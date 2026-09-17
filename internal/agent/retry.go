@@ -198,15 +198,15 @@ func classifyTransient(err error) (string, bool) {
 	//
 	// The empty shape is most often a toolCall-only turn (the model called a
 	// tool and stopped without a summary), which is the shape opencode's
-	// classifier refuses to replay. That gate does not transfer. opencode's
-	// retry re-sends the prompt to a FRESH session with no memory of the tools
-	// the first attempt ran; every other adapter's retry - including the
-	// already-shipped "prose final turn" needle, which fires on turns that ran
-	// tools just as often - does the same, and this needle adds no new class of
-	// replay: it is the same fresh-session re-ask for the same kind of
-	// incomplete-turn ending. Refusing it here would restore the exact failure
-	// being fixed, so the gate stays on the one adapter whose retry is unsafe
-	// for reasons of its own wire protocol rather than of turn shape.
+	// classifier refuses to replay. That gate is opencode's own: it fails
+	// closed because its retry always starts a FRESH session, so it cannot tell
+	// a replayed side effect from a first one. The shared classifier has no
+	// such property to honour - it is reached by every adapter, including ones
+	// whose retry resumes the same session - and this needle adds no new class
+	// of replay anyway: the already-shipped "prose final turn" needle retries
+	// the same kind of incomplete-turn ending. Refusing an empty turn here
+	// would restore the exact failure being fixed, so the gate stays where the
+	// wire protocol makes it meaningful.
 	if errors.Is(err, errNoTextOutput) {
 		return "empty agent turn", true
 	}
