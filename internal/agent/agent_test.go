@@ -1100,23 +1100,40 @@ func TestFinalizeTextResult_ProseWithoutJSONReturnsEndedWithProseError(t *testin
 }
 
 func TestFinalizeTextResult_EmptyTextIsNotASchemaRejection(t *testing.T) {
-	// A turn that produced no assistant text at all is a harness outcome, not
-	// a malformed answer. Reporting it as a structured-output rejection made
-	// the review step rerun a fresh session-free review up to its analyzer
-	// bound (3 attempts) and then fail the whole run - measured live on a
-	// branch where omp ended three consecutive rounds with a toolCall-only
-	// assistant message.
-	for _, schema := range []json.RawMessage{nil, json.RawMessage(`{"type":"object"}`)} {
-		_, err := finalizeTextResult("omp", "", schema, TokenUsage{})
-		if err == nil {
-			t.Fatal("expected an error for a turn with no text")
-		}
-		if !strings.Contains(err.Error(), "omp returned no text output") {
-			t.Fatalf("err = %q, want the adapter named in the message", err)
-		}
-		if IsStructuredOutputRejected(err) {
-			t.Fatalf("err = %v, want no structured-output rejection: no answer was produced to reformat", err)
-		}
+	// A structured turn that produced no assistant text at all is a harness
+	// outcome, not a malformed answer. Reporting it as a structured-output
+	// rejection made the review step rerun a fresh session-free review up to
+	// its analyzer bound (3 attempts) and then fail the whole run - measured
+	// live on a branch where omp ended three consecutive rounds with a
+	// toolCall-only assistant message.
+	_, err := finalizeTextResult("omp", "", reviewOutputTestSchema(), TokenUsage{})
+	if err == nil {
+		t.Fatal("expected an error for a turn with no text")
+	}
+	if !strings.Contains(err.Error(), "omp returned no text output") {
+		t.Fatalf("err = %q, want the adapter named in the message", err)
+	}
+	if IsStructuredOutputRejected(err) {
+		t.Fatalf("err = %v, want no structured-output rejection: no answer was produced to reformat", err)
+	}
+}
+
+func TestFinalizeTextResult_SchemalessEmptyTurnStaysNonRetryable(t *testing.T) {
+	// A caller that requested no structured answer never had this retry, and
+	// nothing about an empty turn justifies widening fresh-session replay to
+	// it: the verdict is the plain failure it has always been.
+	_, err := finalizeTextResult("pi", "", nil, TokenUsage{})
+	if err == nil {
+		t.Fatal("expected an error for a turn with no text")
+	}
+	if IsStructuredOutputRejected(err) {
+		t.Fatalf("err = %v, want no structured-output rejection without a schema", err)
+	}
+	if _, retry := classifyTransient(err); retry {
+		t.Fatalf("a schema-less empty turn must not be retried: %v", err)
+	}
+	if !strings.Contains(err.Error(), "pi returned no text output") {
+		t.Fatalf("err = %q, want the unchanged message", err)
 	}
 }
 
