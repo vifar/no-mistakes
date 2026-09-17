@@ -193,6 +193,23 @@ func classifyTransient(err error) (string, bool) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return "", false
 	}
+	// An empty turn is matched by sentinel rather than by substring: the same
+	// words can appear in model prose, which the parse errors quote back.
+	//
+	// The empty shape is most often a toolCall-only turn (the model called a
+	// tool and stopped without a summary), which is the shape opencode's
+	// classifier refuses to replay. That gate does not transfer. opencode's
+	// retry re-sends the prompt to a FRESH session with no memory of the tools
+	// the first attempt ran; every other adapter's retry - including the
+	// already-shipped "prose final turn" needle, which fires on turns that ran
+	// tools just as often - does the same, and this needle adds no new class of
+	// replay: it is the same fresh-session re-ask for the same kind of
+	// incomplete-turn ending. Refusing it here would restore the exact failure
+	// being fixed, so the gate stays on the one adapter whose retry is unsafe
+	// for reasons of its own wire protocol rather than of turn shape.
+	if errors.Is(err, errNoTextOutput) {
+		return "empty agent turn", true
+	}
 	msg := strings.ToLower(err.Error())
 	if isTerminalRetryError(msg) {
 		return "", false
