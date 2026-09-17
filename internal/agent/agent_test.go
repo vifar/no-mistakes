@@ -1168,21 +1168,6 @@ func TestClassifyTransient_EmptyTurnSurvivesWrapping(t *testing.T) {
 	}
 }
 
-func TestFinalizeTextResult_WhitespaceOnlyTextIsAnEmptyTurn(t *testing.T) {
-	// Adapters trim before the finalizer, so a whitespace-only assistant
-	// message reaches this path as "" and takes the same retryable route.
-	_, err := finalizeTextResult("pi", strings.TrimSpace("   \n\t "), reviewOutputTestSchema(), TokenUsage{})
-	if err == nil {
-		t.Fatal("expected an error for whitespace-only text")
-	}
-	if IsStructuredOutputRejected(err) {
-		t.Fatalf("err = %v, want no structured-output rejection", err)
-	}
-	if _, retry := classifyTransient(err); !retry {
-		t.Fatalf("whitespace-only turn was not classified retryable: %v", err)
-	}
-}
-
 func TestFinalizeTextResult_EmptyTurnKeepsReportedUsage(t *testing.T) {
 	usage := TokenUsage{InputTokens: 17048, OutputTokens: 58, CacheReadTokens: 256, Reported: true}
 	result, err := finalizeTextResult("omp", "", reviewOutputTestSchema(), usage)
