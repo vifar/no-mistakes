@@ -323,18 +323,27 @@ func TestReviewStep_ByteLiveProgresslessTurnFailsOnStallNotWallClock(t *testing.
 // agent merge-base(main, HEAD): every commit between main and the feature tip
 // (measured: 1869 commits / 5634 files on controller) for a one-commit change
 // off origin/dev. That unbounded first-turn workload is the wedge.
+//
+// Review must fetch the PR base itself: Rebase's fetch is warning-only and can
+// be skipped, so relying on a prior step leaves origin/<base> missing and
+// falls through to EmptyTreeSHA / the push-delta tip.
 func TestReviewStep_ScopesDiffToPRBaseBranchNotDefaultBranch(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
 	dir := t.TempDir()
 	gitCmd(t, dir, "init")
 	gitCmd(t, dir, "config", "user.name", "test")
 	gitCmd(t, dir, "config", "user.email", "test@test.com")
 	gitCmd(t, dir, "checkout", "-b", "main")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
 	if err := os.WriteFile(filepath.Join(dir, "main-only.txt"), []byte("only on main\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	gitCmd(t, dir, "add", "-A")
 	gitCmd(t, dir, "commit", "-m", "main only")
 	mainSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
 
 	gitCmd(t, dir, "checkout", "-b", "dev")
 	if err := os.WriteFile(filepath.Join(dir, "dev.txt"), []byte("dev line\n"), 0o644); err != nil {
@@ -343,6 +352,7 @@ func TestReviewStep_ScopesDiffToPRBaseBranchNotDefaultBranch(t *testing.T) {
 	gitCmd(t, dir, "add", "-A")
 	gitCmd(t, dir, "commit", "-m", "dev commit")
 	devSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "dev")
 
 	gitCmd(t, dir, "checkout", "-b", "feature")
 	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("one commit\n"), 0o644); err != nil {
@@ -351,6 +361,13 @@ func TestReviewStep_ScopesDiffToPRBaseBranchNotDefaultBranch(t *testing.T) {
 	gitCmd(t, dir, "add", "-A")
 	gitCmd(t, dir, "commit", "-m", "feature commit")
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	// Drop local and remote-tracking PR-base refs so Review cannot resolve
+	// merge-base without fetching origin/dev itself.
+	gitCmd(t, dir, "branch", "-D", "dev")
+	gitCmd(t, dir, "branch", "-D", "main")
+	gitCmd(t, dir, "update-ref", "-d", "refs/remotes/origin/dev")
+	gitCmd(t, dir, "update-ref", "-d", "refs/remotes/origin/main")
 
 	ag := &mockAgent{
 		name: "scoped-reviewer",
@@ -371,6 +388,7 @@ func TestReviewStep_ScopesDiffToPRBaseBranchNotDefaultBranch(t *testing.T) {
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, mainSHA, headSHA, config.Commands{})
 	sctx.Repo.DefaultBranch = "main"
+	sctx.Repo.UpstreamURL = upstream
 	sctx.Config.PR.BaseBranch = "dev"
 
 	outcome, err := (&ReviewStep{}).Execute(sctx)
@@ -392,6 +410,53 @@ func TestReviewStep_ScopesDiffToPRBaseBranchNotDefaultBranch(t *testing.T) {
 	}
 	if strings.Contains(prompt, "base commit: "+mainSHA) {
 		t.Fatalf("review prompt still used Repo.DefaultBranch merge-base %s:\n%s", mainSHA, prompt)
+	}
+}
+
+// A missing/unfetchable PR base must fail the review step closed. Falling
+// through to EmptyTreeSHA or the push-delta tip regenerates the unbounded
+// first-turn wedge the PR-base scope exists to remove.
+func TestReviewStep_MissingPRBaseFetchFailsClosed(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	if err := os.WriteFile(filepath.Join(dir, "main.txt"), []byte("main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "main")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "feature")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	ag := &mockAgent{name: "must-not-run"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.DefaultBranch = "main"
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Config.PR.BaseBranch = "missing-integration"
+
+	_, err := (&ReviewStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatal("expected review to fail closed when the PR base cannot be fetched")
+	}
+	if !strings.Contains(err.Error(), "fetch review base origin/missing-integration") {
+		t.Fatalf("error = %q, want a fetch failure for the configured PR base", err)
+	}
+	if len(ag.calls) != 0 {
+		t.Fatalf("review agent ran %d time(s) despite an unresolved PR base", len(ag.calls))
 	}
 }
 
