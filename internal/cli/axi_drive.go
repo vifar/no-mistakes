@@ -145,7 +145,7 @@ func newAxiRunCmd() *cobra.Command {
 			"persisted intent; raw intent is never included.\n\n" +
 			"--base-branch targets an integration branch other than the repository default\n" +
 			"for this run only (for example an epic branch). It overrides pr.base_branch\n" +
-			"in repo config and is persisted on the run for rebase, PR, and CI steps.\n\n" +
+			"in repo config and is persisted on the run for review, rebase, PR, and CI steps.\n\n" +
 			"--model and/or --effort opt into an immutable Pi profile for a new run.\n" +
 			"An omitted field comes from agent_config.pi; both must resolve. Requires\n" +
 			"Pi-only agents; raw native selection flags conflict. The pin outranks\n" +
