@@ -197,7 +197,6 @@ func withFastBackoff(t *testing.T) func() {
 	return WithFastBackoff()
 }
 
-
 func TestRunWithRetry_RetriesTransientThenSucceeds(t *testing.T) {
 	defer withFastBackoff(t)()
 
