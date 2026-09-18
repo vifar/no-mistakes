@@ -36,6 +36,21 @@ var transientBackoff = func(ctx context.Context, attempt int) error {
 	}
 }
 
+// WithFastBackoff replaces transientBackoff with a near-instant version that
+// preserves ctx-cancel semantics. Returns a restore func. For tests only.
+func WithFastBackoff() func() {
+	prev := transientBackoff
+	transientBackoff = func(ctx context.Context, attempt int) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Millisecond):
+			return nil
+		}
+	}
+	return func() { transientBackoff = prev }
+}
+
 // transientBackoffBaseDuration returns the un-jittered delay for a given
 // 1-indexed retry attempt. Progression: base, 4*base, 16*base, ...
 func transientBackoffBaseDuration(attempt int, base time.Duration) time.Duration {

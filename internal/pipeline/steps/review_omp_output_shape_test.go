@@ -59,7 +59,7 @@ func TestReviewStep_EmptyTurnIsAbsorbedByTheAdapterNotSpentAsAnAttempt(t *testin
 	if runtime.GOOS == "windows" {
 		t.Skip("shell fixture is Unix-only")
 	}
-	t.Parallel()
+	defer agent.WithFastBackoff()()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 
 	// Turn 1 ends with a toolCall-only assistant message and no text part -
