@@ -11,8 +11,6 @@ import (
 
 var sampleAgentProcess = sampleAgentProcessOS
 
-// sampleAgentProcessOS reads the native process state and accumulated CPU time.
-// A runnable process with no accumulated CPU time is the measured wedge shape.
 func sampleAgentProcessOS(pid int) (uint64, string, error) {
 	if pid <= 0 {
 		return 0, "", fmt.Errorf("invalid process id %d", pid)
@@ -33,20 +31,27 @@ func parseProcessCPUTime(value string) uint64 {
 	if len(parts) != 2 && len(parts) != 3 {
 		return ^uint64(0)
 	}
-	var seconds uint64
+	var totalSeconds uint64
+	var fractionNanos uint64
 	for i, part := range parts {
 		if i == len(parts)-1 {
 			fraction := strings.Split(part, ".")
-			if len(fraction) > 2 || fraction[0] == "" || (len(fraction) == 2 && fraction[1] == "") {
+			if len(fraction) > 2 || fraction[0] == "" || (len(fraction) == 2 && fraction[1] == "") || (len(fraction) == 2 && len(fraction[1]) > 9) {
 				return ^uint64(0)
 			}
 			part = fraction[0]
+			if len(fraction) == 2 {
+				fractionNanos, _ = strconv.ParseUint(fraction[1]+strings.Repeat("0", 9-len(fraction[1])), 10, 32)
+			}
 		}
 		v, err := strconv.ParseUint(part, 10, 32)
-		if err != nil {
+		if err != nil || totalSeconds > (^uint64(0)-v)/60 {
 			return ^uint64(0)
 		}
-		seconds = seconds*60 + v
+		totalSeconds = totalSeconds*60 + v
 	}
-	return seconds
+	if totalSeconds > (^uint64(0)-fractionNanos)/1_000_000_000 {
+		return ^uint64(0)
+	}
+	return totalSeconds*1_000_000_000 + fractionNanos
 }

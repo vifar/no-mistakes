@@ -11,8 +11,8 @@ func TestParseProcessCPUTime(t *testing.T) {
 		want  uint64
 	}{
 		{name: "darwin zero", value: "0:00.00", want: 0},
-		{name: "fractional", value: "1:02.50", want: 62},
-		{name: "hours", value: "1:02:03.50", want: 3723},
+		{name: "fractional", value: "1:02.50", want: 62_500_000_000},
+		{name: "hours", value: "1:02:03.50", want: 3_723_500_000_000},
 		{name: "malformed", value: "0:00.", want: ^uint64(0)},
 	}
 	for _, tt := range tests {
