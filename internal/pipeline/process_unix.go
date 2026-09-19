@@ -34,7 +34,14 @@ func parseProcessCPUTime(value string) uint64 {
 		return ^uint64(0)
 	}
 	var seconds uint64
-	for _, part := range parts {
+	for i, part := range parts {
+		if i == len(parts)-1 {
+			fraction := strings.Split(part, ".")
+			if len(fraction) > 2 || fraction[0] == "" || (len(fraction) == 2 && fraction[1] == "") {
+				return ^uint64(0)
+			}
+			part = fraction[0]
+		}
 		v, err := strconv.ParseUint(part, 10, 32)
 		if err != nil {
 			return ^uint64(0)
