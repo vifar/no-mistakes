@@ -41,7 +41,11 @@ func parseProcessCPUTime(value string) uint64 {
 			}
 			part = fraction[0]
 			if len(fraction) == 2 {
-				fractionNanos, _ = strconv.ParseUint(fraction[1]+strings.Repeat("0", 9-len(fraction[1])), 10, 32)
+				var err error
+				fractionNanos, err = strconv.ParseUint(fraction[1]+strings.Repeat("0", 9-len(fraction[1])), 10, 32)
+				if err != nil {
+					return ^uint64(0)
+				}
 			}
 		}
 		v, err := strconv.ParseUint(part, 10, 32)
