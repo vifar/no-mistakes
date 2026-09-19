@@ -545,7 +545,8 @@ This is measured behaviour, not a hypothetical: `omp` review turns hit their the
 
 An invocation is stalled when no assistant text, tool call, or tool result has been observed for this long.
 Reasoning-only traffic, subprocess byte liveness, and retry or fallback bookkeeping do not count - only forward motion does.
-When the bound expires the agent is cancelled and the run fails with `agent made no progress; agent produced no assistant output or tool activity for <measured>` instead of continuing to consume the remaining budget.
+In addition, on platforms that expose process state and CPU time, a launched native agent that remains runnable with zero accumulated CPU time and makes no progress is treated as a confirmed wedge after a short grace window and cancelled early; this catches a process that never began executing instead of waiting for the full configured bound. Malformed or unavailable process samples do not trigger that classification.
+When the bound expires - including for that confirmed zero-CPU wedge - the agent is cancelled and the run fails with `agent made no progress; agent produced no assistant output or tool activity for <measured>` instead of continuing to consume the remaining budget.
 That diagnostic is deliberately distinct from the wall-clock one, because the two demand different responses: a wall-clock expiry means the turn was working and needs a larger budget, while a stall means it was not converging and needs investigating.
 
 |         |                        |
@@ -554,7 +555,7 @@ That diagnostic is deliberately distinct from the wall-clock one, because the tw
 | Default | `30m`                  |
 
 Accepts any positive Go `time.ParseDuration` string: `5m`, `30m`, `1h`, etc.
-Set it to `0`, `unlimited`, `none`, `off`, or `never` to disable the bound and rely on the absolute wall-clock limits alone; that is the documented escape hatch for a turn with one legitimately long silent step.
+Set it to `0`, `unlimited`, `none`, `off`, or `never` to disable the bound and rely on the absolute wall-clock limits alone; that also disables the zero-CPU wedge safeguard.
 A malformed value is rejected when loading the global config rather than silently removing the bound.
 The default matches [`agent_timeout`](#agent_timeout) on purpose: 30m is already treated as a safe ceiling for an entire invocation, so 30m of measured silence is strictly more conservative, and it stays well clear of the longest silent stretch observed in healthy work (a single 21-minute tool call).
 It still fires when Review or Test has already installed [`review_agent_timeout`](#review_agent_timeout) or [`test_agent_timeout`](#test_agent_timeout): those steps own the wall-clock diagnosis, but the progress watcher attaches underneath that deadline so a byte-live, progressless turn cannot burn the remaining budget.
