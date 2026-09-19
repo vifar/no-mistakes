@@ -299,9 +299,9 @@ func (a *agentActivity) beginAttempt() {
 	a.observed = 0
 	a.progressed = time.Time{}
 	a.progressCount = 0
+	a.launched = false
 	a.launchedPID = 0
 	a.launchedAt = time.Time{}
-	a.zeroCPUSince = time.Time{}
 	a.mu.Unlock()
 }
 
