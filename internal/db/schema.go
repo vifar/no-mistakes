@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS runs (
     launch_intent_digest TEXT,
     launch_receipt_claimed_at INTEGER,
     pr_base_branch       TEXT,
+    omit_intent          INTEGER NOT NULL DEFAULT 0,
     pi_profile           TEXT,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL

@@ -12,6 +12,7 @@ import (
 const (
 	MethodPushReceived       = "push_received"
 	MethodResolvePiProfile   = "resolve_pi_profile"
+	MethodProbeOmitIntent    = "probe_omit_intent"
 	MethodStartFreshRun      = "start_fresh_run"
 	MethodClaimLaunchReceipt = "claim_launch_receipt"
 	MethodGetRun             = "get_run"

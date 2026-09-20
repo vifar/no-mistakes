@@ -123,6 +123,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			omitIntent, err := parseOmitIntentPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 			piProfile, err := parsePiProfilePushOptions(pushOptions)
 			if err != nil {
 				return err
@@ -158,6 +162,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				LaunchNonce:            launchNonce,
 				ValidationGeneration:   validationGeneration,
 				PRBaseBranch:           prBaseBranch,
+				OmitIntent:             omitIntent,
 				PiProfile:              piProfile,
 				ReconciledPreviousHead: reconciledPreviousHead,
 			}, &result)
