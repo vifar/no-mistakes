@@ -73,7 +73,7 @@ func newSyncCmd() *cobra.Command {
 
 func newAxiSyncCmd() *cobra.Command {
 	var check, recover, keepLocal bool
-	var bindArchiveRef string
+	var bindArchiveRef, authoritativeHead string
 	cmd := &cobra.Command{
 		Use:   "sync",
 		Short: "Check or apply guarded current-branch synchronization",
@@ -85,9 +85,10 @@ func newAxiSyncCmd() *cobra.Command {
 			"verified pipeline head with reset semantics.\n" +
 			"--check performs the same fresh read-only plan. Blocked states change nothing.\n" +
 			"--recover performs the guarded custody return offered by\n" +
-			"next_action.code: recover_custody; --keep-local keeps the current local head.\n" +
-			"--bind-archive-ref binds one exact existing refs/heads/archive/* commit to\n" +
-			"the selected terminal run; it never creates or moves a Git ref.",
+			"--authoritative-head requires the registered worktree to already be at one exact\n" +
+			"full commit SHA before the guarded recovery runs; it never moves the worktree.\n" +
+			"--bind-archive-ref binds one existing archive commit as exact evidence without\n" +
+			"creating or moving a Git ref; it never creates or moves refs.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -98,16 +99,20 @@ func newAxiSyncCmd() *cobra.Command {
 			if keepLocal && !recover {
 				return emitError(cmd, 2, "--keep-local requires --recover")
 			}
-			if bindArchiveRef != "" && (check || recover || keepLocal) {
-				return emitError(cmd, 2, "--bind-archive-ref cannot be combined with synchronization or recovery flags")
+			if bindArchiveRef != "" && (check || recover || keepLocal || authoritativeHead != "") {
+				return emitError(cmd, 2, "--bind-archive-ref cannot be combined with synchronization, recovery, or authoritative-head flags")
 			}
-			return runAxiSync(cmd, check, recover, keepLocal, bindArchiveRef)
+			if authoritativeHead != "" && !recover {
+				return emitError(cmd, 2, "--authoritative-head requires --recover")
+			}
+			return runAxiSync(cmd, check, recover, keepLocal, bindArchiveRef, authoritativeHead)
 		},
 	}
 	cmd.Flags().BoolVar(&check, "check", false, "freshly verify and return the plan without changing HEAD")
 	cmd.Flags().BoolVar(&recover, "recover", false, "return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch)")
 	cmd.Flags().BoolVar(&keepLocal, "keep-local", false, "with --recover: keep the current local head; anchor available preserved commits, discard genuinely missing ones, and make the gate follow the kept head")
 	cmd.Flags().StringVar(&bindArchiveRef, "bind-archive-ref", "", "bind one existing refs/heads/archive/* commit as exact keep-local recovery evidence without changing Git refs")
+	cmd.Flags().StringVar(&authoritativeHead, "authoritative-head", "", "with --recover: require the registered worktree to already be at this exact full commit SHA")
 	return cmd
 }
 
@@ -373,7 +378,7 @@ func humanSyncSummary(state branchsync.State) string {
 	}
 }
 
-func runAxiSync(cmd *cobra.Command, check, recover, keepLocal bool, bindArchiveRef string) error {
+func runAxiSync(cmd *cobra.Command, check, recover, keepLocal bool, bindArchiveRef, authoritativeHead string) error {
 	started := time.Now()
 	mode := "apply"
 	switch {
@@ -402,7 +407,7 @@ func runAxiSync(cmd *cobra.Command, check, recover, keepLocal bool, bindArchiveR
 	case check:
 		state = service.Refresh(cmd.Context())
 	case recover:
-		state = service.Recover(cmd.Context(), keepLocal)
+		state = service.RecoverAtHead(cmd.Context(), keepLocal, authoritativeHead)
 	default:
 		state = service.Apply(cmd.Context())
 	}
