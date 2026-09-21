@@ -652,6 +652,38 @@ func (s *Service) BindRecoveryArchive(ctx context.Context, archiveRef string) St
 // stranded stack; inspection then reports custody_returned (never-pushed runs)
 // or the ordinary classification against the last push binding (pushed runs),
 // both pointing at run_pipeline as the next step.
+// RecoverAtHead performs the guarded custody return only when the invoking
+// registered worktree is checked out at the exact authoritative commit named by
+// the caller. The head is an assertion boundary, not a ref to resolve: this
+// operation never selects, resets, or pushes an arbitrary commit.
+func (s *Service) RecoverAtHead(ctx context.Context, keepLocal bool, authoritativeHead string) State {
+	authoritativeHead = strings.TrimSpace(authoritativeHead)
+	if authoritativeHead == "" {
+		return s.Recover(ctx, keepLocal)
+	}
+	state, _, _ := s.inspect(ctx)
+	if state.Local.Head == "" {
+		return state
+	}
+	if state.State != StatePipelineOwned && state.State != StateUserOwned {
+		return state
+	}
+	if len(authoritativeHead) != 40 {
+		return blockedPlan(state, StateAmbiguousContext, "blocked_recover_authority_invalid", "the authoritative recovery head must be an exact full commit SHA reachable in the registered worktree; no files or refs were changed")
+	}
+	if _, err := hex.DecodeString(authoritativeHead); err != nil {
+		return blockedPlan(state, StateAmbiguousContext, "blocked_recover_authority_invalid", "the authoritative recovery head must be an exact full commit SHA reachable in the registered worktree; no files or refs were changed")
+	}
+	resolved, err := git.Run(ctx, s.workDir(), "rev-parse", "--verify", authoritativeHead+"^{commit}")
+	if err != nil || resolved != authoritativeHead {
+		return blockedPlan(state, StateAmbiguousContext, "blocked_recover_authority_invalid", "the authoritative recovery head must be an exact full commit SHA reachable in the registered worktree; no files or refs were changed")
+	}
+	if state.Local.Head != authoritativeHead {
+		return blockedPlan(state, StateAmbiguousContext, "blocked_recover_authority_mismatch", fmt.Sprintf("the registered worktree is at %s, not the authoritative recovery head %s; no files or refs were changed", state.Local.Head, authoritativeHead))
+	}
+	return s.Recover(ctx, keepLocal)
+}
+
 func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 	if refusal, blocked := s.gateContextRefusal(ctx); blocked {
 		return refusal

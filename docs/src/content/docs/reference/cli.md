@@ -284,15 +284,17 @@ no-mistakes axi sync --check
 no-mistakes axi sync
 no-mistakes axi sync --recover
 no-mistakes axi sync --recover --keep-local
+no-mistakes axi sync --recover --authoritative-head <full-sha>
 no-mistakes axi sync --bind-archive-ref refs/heads/archive/<name>
 ```
 
 | Flag                 | Type     | Default | Description                                                                  |
-| -------------------- | -------- | ------- | ---------------------------------------------------------------------------- |
-| `--check`            | `bool`   | `false` | Verify the live target and exact plan without changing `HEAD`                |
-| `--recover`          | `bool`   | `false` | Return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch) |
-| `--keep-local`       | `bool`   | `false` | With `--recover`: keep the current local head; never touches the worktree   |
-| `--bind-archive-ref` | `string` | (none)  | Bind one existing `refs/heads/archive/*` commit as exact evidence for a keep-local recovery; never creates or moves a Git ref |
+| -------------------- | -------- | -------- | ---------------------------------------------------------------------------- |
+| `--check`            | `bool`    | `false` | Verify the live target and exact plan without changing `HEAD`                |
+| `--recover`          | `bool`    | `false` | Return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch) |
+| `--keep-local`       | `bool`    | `false` | With `--recover`: keep the current local head; never touches the worktree   |
+| `--authoritative-head` | `string` | (none) | With `--recover`: require the registered worktree to already be at this exact full commit SHA; never moves the worktree |
+| `--bind-archive-ref` | `string` | (none)   | Bind one existing `refs/heads/archive/*` commit as exact evidence for a keep-local recovery; never creates or moves a Git ref |
 
 The default command is an explicit non-interactive apply request and never prompts.
 All modes return the complete `branch_sync` object as TOON.

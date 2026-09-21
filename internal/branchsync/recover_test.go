@@ -555,6 +555,40 @@ func TestRecoverDivergedRefusesButKeepLocalReturnsCustody(t *testing.T) {
 	}
 }
 
+func TestRecoverAtHeadRefusesWrongAuthoritativeBranchHead(t *testing.T) {
+	t.Parallel()
+	f := newRecoverFixture(t, types.RunCancelled)
+	mustRun(t, f.local, "checkout", "main")
+	state := f.service.RecoverAtHead(f.ctx, false, f.preserved)
+	if state.Recovered || state.Safety != "blocked_wrong_branch" || state.Changed {
+		t.Fatalf("wrong-branch authoritative recovery = %#v", state)
+	}
+	if f.custodyReturned() {
+		t.Fatal("wrong-branch refusal stamped custody")
+	}
+}
+func TestRecoverAtHeadReturnsCustodyOnlyAtExactAuthoritativeHead(t *testing.T) {
+	t.Parallel()
+	f := newRecoverFixture(t, types.RunCancelled)
+	mustRun(t, f.local, "commit", "--allow-empty", "-m", "unrelated local commit")
+	other := mustRun(t, f.local, "rev-parse", "HEAD")
+	mustRun(t, f.local, "reset", "--hard", f.submitted)
+	state := f.service.RecoverAtHead(f.ctx, true, other)
+	if state.Recovered || state.Safety != "blocked_recover_authority_mismatch" || state.Changed {
+		t.Fatalf("non-authoritative head recovery = %#v", state)
+	}
+	if state.Local.Head != f.submitted || f.custodyReturned() {
+		t.Fatal("authority mismatch mutated custody")
+	}
+	state = f.service.RecoverAtHead(f.ctx, true, f.submitted)
+	if !state.Recovered || !f.custodyReturned() {
+		t.Fatalf("authoritative recovery = %#v", state)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatalf("authoritative keep-local recovery moved HEAD to %s", got)
+	}
+}
+
 func TestBoundArchiveOffersOnlyKeepLocalRecoveryForDivergentLaterHead(t *testing.T) {
 	t.Parallel()
 
