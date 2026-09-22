@@ -98,6 +98,7 @@ intent:
   threshold: 0.2
   slack_days: 3
   disabled_readers: []
+  # publish_intent: false # Keep the generated Intent section out of PR bodies by default
 
 test:
   evidence:
@@ -348,12 +349,52 @@ review_agents:
     effort: max
 ```
 
-The only role keys are `reviewer` and `fixer`. Each configured role requires one
+The role keys are `reviewer`, `fixer`, and their optional later-round overlays
+`reviewer_after_round` and `fixer_after_round`. Each configured role requires one
 explicit `agent` (the same harness names as `agent_config`; no `auto` or lists).
 Model and effort are optional and inherit `agent_config` for that harness when
 empty. Nonempty role values override that profile, but native
 `agent_args_override` flags still win. Model availability, credentials, and
 supported effort levels remain the harness/provider's responsibility.
+
+#### Later-round role overrides
+
+`reviewer_after_round` and `fixer_after_round` are opt-in overlays for long
+review loops, where the first pass is worth a stronger tier and later rounds are
+mostly re-checking a fix the stronger model already prescribed. Each takes the
+same `agent` / `model` / `effort` fields plus `after_round`: the number of
+leading rounds that stay on the base role. `after_round` defaults to `1`, so the
+overlay takes over from round 2.
+
+```yaml
+review_agents:
+  fixer:
+    agent: pi
+    model: anthropic-vertex/claude-opus-4-8
+  fixer_after_round:
+    agent: pi
+    model: google-vertex/gemini-3.8-flash
+    after_round: 2
+```
+
+Rounds 1 and 2 above run on the `fixer` profile; round 3 and every later round
+run on `fixer_after_round`. The direction is yours: point the overlay at a
+cheaper tier to stop long loops from spending at the top tier, or at a stronger
+one to escalate a loop that is not converging.
+
+Without these keys nothing changes - every round runs on the role it runs on
+today. They only select the harness for a round; they never change how many
+rounds happen, and `auto_fix` plus the gate remain the only things that bound
+the loop. The overlay applies to a round the pipeline numbered; an invocation
+outside a numbered round keeps the base role. Only the base roles accept plain
+`agent` / `model` / `effort` - setting `after_round` on `reviewer` or `fixer`, or
+a value below 1, is a configuration error. Because a later-round fixer may be a
+harness that cannot resume sessions, fixer session reuse is reported for every
+fixer a run can use: configuring a non-resumable `fixer_after_round` turns fix
+turns cold for the whole run rather than handing round 3 a session it cannot
+resume. `no-mistakes stats --run <id>` shows the agent and served model per
+invocation alongside its round, so which tier served which round is visible
+after the fact.
 
 Both roles can use the same harness with different models. Reviews and rereviews
 always run fresh; only review fixes reuse the fixer's session when
@@ -581,8 +622,17 @@ Raise it for repositories whose reviews legitimately run long; it bounds only th
 
 Maximum wall-clock time for one Test-step agent invocation.
 The budget covers the post-test evidence-gathering turn, and a Test-repair turn gets its own budget of the same length.
-When the deadline expires, the test agent is cancelled and the run fails with a diagnostic naming the timeout instead of remaining active indefinitely.
-That diagnostic carries the same measured evidence and adapter report described under [`agent_timeout`](#agent_timeout).
+When the deadline expires, the test agent is cancelled and the Test step parks for a decision with an ask-user finding rather than failing the run as a code defect.
+That finding carries the same measured evidence and adapter report described under [`agent_timeout`](#agent_timeout).
+A late structured result from the expired turn is still not used as a successful Test pass.
+The park keeps the configured `commands.test` result from the same execution, so approving over a failing command is still recorded as a configured-command override.
+A cut fix round also keeps the findings of the gate it was answering, selected or not, and the last completed evidence turn's verdict, so approving it is recorded against that verdict.
+A commit the timed-out agent already made is recorded locally for custody and is not pushed, unless an unfinished rebase or merge leaves only a partial HEAD.
+While the run worktree holds uncommitted changes or commits past the head the last completed evidence turn saw (before one completes, past the head the first cut measured from, which each later park carries forward and measures again), the park names them with the commands to inspect them and approval is refused, because the steps after Test would commit and publish them.
+Otherwise approving the park is a Test exception (`passed-with-override`), not a silent green pass.
+A fix response spends another budget: a repair turn runs only for selected findings other than the budget cut itself, then validation re-runs over whatever the cut left.
+Guidance you attach to the budget-cut finding itself (`axi respond --instructions`, or `e` in the TUI) is given to that re-run validation.
+You can also abort, raise this value, and retry.
 
 |         |                        |
 | ------- | ---------------------- |
@@ -591,7 +641,9 @@ That diagnostic carries the same measured evidence and adapter report described 
 
 Accepts any positive Go `time.ParseDuration` string: `5m`, `30m`, `1h`, etc.
 Non-positive values are rejected when loading the global config.
-Raise it for repositories whose targeted tests or evidence gathering legitimately run long; it bounds only the Test step, and no other step or environment variable overrides it.
+Raise it for repositories whose targeted tests or evidence gathering legitimately run long; a suite that itself takes close to 30 minutes leaves almost no slack against provider slowness under the default.
+The shipped default stays a stall bound and is not raised automatically.
+It bounds only the Test step, and no other step or environment variable overrides it.
 
 ### daemon_connect_timeout
 
@@ -666,6 +718,51 @@ When resume is unavailable or fails, the fix turn falls back to a cold run or a 
 Session identities are persisted only as minimum local resume metadata, never as prompts or transcripts; Pi's own session directory retains its native transcript. Keep Pi's session directory private, and keep any `--session-dir` or `PI_CODING_AGENT_SESSION_DIR` setting stable while a run is active so a daemon restart can find the fixer session.
 The [daemon crash-recovery reference](/no-mistakes/concepts/daemon/#crash-recovery) owns which parked gates can resume or reconcile after a restart.
 Set `false` to force every agent invocation cold.
+
+### jev
+
+Opt-in TypeSafe Jev pre-brief for review turns (issue #1055).
+
+|         |          |
+| ------- | -------- |
+| Type    | `object` |
+| Default | disabled |
+
+```yaml
+jev:
+  review_assist: false
+  candidate_excerpt_bytes: 0
+```
+
+| Field                         | Type   | Default | Description                                                  |
+| ----------------------------- | ------ | ------- | ------------------------------------------------------------ |
+| `jev.review_assist`           | `bool` | `false` | Consult TypeSafe Jev before each review turn                 |
+| `jev.candidate_excerpt_bytes` | `int`  | `0`     | Per-candidate content excerpt budget in bytes (`0` = path-only) |
+
+When enabled and [`TYPESAFE_API_KEY`](/no-mistakes/reference/environment/#typesafe_api_key) is set in the daemon's environment, each review turn - the initial review and every rereview - runs one batched Jev evaluation over a code-filtered digest of the change before the reviewer launches.
+The digest covers only the files the review covers, so paths matching `ignore_patterns` are left out.
+Its typed answers feed the review prompt one kind of advisory input: a ranked list of surrounding-context files worth reading first.
+The candidates Jev ranks are found in code: files that use the names the change defines, preferring files that use rare names over files that only share common ones, then same-directory siblings of the changed files.
+Paths matching `ignore_patterns` are never candidates.
+Jev's answer decides which candidates are listed: a candidate is listed when most of its probability mass sits at "relevant" or "essential" (a probability-weighted score threshold would demand near-certainty and never fires), and the order also weighs the code's evidence, so a file that uses a changed name is listed ahead of a same-directory sibling Jev scored the same.
+A follow-up operator-credentialed live TypeSafe run and off/on cold-review benchmark lives in `benchmarks/issue-1125/` (method, raw data, and conclusion).
+The original published method is in `benchmarks/issue-1055/`.
+
+The assist can only add to a review, never subtract.
+Complete-change coverage, the `reviewed_paths` contract, and every prompt obligation are exactly what they are with the assist off, no Jev answer can remove a file, a clause, or an obligation, and the reviewer stays a fresh, session-free invocation that never resumes the fixer session.
+Every failure mode - unset key, network or API error, undecodable answer - falls back to the same cold review with one log line.
+Jev answers are typed numbers, not generated text, so the service cannot inject prose into the review prompt.
+
+This setting is global-only: it does not exist in `.no-mistakes.yaml`, so a pushed branch cannot enable or steer the pre-screen that feeds the reviewer gating it.
+The request sent to TypeSafe carries the branch name, the base commit, the clipped diff and diff stat of the reviewable files, and the paths of up to 40 candidate files.
+By default it sends no content from unchanged files: candidates are paths only.
+Setting `jev.candidate_excerpt_bytes` above 0 opts into sending a bounded leading slice of each candidate file alongside its path, so the relevance question can be judged from a small slice of content rather than the path alone.
+Each excerpt holds at most that many bytes, cut at a line boundary; binary files, symlinks, and other non-regular files contribute none (a tracked symlink is never followed, so its target's content never leaves the machine); files matching `ignore_patterns` are still excluded entirely; and one 16 KiB per-request ceiling drops excerpts from the least-coupled candidates first, so the request stays bounded.
+The relevance question tells Jev to judge from the excerpt when one is present and from the path otherwise; listing thresholds and candidate discovery are unchanged.
+Enabling the excerpt sends bounded content of unchanged files to the TypeSafe API: leave it at 0 unless you accept that.
+The change content in it is a subset of what the review agent itself sends to its model provider, and the request leaves the machine only when you set both this flag and the key.
+The model is pinned (`jev-1.13.0`), and each request is billed per input token at [TypeSafe's published price](https://docs.typesafe.ai/models); output tokens are free.
+The local step log records how many candidates were listed, the answering model ID, and the input-token usage; none of it goes to telemetry.
 
 ### worktree_roots
 
@@ -856,8 +953,11 @@ When enabled and no intent was supplied directly for the run, no-mistakes can re
 | `intent.threshold`        | `float`    | `0.2`   | Minimum raw match score for selecting a transcript session |
 | `intent.slack_days`       | `int`      | `3`     | Extra days to look back before the change window           |
 | `intent.disabled_readers` | `string[]` | Empty   | Transcript readers to disable                              |
+| `intent.publish_intent`   | `bool`     | `true`  | Publish the generated Intent section on PR bodies by default |
 
 Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `pi`, and `copilot`.
+
+`intent.publish_intent: false` is a global, operator-side default that keeps the generated `## Intent` section out of the PR body for runs started without an explicit override. It is the caller-side counterpart of the repository's trusted [`pr.publish_intent`](/no-mistakes/reference/repo-config/#prpublish_intent): both are tighten-only, the repository's trusted policy remains the ceiling a caller can never exceed, and review, test, document, lint, and CI auto-fix prompts keep the full intent. Under the caller-side omission the PR-drafting turns receive no intent text at all and draft from the diff and commit messages only; the intent is withheld from them, never scanned out of their output. A run records the folded decision (the `axi run --no-publish-intent` flag OR this global default) at start; reruns inherit it, and a mid-run config change never re-publishes. This field is global-only: a pushed branch's `.no-mistakes.yaml` cannot express it.
 
 The match score is the share of matching files mentioned in a transcript session; deleted files are ignored when the diff also contains non-deleted changes.
 All-deletion diffs still match against the deleted changed files.

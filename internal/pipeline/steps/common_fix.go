@@ -49,14 +49,16 @@ type commitSummary struct {
 var errRejectedCommitSummary = errors.New("rejected commit summary")
 
 const (
-	noChangesAppliedSummary = "no changes applied"
+	// NoChangesAppliedSummary is the fix result of a round that changed
+	// nothing; it is not a fix the pipeline applied.
+	NoChangesAppliedSummary = "no changes applied"
 	changesAppliedSummary   = "changes applied"
 )
 
 const fixerRemovalRule = `
 
 Removal-first rule:
-- When a problem can be solved by removing a code path that is not strictly required to satisfy the intent - an extra acceptance or matching branch, a fallback, an alias, a second definition of something the code already defines once, or handling for an input nobody intends - fix it by removing that path, not by validating, hardening, or documenting it. Judge what the intent strictly requires against the User intent section when present, otherwise against the change's own stated purpose. Removal is the smallest fix for such a path: hardening it leaves the unrequired path in place for the next review to find another hole in.`
+- When a problem can be solved by removing a code path that is not strictly required to satisfy the intent - an extra acceptance or matching branch, a fallback, an alias, a second definition of something the code already defines once, or handling for an input nobody intends - fix it by removing that path, not by validating, hardening, or documenting it. Judge what the intent strictly requires against the User intent section when present, otherwise against the change's own stated purpose. Later recorded human fix decisions supersede conflicting original intent. Removal is the smallest fix for such a path: hardening it leaves the unrequired path in place for the next review to find another hole in.`
 
 func fixerPrompt(prompt string) string {
 	return prompt + fixerRemovalRule
@@ -382,7 +384,7 @@ func fixResultSummary(committed bool) string {
 	if committed {
 		return changesAppliedSummary
 	}
-	return noChangesAppliedSummary
+	return NoChangesAppliedSummary
 }
 
 func extractCommitSummary(result *agent.Result) (string, error) {
