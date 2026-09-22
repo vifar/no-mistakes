@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -603,19 +604,36 @@ func TestOmpAgent_AssistantErrorSurfaces(t *testing.T) {
 // reports nothing, which is exactly the defect this pins.
 func TestOmpAgent_ReportsProgressForToolOnlyTurn(t *testing.T) {
 	dir := t.TempDir()
-	bin := filepath.Join(dir, "omp")
-	script := `#!/bin/sh
-cat > /dev/null
-printf '%s\n' '{"type":"session","version":3,"id":"01a0aba2-bd3d-7381-a438-95d4b1de9f0c"}'
-printf '%s\n' '{"type":"agent_start"}'
-printf '%s\n' '{"type":"turn_start"}'
-printf '%s\n' '{"type":"tool_execution_start","toolName":"bash"}'
-printf '%s\n' '{"type":"tool_execution_end","toolName":"bash"}'
-printf '%s\n' '{"type":"tool_execution_start","toolName":"read"}'
-printf '%s\n' '{"type":"tool_execution_end","toolName":"read"}'
-printf '%s\n' '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"stopReason":"stop","usage":{"input":5,"output":1,"cacheRead":0,"cacheWrite":0}}}'
-printf '%s\n' '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input":5,"output":1,"cacheRead":0,"cacheWrite":0}}]}'
-`
+	name := "omp"
+	if runtime.GOOS == "windows" {
+		name = "omp.cmd"
+	}
+	bin := filepath.Join(dir, name)
+	var script string
+	lines := []string{
+		`{"type":"session","version":3,"id":"01a0aba2-bd3d-7381-a438-95d4b1de9f0c"}`,
+		`{"type":"agent_start"}`,
+		`{"type":"turn_start"}`,
+		`{"type":"tool_execution_start","toolName":"bash"}`,
+		`{"type":"tool_execution_end","toolName":"bash"}`,
+		`{"type":"tool_execution_start","toolName":"read"}`,
+		`{"type":"tool_execution_end","toolName":"read"}`,
+		`{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"done"}],"stopReason":"stop","usage":{"input":5,"output":1,"cacheRead":0,"cacheWrite":0}}}`,
+		`{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"done"}],"usage":{"input":5,"output":1,"cacheRead":0,"cacheWrite":0}}}`,
+	}
+	if runtime.GOOS == "windows" {
+		scriptLines := []string{"@echo off"}
+		for _, line := range lines {
+			scriptLines = append(scriptLines, "echo "+winEchoEscape(line))
+		}
+		script = strings.Join(scriptLines, "\r\n") + "\r\n"
+	} else {
+		scriptLines := []string{"#!/bin/sh", "cat > /dev/null"}
+		for _, line := range lines {
+			scriptLines = append(scriptLines, "printf '%s\\n' "+shellSingleQuote(line))
+		}
+		script = strings.Join(scriptLines, "\n") + "\n"
+	}
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake omp: %v", err)
 	}
