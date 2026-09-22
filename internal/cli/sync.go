@@ -79,7 +79,7 @@ func newSyncCmd() *cobra.Command {
 }
 
 func newAxiSyncCmd() *cobra.Command {
-	var check, recover, keepLocal bool
+	var check, recover, keepLocal, adoptPublished bool
 	var bindArchiveRef, authoritativeHead string
 	cmd := &cobra.Command{
 		Use:   "sync",
@@ -112,7 +112,7 @@ func newAxiSyncCmd() *cobra.Command {
 			if authoritativeHead != "" && !recover {
 				return emitError(cmd, 2, "--authoritative-head requires --recover")
 			}
-			return runAxiSync(cmd, check, recover, keepLocal, bindArchiveRef, authoritativeHead)
+			return runAxiSync(cmd, check, recover, keepLocal, adoptPublished, bindArchiveRef, authoritativeHead)
 		},
 	}
 	cmd.Flags().BoolVar(&check, "check", false, "freshly verify and return the plan without changing HEAD")
@@ -438,7 +438,7 @@ func humanSyncSummary(state branchsync.State) string {
 	}
 }
 
-func runAxiSync(cmd *cobra.Command, check, recover, keepLocal bool, bindArchiveRef, authoritativeHead string) error {
+func runAxiSync(cmd *cobra.Command, check, recover, keepLocal, adoptPublished bool, bindArchiveRef, authoritativeHead string) error {
 	started := time.Now()
 	mode := "apply"
 	switch {
@@ -470,6 +470,8 @@ func runAxiSync(cmd *cobra.Command, check, recover, keepLocal bool, bindArchiveR
 		state = service.Refresh(cmd.Context())
 	case recover:
 		state = service.RecoverAtHead(cmd.Context(), keepLocal, authoritativeHead)
+	case adoptPublished:
+		state = service.AdoptPublished(cmd.Context())
 	default:
 		state = service.Apply(cmd.Context())
 	}

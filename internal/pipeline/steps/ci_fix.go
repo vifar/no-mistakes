@@ -445,12 +445,29 @@ func extractCIFixConclusion(result *agent.Result) (ciFixConclusion, error) {
 // fall through to the generic warn-and-retry branch and spend up to
 // auto_fix.ci further stall windows with nothing but warning lines to show for
 // it.
-func ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc string, err error) *pipeline.StepOutcome {
+func (s *CIStep) ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc string, err error) *pipeline.StepOutcome {
 	if err == nil || !isAgentBudgetBurned(err) {
 		return nil
 	}
 	sctx.Log(fmt.Sprintf("CI auto-fix agent exhausted its invocation budget: %v", err))
-	return ciFixAgentTimeoutOutcome(issueDesc, dirtyRunWorktree(sctx), err)
+	var leftover []string
+	head, headErr := stepGitHeadSHA(sctx)
+	switch {
+	case rebaseInProgress(sctx.Ctx, sctx.WorkDir) || mergeInProgress(sctx.Ctx, sctx.WorkDir):
+		leftover = append(leftover, fmt.Sprintf("The timed-out agent left an unfinished rebase or merge in the run worktree at %s; its partial HEAD is not recorded.", sctx.WorkDir))
+	case headErr == nil && head != "" && head != sctx.Run.HeadSHA:
+		if _, recErr := s.recordLocalRepair(sctx, head); recErr != nil {
+			sctx.Log(fmt.Sprintf("warning: could not record timed-out CI repair head %s: %v", head, recErr))
+			leftover = append(leftover, fmt.Sprintf("The timed-out agent left a committed head at %s in the run worktree.", shortObjectID(head)))
+		} else {
+			sctx.Log("timed-out CI repair head recorded locally; waiting for a decision instead of auto-revalidating")
+			leftover = append(leftover, fmt.Sprintf("The timed-out agent committed %s; it is recorded locally for custody and is not published.", shortObjectID(head)))
+		}
+	}
+	if dirty := dirtyRunWorktree(sctx); dirty != "" {
+		leftover = append(leftover, fmt.Sprintf("The timed-out agent left uncommitted changes in the run worktree at %s; they are not committed or pushed.", dirty))
+	}
+	return ciFixAgentTimeoutOutcome(issueDesc, strings.Join(leftover, " "), err)
 }
 
 // isAgentBudgetBurned reports whether an agent failure is a proven
