@@ -1260,6 +1260,9 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if !launchPRBaseBranchMatches(run, prBaseBranch) {
 			return nil, conflictingLaunchPRBaseBranch(p.LaunchNonce)
 		}
+		if p.OmitIntent && !run.OmitIntent {
+			return nil, conflictingLaunchOmitIntent(p.LaunchNonce)
+		}
 
 		receipt, err := receiptForRun(run, claimed)
 		if err != nil {

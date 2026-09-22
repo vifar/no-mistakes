@@ -297,7 +297,7 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 		return nil, err
 	}
 	roles := make(map[string]agent.Agent, len(cfg.ReviewAgents))
-	for _, role := range []string{"reviewer", "fixer"} {
+	for _, role := range config.ReviewAgentRoles {
 		entry, ok := cfg.ReviewAgents[role]
 		if !ok {
 			continue
@@ -312,7 +312,18 @@ func newPipelineAgent(ctx context.Context, cfg *config.Config, evidenceRoot stri
 		}
 		roles[role] = next
 	}
-	return agent.WithReviewAgents(primary, roles["reviewer"], roles["fixer"]), nil
+	return agent.WithReviewRoles(primary, agent.ReviewRoles{
+		Reviewer: agent.RoundedRole{
+			Agent:    roles[config.RoleReviewer],
+			Late:     roles[config.RoleReviewerAfterRound],
+			LateFrom: cfg.ReviewAgentTakeoverRound(config.RoleReviewerAfterRound),
+		},
+		Fixer: agent.RoundedRole{
+			Agent:    roles[config.RoleFixer],
+			Late:     roles[config.RoleFixerAfterRound],
+			LateFrom: cfg.ReviewAgentTakeoverRound(config.RoleFixerAfterRound),
+		},
+	}), nil
 }
 
 func newConfiguredAgent(ctx context.Context, cfg *config.Config, evidenceRoot string, lookPath func(string) (string, error), environment runenv.Overlay) (agent.Agent, error) {
@@ -848,6 +859,12 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 			if !launchPRBaseBranchMatches(existing, storedPRBaseBranch) {
 				return "", conflictingLaunchPRBaseBranch(launchNonce)
 			}
+			// The stored value folds the operator's global intent.publish_intent
+			// default in, so only a claim REQUESTING omission against a run
+			// without it is a genuine conflict; the reverse can be the fold.
+			if omitIntent && !existing.OmitIntent {
+				return "", conflictingLaunchOmitIntent(launchNonce)
+			}
 
 			replayed, err := receiptForRun(existing, false)
 			if err != nil {
@@ -864,7 +881,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 				receipt = replayed
 				return existing.ID, nil
 			}
-			claimedRun, claimed, err := m.db.ClaimLaunchReceipt(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch)
+			claimedRun, claimed, err := m.db.ClaimLaunchReceipt(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent)
 			if err != nil {
 				return "", err
 			}
@@ -915,7 +932,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 				return "", err
 			}
 		} else {
-			claimedRun, claimed, err := m.db.ClaimLaunchReceipt(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch)
+			claimedRun, claimed, err := m.db.ClaimLaunchReceipt(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent)
 			if err != nil {
 				return "", err
 			}
@@ -956,6 +973,10 @@ func launchPRBaseBranchMatches(run *db.Run, requested string) bool {
 
 func conflictingLaunchPRBaseBranch(launchNonce string) error {
 	return fmt.Errorf("conflicting launch_nonce %q is already bound to a different pr base branch", launchNonce)
+}
+
+func conflictingLaunchOmitIntent(launchNonce string) error {
+	return fmt.Errorf("conflicting launch_nonce %q is already bound to a run that publishes the Intent section", launchNonce)
 }
 
 func validateLaunchNonce(nonce string) error {
@@ -1328,6 +1349,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("invalid_pr_base_branch")
 		return "", err
 	}
+	// The caller-side omit decision is the OR of the explicit per-run request
+	// and the operator's global tighten-only default. It is stamped here, at
+	// creation, and can only reduce publication: the repository's trusted
+	// pr.publish_intent is enforced independently by the PR step.
+	storedOmitIntent := omitIntent || (globalCfg != nil && !globalCfg.Intent.PublishesIntentByDefault())
 
 	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, pin)
 	if err != nil {

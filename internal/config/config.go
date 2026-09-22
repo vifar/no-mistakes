@@ -221,13 +221,18 @@ type GlobalConfig struct {
 	// value still wins over it.
 	Rebase RebaseRaw
 	Commit GlobalCommitRaw
-	Intent IntentRaw
+	Intent GlobalIntentRaw
 	Test   TestRaw
 	// Eval is resolved at load time because it is global-only: it describes
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
 	// RepoConfig means no pushed branch can enable, disable, or resize it.
-	Eval      Eval
+	Eval Eval
+	// Jev holds the resolved TypeSafe pre-brief settings (see the Jev type).
+	// Global-only for the same reason as Eval: it decides whether this
+	// machine's review turns consult an external pre-screen service under the
+	// operator's own key, so no pushed branch may enable or steer it.
+	Jev       Jev
 	Providers ProvidersRaw
 }
 
@@ -259,9 +264,10 @@ type globalConfigRaw struct {
 	CI                      CIRaw                      `yaml:"ci"`
 	Rebase                  RebaseRaw                  `yaml:"rebase"`
 	Commit                  GlobalCommitRaw            `yaml:"commit"`
-	Intent                  IntentRaw                  `yaml:"intent"`
+	Intent                  GlobalIntentRaw            `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
 	Eval                    EvalRaw                    `yaml:"eval"`
+	Jev                     JevRaw                     `yaml:"jev"`
 	ForgeProfiles           ForgeProfiles              `yaml:"forge_profiles"`
 	Providers               ProvidersRaw               `yaml:"providers"`
 }
@@ -690,7 +696,10 @@ type Config struct {
 	LogLevel              string
 	SessionReuse          bool
 	Eval                  Eval
-	Commands              Commands
+	// Jev is global-only by design (see GlobalConfig.Jev); Merge copies it
+	// straight through with no repository override step.
+	Jev      Jev
+	Commands Commands
 	// Gates are the repository's extra checks, already trusted-only by the
 	// time they reach here (EffectiveRepoConfig sourced them from the trusted
 	// default-branch copy).
@@ -936,6 +945,32 @@ type Eval struct {
 	DiversifiedSize int
 }
 
+// JevRaw is the YAML representation of the TypeSafe review pre-brief
+// settings. Pointer fields distinguish "not set" (nil) from explicit values.
+type JevRaw struct {
+	ReviewAssist *bool `yaml:"review_assist"`
+	// CandidateExcerptBytes bounds the content excerpt attached to each
+	// ranked candidate file. Nil means unset (path-only candidates).
+	CandidateExcerptBytes *int `yaml:"candidate_excerpt_bytes"`
+}
+
+// Jev is the resolved TypeSafe pre-brief config. ReviewAssist opts review
+// turns into one batched Jev evaluation that ranks surrounding context as
+// advisory prompt input (issue #1055). It never
+// changes what a review covers or who validates it, and every failure of the
+// assist falls back to the same cold review that runs with it off. The API
+// key is read from the daemon's TYPESAFE_API_KEY environment variable at turn
+// time, never from this document.
+type Jev struct {
+	ReviewAssist bool
+	// CandidateExcerptBytes caps the content excerpt attached to each
+	// ranked candidate file, in bytes. 0 is today's path-only behaviour:
+	// no content of an unchanged file leaves the machine. A positive value
+	// opts into sending a bounded leading slice of each candidate file to
+	// the TypeSafe API as part of the pre-brief state.
+	CandidateExcerptBytes int
+}
+
 // IntentRaw is the YAML representation of user-intent extraction settings.
 // Pointer fields distinguish "not set" (nil) from explicit zero/false values.
 type IntentRaw struct {
@@ -943,6 +978,30 @@ type IntentRaw struct {
 	Threshold       *float64 `yaml:"threshold"`
 	SlackDays       *int     `yaml:"slack_days"`
 	DisabledReaders []string `yaml:"disabled_readers"`
+}
+
+// GlobalIntentRaw is the global config's `intent:` block. It extends the
+// repo-level IntentRaw with the caller-side publication control, which a
+// repository config deliberately cannot express: publication policy lives in
+// the trusted `pr.publish_intent`, and the caller-side control below is owned
+// by the operator of the machine that runs the gate.
+type GlobalIntentRaw struct {
+	IntentRaw `yaml:",inline"`
+	// PublishIntent is the contributor-side, tighten-only publication
+	// preference for the generated public Intent section. `false` omits that
+	// section for runs started on this machine; it can never publish intent
+	// on a repository whose trusted `pr.publish_intent` disabled it. The full
+	// intent still reaches every step prompt except the PR-drafting turns,
+	// which then see no intent text at all. Default nil, which publishes when
+	// the repository permits it.
+	PublishIntent *bool `yaml:"publish_intent"`
+}
+
+// PublishesIntentByDefault reports whether runs started on this machine
+// publish the generated Intent section when the repository's trusted policy
+// allows it. It makes no promise about model prose.
+func (g GlobalIntentRaw) PublishesIntentByDefault() bool {
+	return g.PublishIntent == nil || *g.PublishIntent
 }
 
 // Intent is the resolved user-intent extraction config.
@@ -1083,8 +1142,10 @@ agent_stall_timeout: "30m"
 review_agent_timeout: "30m"
 
 # Maximum wall-clock time for one Test-step agent invocation, including the
-# post-test evidence-gathering turn. A stalled test agent fails the run instead
-# of leaving it active.
+# post-test evidence-gathering turn. A stalled test agent parks for a decision
+# instead of leaving the run active. Raise this when targeted tests or evidence
+# gathering routinely approach 30m; the default is a stall bound, not slack
+# for a long suite.
 test_agent_timeout: "30m"
 
 # Maximum time a CLI client waits for an existing daemon socket to accept a
@@ -1958,6 +2019,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		LogLevel:                "info",
 		SessionReuse:            true,
 		Eval:                    evalDefaults(),
+		Jev:                     Jev{},
 	}
 }
 
@@ -2130,6 +2192,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateRebaseRaw(raw.Rebase); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
+	if err := validateJevRaw(raw.Jev); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
 
 	if len(raw.Agent) > 0 {
 		cfg.Agents = copyAgents(raw.Agent)
@@ -2270,6 +2335,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Test = raw.Test
 	cfg.Providers = raw.Providers
 	applyEvalOverrides(&cfg.Eval, &raw.Eval)
+	applyJevOverrides(&cfg.Jev, &raw.Jev)
 
 	return cfg, nil
 }
@@ -2838,6 +2904,27 @@ func applyEvalOverrides(dst *Eval, src *EvalRaw) {
 	}
 }
 
+// applyJevOverrides applies non-nil raw values onto resolved defaults.
+func applyJevOverrides(dst *Jev, src *JevRaw) {
+	if src.ReviewAssist != nil {
+		dst.ReviewAssist = *src.ReviewAssist
+	}
+	if src.CandidateExcerptBytes != nil {
+		dst.CandidateExcerptBytes = *src.CandidateExcerptBytes
+	}
+}
+
+// validateJevRaw fails the config closed on a negative
+// jev.candidate_excerpt_bytes. A negative byte budget has no defensible
+// meaning here - it is neither "send nothing" (0) nor a bound - so
+// surfacing the typo beats guessing which one was meant.
+func validateJevRaw(raw JevRaw) error {
+	if raw.CandidateExcerptBytes != nil && *raw.CandidateExcerptBytes < 0 {
+		return fmt.Errorf("jev.candidate_excerpt_bytes must be 0 (path-only candidates) or greater, got %d", *raw.CandidateExcerptBytes)
+	}
+	return nil
+}
+
 // validateEvalRaw fails the config closed on a negative eval.max_cases. A
 // negative cap has no defensible meaning here - it is neither "keep everything"
 // (0) nor a bound - so surfacing the typo beats guessing which one was meant.
@@ -3041,7 +3128,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	applyRebaseOverrides(&rebase, &repo.Rebase)
 
 	intent := intentDefaults()
-	applyIntentOverrides(&intent, &global.Intent)
+	applyIntentOverrides(&intent, &global.Intent.IntentRaw)
 	applyIntentOverrides(&intent, &repo.Intent)
 
 	test := testDefaults()
@@ -3111,7 +3198,9 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		SessionReuse:          global.SessionReuse,
 		// Eval is global-only by design (see GlobalConfig.Eval), so it is
 		// copied straight through with no repository override step.
-		Eval:           global.Eval,
+		Eval: global.Eval,
+		// Jev is global-only for the same reason as Eval.
+		Jev:            global.Jev,
 		Commands:       repo.Commands,
 		Gates:          copyGates(repo.Gates),
 		IgnorePatterns: repo.IgnorePatterns,

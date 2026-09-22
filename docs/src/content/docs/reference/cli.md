@@ -121,6 +121,7 @@ no-mistakes axi run --intent "the user's goal"
 no-mistakes axi run --intent "the user's goal" --skip test,lint
 no-mistakes axi run --intent "the user's goal" --yes
 no-mistakes axi run --intent "the user's goal" --base-branch epic/foo
+no-mistakes axi run --intent "the user's goal" --no-publish-intent
 ```
 
 | Flag            | Type     | Default | Description                                                                                          |
@@ -153,6 +154,7 @@ If the configured native agent or ACP runner is unavailable, the run fails befor
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths) are an exception to this automatic handling.
+So is a Test budget-cut gate that reports `test-agent-unvalidated-work`: approval is refused there, so `--yes` stops at it and leaves the choice between `--action fix` and `no-mistakes axi abort` to the operator (see [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout)).
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
@@ -166,7 +168,7 @@ After that monitor ends, see [`no-mistakes rerun`](#no-mistakes-rerun) for the r
 Successful outcomes (`checks-passed`, `passed`, `passed-with-override`, and `passed-with-skips`) also carry `help` instructions telling the agent to summarize the run.
 `passed-with-override` is a completed run with an explicitly approved Test exception or a CI approval over still-failing checks.
 It stays a success but is distinct from a clean `passed`.
-A Test exception is an approval past a failing configured `commands.test`, a `no-go` verdict, or an `inconclusive` verdict; approving a `no-surface` park records its reason but completes as `passed`.
+A Test exception is an approval past a failing configured `commands.test`, a `no-go` verdict, an `inconclusive` verdict, or a [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout) budget cut; approving a `no-surface` park records its reason but completes as `passed`.
 `run.test_override_reason` preserves the Test exception explanation in drive and status output, including at the `checks-passed` stopping point; CI overrides retain their separate reason.
 Report those exceptions rather than describing Test as clean.
 `passed-with-skips` is a completed run where PR publication or CI verification automatically skipped because its provider was unavailable, or CI had no PR URL.
@@ -286,6 +288,7 @@ no-mistakes axi sync --recover
 no-mistakes axi sync --recover --keep-local
 no-mistakes axi sync --recover --authoritative-head <full-sha>
 no-mistakes axi sync --bind-archive-ref refs/heads/archive/<name>
+no-mistakes axi sync --adopt-published
 ```
 
 | Flag                 | Type     | Default | Description                                                                  |
@@ -307,6 +310,12 @@ When the local gate branch is exactly at a newer same-branch pushed binding and 
 Fork configurations verify the configured fork URL and exact feature ref rather than assuming `origin`.
 Dirty, in-progress, ahead, genuinely diverged, detached, wrong-branch, offline, changed-target, rewritten, deleted, legacy, or retired states fail closed without destructive recovery.
 Run `axi sync` only when structured output offers `next_action.code: sync`; process any blocked state instead of substituting reset, stash, merge, rebase, force, or branch replacement.
+
+### Published-rebase gate recovery
+
+A custody-returned branch can later be rebased and force-with-lease pushed to its configured target. Its local head then diverges from the preserved gate lane, so an ordinary gate push correctly rejects it as non-fast-forward. Status reports `state: custody_returned`, `relation: diverged`, and `next_action.code: adopt_published` instead of directing another rejected `axi run`.
+
+`axi sync --adopt-published` is the explicit recovery. It requires a clean exact checked-out branch, the same recovered lane at its recorded preserved head, and a live configured push target whose branch exactly equals local `HEAD`. It fetches that verified object into the local gate, preserves the old gate head under the run's recovery ref, then compare-and-swaps only the current lane. It never pushes to the configured target or changes the worktree. A missing, changed, or different target head, a changed gate lane, or changed local assumptions refuses without replacing the lane.
 
 ### Custody recovery
 
@@ -447,7 +456,10 @@ If the selected prior run has explicit intent, rerun inherits it exactly by defa
 otherwise it performs fresh intent inference. `--intent` supplies a new canonical
 explicit intent in either case. Inherited intent keeps distinct rerun provenance;
 an override is recorded as newly supplied explicit intent, while fresh inference
-records the transcript source. If another run is active on that branch, rerun
+records the transcript source. Omission of the generated Intent section is always
+inherited from the selected prior run; `--no-publish-intent` and the global
+[`intent.publish_intent`](/no-mistakes/reference/global-config/#intent)
+default can only add omission, never remove it. If another run is active on that branch, rerun
 cancels it before starting over. Treat rerun as a between-runs action after a
 failed or cancelled outcome; use `axi run` for separate local fixes, and do not
 use rerun to bypass a gate.
@@ -469,6 +481,7 @@ no-mistakes sync --yes
 no-mistakes sync --recover
 no-mistakes sync --recover --keep-local
 no-mistakes sync --bind-archive-ref refs/heads/archive/<name>
+no-mistakes sync --adopt-published
 ```
 
 | Flag                 | Type     | Default | Description                                                     |
@@ -478,8 +491,9 @@ no-mistakes sync --bind-archive-ref refs/heads/archive/<name>
 | `--recover`          | `bool`   | `false` | Return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch) |
 | `--keep-local`       | `bool`   | `false` | With `--recover`: keep the current local head; never touches the worktree |
 | `--bind-archive-ref` | `string` | (none)  | Bind one existing `refs/heads/archive/*` commit as exact keep-local recovery evidence without changing Git refs |
+| `--adopt-published`  | `bool`   | `false` | Adopt a clean diverged local head into its stale gate lane only when the configured push target has that exact head |
 
-Without `--yes`, apply prints the exact full-SHA plan and requires TTY confirmation; `--recover` prompts the same way before returning custody. Archive binding is itself explicit, does not prompt, and cannot be combined with synchronization, recovery, or `--yes`.
+Without `--yes`, apply prints the exact full-SHA plan and requires TTY confirmation; `--recover` and `--adopt-published` prompt the same way before they mutate a gate lane. Archive binding is itself explicit, does not prompt, and cannot be combined with synchronization, recovery, or `--yes`.
 A non-TTY apply or recovery refuses with a direct `--yes` hint.
 The command uses the same service and safety contract as `no-mistakes axi sync`, including the guarded equivalent advance and custody recovery documented there; it never stashes, rebases, creates a merge commit, switches branches, deletes a branch, or updates an external remote.
 

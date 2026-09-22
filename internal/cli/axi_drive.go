@@ -131,7 +131,8 @@ func newAxiRunCmd() *cobra.Command {
 			"prints it. With --yes it auto-resolves eligible gates (fixing actionable\n" +
 			"findings - including ask-user findings, with no escalation - then\n" +
 			"accepting the result) until a decision point or outcome.\n" +
-			"Protected-path refusals require an explicit response, even with --yes.\n\n" +
+			"Protected-path and Test unvalidated-work refusals require an explicit\n" +
+			"response, even with --yes.\n\n" +
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
@@ -161,11 +162,12 @@ func newAxiRunCmd() *cobra.Command {
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return trackAxiSurface("axi-run", "/axi/run", telemetry.Fields{
-				"auto_yes":         autoYes,
-				"has_intent":       strings.TrimSpace(intent) != "",
-				"has_skip":         strings.TrimSpace(skipValue) != "",
-				"has_base_branch":  strings.TrimSpace(baseBranch) != "",
-				"has_launch_nonce": launchNonce != "",
+				"auto_yes":          autoYes,
+				"has_intent":        strings.TrimSpace(intent) != "",
+				"has_skip":          strings.TrimSpace(skipValue) != "",
+				"has_base_branch":   strings.TrimSpace(baseBranch) != "",
+				"has_launch_nonce":  launchNonce != "",
+				"no_publish_intent": noPublishIntent,
 			}, func() error {
 				skipSteps, err := parseSkipSteps(skipValue)
 				if err != nil {
@@ -180,19 +182,20 @@ func newAxiRunCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve eligible gates (fix findings, then accept) until a decision point or outcome; protected-path refusals require an explicit response")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve eligible gates (fix findings, then accept) until a decision point or outcome; protected-path and Test unvalidated-work refusals require an explicit response")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	cmd.Flags().StringVar(&launchNonce, "launch-nonce", "", "opaque nonce for a daemon-bound pre-drive launch receipt")
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
+	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this run (tighten-only; full intent still reaches every step prompt except PR drafting)")
 	bindAxiWaitFlag(cmd, &wait)
 	bindPiProfileFlags(cmd, &model, &effort)
 	return cmd
 }
 
 func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch string) error {
-	return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, "", "", defaultAxiWait)
+	return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, false, "", "", defaultAxiWait)
 }
 
 func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch, launchNonce, validationGeneration string, wait time.Duration, profiles ...*agentcfg.PiProfile) error {
@@ -214,6 +217,17 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
 	}
 	defer env.close()
+	// Probe before any RPC carries omit_intent: an older daemon would drop
+	// the unknown field silently and publish the intent it was asked to
+	// withhold, so the run is refused instead. An unreadable global config
+	// (env.cfg holds defaults) cannot rule omission out, so it probes too.
+	globalCfg := env.cfg
+	if env.globalConfigErr != nil {
+		globalCfg = nil
+	}
+	if err := requireDaemonHonorsOmitIntent(env.client, omitIntent, globalCfg); err != nil {
+		return emitError(cmd, 2, err.Error())
+	}
 
 	branch, err := git.CurrentBranch(ctx, ".")
 	if err != nil {
@@ -267,6 +281,10 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 			if err := conflictingActiveRunPRBaseBranch(active, baseBranch); err != nil {
 				return emitError(cmd, 2, err.Error(),
 					"Omit --base-branch to reattach, or abort the active run before starting a new one")
+			}
+			if err := conflictingActiveRunOmitIntent(active, omitIntent); err != nil {
+				return emitError(cmd, 2, err.Error(),
+					"Omit --no-publish-intent to reattach, or abort the active run before starting a new one")
 			}
 			runID = active.ID
 		}
@@ -548,6 +566,9 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 	if opt := formatPRBaseBranchPushOption(baseBranch); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
+	if opt := formatOmitIntentPushOption(omitIntent); opt != "" {
+		pushOptions = append(pushOptions, opt)
+	}
 	observedHead, err := git.HeadSHA(ctx, ".")
 	if err != nil {
 		return "", fmt.Errorf("prepare private mirror for %q: resolve submission head: %w", branch, err)
@@ -585,7 +606,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 	if opt := formatReconciledPreviousHeadPushOption(reconciliation.PreviousHead); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
-	pushErr := git.PushCommitWithOptions(ctx, ".", gate.RemoteName, submissionHead, "refs/heads/"+branch, "", false, pushOptions)
+	pushErr := git.PushCommitWithOptionsSkippingHooks(ctx, ".", gate.RemoteName, submissionHead, "refs/heads/"+branch, "", false, pushOptions)
 	if pushErr != nil {
 		restoreErr := restoreMirrorAfterFailedPush(ctx, env, branch, reconciliation)
 		if restoreErr != nil {
@@ -720,6 +741,9 @@ func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, s
 		formatValidationGenerationPushOption(validationGeneration),
 	)
 	if opt := formatPRBaseBranchPushOption(baseBranch); opt != "" {
+		pushOptions = append(pushOptions, opt)
+	}
+	if opt := formatOmitIntentPushOption(omitIntent); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
 	if state := freshRunBranchOwnershipState(ctx, env); state != nil {
@@ -862,6 +886,20 @@ func rerunParams(repoID, branch string, skipSteps []types.StepName, intent, base
 	return &ipc.RerunParams{RepoID: repoID, Branch: branch, SkipSteps: skipSteps, Intent: intent, PRBaseBranch: baseBranch}
 }
 
+// conflictingActiveRunOmitIntent reports when --no-publish-intent would be
+// discarded by reattaching to an in-flight run that was started without it,
+// so the driving agent cannot believe the run omits the public Intent
+// section while the active run will actually publish it.
+func conflictingActiveRunOmitIntent(run *ipc.RunInfo, requested bool) error {
+	if !requested || run == nil {
+		return nil
+	}
+	if run.OmitIntent {
+		return nil
+	}
+	return fmt.Errorf("active run %s is already in progress without --no-publish-intent", run.ID)
+}
+
 // emitLaunchReceipt writes the proof before driveRun subscribes, so callers
 // retain the daemon-authored binding even if later driving blocks or fails.
 func emitLaunchReceipt(cmd *cobra.Command, receipt ipc.LaunchReceipt) {
@@ -887,8 +925,8 @@ func emitLaunchReceipt(cmd *cobra.Command, receipt ipc.LaunchReceipt) {
 // findings is fixed (every finding selected), and the resulting fix_review is
 // accepted; gates with only non-actionable findings are approved. Each step is
 // fixed at most once so a finding the fix cannot clear converges to an approval
-// instead of looping forever. Protected-path refusals always return their gate
-// for an explicit response, including under --yes.
+// instead of looping forever. Protected-path and Test unvalidated-work refusals
+// always return their gate for an explicit response, including under --yes.
 //
 // The CI step monitors an open PR until a human merges or closes it (a live
 // status the TUI shows), so it never reaches a terminal state on its own. An
@@ -925,6 +963,10 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			}
 			if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {
 				fmt.Fprintf(progress, "%s: protected-path refusal requires an explicit response; --yes leaves this gate awaiting a response\n", gate.Name)
+				return run, false, nil
+			}
+			if pipeline.HasUnvalidatedWorkRefusal(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: unvalidated work in the run worktree requires an explicit response; --yes leaves this gate awaiting a response\n", gate.Name)
 				return run, false, nil
 			}
 			gateKey := gate.Name + "\x00" + gate.Status
@@ -1208,7 +1250,7 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
 	cmd.Flags().StringVar(&reason, "reason", "", "exception reason preserved with Test approval (with --action approve)")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix (with --action fix)")
-	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve subsequent eligible gates until a decision point or outcome; protected-path refusals require an explicit response")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve subsequent eligible gates until a decision point or outcome; protected-path and Test unvalidated-work refusals require an explicit response")
 	bindAxiWaitFlag(cmd, &wait)
 	return cmd
 }
