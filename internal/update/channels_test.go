@@ -4,11 +4,76 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestDefaultUpdaterUsesForkChannels(t *testing.T) {
+	const installedVersion = "v1.91.0-58-g43617132"
+	const forkPath = "/vifar/no-mistakes/releases/download/"
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Host != "github.com" || r.URL.Path != forkPath+"channels/channels.json" {
+			t.Errorf("manifest request = %s%s, want github.com%schannels/channels.json", r.Host, r.URL.Path, forkPath)
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"schema_version":1,
+			"stable":{"tag_name":"v1.92.0","assets":[
+				{"name":"no-mistakes-v1.92.0-darwin-arm64.tar.gz","browser_download_url":"https://github.com/vifar/no-mistakes/releases/download/v1.92.0/no-mistakes-v1.92.0-darwin-arm64.tar.gz"},
+				{"name":"checksums.txt","browser_download_url":"https://github.com/vifar/no-mistakes/releases/download/v1.92.0/checksums.txt"}]},
+			"beta":{"tag_name":"v1.93.0-beta.1","prerelease":true,"assets":[
+				{"name":"no-mistakes-v1.93.0-beta.1-darwin-arm64.tar.gz","browser_download_url":"https://github.com/vifar/no-mistakes/releases/download/v1.93.0-beta.1/no-mistakes-v1.93.0-beta.1-darwin-arm64.tar.gz"},
+				{"name":"checksums.txt","browser_download_url":"https://github.com/vifar/no-mistakes/releases/download/v1.93.0-beta.1/checksums.txt"}]}}`)
+	}))
+	defer server.Close()
+
+	// Preserve the production request URL while routing its connection to the
+	// local TLS server. No GitHub request leaves the test process.
+	client := server.Client()
+	transport := client.Transport.(*http.Transport).Clone()
+	transport.TLSClientConfig.ServerName = "example.com"
+	transport.DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, server.Listener.Addr().String())
+	}
+	client.Transport = transport
+	t.Cleanup(transport.CloseIdleConnections)
+
+	for _, tt := range []struct {
+		name string
+		beta bool
+		tag  string
+	}{
+		{name: "stable", tag: "v1.92.0"},
+		{name: "beta", beta: true, tag: "v1.93.0-beta.1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			u, err := defaultUpdater(io.Discard, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			u.currentVersion = installedVersion
+			u.platform = platformSpec{GOOS: "darwin", GOARCH: "arm64"}
+			u.httpClient = client
+			u.includePrereleases = tt.beta
+			plan, err := u.checkLatest(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !plan.UpdateAvailable || plan.LatestVersion != tt.tag {
+				t.Fatalf("plan = %+v, want update to %s", plan, tt.tag)
+			}
+			for _, asset := range []releaseAsset{plan.Archive, plan.Checksums} {
+				if !strings.HasPrefix(asset.BrowserDownloadURL, "https://github.com"+forkPath+tt.tag+"/") {
+					t.Fatalf("asset URL = %q, want fork release %s", asset.BrowserDownloadURL, tt.tag)
+				}
+			}
+		})
+	}
+}
 
 func TestDefaultManifestURLUsesReleaseAssetCDN(t *testing.T) {
 	got := defaultManifestURL("kunchenguid/no-mistakes")

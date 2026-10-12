@@ -18,7 +18,7 @@ import (
 
 const (
 	appName            = "no-mistakes"
-	repoName           = "kunchenguid/no-mistakes"
+	repoName           = "vifar/no-mistakes"
 	backgroundFlag     = "--update-check"
 	noUpdateCheckEnv   = "NO_MISTAKES_NO_UPDATE_CHECK"
 	checksumsAssetName = "checksums.txt"

@@ -68,11 +68,13 @@ The flake embeds the same default telemetry host and website ID as official rele
 ## From source
 
 ```sh
-git clone git@github.com:kunchenguid/no-mistakes.git
+git clone git@github.com:vifar/no-mistakes.git
 cd no-mistakes
 make build
 make install
 ```
+
+This fork's source build uses its release-please version baseline and records the source commit separately. Set `VERSION` explicitly for a release or development build. [Fork release prerequisites](/no-mistakes/guides/fork-updates/) owns the self-update channel and version ordering.
 
 `make build` embeds the telemetry host from `NO_MISTAKES_UMAMI_HOST` in a repo-local `.env` first, then `UMAMI_HOST` from the shell, then the default self-hosted host. It embeds the telemetry website ID from `NO_MISTAKES_UMAMI_WEBSITE_ID` in `.env` first, then `UMAMI_WEBSITE_ID` from the shell, then the default website ID.
 
@@ -109,7 +111,7 @@ Use `no-mistakes update --beta` to opt into prereleases and install the latest b
 Use `no-mistakes update -y` to answer yes to the daemon-executable-mismatch prompt described below.
 Version discovery uses the GitHub release-asset CDN rather than the rate-limited REST API; see [`no-mistakes update`](/no-mistakes/reference/cli/#no-mistakes-update).
 
-Because `update` installs the latest official release binary, it installs a binary with the default self-hosted telemetry host and website ID. Disable telemetry with `NO_MISTAKES_TELEMETRY=0`, or override the host and website ID with `NO_MISTAKES_UMAMI_HOST` and `NO_MISTAKES_UMAMI_WEBSITE_ID`.
+Fork release binaries include the default self-hosted telemetry host and website ID. Disable telemetry with `NO_MISTAKES_TELEMETRY=0`, or override the host and website ID with `NO_MISTAKES_UMAMI_HOST` and `NO_MISTAKES_UMAMI_WEBSITE_ID`.
 
 If pending or running pipeline runs exist, the update refuses to restart the daemon and prints each active run's ID, status, branch, and short head SHA. Pass `--force` to restart the daemon anyway and accept that those runs may fail; `-y`/`--yes` does **not** bypass this guard.
 If the running daemon was started from a different binary, the update still prompts before replacing it; `-y`/`--yes` answers that prompt non-interactively.

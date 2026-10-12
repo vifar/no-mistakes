@@ -1,5 +1,14 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+# Source builds use the fork's release version, never tags imported from upstream.
+# Explicit VERSION values remain available for release and development builds.
+SOURCE_COMMIT := $(shell if [ -z "$$(git rev-parse --show-prefix 2>/dev/null)" ]; then git rev-parse --short HEAD 2>/dev/null; fi)
+ifeq ($(origin VERSION), undefined)
+VERSION := $(shell perl -MJSON::PP -0777 -ne '$$v = decode_json($$_)->{"."}; die "invalid fork release version\n" unless defined $$v && $$v =~ /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$$/; print "v$$v"' .release-please-manifest.json)
+ifeq ($(strip $(VERSION)),)
+$(error Cannot read the fork release version from .release-please-manifest.json; set VERSION explicitly)
+endif
+VERSION := $(VERSION)$(if $(SOURCE_COMMIT),+g$(SOURCE_COMMIT)$(shell if [ -n "$$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then printf '.dirty'; fi))
+endif
+COMMIT  ?= $(if $(SOURCE_COMMIT),$(SOURCE_COMMIT),unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 DEFAULT_UMAMI_HOST := https://a.kunchenguid.com
 DEFAULT_UMAMI_WEBSITE_ID := f959e889-92f5-4121-8a1f-571b10861198
