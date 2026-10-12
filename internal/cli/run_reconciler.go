@@ -19,6 +19,11 @@ const (
 	driveReconnectInterval = 500 * time.Millisecond
 	driveReconnectTimeout  = 30 * time.Second
 	defaultGetRunTimeout   = 30 * time.Second
+	// defaultHealthProbeTimeout bounds the liveness probe that follows a
+	// timed-out run-state read. A daemon slow enough to miss the 30s get_run
+	// deadline is usually slow to answer health too, so the 250ms startup dial
+	// check would misread a loaded live daemon as dead and drop the driver.
+	defaultHealthProbeTimeout = 5 * time.Second
 )
 
 // driveGetRunTimeoutNS is the shared per-attempt deadline for run-state IPC
@@ -28,8 +33,22 @@ const (
 // can be proven without waiting 30s.
 var driveGetRunTimeoutNS atomic.Int64
 
+// driveHealthProbeTimeoutNS is the per-probe deadline for the health check
+// after a slow run-state read. Tests shorten it to prove an unanswered probe
+// still fails closed.
+var driveHealthProbeTimeoutNS atomic.Int64
+
 func init() {
 	driveGetRunTimeoutNS.Store(int64(defaultGetRunTimeout))
+	driveHealthProbeTimeoutNS.Store(int64(defaultHealthProbeTimeout))
+}
+
+func healthProbeTimeout() time.Duration {
+	d := time.Duration(driveHealthProbeTimeoutNS.Load())
+	if d <= 0 {
+		return defaultHealthProbeTimeout
+	}
+	return d
 }
 
 func getRunCallTimeout() time.Duration {
@@ -134,7 +153,7 @@ func (s *ipcRunStateSource) probeHealth(ctx context.Context) error {
 	}
 	defer client.Close()
 
-	timeout := ipc.DefaultDialTimeout
+	timeout := healthProbeTimeout()
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {

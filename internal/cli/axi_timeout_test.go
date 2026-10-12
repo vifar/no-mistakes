@@ -144,6 +144,81 @@ func TestDriveRun_SlowGetRunWithFailedHealthIsDead(t *testing.T) {
 	}
 }
 
+// A daemon slow enough to miss the get_run deadline is usually slow to answer
+// health as well. A health reply slower than the 250ms startup dial check but
+// inside the probe bound proves the daemon is alive, so the driver retries.
+func TestDriveRun_SlowHealthProbeOnLiveDaemonRetries(t *testing.T) {
+	setDriveGetRunTimeout(t, 60*time.Millisecond)
+
+	var getRunCalls atomic.Int32
+	var healthCalls atomic.Int32
+	socketPath := filepath.Join(makeSocketSafeTempDir(t), "slow-health.sock")
+	srv := ipc.NewServer()
+	srv.Handle(ipc.MethodHealth, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+		healthCalls.Add(1)
+		if err := sleepOrDone(ctx, 500*time.Millisecond); err != nil {
+			return nil, err
+		}
+		return &ipc.HealthResult{Status: "ok"}, nil
+	})
+	srv.Handle(ipc.MethodGetRun, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+		if getRunCalls.Add(1) == 1 {
+			if err := sleepOrDone(ctx, 180*time.Millisecond); err != nil {
+				return nil, err
+			}
+		}
+		return &ipc.GetRunResult{Run: &ipc.RunInfo{ID: "run-1", Status: types.RunCompleted}}, nil
+	})
+	srv.HandleStream(ipc.MethodSubscribe, hangSubscribe)
+	startIPCServer(t, srv, socketPath)
+
+	client := dialReady(t, socketPath)
+	defer client.Close()
+
+	run, _, err := driveRun(context.Background(), io.Discard, client, socketPath, "run-1", false)
+	if err != nil {
+		t.Fatalf("slow-but-healthy daemon treated as dead: %v", err)
+	}
+	if run == nil || run.Status != types.RunCompleted {
+		t.Fatalf("run = %+v, want completed", run)
+	}
+	if healthCalls.Load() < 1 || getRunCalls.Load() < 2 {
+		t.Fatalf("health=%d get_run=%d, want a slow probe then a retried get_run", healthCalls.Load(), getRunCalls.Load())
+	}
+}
+
+// An unanswered health probe still fails closed at its own bound rather than
+// retrying forever.
+func TestDriveRun_UnansweredHealthProbeFailsAtItsBound(t *testing.T) {
+	setDriveGetRunTimeout(t, 50*time.Millisecond)
+	setDriveHealthProbeTimeout(t, 150*time.Millisecond)
+
+	socketPath := filepath.Join(makeSocketSafeTempDir(t), "stuck-health.sock")
+	srv := ipc.NewServer()
+	srv.Handle(ipc.MethodHealth, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	srv.Handle(ipc.MethodGetRun, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	srv.HandleStream(ipc.MethodSubscribe, hangSubscribe)
+	startIPCServer(t, srv, socketPath)
+
+	client := dialReady(t, socketPath)
+	defer client.Close()
+
+	started := time.Now()
+	_, _, err := driveRun(context.Background(), io.Discard, client, socketPath, "run-1", false)
+	if err == nil || !strings.Contains(err.Error(), "health probe failed") {
+		t.Fatalf("error = %v, want health-probe failure", err)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Fatalf("unanswered probe took %s, want failure near its bound", elapsed)
+	}
+}
+
 func TestAxiRun_WaitElapsedAgainstLiveIdleDaemon(t *testing.T) {
 	fx := newAxiTimeoutFixture(t, axiTimeoutOpts{})
 	fx.setGetRun(func(context.Context, int) (*ipc.RunInfo, error) {
@@ -552,6 +627,12 @@ func setDriveGetRunTimeout(t *testing.T, d time.Duration) {
 	t.Helper()
 	prev := driveGetRunTimeoutNS.Swap(int64(d))
 	t.Cleanup(func() { driveGetRunTimeoutNS.Store(prev) })
+}
+
+func setDriveHealthProbeTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	prev := driveHealthProbeTimeoutNS.Swap(int64(d))
+	t.Cleanup(func() { driveHealthProbeTimeoutNS.Store(prev) })
 }
 
 func sleepOrDone(ctx context.Context, d time.Duration) error {
