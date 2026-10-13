@@ -130,6 +130,8 @@ func Dial(socketPath string) (*Client, error) {
 	return DialWithDeadline(socketPath, time.Time{})
 }
 
+// DialWithDeadline caps the configured connection timeout by deadline without
+// changing RPC reply deadlines. A zero deadline retains Dial's configured bound.
 func DialWithDeadline(socketPath string, deadline time.Time) (*Client, error) {
 	conn, err := dialEndpoint(socketPath, deadline)
 	if err != nil {
