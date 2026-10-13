@@ -152,3 +152,46 @@ func TestWaitForDaemonStartBoundsHealthProbeByStartupDeadline(t *testing.T) {
 		t.Fatalf("waitForDaemonStart took %v, want startup deadline to cap health probes", elapsed)
 	}
 }
+
+func TestWaitForDaemonStartBoundsConnectionByStartupDeadline(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p.Socket(), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NM_TEST_DAEMON_START_TIMEOUT", "160ms")
+	t.Setenv("NM_TEST_DAEMON_START_POLL_INTERVAL", "10ms")
+	oldDial := daemonHealthDial
+	calls := 0
+	daemonHealthDial = func(socket string, deadline time.Time) (*ipc.Client, error) {
+		calls++
+		if socket != p.Socket() {
+			t.Fatalf("dial socket = %q, want %q", socket, p.Socket())
+		}
+		if deadline.IsZero() || time.Until(deadline) > 160*time.Millisecond {
+			t.Fatalf("readiness dial deadline = %v, want remaining startup budget", deadline)
+		}
+		remaining := time.Until(deadline)
+		if remaining > 0 {
+			time.Sleep(remaining)
+		}
+		return nil, &ipc.ConnectTimeoutError{SocketPath: socket, TimeoutDuration: remaining, Err: os.ErrDeadlineExceeded}
+	}
+	t.Cleanup(func() { daemonHealthDial = oldDial })
+	started := time.Now()
+	err := waitForDaemonStart(p, 0, time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "did not accept a connection") {
+		t.Fatalf("readiness error = %v, want connection timeout evidence", err)
+	}
+	if calls == 0 {
+		t.Fatal("readiness never attempted a connection")
+	}
+	if elapsed := time.Since(started); elapsed < 140*time.Millisecond || elapsed > 2500*time.Millisecond {
+		t.Fatalf("readiness took %v, want connection capped by startup budget", elapsed)
+	}
+	if _, err := os.Stat(p.Socket()); err != nil {
+		t.Fatalf("connection timeout removed socket: %v", err)
+	}
+}

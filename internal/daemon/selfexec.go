@@ -19,6 +19,7 @@ import (
 
 var daemonHealthCheck func(*paths.Paths, ...time.Duration) (bool, error) = daemonIsRunningViaIPC
 var daemonDial = ipc.Dial
+var daemonHealthDial = ipc.DialWithDeadline
 var daemonStart = Start
 var daemonProcessRunning = processRunning
 var daemonProcessStartTime = processStartTime
@@ -549,7 +550,7 @@ func daemonIsRunningViaIPC(p *paths.Paths, budget ...time.Duration) (bool, error
 		}
 		deadline = time.Now().Add(budget[0])
 	}
-	client, err := ipc.Dial(p.Socket())
+	client, err := daemonHealthDial(p.Socket(), deadline)
 	if err != nil {
 		_, statErr := os.Stat(p.Socket())
 		if os.IsNotExist(statErr) {

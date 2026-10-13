@@ -116,3 +116,65 @@ func shortTempDir(t *testing.T) string {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	return dir
 }
+
+func TestDialWithDeadlineBoundsConnection(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		configured time.Duration
+		budget     time.Duration
+		wantMax    time.Duration
+	}{
+		{"startup budget", 5 * time.Second, 160 * time.Millisecond, 160 * time.Millisecond},
+		{"configured timeout", 25 * time.Millisecond, 5 * time.Second, 25 * time.Millisecond},
+		{"ordinary dial", 25 * time.Millisecond, 0, 25 * time.Millisecond},
+		{"expired deadline", 5 * time.Second, -time.Second, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("NM_DAEMON_CONNECT_TIMEOUT", tc.configured.String())
+			socket := filepath.Join(shortTempDir(t), "socket")
+			if runtime.GOOS == "windows" {
+				endpoint := fmt.Sprintf("127.0.0.1:1\ntoken\n%d", os.Getpid())
+				if err := os.WriteFile(socket, []byte(endpoint), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			originalDial := dialNetworkWithTimeout
+			calls := 0
+			dialNetworkWithTimeout = func(network, address string, timeout time.Duration) (net.Conn, error) {
+				calls++
+				if timeout <= 0 || timeout > tc.wantMax {
+					t.Fatalf("connection timeout = %v, want positive and at most %v", timeout, tc.wantMax)
+				}
+				if tc.budget == 0 || tc.budget > tc.configured {
+					if timeout != tc.configured {
+						t.Fatalf("connection timeout = %v, want configured %v", timeout, tc.configured)
+					}
+				}
+				time.Sleep(timeout)
+				return nil, timeoutDialError{}
+			}
+			t.Cleanup(func() { dialNetworkWithTimeout = originalDial })
+			started := time.Now()
+			var client *Client
+			var err error
+			if tc.budget == 0 {
+				client, err = Dial(socket)
+			} else {
+				client, err = DialWithDeadline(socket, started.Add(tc.budget))
+			}
+			if client != nil || !IsConnectTimeout(err) || IsCallTimeout(err) {
+				t.Fatalf("dial = %v, %v, want connection timeout only", client, err)
+			}
+			wantCalls := 1
+			if tc.budget < 0 {
+				wantCalls = 0
+			}
+			if calls != wantCalls {
+				t.Fatalf("network dial calls = %d, want %d", calls, wantCalls)
+			}
+			if elapsed := time.Since(started); elapsed > 2500*time.Millisecond {
+				t.Fatalf("dial took %v, want less than the uncapped 5s timeout", elapsed)
+			}
+		})
+	}
+}

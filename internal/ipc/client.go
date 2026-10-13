@@ -127,7 +127,11 @@ const (
 
 // Dial connects to the IPC server at the given endpoint path.
 func Dial(socketPath string) (*Client, error) {
-	conn, err := dialEndpoint(socketPath)
+	return DialWithDeadline(socketPath, time.Time{})
+}
+
+func DialWithDeadline(socketPath string, deadline time.Time) (*Client, error) {
+	conn, err := dialEndpoint(socketPath, deadline)
 	if err != nil {
 		return nil, err
 	}
@@ -140,8 +144,20 @@ func Dial(socketPath string) (*Client, error) {
 	}, nil
 }
 
-func dialEndpoint(socketPath string) (net.Conn, error) {
+func dialEndpoint(socketPath string, deadline time.Time) (net.Conn, error) {
 	timeout := connectTimeout(socketPath)
+	if !deadline.IsZero() {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return nil, fmt.Errorf("dial ipc: %w", &ConnectTimeoutError{
+				SocketPath: socketPath,
+				Err:        os.ErrDeadlineExceeded,
+			})
+		}
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
 	conn, err := dial(socketPath, timeout)
 	if err != nil {
 		var netErr net.Error
@@ -255,7 +271,7 @@ func SubscribeContext(ctx context.Context, socketPath string, params *SubscribeP
 	if err := ctx.Err(); err != nil {
 		return nil, nil, err
 	}
-	conn, err := dialEndpoint(socketPath)
+	conn, err := dialEndpoint(socketPath, time.Time{})
 	if err != nil {
 		return nil, nil, err
 	}
