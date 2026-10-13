@@ -27,7 +27,7 @@ func TestNativeAgentCommand_SlowClaudeCallbackPreservesCompletedTurn(t *testing.
 	cmd := exec.CommandContext(ctx, "sh", "-c", `printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"review complete"}]}}' '{"type":"result","subtype":"success","structured_output":{"ok":true}}'`)
 	shellenv.ConfigureShellCommand(cmd)
 	cmd.WaitDelay = 50 * time.Millisecond
-	started, err := startNativeAgentCommand(ctx, cmd, nil)
+	started, err := startNativeAgentCommand(cmd, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

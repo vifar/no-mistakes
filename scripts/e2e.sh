@@ -58,10 +58,9 @@ trap 'reap_inventory; if [[ "${OWNED_INVENTORY}" -eq 1 ]]; then rm -rf "$NM_E2E_
 
 # Default args match the historical Makefile e2e target; callers may override.
 if [[ "$#" -eq 0 ]]; then
-  # The user-journey matrix runs native backends serially because each case
-  # owns process-wide environment. A pristine-main run took 497s for internal/e2e
-  # under normal load, so the package budget includes room for ordinary variance.
-  set -- -tags=e2e -count=1 -timeout 720s ./internal/e2e/... ./internal/pipeline/steps/...
+  # The matrix takes ~30m locally and hit the old 25m deadline in its last
+  # journeys on CI (rationale from a79be0b6).
+  set -- -tags=e2e -count=1 -timeout 2400s ./internal/e2e/... ./internal/pipeline/steps/...
 fi
 
 go test "$@"
