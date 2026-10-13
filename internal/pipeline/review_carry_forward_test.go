@@ -847,6 +847,7 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundSilenceKeepsAnUnrelatedFinding
 		t.Fatalf("the withdrawn finding survived its own retraction: %s", *steps[0].FindingsJSON)
 	}
 
+	waitForParkedGate(t, exec, time.Now().Add(20*time.Second))
 	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)
 	}
