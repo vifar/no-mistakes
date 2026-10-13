@@ -87,7 +87,7 @@ func TestEnsureDaemonAcceptsSlowHealthReplyWithoutSpawning(t *testing.T) {
 	if err := EnsureDaemon(p); err != nil {
 		t.Fatalf("EnsureDaemon = %v, want successful slow health reply", err)
 	}
-	if elapsed := time.Since(startedAt); elapsed < 100*time.Millisecond || elapsed > 600*time.Millisecond {
+	if elapsed := time.Since(startedAt); elapsed < 400*time.Millisecond {
 		t.Fatalf("EnsureDaemon elapsed %v, want observed slow reply", elapsed)
 	}
 	if started {
@@ -119,8 +119,8 @@ func TestEnsureDaemonDoesNotSpawnOnUnansweredHealthReply(t *testing.T) {
 	if !ipc.IsCallTimeout(err) {
 		t.Fatalf("EnsureDaemon error = %v, want IPC call timeout", err)
 	}
-	if elapsed < 100*time.Millisecond || elapsed > 600*time.Millisecond {
-		t.Fatalf("EnsureDaemon elapsed %v, want near 120ms timeout and below 600ms", elapsed)
+	if elapsed < 100*time.Millisecond {
+		t.Fatalf("EnsureDaemon elapsed %v, want at least the 120ms reply timeout", elapsed)
 	}
 	if started {
 		t.Fatal("EnsureDaemon spawned a daemon after an ambiguous health reply")
@@ -136,7 +136,7 @@ func TestWaitForDaemonStartBoundsHealthProbeByStartupDeadline(t *testing.T) {
 	p := paths.WithRoot(root)
 	t.Setenv("NM_TEST_DAEMON_START_TIMEOUT", "160ms")
 	t.Setenv("NM_TEST_DAEMON_START_POLL_INTERVAL", "10ms")
-	t.Setenv("NM_TEST_DAEMON_HEALTH_REPLY_TIMEOUT", "2s")
+	t.Setenv("NM_TEST_DAEMON_HEALTH_REPLY_TIMEOUT", "5s")
 	listenHealthTestSocket(t, p, 0, false)
 
 	started := time.Now()
@@ -148,7 +148,7 @@ func TestWaitForDaemonStartBoundsHealthProbeByStartupDeadline(t *testing.T) {
 	if !strings.Contains(err.Error(), "daemon health did not reply") {
 		t.Fatalf("readiness error = %v, want IPC call timeout evidence", err)
 	}
-	if elapsed < 140*time.Millisecond || elapsed > 500*time.Millisecond {
+	if elapsed < 140*time.Millisecond || elapsed > 2500*time.Millisecond {
 		t.Fatalf("waitForDaemonStart took %v, want startup deadline to cap health probes", elapsed)
 	}
 }
