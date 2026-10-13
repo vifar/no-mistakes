@@ -56,7 +56,7 @@ func TestStart_ReinstallsManagedServiceWhenPlistChanged(t *testing.T) {
 		}
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return running, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return running, nil }
 
 	if err := Start(p); err != nil {
 		t.Fatalf("Start should reload and succeed when plist changed, got %v", err)
@@ -120,7 +120,7 @@ func TestStart_DoesNotReinstallWhenPlistUnchanged(t *testing.T) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return true, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return true, nil }
 
 	err := Start(p)
 	if err == nil || !strings.Contains(err.Error(), "already running") {
@@ -159,7 +159,7 @@ func TestStartDoesNotRestartLaunchAgentForExecutableOnlyChange(t *testing.T) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return true, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return true, nil }
 
 	err := Start(p)
 	if err == nil || !strings.Contains(err.Error(), "already running") {
@@ -211,7 +211,7 @@ func TestStartPreservesInstalledExecutableWhenRefreshingLaunchAgent(t *testing.T
 		}
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return running, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return running, nil }
 
 	if err := Start(p); err != nil {
 		t.Fatalf("Start should refresh stale plist: %v", err)
@@ -267,7 +267,7 @@ func TestStartRestartsSystemdUnitWhenDefinitionChanged(t *testing.T) {
 		}
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return running, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return running, nil }
 
 	if err := Start(p); err != nil {
 		t.Fatalf("Start should restart stale systemd unit, got %v", err)
@@ -304,11 +304,11 @@ func TestStartStopsDetachedDaemonBeforeRestartingStaleManagedService(t *testing.
 
 	oldHealthCheck := daemonHealthCheck
 	var serviceRestarted atomic.Bool
-	daemonHealthCheck = func(p *paths.Paths) (bool, error) {
+	daemonHealthCheck = func(p *paths.Paths, budget ...time.Duration) (bool, error) {
 		if serviceRestarted.Load() {
 			return true, nil
 		}
-		alive, err := oldHealthCheck(p)
+		alive, err := oldHealthCheck(p, budget...)
 		if err != nil {
 			// A racing Windows TCP connection can report an error after the
 			// in-process daemon has shut down. For this service-ordering test,
@@ -373,7 +373,7 @@ func TestStartDoesNotStopRunningDaemonWhenStaleManagedInstallFails(t *testing.T)
 		}
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return true, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return true, nil }
 
 	err := Start(p)
 	if err == nil {
@@ -417,7 +417,7 @@ func TestStartRestoresStaleSystemdUnitWhenRefreshInstallFails(t *testing.T) {
 		}
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return true, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return true, nil }
 
 	err := Start(p)
 	if err == nil {
@@ -476,7 +476,7 @@ func TestStartRestoresStaleSystemdUnitAtOriginalModeWhenRefreshInstallFails(t *t
 		}
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return true, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return true, nil }
 
 	err := Start(p)
 	if err == nil {
@@ -537,7 +537,7 @@ func TestStartRestartsRestoredSystemdUnitWhenRefreshRestartFails(t *testing.T) {
 		}
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		return !stopped || restartAttempts > 1, nil
 	}
 
@@ -581,7 +581,7 @@ func TestStartDoesNotInstallManagedServiceWhenDaemonAliveAndDefinitionMissing(t 
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return true, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return true, nil }
 
 	err := Start(p)
 	if err == nil || !strings.Contains(err.Error(), "already running") {
@@ -624,7 +624,7 @@ func TestStartFallsBackToDetachedDaemonWhenManagedStartFails(t *testing.T) {
 		return nil, nil
 	}
 	checks := 0
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		checks++
 		return checks >= 3, nil
 	}
@@ -682,7 +682,7 @@ func TestStartDetachedDaemonUsesProvidedRootViaNMHome(t *testing.T) {
 	cleanup := stubServiceRuntime(t)
 	defer cleanup()
 	checks := 0
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		checks++
 		return checks >= 2, nil
 	}
@@ -800,7 +800,7 @@ func TestStartStopsManagedServiceBeforeDetachedFallbackAfterTimeout(t *testing.T
 		return nil, nil
 	}
 	checks := 0
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		checks++
 		if !managedStopped {
 			return false, nil
@@ -890,7 +890,7 @@ func TestStartReturnsManagedStopErrorWhenSystemdStopSaysNotLoaded(t *testing.T) 
 		return nil, nil
 	}
 	checks := 0
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		checks++
 		return false, nil
 	}
@@ -935,7 +935,7 @@ func TestStartReturnsManagedStopErrorWhenFallbackCleanupFails(t *testing.T) {
 		return nil, nil
 	}
 	checks := 0
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		checks++
 		return false, nil
 	}
@@ -984,7 +984,7 @@ func TestStartRemovesLaunchAgentBeforeDetachedFallbackAfterBootoutESRCH(t *testi
 		}
 	}
 	checks := 0
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		checks++
 		return checks >= 3, nil
 	}
@@ -1012,7 +1012,7 @@ func TestStopUsesManagedServiceWhenInstalled(t *testing.T) {
 	defer cleanup()
 	runtimeGOOS = "linux"
 	serviceUserHomeDir = func() (string, error) { return home, nil }
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return false, nil }
 
 	unitPath := filepath.Join(home, ".config", "systemd", "user", systemdServiceName(p))
 	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
@@ -1137,7 +1137,7 @@ func TestManagedStopErrorsStillWaitForCapturedDaemonExit(t *testing.T) {
 			defer cleanup()
 			runtimeGOOS = "linux"
 			serviceUserHomeDir = func() (string, error) { return home, nil }
-			daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+			daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return false, nil }
 
 			unitPath := filepath.Join(home, ".config", "systemd", "user", systemdServiceName(p))
 			if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
@@ -1318,7 +1318,7 @@ func TestStartWithUnstubbedPathsDoesNotInvokeRealServiceCommands(t *testing.T) {
 	}
 	// Report "not running" for all health checks so Start exercises the
 	// full managed-install-then-fallback decision tree.
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return false, nil }
 
 	p := paths.WithRoot(filepath.Join(t.TempDir(), "nm-home"))
 	if err := p.EnsureDirs(); err != nil {
@@ -1520,7 +1520,7 @@ func TestWaitForDaemonStartKillsChildOnTimeout(t *testing.T) {
 	t.Setenv("NM_TEST_DAEMON_START_POLL_INTERVAL", "1ms")
 
 	oldHealthCheck := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return false, nil }
 	defer func() { daemonHealthCheck = oldHealthCheck }()
 
 	oldStartTime := daemonProcessStartTime
@@ -1561,7 +1561,7 @@ func TestWaitForDaemonStartReturnsCleanupErrorOnTimeout(t *testing.T) {
 	t.Setenv("NM_TEST_DAEMON_START_POLL_INTERVAL", "1ms")
 
 	oldHealthCheck := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return false, nil }
 	defer func() { daemonHealthCheck = oldHealthCheck }()
 
 	oldStartTime := daemonProcessStartTime
@@ -1603,7 +1603,7 @@ func TestWaitForDaemonStartSkipsKillForReusedPID(t *testing.T) {
 	t.Setenv("NM_TEST_DAEMON_START_POLL_INTERVAL", "1ms")
 
 	oldHealthCheck := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return false, nil }
 	defer func() { daemonHealthCheck = oldHealthCheck }()
 
 	oldStartTime := daemonProcessStartTime
@@ -1642,7 +1642,7 @@ func TestWaitForDaemonStartDoesNotKillWhenPIDZero(t *testing.T) {
 	t.Setenv("NM_TEST_DAEMON_START_POLL_INTERVAL", "1ms")
 
 	oldHealthCheck := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return false, nil }
 	defer func() { daemonHealthCheck = oldHealthCheck }()
 
 	oldKill := daemonKillPID

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -18,7 +19,7 @@ func TestEnsureDaemonRefusesOverLongSocketPathBeforeStarting(t *testing.T) {
 
 	oldHealth, oldStart := daemonHealthCheck, daemonStart
 	t.Cleanup(func() { daemonHealthCheck, daemonStart = oldHealth, oldStart })
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		t.Fatal("EnsureDaemon probed the daemon past the socket path check")
 		return false, nil
 	}

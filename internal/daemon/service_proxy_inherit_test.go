@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
@@ -58,7 +59,7 @@ func TestReinstallSystemdServiceInheritsProxyFromExistingUnitWhenEnvUnset(t *tes
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return true, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return true, nil }
 
 	changed, err := reinstallManagedServiceIfChanged(p)
 	if err != nil {
@@ -120,7 +121,7 @@ func TestReinstallLaunchAgentInheritsProxyFromExistingPlistWhenEnvUnset(t *testi
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return true, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return true, nil }
 
 	changed, err := reinstallManagedServiceIfChanged(p)
 	if err != nil {

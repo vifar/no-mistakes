@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
@@ -34,7 +35,7 @@ func TestStartInstallsWindowsTaskAndStartsManagedDaemon(t *testing.T) {
 		return nil, nil
 	}
 	checks := 0
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		checks++
 		return checks >= 2, nil
 	}

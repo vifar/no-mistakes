@@ -25,7 +25,7 @@ func TestStartDetachedDaemonDetectsChildExitPromptly(t *testing.T) {
 	t.Setenv("NM_TEST_DAEMON_START_POLL_INTERVAL", "10ms")
 
 	oldHealth := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return false, nil }
 	t.Cleanup(func() { daemonHealthCheck = oldHealth })
 
 	oldStartTime := daemonProcessStartTime
@@ -94,7 +94,7 @@ func TestWaitForManagedDaemonStartDetectsPublishedChildExit(t *testing.T) {
 	}
 	t.Cleanup(func() { daemonProcessRunning = oldRunning })
 	oldHealth := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return false, nil }
 	t.Cleanup(func() { daemonHealthCheck = oldHealth })
 
 	started := time.Now()
@@ -116,7 +116,7 @@ func TestWaitForManagedDaemonStartDetectsExitAfterPIDFileRemoval(t *testing.T) {
 	t.Setenv("NM_TEST_DAEMON_START_POLL_INTERVAL", "10ms")
 
 	oldHealth := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return false, nil }
 	t.Cleanup(func() { daemonHealthCheck = oldHealth })
 
 	oldInspect := inspectManagedDaemonService
@@ -154,7 +154,7 @@ func TestStartDetachedDaemonTimeoutKillsAndReapsChild(t *testing.T) {
 	t.Setenv("NM_TEST_DAEMON_START_POLL_INTERVAL", "5ms")
 
 	oldHealth := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return false, nil }
 	t.Cleanup(func() { daemonHealthCheck = oldHealth })
 
 	oldStartTime := daemonProcessStartTime
@@ -201,7 +201,7 @@ func TestStartPreservesManagedAndDetachedFallbackErrors(t *testing.T) {
 		}
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return false, nil }
 
 	err := Start(p)
 	if err == nil {

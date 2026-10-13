@@ -20,6 +20,41 @@ import (
 
 const nativeAgentEscapedPipeHelperEnv = "NM_AGENT_NATIVE_PIPE_HELPER"
 
+// A parser callback can take longer than WaitDelay after the leader exits.
+// That is processing buffered output, not a child holding an inherited pipe.
+func TestNativeAgentCommand_SlowClaudeCallbackPreservesCompletedTurn(t *testing.T) {
+	ctx := context.Background()
+	cmd := exec.CommandContext(ctx, "sh", "-c", `printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"review complete"}]}}' '{"type":"result","subtype":"success","structured_output":{"ok":true}}'`)
+	shellenv.ConfigureShellCommand(cmd)
+	cmd.WaitDelay = 50 * time.Millisecond
+	started, err := startNativeAgentCommand(ctx, cmd, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer started.closePipes()
+	stderrDone := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, started.stderr)
+		close(stderrDone)
+	}()
+	var usage TokenUsage
+	var result *claudeResult
+	err = parseClaudeEvents(ctx, started.stdout, func(string) {
+		// Simulate a synchronous log/database callback on a loaded host.
+		time.Sleep(300 * time.Millisecond)
+	}, &usage, &result)
+	if err != nil {
+		t.Fatalf("parse completed turn: %v (wait: %v)", err, started.waitAfterParseError(err))
+	}
+	if err := started.wait(); err != nil {
+		t.Fatalf("wait for completed turn: %v", err)
+	}
+	<-stderrDone
+	if result == nil || string(result.StructuredOutput) != `{"ok":true}` {
+		t.Fatalf("completed result lost: %+v", result)
+	}
+}
+
 func TestNativeAgentCommand_WaitDelayClosesEscapedPipeHolder(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
@@ -38,6 +73,9 @@ func TestNativeAgentCommand_WaitDelayClosesEscapedPipeHolder(t *testing.T) {
 		t.Fatalf("startNativeAgentCommand: %v", err)
 	}
 	defer started.closePipes()
+
+	// Native adapters drain stderr concurrently with the stdout parser.
+	go func() { _, _ = io.Copy(io.Discard, started.stderr) }()
 
 	type readResult struct {
 		output string

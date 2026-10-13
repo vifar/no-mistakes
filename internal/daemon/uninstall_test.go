@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
@@ -46,7 +47,7 @@ func TestUninstallStopsAndRemovesOnlyThisInstancesLaunchAgent(t *testing.T) {
 		}
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		if !stopped {
 			t.Fatal("must stop the managed service before waiting for exit")
 		}

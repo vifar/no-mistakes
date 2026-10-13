@@ -136,7 +136,7 @@ func stubCollisionVars(t *testing.T, procs []daemonProcessInfo, enumErr error, h
 	oldKill := daemonKillPID
 	killed := map[int]bool{}
 	daemonListDaemonProcesses = func() ([]daemonProcessInfo, error) { return procs, enumErr }
-	daemonHealthCheck = func(p *paths.Paths) (bool, error) {
+	daemonHealthCheck = func(p *paths.Paths, _ ...time.Duration) (bool, error) {
 		if health == nil {
 			return false, nil
 		}

@@ -52,7 +52,7 @@ func TestWaitForDaemonStopKeepsArtifactsWhenKillFails(t *testing.T) {
 	}
 
 	originalHealthCheck := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		return true, nil
 	}
 	defer func() {
@@ -84,7 +84,7 @@ func TestWaitForDaemonStopRetriesProcessProbeErrors(t *testing.T) {
 
 	oldHealthCheck := daemonHealthCheck
 	oldProcessRunning := daemonProcessRunning
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return false, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return false, nil }
 	checks := 0
 	daemonProcessRunning = func(pid int) (bool, error) {
 		if pid != 4242 {
@@ -145,7 +145,7 @@ func TestEnsureDaemonDoesNotStartWhenHealthCheckTimesOut(t *testing.T) {
 	})
 
 	originalHealthCheck := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		return false, timeoutErr
 	}
 	defer func() {
@@ -180,6 +180,7 @@ func TestEnsureDaemonDoesNotStartWhenHealthCheckTimesOut(t *testing.T) {
 }
 
 func TestIsRunningFailsFastWhenSocketAcceptsButDoesNotRespond(t *testing.T) {
+	t.Setenv("NM_TEST_DAEMON_HEALTH_REPLY_TIMEOUT", "120ms")
 	if runtime.GOOS == "windows" {
 		t.Skip("unix socket setup is platform-specific")
 	}
@@ -569,7 +570,7 @@ func TestValidateDaemonPIDFallback_RejectsLegacyPIDFileTouchedNearLivePID(t *tes
 		}
 		return mtime.Add(time.Second), nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		return false, nil
 	}
 	t.Cleanup(func() {
@@ -907,7 +908,7 @@ func TestWaitForDaemonStopNeverKillsOwnPIDWhenHealthCheckOnlyErrors(t *testing.T
 	}
 
 	originalHealthCheck := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		return false, errors.New("connect to daemon socket timed out")
 	}
 	defer func() {
@@ -961,7 +962,7 @@ func TestWaitForDaemonStopDoesNotTreatHealthCheckErrorsAsStopped(t *testing.T) {
 	}
 
 	originalHealthCheck := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		return false, errors.New("transient ipc failure")
 	}
 	defer func() {
@@ -1001,7 +1002,7 @@ func TestWaitForDaemonStopRejectsStalePIDBeforeKill(t *testing.T) {
 	}
 
 	originalHealthCheck := daemonHealthCheck
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		return true, nil
 	}
 	defer func() {

@@ -421,7 +421,7 @@ func TestOtherDaemonAlive_FalseWhenLegacyPIDFileTouchedNearLivePID(t *testing.T)
 		}
 		return mtime.Add(time.Second), nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		return false, nil
 	}
 	t.Cleanup(func() {
@@ -464,7 +464,7 @@ func TestOtherDaemonAlive_TrueWhenLegacyPIDFileMatchesResponsiveDaemon(t *testin
 		}
 		return startedAt, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) {
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) {
 		return true, nil
 	}
 	t.Cleanup(func() {

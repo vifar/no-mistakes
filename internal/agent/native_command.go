@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
@@ -35,9 +37,12 @@ func writeNativeAgentStdin(stdin io.WriteCloser, prompt string) <-chan error {
 }
 
 type nativeAgentPipe struct {
-	file     *os.File
-	done     func()
-	doneOnce sync.Once
+	file         *os.File
+	done         func()
+	doneOnce     sync.Once
+	drainMu      sync.Mutex
+	drainTimeout time.Duration
+	timedOut     atomic.Bool
 	// activity, when set, is called for every non-empty read. It is the only
 	// evidence no-mistakes has that a native agent is still alive during the
 	// long tool-using stretches that produce no assistant prose.
@@ -45,7 +50,18 @@ type nativeAgentPipe struct {
 }
 
 func (p *nativeAgentPipe) Read(b []byte) (int, error) {
+	// WaitDelay limits a blocked read after process exit, not the time the
+	// parser spends in callbacks between reads. Refresh before each read so
+	// already-written output survives slow logging or database callbacks.
+	p.drainMu.Lock()
+	if p.drainTimeout > 0 {
+		_ = p.file.SetReadDeadline(time.Now().Add(p.drainTimeout))
+	}
+	p.drainMu.Unlock()
 	n, err := p.file.Read(b)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		p.timedOut.Store(true)
+	}
 	if n > 0 && p.activity != nil {
 		p.activity()
 	}
@@ -126,23 +142,45 @@ func (c *nativeAgentCommand) pid() int {
 	return c.cmd.Process.Pid
 }
 
+// boundDrain bounds the idle time of each remaining Read after the leader
+// exits and also interrupts a Read that was already blocked. It is an
+// idle-read bound, not a total cap: a descendant that keeps writing is live
+// output, and ctx cancellation (closePipes) still ends the invocation. Both
+// pipes must be drained concurrently by the caller, as every adapter does;
+// an undrained pipe never reports done. Unix os.Pipe readers support deadlines.
+func (p *nativeAgentPipe) boundDrain(timeout time.Duration) {
+	p.drainMu.Lock()
+	defer p.drainMu.Unlock()
+	p.drainTimeout = timeout
+	_ = p.file.SetReadDeadline(time.Now().Add(timeout))
+}
+
 func (c *nativeAgentCommand) waitForPipes(waitErr error) error {
-	if c.cmd.WaitDelay <= 0 {
-		<-c.pipesDone
-		return waitErr
-	}
-	timer := time.NewTimer(c.cmd.WaitDelay)
-	defer timer.Stop()
-	select {
-	case <-c.pipesDone:
-		return waitErr
-	case <-timer.C:
-		c.closePipes()
-		if waitErr == nil {
-			return exec.ErrWaitDelay
+	// Windows anonymous pipes do not support read deadlines. Retain their
+	// existing wall-clock backstop rather than losing the inherited-handle bound.
+	if runtime.GOOS == "windows" && c.cmd.WaitDelay > 0 {
+		timer := time.NewTimer(c.cmd.WaitDelay)
+		defer timer.Stop()
+		select {
+		case <-c.pipesDone:
+			return waitErr
+		case <-timer.C:
+			c.closePipes()
+			if waitErr == nil {
+				return exec.ErrWaitDelay
+			}
+			return waitErr
 		}
-		return waitErr
 	}
+	if c.cmd.WaitDelay > 0 {
+		c.stdout.boundDrain(c.cmd.WaitDelay)
+		c.stderr.boundDrain(c.cmd.WaitDelay)
+	}
+	<-c.pipesDone
+	if waitErr == nil && (c.stdout.timedOut.Load() || c.stderr.timedOut.Load()) {
+		return exec.ErrWaitDelay
+	}
+	return waitErr
 }
 
 func (c *nativeAgentCommand) terminate() {
