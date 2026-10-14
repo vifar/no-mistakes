@@ -254,8 +254,10 @@ func (i Inspector) registeredManagedCommonDir(commonDir string) (string, bool, e
 	if repo == nil || !sameCanonicalPath(common, i.Paths.RepoDir(repo.ID)) {
 		return "", false, nil
 	}
-	if !git.LooksLikeBareRepository(common) {
+	if _, err := os.Lstat(filepath.Join(common, ".git")); err == nil {
 		return "", false, fmt.Errorf("gate execution context: registered gate has invalid bare structure")
+	} else if !os.IsNotExist(err) {
+		return "", false, fmt.Errorf("gate execution context: verify managed bare structure: %w", err)
 	}
 	return repo.ID, true, nil
 }
@@ -317,14 +319,12 @@ func runIdentityGit(ctx context.Context, cwd string, args ...string) (string, er
 		if !os.IsNotExist(err) {
 			return "", err
 		}
-		if git.LooksLikeBareRepository(physical) {
-			bare, err := bareGitMetadataPresent(physical)
-			if err != nil {
-				return "", err
-			}
-			if bare {
-				args = append([]string{"--git-dir=" + physical}, args...)
-			}
+		bare, err := bareGitMetadataPresent(physical)
+		if err != nil {
+			return "", err
+		}
+		if bare {
+			args = append([]string{"--git-dir=" + physical}, args...)
 		}
 	}
 	return git.RunDiscoveryWithEnv(ctx, cwd, identityLocale, args...)
@@ -412,29 +412,39 @@ func gitMetadataMatchesDiscovery(cwd, gitDir string) (bool, error) {
 }
 
 func gitHeadPresent(dir string) (bool, error) {
-	if info, err := os.Stat(filepath.Join(dir, "HEAD")); err == nil {
-		if info.Mode().IsRegular() {
-			file, err := os.Open(filepath.Join(dir, "HEAD"))
-			if err != nil {
-				return false, err
-			}
-			data, err := io.ReadAll(io.LimitReader(file, 128))
-			_ = file.Close()
-			if err != nil {
-				return false, err
-			}
-			head := strings.TrimSpace(string(data))
-			if strings.HasPrefix(head, "ref: ") && strings.TrimSpace(strings.TrimPrefix(head, "ref: ")) != "" {
+	path := filepath.Join(dir, "HEAD")
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(path)
+		return strings.HasPrefix(target, "refs/"), err
+	}
+	if !info.Mode().IsRegular() {
+		return false, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, 255))
+	if err := errors.Join(readErr, file.Close()); err != nil {
+		return false, err
+	}
+	head := string(data)
+	if ref, ok := strings.CutPrefix(head, "ref:"); ok {
+		return strings.HasPrefix(strings.TrimLeft(ref, " \t\r\n"), "refs/"), nil
+	}
+	for _, length := range []int{64, 40} {
+		if len(head) >= length {
+			if _, err := hex.DecodeString(head[:length]); err == nil {
 				return true, nil
 			}
-			if len(head) == 40 || len(head) == 64 {
-				if _, err := hex.DecodeString(head); err == nil {
-					return true, nil
-				}
-			}
 		}
-	} else if !os.IsNotExist(err) {
-		return false, err
 	}
 	return false, nil
 }
