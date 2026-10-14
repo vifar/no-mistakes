@@ -9,7 +9,7 @@ The implemented classification rules and execution-budget limits are owned by th
 ## Scope
 
 - Discover the canonical Git common directory before optional top-level attribution.
-- Omit `--show-toplevel` for common directories that are not registered managed gates.
+- Omit `--show-toplevel` for common directories that are not registered managed gates. Both identity commands select explicit bare discovery only from substantive metadata evidence, avoiding the general runners' basename-only bare heuristic for mixed ordinary project entries.
 - Preserve positive managed-gate identity, including a managed bare repository without a worktree top level.
 - Preserve active-step lookup and OS-authenticated peer ancestry for ordinary clones and proven nonrepository directories.
 - Distinguish proven repository absence from cancellation, command failure, malformed metadata, dubious ownership, and output-drain failure.
