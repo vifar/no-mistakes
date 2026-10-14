@@ -83,12 +83,11 @@ func firstNewScratchComponent(sctx *pipeline.StepContext, headDirs map[string]bo
 	return "", nil
 }
 
-// stageUntrackedChanges stages untracked files individually. A wholly
-// untracked directory (git's --directory collapse point) is skipped when its
-// name marks tool scratch, at any depth, so a populated .cache, .test-fixture
-// or node_modules never rides into an automatic commit. A new file inside an
-// already-tracked hidden directory is listed as a file and is staged. Entries
-// matching staging_exclude are skipped too. Skips are logged once.
+// stageUntrackedChanges stages untracked files individually. Scratch-directory
+// identity comes from HEAD's tree, not the index after add -u: deleting the last
+// tracked file must not make its replacement look like new scratch, even when
+// git's --directory listing collapses their parent. Entries matching
+// staging_exclude are skipped too. Skips are logged once.
 func stageUntrackedChanges(sctx *pipeline.StepContext) error {
 	listed, err := stepGitRunRaw(sctx, "ls-files", "--others", "--exclude-standard", "--directory", "--no-empty-directory", "-z")
 	if err != nil {
@@ -228,7 +227,7 @@ func parseRawDiff(raw string) ([]rawDiffEntry, error) {
 	return entries, nil
 }
 
-// addedOrModified keeps entries that introduce a regular blob.
+// addedOrModified keeps entries that add or replace a blob, including symlinks.
 func addedOrModified(entries []rawDiffEntry) []rawDiffEntry {
 	var out []rawDiffEntry
 	for _, entry := range entries {
