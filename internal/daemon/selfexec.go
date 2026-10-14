@@ -636,8 +636,8 @@ func stopPlannedDaemon(p *paths.Paths) error {
 }
 
 // daemonInstance names the exact daemon process a stop is responsible for.
-// A zero value means no provable external process was captured, so callers
-// fall back to health-only stop confirmation.
+// Planned shutdown refuses incomplete identity unless singleton-held checks
+// prove stale artifacts can be cleared; IPC health alone cannot authorize it.
 type daemonInstance struct {
 	instance  string
 	pid       int
