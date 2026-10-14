@@ -171,6 +171,9 @@ func (d *DB) TerminalizeCertifiedWatcher(runID, message, head, configDigest stri
 	if err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id=?`, runID), run); err != nil {
 		return err
 	}
+	if run.Status != types.RunRunning && run.Status != types.RunPending {
+		return nil
+	}
 	certificate, err := buildStatusCertificate(tx, runID, head, configDigest)
 	if err != nil {
 		return err
@@ -234,6 +237,40 @@ func (d *DB) RecordIneligibleTerminal(runID, message string, status types.RunSta
 		return err
 	}
 	defer tx.Rollback()
+	if err := recordIneligibleTerminal(tx, runID, message, status, head, nil); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) SupersedeUncommittedCancellations(runIDs []string, instance string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, runID := range runIDs {
+		if err := recordIneligibleTerminal(tx, runID, "daemon shutting down", types.RunFailed, nil, &instance); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func recordIneligibleTerminal(tx *sql.Tx, runID, message string, status types.RunStatus, head *string, rawInstance *string) error {
+	var err error
+	var current types.RunStatus
+	if err := tx.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&current); err != nil {
+		return err
+	}
+	if current != types.RunRunning && current != types.RunPending {
+		return nil
+	}
+	if rawInstance != nil {
+		if _, err := tx.Exec(`DELETE FROM controlled_shutdown_runs WHERE run_id=? AND instance=?`, runID, *rawInstance); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.Exec(`UPDATE commit_status_publications SET strict_certificate=NULL,preserve_success=NULL WHERE run_id=?`, runID); err != nil {
 		return err
 	}
@@ -246,5 +283,5 @@ func (d *DB) RecordIneligibleTerminal(runID, message string, status types.RunSta
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	return nil
 }

@@ -2316,17 +2316,20 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if dbErr != nil {
 		slog.Warn("settling ineligible terminal outcome", "run", run.ID, "error", dbErr)
 		err = errors.Join(err, dbErr)
-		verified = false
 		dbErr = SettleIneligibleTerminal(e.db, run.ID, errMsg, runStatus)
 	}
 	if dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
 		return errors.Join(err, dbErr)
-	} else if verified {
-		run.HeadSHA = verifiedHead
 	}
-	run.Status = runStatus
-	run.Error = &errMsg
+	durable, readErr := e.db.GetRun(run.ID)
+	if readErr != nil {
+		return errors.Join(err, readErr)
+	}
+	if durable == nil {
+		return errors.Join(err, fmt.Errorf("terminal run outcome unavailable"))
+	}
+	run.Status, run.Error, run.HeadSHA = durable.Status, durable.Error, durable.HeadSHA
 	e.ReportPublishedHeadFailure(context.Background(), run, repo)
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	return err
@@ -2335,6 +2338,16 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
 	err := WithCommitStatusLock(context.Background(), func() error {
+		durable, err := e.db.GetRun(run.ID)
+		if err != nil {
+			return err
+		}
+		if durable == nil {
+			return fmt.Errorf("terminal run outcome unavailable")
+		}
+		if durable.Status != types.RunRunning && durable.Status != types.RunPending {
+			return nil
+		}
 		if verified {
 			return e.db.UpdateRunStatusWithVerifiedHead(run.ID, types.RunCompleted, verifiedHead)
 		}
@@ -2343,12 +2356,19 @@ func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 	if err != nil {
 		return err
 	}
-	if verified {
-		run.HeadSHA = verifiedHead
+	durable, err := e.db.GetRun(run.ID)
+	if err != nil {
+		return err
 	}
-	run.Status = types.RunCompleted
+	if durable == nil {
+		return fmt.Errorf("terminal run outcome unavailable")
+	}
+	run.Status, run.Error, run.HeadSHA = durable.Status, durable.Error, durable.HeadSHA
 	e.reportPublishedHeadStatus(context.Background(), run, repo, "success")
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
+	if run.Status != types.RunCompleted {
+		return fmt.Errorf("run terminalized as %s", run.Status)
+	}
 	return nil
 }
 

@@ -82,3 +82,18 @@ func TestTerminalSettlement_StorageErrorDoesNotEmitCommittedEvent(t *testing.T) 
 		t.Fatalf("failed storage produced a committed terminal outcome: event=%v,status=%s", terminal, run.Status)
 	}
 }
+
+func TestTerminalSettlement_CompletionCannotOverwriteCommittedFailure(t *testing.T) {
+	d, p, run, repo := setupTest(t)
+	if err := RecordRunFailure(context.Background(), d, run.ID, "daemon shutting down", nil); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutor(d, p, nil, nil, nil, nil)
+	if err := executor.completeRun(run, repo); err == nil {
+		t.Error("completion claimed success after committed failure")
+	}
+	stored, err := d.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunFailed || stored.Error == nil || *stored.Error != "daemon shutting down" || run.Status != types.RunFailed {
+		t.Fatalf("completion replaced raw terminal decision: %+v,%v", stored, err)
+	}
+}

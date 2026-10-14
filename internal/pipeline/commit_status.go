@@ -44,9 +44,13 @@ func ReleaseCommitStatusLock() {
 }
 
 func SettleIneligibleTerminal(d *db.DB, runID, message string, status types.RunStatus) error {
+	return settleTerminalWrite(func() error { return d.RecordIneligibleTerminal(runID, message, status, nil) })
+}
+
+func settleTerminalWrite(write func() error) error {
 	done := make(chan error, 1)
 	terminalSettlementMu.Lock()
-	terminalSettlements = append(terminalSettlements, func() { done <- d.RecordIneligibleTerminal(runID, message, status, nil) })
+	terminalSettlements = append(terminalSettlements, func() { done <- write() })
 	terminalSettlementMu.Unlock()
 	select {
 	case CommitStatusLock <- struct{}{}:
@@ -195,5 +199,24 @@ func (e *Executor) ReportSettledRunFailure(ctx context.Context, run *db.Run, rep
 	run.Status, run.Error, run.HeadSHA = durable.Status, durable.Error, durable.HeadSHA
 	e.ReportPublishedHeadFailure(ctx, run, repo)
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
+	return nil
+}
+
+func RecordRawShutdown(ctx context.Context, d *db.DB, runIDs []string, instance string, cancelRuns func()) error {
+	if len(runIDs) == 0 {
+		return nil
+	}
+	var cancelOnce sync.Once
+	write := func() error {
+		cancelOnce.Do(cancelRuns)
+		return d.SupersedeUncommittedCancellations(runIDs, instance)
+	}
+	if err := WithCommitStatusLock(ctx, write); err != nil {
+		slog.Warn("raw shutdown terminal outcome unsettled", "error", err)
+		if settlementErr := settleTerminalWrite(write); settlementErr != nil {
+			return errors.Join(err, settlementErr)
+		}
+		return nil
+	}
 	return nil
 }

@@ -2340,14 +2340,20 @@ func (m *RunManager) Shutdown() {
 	m.rawShutdown = true
 	m.shuttingDown.Store(true)
 	cancels := make(map[string]context.CancelCauseFunc, len(m.cancels))
+	ids := make([]string, 0, len(m.cancels))
 	for id, cancel := range m.cancels {
 		cancels[id] = cancel
+		ids = append(ids, id)
 	}
 	m.mu.Unlock()
 
-	for id, cancel := range cancels {
-		cancel(fmt.Errorf("daemon shutting down"))
-		slog.Info("cancelled run on shutdown", "run_id", id)
+	if err := pipeline.RecordRawShutdown(context.Background(), m.db, ids, m.runtimeInstance, func() {
+		for id, cancel := range cancels {
+			cancel(fmt.Errorf("daemon shutting down"))
+			slog.Info("cancelled run on shutdown", "run_id", id)
+		}
+	}); err != nil {
+		slog.Error("raw shutdown terminal outcome unsettled", "error", err)
 	}
 
 	done := make(chan struct{})
