@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -52,10 +53,10 @@ func UpdateRunPRState(ctx context.Context, d *db.DB, runID, state string) error 
 func RecordRunFailure(ctx context.Context, d *db.DB, runID, message string, head *string) error {
 	err := WithCommitStatusLock(ctx, func() error { return d.RecordIneligibleTerminal(runID, message, types.RunFailed, head) })
 	if err != nil {
-		// An unavailable serialization boundary never leaves a usable DB active
-		// or retains eligibility. The ledger also rejects stale success saves.
 		slog.Warn("recording ineligible terminal fallback", "run", runID, "error", err)
-		return d.RecordIneligibleTerminal(runID, message, types.RunFailed, nil)
+		if settlementErr := WithCommitStatusLock(context.Background(), func() error { return d.RecordIneligibleTerminal(runID, message, types.RunFailed, nil) }); settlementErr != nil {
+			return errors.Join(err, settlementErr)
+		}
 	}
 	return nil
 }
