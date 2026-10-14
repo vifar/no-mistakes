@@ -20,14 +20,7 @@ No enrollment rewrite, marker exception, empty-directory control request, raw mu
 
 ## Contract
 
-1. The common-directory proof is authoritative only after canonical path, registered owner, and bare-repository structure agree. Every discovered common directory must have recognizable HEAD and object/reference directories, independently of registration and even when linked actual metadata remains healthy. HEAD recognition follows Git discovery: `ref:` with optional space, tab, CR or LF and a `refs/` prefix; a `refs/` symlink target without dereferencing it, including unborn targets; or a detached hexadecimal object-ID prefix. These forms remain supported; damaged common metadata cannot become an unmanaged verdict.
-2. An ordinary clone completes classification even if its top-level lookup would block. It does not execute that unnecessary lookup.
-3. A managed gate remains nested even when top-level attribution is unavailable. Run and phase metadata are optional; they cannot determine refusal.
-4. A canceled or failed first identity query returns an error. It never becomes a successful ordinary-caller verdict.
-5. Proceeding without Git identity requires a narrowly recognized English ordinary-discovery absence diagnostic, a normal Git exit, complete output draining, and corroborating filesystem evidence that repository metadata is absent. Existing or malformed gitfiles, incomplete `.git` directories, corrupted bare metadata, and ambiguous discovery fail closed. Exit status 128 and stderr alone are insufficient. Do not parse a rendered error string or accept extra diagnostic lines.
-6. Use a fixed English locale for these identity queries. Retain captured, redacted stderr in a typed Git command error, preserving normal error text and `errors.Is`/`errors.As` through `Unwrap`. Preserve simultaneous command-exit and output-drain failures; neither an exit code nor cancellation may hide `exec.ErrWaitDelay` or another drain failure.
-7. Marker presence remains diagnostic. A daemon or active-agent descendant stays refused after changing to an ordinary clone or nonrepository directory.
-8. All existing source, mirror, run, reference, and worktree records remain unchanged by classification.
+The [gate-model handbook](../src/content/docs/concepts/gate-model.md#recursive-run-containment) owns the classification contract, supported HEAD forms, refusal conditions, and execution-budget limits. The [area skill](../../.agents/skills/gate-worktree-git-safety/SKILL.md) maps implementation owners and regressions; `git.CommandError` and the shell runner's comments own error-preservation details.
 
 ## Implementation order
 

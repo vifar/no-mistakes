@@ -95,6 +95,9 @@ func RunWithEnv(ctx context.Context, dir string, extraEnv []string, args ...stri
 	return runInDirWithEnv(ctx, dir, extraEnv, args...)
 }
 
+// RunDiscoveryWithEnv leaves bare-directory selection to the discovery caller.
+// Unlike RunWithEnv, it never injects --git-dir from the general bare heuristic:
+// ordinary project entries must not override corroborated identity discovery.
 func RunDiscoveryWithEnv(ctx context.Context, dir string, extraEnv []string, args ...string) (string, error) {
 	return runInDirWithEnv(ctx, dir, extraEnv, args...)
 }
