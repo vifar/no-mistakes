@@ -338,11 +338,43 @@ func TestIdentityBareDiscoveryUnderSafeBareRepositoryExplicit(t *testing.T) {
 		cwd     string
 		managed bool
 	}{
-		{f.gate, true}, {f.origin, false},
+		{f.gate, true}, {filepath.Join(f.gate, "objects"), true}, {f.origin, false}, {filepath.Join(f.origin, "objects", "pack"), false},
 	} {
 		got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: tc.cwd})
 		if err != nil || got.ManagedGit != tc.managed || got.Nested != tc.managed {
 			t.Fatalf("explicit bare discovery: %+v, %v", got, err)
+		}
+	}
+
+	for _, layout := range []string{"ordinary", "linked", "separate", "invalid"} {
+		root := filepath.Join(f.gate, "objects", layout)
+		switch layout {
+		case "ordinary":
+			run(t, "", "git", "init", root)
+		case "linked":
+			run(t, f.work, "git", "worktree", "add", "--detach", root, "HEAD")
+		case "separate":
+			run(t, "", "git", "init", "--separate-git-dir", filepath.Join(t.TempDir(), "metadata"), root)
+		case "invalid":
+			if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		child := filepath.Join(root, "child")
+		if err := os.Mkdir(child, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, cwd := range []string{root, child} {
+			got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: cwd})
+			if layout == "invalid" {
+				if err == nil {
+					t.Fatal("nearer incomplete metadata admitted")
+				}
+				continue
+			}
+			if err != nil || got.ManagedGit || got.Nested {
+				t.Fatalf("nearer metadata lost precedence: %+v, %v", got, err)
+			}
 		}
 	}
 	if runtime.GOOS != "windows" {
@@ -423,7 +455,7 @@ func TestIdentityValidMetadataTopologies(t *testing.T) {
 func TestIdentityLinkedCommonMetadataFailsClosed(t *testing.T) {
 	for _, topology := range []string{"registered", "unregistered", "ordinary"} {
 		t.Run(topology, func(t *testing.T) {
-			for _, damage := range []string{"missing-head", "directory-head", "invalid-head", "garbage-symbolic-head", "garbage-symlink-head", "missing-objects", "file-objects", "missing-refs", "file-refs"} {
+			for _, damage := range []string{"missing-head", "directory-head", "invalid-head", "garbage-symbolic-head", "vertical-symbolic-head", "formfeed-symbolic-head", "garbage-symlink-head", "missing-objects", "file-objects", "missing-refs", "file-refs"} {
 				t.Run(damage, func(t *testing.T) {
 					if damage == "garbage-symlink-head" && runtime.GOOS == "windows" {
 						t.Skip("native Windows symlink runtime is untested")
@@ -458,6 +490,18 @@ func TestIdentityLinkedCommonMetadataFailsClosed(t *testing.T) {
 					case "garbage-symlink-head":
 						if err := os.Symlink("garbage", path); err != nil {
 							t.Fatal(err)
+						}
+					case "vertical-symbolic-head", "formfeed-symbolic-head":
+						whitespace := "\v"
+						if damage == "formfeed-symbolic-head" {
+							whitespace = "\f"
+						}
+						if err := os.WriteFile(path, []byte("ref:"+whitespace+"refs/heads/unborn\n"), 0o644); err != nil {
+							t.Fatal(err)
+						}
+						command := exec.Command("git", "--git-dir="+common, "rev-parse", "--git-common-dir")
+						if output, err := command.CombinedOutput(); err == nil {
+							t.Fatalf("real Git accepted invalid HEAD whitespace: %q", output)
 						}
 					case "garbage-symbolic-head":
 						if err := os.WriteFile(path, []byte("ref: garbage\n"), 0o644); err != nil {
@@ -591,9 +635,11 @@ func TestIdentityManagedAttributionFailureRetainsPositiveProof(t *testing.T) {
 
 func TestIdentityManagedBareAttributionAbsenceKeepsProof(t *testing.T) {
 	f := activeIdentityFixture(t)
-	got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: f.gate})
-	if err != nil || !got.Nested || !got.ManagedGit {
-		t.Fatalf("managed bare attribution absence lost proof: %+v, %v", got, err)
+	for _, cwd := range []string{f.gate, filepath.Join(f.gate, "objects")} {
+		got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: cwd})
+		if err != nil || !got.Nested || !got.ManagedGit {
+			t.Fatalf("managed bare attribution absence lost proof: %+v, %v", got, err)
+		}
 	}
 }
 
@@ -694,6 +740,66 @@ func TestIdentityCommandsHaveSharedExecutionBudget(t *testing.T) {
 				if elapsed := canceled.Sub(topStart); elapsed > 8*time.Second {
 					t.Errorf("second command received a fresh budget: %v", elapsed)
 				}
+			}
+		})
+	}
+}
+
+func TestIdentityLiteralPathBytes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native Windows path runtime is untested")
+	}
+	f := activeIdentityFixture(t)
+	records, err := f.d.GetActiveRuns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"repo\nname", "repo\n", "quote' $(literal) \t"} {
+		t.Run(name, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), name)
+			run(t, "", "git", "init", root)
+			assertAllowed(t, gatecontext.Inspector{Paths: f.p}, root, "literal ordinary path")
+			run(t, root, "git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "base")
+			ordinaryLinked := filepath.Join(t.TempDir(), "linked")
+			run(t, root, "git", "worktree", "add", "--detach", ordinaryLinked, "HEAD")
+			assertAllowed(t, gatecontext.Inspector{Paths: f.p}, ordinaryLinked, "literal linked common metadata")
+			bare := filepath.Join(t.TempDir(), name)
+			run(t, "", "git", "init", "--bare", bare)
+			assertAllowed(t, gatecontext.Inspector{Paths: f.p}, bare, "literal bare path")
+			metadata := filepath.Join(t.TempDir(), name, "metadata")
+			if err := os.MkdirAll(filepath.Dir(metadata), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			separate := filepath.Join(t.TempDir(), "separate")
+			run(t, "", "git", "init", "--separate-git-dir", metadata, separate)
+			assertAllowed(t, gatecontext.Inspector{Paths: f.p}, separate, "literal separate metadata")
+			linked := filepath.Join(t.TempDir(), name)
+			run(t, f.gate, "git", "worktree", "add", "--detach", linked, "refs/heads/feature")
+			if err := f.d.SetRunWorktreeDir(records[0].ID, linked); err != nil {
+				t.Fatal(err)
+			}
+			got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: linked})
+			if err != nil || !got.ManagedGit || got.RunID != records[0].ID {
+				t.Fatalf("literal managed attribution: %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestIdentityGitfileGrowsAfterGitDiscovery(t *testing.T) {
+	for _, layout := range []string{"linked", "separate"} {
+		t.Run(layout, func(t *testing.T) {
+			f := newTopologyFixture(t)
+			cwd := f.managed
+			if layout == "separate" {
+				cwd = filepath.Join(t.TempDir(), "separate")
+				run(t, "", "git", "init", "--separate-git-dir", filepath.Join(t.TempDir(), "metadata"), cwd)
+			}
+			gitfault.Install(t, "grow-gitfile")
+			t.Setenv("NM_GIT_FAULT_GITFILE", filepath.Join(cwd, ".git"))
+			_, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: cwd})
+			if err == nil {
+				t.Fatal("gitfile grown after successful real discovery was admitted")
 			}
 		})
 	}
