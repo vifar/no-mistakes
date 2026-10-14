@@ -18,8 +18,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-var commitStatusLock = pipeline.CommitStatusLock
-
 const commitStatusOperationTimeout = 15 * time.Second
 
 func acquireCommitStatusLock(ctx context.Context) error {
@@ -150,7 +148,7 @@ func reconcileCommitStatusAttempt(sctx *pipeline.StepContext) (*db.CommitStatusP
 	if err := acquireCommitStatusLock(ctx); err != nil {
 		return nil, err
 	}
-	defer func() { <-commitStatusLock }()
+	defer pipeline.ReleaseCommitStatusLock()
 	bounded := *sctx
 	bounded.Ctx = ctx
 	attempt, err := sctx.DB.GetCommitStatusAttempt(sctx.Run.ID)
@@ -222,7 +220,7 @@ func confirmVerifiedCommitStatus(sctx *pipeline.StepContext, sha, target, ref st
 	if err := acquireCommitStatusLock(ctx); err != nil {
 		return nil, err
 	}
-	defer func() { <-commitStatusLock }()
+	defer pipeline.ReleaseCommitStatusLock()
 	confirmed, err := sctx.DB.ConfirmCommitStatusAttempt(sctx.Run.ID, attempt.CommitStatusPublication)
 	if err != nil || !confirmed {
 		return nil, err
@@ -255,7 +253,7 @@ func commitStatusReporter(sctx *pipeline.StepContext, publication *db.CommitStat
 			statusWarning(log, "wait for reporting", err)
 			return
 		}
-		defer func() { <-commitStatusLock }()
+		defer pipeline.ReleaseCommitStatusLock()
 		current, err := sctx.DB.GetCommitStatusPublication(bounded, sctx.Run.ID, db.CommitStatusPublication{SHA: sha, Host: statusHost, Repo: statusRepo})
 		if err != nil {
 			statusWarning(log, "read publication ownership", err)

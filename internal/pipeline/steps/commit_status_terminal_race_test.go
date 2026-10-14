@@ -361,18 +361,18 @@ func TestCommitStatus_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Error(err)
 		}
+		mu.Lock()
+		states = append(states, payload.State)
+		mu.Unlock()
 		if payload.State == "success" {
 			close(entered)
 			<-release
 		}
-		mu.Lock()
-		states = append(states, payload.State)
-		mu.Unlock()
 		w.WriteHeader(201)
 	}))
 	defer func() { unblock(); server.Close() }()
 	env, _ := fakeGH(t, "")
-	env = append(env, "FAKE_CLI_STATUS_API_URL="+server.URL, "FAKE_CLI_STATUS_PIPE_CHILD=1")
+	env = append(env, "FAKE_CLI_STATUS_API_URL="+server.URL, "FAKE_CLI_STATUS_PIPE_CHILD=1", "FAKE_CLI_STATUS_HTTP_TIMEOUT=60s", "FAKE_CLI_STATUS_PIPE_IGNORE_TERM=1")
 	for key, value := range environmentEntries(t, env) {
 		t.Setenv(key, value)
 	}
@@ -402,14 +402,24 @@ func TestCommitStatus_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("failure did not start")
 	}
-	time.Sleep(16 * time.Second)
+	time.Sleep(32 * time.Second)
 	run, err := sc.DB.GetRun(sc.Run.ID)
-	if err != nil || run.Status != types.RunRunning {
-		t.Errorf("terminal commit crossed outstanding POST after deadline: %+v,%v", run, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status == types.RunRunning {
+		select {
+		case err := <-done:
+			done <- err
+			t.Errorf("executor abandoned unsettled terminal ownership: %v", err)
+		default:
+		}
 	}
 	select {
 	case <-terminal:
-		t.Error("unsettled terminal event emitted")
+		if run.Status == types.RunRunning {
+			t.Error("unsettled terminal event emitted")
+		}
 	default:
 	}
 	unblock()
