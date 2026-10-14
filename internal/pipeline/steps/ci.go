@@ -246,6 +246,7 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		}
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
+	checks = newCIChecksScope(sctx, host, effectivePRBaseBranch(sctx)).Apply(ctx, pr, checks).Relevant
 	if allChecksPassed(checks) {
 		if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
 			return fmt.Sprintf("could not verify live CI comparison: %v", err), nil
@@ -507,6 +508,15 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 	}
 	pr.BaseBranch = baseBranch
+	// One scope per execution: the target branch's required checks are read on
+	// the first poll that needs them and reused for every later one.
+	checkScope := newCIChecksScope(sctx, host, baseBranch)
+	if err := recordCIChecksScope(sctx); err != nil {
+		if sctx.Run.Shipping != nil {
+			return nil, err
+		}
+		sctx.Log(fmt.Sprintf("warning: %v", err))
+	}
 	if repairRequested {
 		repairOutcome, err := s.repairFromFindings(sctx, host, pr)
 		if err != nil {
@@ -556,6 +566,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	var timeoutFailingChecks []scm.CheckTarget
 	timeoutMergeConflict := false
 	lastMonitorLog := ""
+	lastScopeLog := ""
 	consecutiveCheckErrs := 0
 	consecutiveBotCommentErrs := 0
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
@@ -744,6 +755,18 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		} else {
 			consecutiveCheckErrs = 0
+			// Only the checks that decide readiness reach anything below.
+			// External approval contexts and checks the target branch does not
+			// require are reported here and nowhere else: they can neither
+			// block the PR nor be handed to the fix agent.
+			scoped := checkScope.Apply(ctx, pr, checks)
+			checks = scoped.Relevant
+			if summary := scoped.Summary(); summary != lastScopeLog {
+				lastScopeLog = summary
+				if summary != "" {
+					sctx.Log("CI checks not evaluated: " + summary)
+				}
+			}
 			// A failure the provider produced before the repository's own steps
 			// ran (a setup/action-resolution outage) is infrastructure, not a
 			// verdict on the code. Re-bucket those into the transient path before

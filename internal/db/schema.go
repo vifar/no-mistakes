@@ -442,4 +442,9 @@ var migrationStatements = []string{
 	// Owner-approved Test gaps accepted under strict shipping (see
 	// StepResult.AcceptedGapRefusal). NULL means no gap was accepted.
 	`ALTER TABLE step_results ADD COLUMN accepted_gaps_json TEXT`,
+	// The check scope (ci.required_checks, must_pass, external_checks) the CI
+	// step last evaluated this run's checks under, as opaque JSON. The strict
+	// ci-ready receipt re-reads live checks outside the daemon and must apply
+	// exactly the scope the CI step used; NULL means none was recorded.
+	`ALTER TABLE runs ADD COLUMN check_scope_json TEXT`,
 }

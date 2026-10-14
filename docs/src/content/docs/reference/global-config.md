@@ -88,6 +88,9 @@ ci:
   rerun_transient: 0
   revalidate_repairs: false
   review_bot_comments: on_failure # or: always
+  required_checks: auto # or: all
+  must_pass: []
+  external_checks: []
 
 rebase:
   strategy: rebase # or: merge
@@ -974,6 +977,54 @@ ci:
 ```
 
 A value in the trusted repository config overrides this global value. An unrecognized value fails the config rather than falling back to the default.
+
+### ci.required_checks
+
+The operator-level fallback for [`ci.required_checks`](/no-mistakes/reference/repo-config/#cirequired_checks), whose per-repository reference owns the semantics and the trust boundary.
+
+| | |
+|---|---|
+| Type | `string` (`auto` or `all`) |
+| Default | `auto` |
+
+```yaml
+ci:
+  required_checks: all
+```
+
+A value in the trusted repository config overrides this global value. An unrecognized value fails the config rather than falling back to the default.
+
+### ci.must_pass
+
+The operator-level fallback for [`ci.must_pass`](/no-mistakes/reference/repo-config/#cimust_pass): glob patterns for check contexts that are always required.
+
+| | |
+|---|---|
+| Type | list of glob patterns |
+| Default | `[]` |
+
+```yaml
+ci:
+  must_pass: ["lint (*)"]
+```
+
+A list in the trusted repository config replaces this one.
+
+### ci.external_checks
+
+The operator-level fallback for [`ci.external_checks`](/no-mistakes/reference/repo-config/#ciexternal_checks): glob patterns for check contexts that pass only after an outside party acts, such as an external approval app. They are reported, never waited on, never repaired, and never become findings.
+
+| | |
+|---|---|
+| Type | list of glob patterns |
+| Default | `[]` |
+
+```yaml
+ci:
+  external_checks: ["Final Approval / approve*"]
+```
+
+A list in the trusted repository config replaces this one.
 
 ### rebase.strategy
 

@@ -619,7 +619,39 @@ func fakeCIGHFactsListAPI(args []string) {
 	}
 }
 
+// fakeCIGHRequiredChecksAPI answers the branch-protection and branch-rules
+// reads behind required-check scoping. FAKE_CLI_PROTECTION_JSON and
+// FAKE_CLI_RULES_JSON are the response bodies; an unset one answers HTTP 404
+// (no protection, no rules) and the literal value "403" answers HTTP 403.
+func fakeCIGHRequiredChecksAPI(args []string) {
+	if len(args) == 0 || args[0] != "api" {
+		return
+	}
+	endpoint := args[len(args)-1]
+	var env string
+	switch {
+	case strings.Contains(endpoint, "/protection/required_status_checks"):
+		env = "FAKE_CLI_PROTECTION_JSON"
+	case strings.Contains(endpoint, "/rules/branches/"):
+		env = "FAKE_CLI_RULES_JSON"
+	default:
+		return
+	}
+	switch body := os.Getenv(env); body {
+	case "":
+		fmt.Fprintln(os.Stderr, "gh: Not Found (HTTP 404)")
+		os.Exit(1)
+	case "403":
+		fmt.Fprintln(os.Stderr, "gh: Resource not accessible by integration (HTTP 403)")
+		os.Exit(1)
+	default:
+		fmt.Print(body)
+		os.Exit(0)
+	}
+}
+
 func fakeCIGHFactsAPI(args []string) {
+	fakeCIGHRequiredChecksAPI(args)
 	fakeCIGHFactsListAPI(args)
 	if len(args) == 0 || args[0] != "api" || !strings.HasPrefix(args[len(args)-1], "repos/test/repo/pulls/") {
 		return
@@ -1276,6 +1308,8 @@ func printFakeCommitChecks(raw string, args []string) {
 		// App is the check suite's app slug, rendered the way GitHub's
 		// GraphQL rollup reports it (checkSuite.app.slug). Empty omits it.
 		App string `json:"app"`
+		// Workflow is the emitting workflow's name (checkSuite.workflowRun.workflow.name).
+		Workflow string `json:"workflow"`
 	}
 	if err := json.Unmarshal([]byte(raw), &checks); err != nil {
 		fmt.Println(raw)
@@ -1315,8 +1349,15 @@ func printFakeCommitChecks(raw string, args []string) {
 			"__typename": "CheckRun", "name": check.Name, "status": status,
 			"conclusion": conclusion, "completedAt": check.CompletedAt, "detailsUrl": link,
 		}
-		if check.App != "" {
-			node["checkSuite"] = map[string]any{"app": map[string]any{"slug": check.App}}
+		if check.App != "" || check.Workflow != "" {
+			suite := map[string]any{}
+			if check.App != "" {
+				suite["app"] = map[string]any{"slug": check.App}
+			}
+			if check.Workflow != "" {
+				suite["workflowRun"] = map[string]any{"workflow": map[string]any{"name": check.Workflow}}
+			}
+			node["checkSuite"] = suite
 		}
 		nodes = append(nodes, node)
 	}

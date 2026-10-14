@@ -169,6 +169,13 @@ func Export(ctx context.Context, database *db.DB, repo *db.Repo, runID, phase st
 		if pr.HeadSHA != first.LocalHeadSHA {
 			return nil, fmt.Errorf("PR head moved during readiness observation")
 		}
+		// Readiness is judged on the same checks the CI step judged it on:
+		// the scope it recorded for this run, not every context on the head.
+		policy, err := recordedCheckScope(database, runID)
+		if err != nil {
+			return nil, err
+		}
+		checks = scm.NewCheckScope(host, policy, first.TargetBranch, nil).Apply(ctx, pr, checks).Relevant
 		if len(checks) == 0 {
 			return nil, fmt.Errorf("strict readiness requires live checks")
 		}
@@ -207,6 +214,23 @@ func Export(ctx context.Context, database *db.DB, repo *db.Repo, runID, phase st
 		return nil, fmt.Errorf("review receipt exceeds payload limit")
 	}
 	return out, nil
+}
+
+// recordedCheckScope returns the check-scope policy the CI step recorded for
+// the run. A run that recorded none is evaluated under the default policy.
+func recordedCheckScope(database *db.DB, runID string) (scm.CheckScopePolicy, error) {
+	var policy scm.CheckScopePolicy
+	raw, err := database.GetRunCheckScope(runID)
+	if err != nil {
+		return policy, err
+	}
+	if raw == "" {
+		return policy, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
+		return policy, fmt.Errorf("invalid recorded CI check scope")
+	}
+	return policy, nil
 }
 
 func durablePayload(database *db.DB, runID, phase string) (Payload, error) {

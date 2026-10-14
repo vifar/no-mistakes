@@ -1743,6 +1743,40 @@ func TestRunGatesArePinnedAndDefaultToNone(t *testing.T) {
 	}
 }
 
+func TestRunCheckScopeIsRecordedAndSurvivesRestart(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "scope.sqlite")
+	d, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, err := d.InsertRun(repo.ID, "feature", "abc123", "def456")
+	if err != nil {
+		t.Fatalf("insert run: %v", err)
+	}
+	if got, err := d.GetRunCheckScope(run.ID); err != nil || got != "" {
+		t.Fatalf("scope on a fresh run = %q, %v; want none", got, err)
+	}
+	if got, err := d.GetRunCheckScope("no-such-run"); err != nil || got != "" {
+		t.Fatalf("scope for unknown run = %q, %v; want none", got, err)
+	}
+	payload := `{"required_checks":"auto","external_checks":["approve"]}`
+	if err := d.SetRunCheckScope(run.ID, payload); err != nil {
+		t.Fatalf("set scope: %v", err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+	reopened, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen db: %v", err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	if got, err := reopened.GetRunCheckScope(run.ID); err != nil || got != payload {
+		t.Fatalf("scope after restart = %q, %v; want %q", got, err, payload)
+	}
+}
+
 func TestGetRunGatesForUnknownRun(t *testing.T) {
 	d := openTestDB(t)
 	pinned, err := d.GetRunGates("no-such-run")

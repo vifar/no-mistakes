@@ -8,7 +8,7 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `staging_exclude`, `max_file_size_bytes`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `staging_exclude`, `max_file_size_bytes`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `ci.required_checks`, `ci.must_pass`, `ci.external_checks`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
@@ -86,6 +86,9 @@ ci:
   rerun_transient: 0
   revalidate_repairs: false
   review_bot_comments: on_failure # or: always
+  required_checks: auto # or: all
+  must_pass: []
+  external_checks: [] # e.g. ["Final Approval / approve*", "approval-status"]
 
 # How a base branch that moved under your branch is integrated.
 # Read only from the trusted default branch.
@@ -886,6 +889,64 @@ Forges that cannot supply review comments are unaffected by either value. Becaus
 
 This value is read only from the trusted default-branch copy of this file, like the rest of the `ci` block: a pushed branch cannot silence a green bot's comments on itself, and cannot opt itself in either.
 A value set here wins over the operator's own [`ci.review_bot_comments`](/no-mistakes/reference/global-config/#cireview_bot_comments).
+
+### ci.required_checks
+
+Which checks on the PR head decide CI readiness and repair.
+
+| | |
+|---|---|
+| Type | `string` (`auto` or `all`) |
+| Default | `auto` |
+| Trust | Read only from the trusted default branch |
+
+```yaml
+ci:
+  required_checks: auto
+```
+
+- **`auto` (default)** evaluates only the status checks the target branch requires, read from branch protection (`required_status_checks`) and repository rulesets (`required_status_checks` rules) and unioned. A failing check outside that set is reported as informational: it does not block `checks-passed`, `ci_ready`, or the strict `ci-ready` receipt, and it is never handed to the fix agent. A required check that is failing, pending, or not reported yet still blocks, and a failing one is still repaired. When the target has no required checks, the required checks cannot be read (HTTP 404 or 403), or the provider has no equivalent, every check is evaluated and the step log says so. Only GitHub reads required checks today.
+- **`all`** evaluates every check on the head, whatever the target branch requires. This was the only behavior before the key existed.
+
+The required set is read once per CI step execution, not once per poll. Required contexts are matched exactly against the check name. The strict `ci-ready` receipt applies the same scope the CI step recorded for the run.
+
+A value set here wins over the operator's own [`ci.required_checks`](/no-mistakes/reference/global-config/#cirequired_checks). An unrecognized value fails the config.
+
+### ci.must_pass
+
+Extra check contexts that are always required, in addition to the target branch's required checks.
+
+| | |
+|---|---|
+| Type | list of glob patterns |
+| Default | `[]` |
+| Trust | Read only from the trusted default branch |
+
+```yaml
+ci:
+  must_pass: ["lint (*)", "e2e"]
+```
+
+Patterns are glob-style (`*` matches any run of characters including `/`, `?` matches one character, matching is case-sensitive) and are matched against the check name and, for GitHub check runs, the `workflow / job` display form. A matching failing check blocks and is repaired like any required check. A pattern without wildcards also blocks readiness while no check of that name has been reported. `external_checks` outranks `must_pass`. A list set here replaces the operator's [`ci.must_pass`](/no-mistakes/reference/global-config/#cimust_pass); `[]` clears it.
+
+### ci.external_checks
+
+Check contexts that pass only after an outside party acts, and so are never evaluated.
+
+| | |
+|---|---|
+| Type | list of glob patterns |
+| Default | `[]` |
+| Trust | Read only from the trusted default branch |
+
+```yaml
+ci:
+  external_checks:
+    - "Final Approval / approve*"
+    - "approval-status"
+```
+
+An external approval app, such as a GitHub App job that approves the exact head after an outside reviewer signs off, cannot pass until the head has been published and reviewed externally. Waiting on it, or trying to repair it, deadlocks the run; in strict shipping the failing context would park the CI step as an actionable finding that can be neither approved nor skipped. A check matching a pattern here is reported in the step log as `external (awaiting outside approval)`, is never waited on, never repaired, and never becomes a finding, even when the target branch requires it. `external_checks` outranks `must_pass` and the required set. Patterns use the same glob syntax and name forms as [`ci.must_pass`](#cimust_pass). A list set here replaces the operator's [`ci.external_checks`](/no-mistakes/reference/global-config/#ciexternal_checks); `[]` clears it.
 
 ### rebase.strategy
 

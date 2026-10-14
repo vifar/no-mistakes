@@ -251,6 +251,19 @@ type Check struct {
 	// so the CI step can tell a third-party review bot's verdict from the
 	// repository's own CI without matching names. Empty when unknown.
 	App string
+	// Workflow is the name of the workflow that emitted the check, when the
+	// provider reports one (GitHub Actions). Together with Name it forms the
+	// "workflow / job" display form that check-scope patterns may match.
+	Workflow string
+}
+
+// DisplayName is the "workflow / job" form of the check's name, or Name when
+// the provider reported no workflow.
+func (c Check) DisplayName() string {
+	if c.Workflow == "" {
+		return c.Name
+	}
+	return c.Workflow + " / " + c.Name
 }
 
 // Failing reports whether the check is in a failed bucket.
