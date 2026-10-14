@@ -289,7 +289,7 @@ func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("gate execution context: corroborate Git discovery identity: %w", err)
 	}
-	common, matched := strings.CutSuffix(identity, "\n"+actual+"\n")
+	common, matched := strings.CutSuffix(identity, "\n"+filepath.ToSlash(actual)+"\n")
 	if actual == "" || !matched || !filepath.IsAbs(common) {
 		return "", fmt.Errorf("gate execution context: Git discovery skipped repository metadata or returned no absolute directory identities")
 	}

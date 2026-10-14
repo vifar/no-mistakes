@@ -86,7 +86,9 @@ repository. Gitfile targets are compared with the actual metadata directory so
 linked and separate Git directories remain supported. Reopened gitfiles are limited
 to 1 MiB and must still be regular files. The independently resolved actual metadata
 path frames the raw common/actual command output, preserving embedded newlines and
-terminal whitespace without shell evaluation. Optional top-level attribution also
+terminal whitespace without shell evaluation. The framing boundary converts native
+Windows separators to Git's forward slashes; Unix backslashes remain literal
+filename bytes. Optional top-level attribution also
 preserves path bytes. Every discovered common directory
 must have a recognizable `HEAD` and object/reference directories, regardless of
 registration and even when the linked worktree metadata is healthy. Unborn
