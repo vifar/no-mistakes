@@ -181,3 +181,52 @@ func TestCommitStatus_FailedAndNoopSameHeadRepairsCannotPreserve(t *testing.T) {
 		t.Fatalf("failure retry missing: %v,%v", ids, err)
 	}
 }
+
+func TestRawShutdown_SupersessionIsAtomicAndPreservesCommittedDecision(t *testing.T) {
+	d, committed, p := certifiedStatusFixture(t)
+	binding := &ControlledShutdownBinding{Instance: "runtime", Lifecycle: "lifecycle", Reason: "planned"}
+	if err := d.PrepareControlledShutdown([]string{committed.ID}, binding.Instance, binding.Lifecycle, binding.Reason); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.TerminalizeCertifiedWatcher(committed.ID, "planned", "head", "config", types.RunCancelled, binding); err != nil {
+		t.Fatal(err)
+	}
+	active, err := d.InsertRun(committed.RepoID, "other", "other-head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(active.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.PrepareControlledShutdown([]string{active.ID}, binding.Instance, binding.Lifecycle, binding.Reason); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SupersedeUncommittedCancellations([]string{active.ID, "missing-run"}, binding.Instance); err == nil {
+		t.Fatal("uncertain batch committed")
+	}
+	stillActive, err := d.GetRun(active.ID)
+	if err != nil || stillActive.Status != types.RunRunning {
+		t.Fatalf("failed batch partially terminalized: %+v,%v", stillActive, err)
+	}
+	matches, err := d.ControlledShutdownMatches(active.ID, binding.Instance, binding.Lifecycle, binding.Reason)
+	if err != nil || !matches {
+		t.Fatalf("failed batch partially superseded binding: %v,%v", matches, err)
+	}
+	for range 2 {
+		if err := d.SupersedeUncommittedCancellations([]string{committed.ID, active.ID}, binding.Instance); err != nil {
+			t.Fatal(err)
+		}
+	}
+	failed, err := d.GetRun(active.ID)
+	if err != nil || failed.Status != types.RunFailed || failed.Error == nil || *failed.Error != "daemon shutting down" {
+		t.Fatalf("raw batch failed to settle active run: %+v,%v", failed, err)
+	}
+	matches, err = d.ControlledShutdownMatches(active.ID, binding.Instance, binding.Lifecycle, binding.Reason)
+	if err != nil || matches {
+		t.Fatalf("raw batch retained uncommitted binding: %v,%v", matches, err)
+	}
+	preserved, err := d.GetCommitStatusPublication(context.Background(), committed.ID, p)
+	if err != nil || preserved.StrictCertificate == nil || preserved.PreserveSuccess == nil || !*preserved.PreserveSuccess {
+		t.Fatalf("raw batch changed committed preservation: %+v,%v", preserved, err)
+	}
+}

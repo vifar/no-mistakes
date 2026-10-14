@@ -1,0 +1,290 @@
+package daemon
+
+import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
+	"modernc.org/sqlite"
+)
+
+type strictShutdownPass struct{ name types.StepName }
+
+func (s strictShutdownPass) Name() types.StepName { return s.name }
+func (s strictShutdownPass) Execute(sc *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	out := &pipeline.StepOutcome{}
+	if s.name == types.StepReview {
+		out.ReviewApprovedHeadSHA = sc.Run.HeadSHA
+	}
+	if s.name == types.StepTest {
+		out.Findings = fmt.Sprintf(`{"findings":[],"tested_head_sha":%q}`, sc.Run.HeadSHA)
+	}
+	return out, nil
+}
+
+type shutdownWatchStep struct {
+	execute func(*pipeline.StepContext) (*pipeline.StepOutcome, error)
+}
+
+func (*shutdownWatchStep) Name() types.StepName { return types.StepCI }
+func (s *shutdownWatchStep) Execute(sc *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	return s.execute(sc)
+}
+
+func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
+	bin := t.TempDir()
+	if out, err := exec.Command("go", "build", "-o", filepath.Join(bin, "gh"), "../pipeline/fakecli").CombinedOutput(); err != nil {
+		t.Fatalf("fake gh: %v: %s", err, out)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_CLI_MODE", "gh")
+	for _, causeKind := range []string{"planned", "user"} {
+		for _, first := range []string{"raw", "preservation"} {
+			t.Run(causeKind+"/"+first, func(t *testing.T) {
+				p := paths.WithRoot(t.TempDir())
+				if err := p.EnsureDirs(); err != nil {
+					t.Fatal(err)
+				}
+				d, err := db.Open(p.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				repo, head := setupTestGitRepo(t, p, d, "raw-certified")
+				run, err := d.InsertRun(repo.ID, "main", head, head)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := d.UpdateRunPublication(run.ID, db.PushBinding{HeadSHA: head, TargetKind: "upstream", TargetFingerprint: "fingerprint", Ref: "refs/heads/main"}); err != nil {
+					t.Fatal(err)
+				}
+				cfg := config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{})
+				publication := db.CommitStatusPublication{SHA: head, Host: "github.com", Repo: "test/repo", Validated: true}
+				if err := d.PutCommitStatusPublication(run.ID, publication); err != nil {
+					t.Fatal(err)
+				}
+				terminalEntered, terminalRelease := make(chan struct{}), make(chan struct{})
+				var terminalOnce sync.Once
+				releaseTerminal := func() { terminalOnce.Do(func() { close(terminalRelease) }) }
+				defer releaseTerminal()
+				function := "pause_terminal_" + newShutdownToken()
+				if err := sqlite.RegisterScalarFunction(function, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
+					close(terminalEntered)
+					<-terminalRelease
+					return int64(1), nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				d.Close()
+				d, err = db.Open(p.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer d.Close()
+				control, err := sql.Open("sqlite", p.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer control.Close()
+				if first == "preservation" {
+					if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER pause_preservation BEFORE UPDATE ON commit_status_publications WHEN NEW.run_id=%q AND NEW.preserve_success=1 AND OLD.preserve_success IS NULL BEGIN SELECT %s(); END`, run.ID, function)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var mu sync.Mutex
+				var states []string
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload struct{ State string }
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+						t.Error(err)
+					}
+					mu.Lock()
+					states = append(states, payload.State)
+					mu.Unlock()
+					w.WriteHeader(201)
+				}))
+				defer server.Close()
+				t.Setenv("FAKE_CLI_STATUS_API_URL", server.URL)
+				ctx, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				ready, cancelled, watchRelease, rawDispatched := make(chan struct{}), make(chan error, 1), make(chan struct{}), make(chan struct{})
+				var watchOnce, rawOnce sync.Once
+				releaseWatch := func() { watchOnce.Do(func() { close(watchRelease) }) }
+				defer releaseWatch()
+				watcher := &shutdownWatchStep{execute: func(sc *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+					(&steps.PushStep{}).ReportPublishedHeadStatus(sc, "success", head)
+					stored, err := sc.DB.GetCommitStatusPublication(context.Background(), run.ID, publication)
+					if err != nil || stored == nil || stored.StrictCertificate == nil || stored.LastState != "success" {
+						return nil, fmt.Errorf("actual success lacked strict proof: %+v,%v", stored, err)
+					}
+					close(ready)
+					<-sc.Ctx.Done()
+					cancelled <- context.Cause(sc.Ctx)
+					<-watchRelease
+					return nil, sc.Ctx.Err()
+				}}
+				core := []pipeline.Step{strictShutdownPass{types.StepReview}, strictShutdownPass{types.StepTest}, strictShutdownPass{types.StepDocument}, strictShutdownPass{types.StepLint}, watcher, &steps.PushStep{}}
+				mgr := NewRunManager(d, p, nil)
+				mgr.runtimeStartedAt = time.Now().UTC()
+				executor := pipeline.NewExecutor(d, p, cfg, recoveredRunTestAgent{}, core, mgr.broadcast)
+				executor.SetRuntimeInstance(mgr.runtimeInstance)
+				executor.SetForgeContext(&forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"})
+				mgr.cancels[run.ID] = func(cause error) {
+					cancel(cause)
+					if cause != nil && cause.Error() == "daemon shutting down" {
+						rawOnce.Do(func() { close(rawDispatched) })
+					}
+				}
+				mgr.executors[run.ID] = executor
+				mgr.wg.Add(1)
+				finished := make(chan error, 1)
+				go func() { defer mgr.wg.Done(); finished <- executor.Execute(ctx, run, repo, repo.WorkingPath) }()
+				select {
+				case <-ready:
+				case err := <-finished:
+					t.Fatalf("watcher never certified: %v", err)
+				case <-time.After(10 * time.Second):
+					t.Fatal("watcher did not start")
+				}
+				request := ipc.ShutdownParams{ExpectedPID: os.Getpid(), ExpectedStartedAt: mgr.runtimeStartedAt.Format(time.RFC3339Nano), ExpectedInstance: mgr.runtimeInstance}
+				plannedDone := make(chan error, 1)
+				if causeKind == "planned" {
+					go func() { _, err := mgr.prepareControlledShutdown(context.Background(), request); plannedDone <- err }()
+				} else {
+					if err := mgr.HandleCancel(run.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var firstCause error
+				select {
+				case firstCause = <-cancelled:
+				case <-time.After(time.Second):
+					t.Fatal("cancellation did not reach watcher")
+				}
+				if causeKind == "planned" {
+					planned, ok := firstCause.(*pipeline.ControlledShutdownCause)
+					if !ok {
+						t.Fatalf("planned provenance missing: %v", firstCause)
+					}
+					matches, err := d.ControlledShutdownMatches(run.ID, planned.Instance, planned.Lifecycle, planned.Error())
+					if err != nil || !matches {
+						t.Fatalf("planned cancellation preceded durable binding: %v,%v", matches, err)
+					}
+				}
+				subscription, err := mgr.Subscribe(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer subscription.Close()
+				if first == "preservation" {
+					releaseWatch()
+					select {
+					case <-terminalEntered:
+					case <-time.After(time.Second):
+						t.Fatal("terminal transaction did not pause")
+					}
+				}
+				if first == "preservation" {
+					releaseTerminal()
+					select {
+					case err := <-finished:
+						finished <- err
+					case <-time.After(time.Second):
+						t.Fatal("preservation did not commit")
+					}
+				}
+				rawDone := make(chan struct{})
+				go func() { mgr.Shutdown(); close(rawDone) }()
+				select {
+				case <-rawDispatched:
+				case <-time.After(time.Second):
+					t.Fatal("raw shutdown did not reach captured cancellation")
+				}
+				if context.Cause(ctx) != firstCause {
+					t.Fatal("raw shutdown replaced immutable first cause")
+				}
+				releaseTerminal()
+				releaseWatch()
+				select {
+				case err := <-finished:
+					if err == nil {
+						t.Fatal("cancelled watcher completed successfully")
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("terminal decision did not finish")
+				}
+				select {
+				case <-rawDone:
+				case <-time.After(time.Second):
+					t.Fatal("raw shutdown did not drain")
+				}
+				if causeKind == "planned" {
+					if err := <-plannedDone; err == nil && first == "raw" {
+						t.Error("raw supersession produced planned ACK")
+					}
+				}
+				reopened, err := db.Open(p.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reopened.Close()
+				stored, err := reopened.GetRun(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pub, err := reopened.GetCommitStatusPublication(context.Background(), run.ID, publication)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expectedStatus := types.RunFailed
+				expectedStates := "[success failure]"
+				if first == "preservation" {
+					expectedStatus = types.RunCancelled
+					expectedStates = "[success]"
+				}
+				if stored.Status != expectedStatus {
+					t.Errorf("terminal status=%s,want %s", stored.Status, expectedStatus)
+				}
+				if first == "raw" && (stored.Error == nil || *stored.Error != "daemon shutting down" || pub.StrictCertificate != nil || (pub.PreserveSuccess != nil && *pub.PreserveSuccess)) {
+					t.Errorf("raw shutdown retained eligibility or planned reason: %+v,%+v", stored, pub)
+				}
+				if first == "preservation" && (pub.StrictCertificate == nil || pub.PreserveSuccess == nil || !*pub.PreserveSuccess) {
+					t.Errorf("committed preservation changed: %+v", pub)
+				}
+				eventCtx, stop := context.WithTimeout(context.Background(), time.Second)
+				defer stop()
+				event, ok := subscription.Next(eventCtx)
+				if !ok || event.StateRev != mgr.StateRev(run.ID) || (event.Type != ipc.EventStreamGap && (event.Type != ipc.EventRunCompleted || event.Status == nil || *event.Status != string(expectedStatus))) {
+					t.Errorf("public terminal outcome: %+v,%v", event, ok)
+				}
+				sc := &pipeline.StepContext{Ctx: context.Background(), DB: reopened, Run: stored, Repo: repo, Config: cfg, WorkDir: repo.WorkingPath, ForgeContext: &forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"}}
+				for _, state := range []string{"pending", "success", "failure"} {
+					(&steps.PushStep{}).ReportPublishedHeadStatus(sc, state, head)
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				if fmt.Sprint(states) != expectedStates {
+					t.Errorf("HTTP outcome=%v,want %s", states, expectedStates)
+				}
+			})
+		}
+	}
+}
