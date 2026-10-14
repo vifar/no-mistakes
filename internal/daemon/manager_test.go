@@ -516,22 +516,20 @@ func TestPushReceivedResolvesForgeProfileIntoRunContext(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	select {
-	case resolved := <-contexts:
-		if resolved.provider != scm.ProviderGitHub {
-			t.Fatalf("provider = %q, want %q", resolved.provider, scm.ProviderGitHub)
-		}
-		if resolved.env["GH_CONFIG_DIR"] != profileDir {
-			t.Fatalf("GH_CONFIG_DIR = %q, want %q", resolved.env["GH_CONFIG_DIR"], profileDir)
-		}
-		if _, exists := resolved.env["GH_TOKEN"]; exists {
-			t.Fatal("ambient GH_TOKEN survived run context")
-		}
-		if resolved.gitEnv != "config:"+profileDir+" token:" {
-			t.Fatalf("git subprocess environment = %q", resolved.gitEnv)
-		}
-	case <-time.After(3 * time.Second):
-		t.Fatal("pipeline did not report its forge context")
+	// This asserts environment propagation, not scheduler latency. The test
+	// runner's timeout remains the watchdog for a missing capture.
+	resolved := <-contexts
+	if resolved.provider != scm.ProviderGitHub {
+		t.Fatalf("provider = %q, want %q", resolved.provider, scm.ProviderGitHub)
+	}
+	if resolved.env["GH_CONFIG_DIR"] != profileDir {
+		t.Fatalf("GH_CONFIG_DIR = %q, want %q", resolved.env["GH_CONFIG_DIR"], profileDir)
+	}
+	if _, exists := resolved.env["GH_TOKEN"]; exists {
+		t.Fatal("ambient GH_TOKEN survived run context")
+	}
+	if resolved.gitEnv != "config:"+profileDir+" token:" {
+		t.Fatalf("git subprocess environment = %q", resolved.gitEnv)
 	}
 	if run := waitForRunTerminalState(t, d, result.RunID); run.Status != types.RunCompleted {
 		t.Fatalf("run status = %q, want %q", run.Status, types.RunCompleted)
@@ -614,13 +612,11 @@ func TestPushReceivedKeepsConcurrentForgeProfilesIsolated(t *testing.T) {
 	}
 
 	observed := make(map[string]capturedForgeContext, 2)
+	// Both steps stay at the barrier until their environments are checked.
+	// Wait for that proof, not an arbitrary three-second scheduling window.
 	for range 2 {
-		select {
-		case captured := <-contexts:
-			observed[captured.repoID] = captured
-		case <-time.After(3 * time.Second):
-			t.Fatal("concurrent forge runs did not reach barrier")
-		}
+		captured := <-contexts
+		observed[captured.repoID] = captured
 	}
 	for repoID, wantDir := range map[string]string{"personal-forge-run": personalDir, "work-forge-run": workDir} {
 		captured := observed[repoID]

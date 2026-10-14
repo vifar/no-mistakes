@@ -608,10 +608,10 @@ func startIPCServer(t *testing.T, srv *ipc.Server, socketPath string) {
 	go func() { errCh <- srv.Serve(socketPath) }()
 	t.Cleanup(func() {
 		srv.Close()
-		select {
-		case <-errCh:
-		case <-time.After(time.Second):
-			t.Error("fake daemon did not stop")
+		// Join the server before fixture cleanup. Shutdown latency is not the
+		// timeout behavior under test; the test runner bounds a stuck server.
+		if err := <-errCh; err != nil {
+			t.Errorf("fake daemon stopped with an error: %v", err)
 		}
 	})
 	dialReady(t, socketPath).Close()
