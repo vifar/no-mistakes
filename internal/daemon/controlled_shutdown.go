@@ -20,6 +20,13 @@ func newShutdownToken() string {
 	return hex.EncodeToString(token[:])
 }
 
+type controlledShutdownPreparation struct {
+	cause *pipeline.ControlledShutdownCause
+	ids   []string
+	done  chan struct{}
+	err   error
+}
+
 // prepareControlledShutdown drains the bound run decisions before acknowledging.
 // A preparation record alone is never used by crash recovery.
 func (m *RunManager) prepareControlledShutdown(ctx context.Context, expected ipc.ShutdownParams) (*ipc.ShutdownResult, error) {
@@ -35,42 +42,60 @@ func (m *RunManager) prepareControlledShutdown(ctx context.Context, expected ipc
 	if m.runtimeInstance == "" || expected.ExpectedInstance != m.runtimeInstance {
 		return nil, fmt.Errorf("daemon runtime identity is unavailable")
 	}
-	lifecycle := newShutdownToken()
-	if lifecycle == "" {
-		return nil, fmt.Errorf("shutdown lifecycle identity is unavailable")
-	}
 	m.mu.Lock()
-	if m.shuttingDown.Load() {
+	preparation := m.shutdownPreparation
+	if preparation == nil {
+		if m.shuttingDown.Load() {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("daemon shutdown already started")
+		}
+		lifecycle := newShutdownToken()
+		if lifecycle == "" {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("shutdown lifecycle identity is unavailable")
+		}
+		m.shuttingDown.Store(true)
+		cancels := make(map[string]context.CancelCauseFunc, len(m.cancels))
+		ids := make([]string, 0, len(m.cancels))
+		for id, cancel := range m.cancels {
+			cancels[id] = cancel
+			ids = append(ids, id)
+		}
+		preparation = &controlledShutdownPreparation{
+			cause: &pipeline.ControlledShutdownCause{Instance: m.runtimeInstance, Lifecycle: lifecycle},
+			ids:   ids,
+			done:  make(chan struct{}),
+		}
+		m.shutdownPreparation = preparation
 		m.mu.Unlock()
-		return nil, fmt.Errorf("daemon shutdown already started")
+		if err := m.db.PrepareControlledShutdown(ids, preparation.cause.Instance, preparation.cause.Lifecycle, preparation.cause.Error()); err != nil {
+			preparation.err = fmt.Errorf("record planned shutdown: %w", err)
+			m.mu.Lock()
+			m.shutdownPreparation = nil
+			m.shuttingDown.Store(false)
+			m.mu.Unlock()
+			close(preparation.done)
+			return nil, preparation.err
+		}
+		for _, cancel := range cancels {
+			cancel(preparation.cause)
+		}
+		go func() { m.wg.Wait(); close(preparation.done) }()
+	} else {
+		m.mu.Unlock()
 	}
-	m.shuttingDown.Store(true)
-	cancels := make(map[string]context.CancelCauseFunc, len(m.cancels))
-	ids := make([]string, 0, len(m.cancels))
-	for id, cancel := range m.cancels {
-		cancels[id] = cancel
-		ids = append(ids, id)
-	}
-	m.mu.Unlock()
-	cause := &pipeline.ControlledShutdownCause{Instance: m.runtimeInstance, Lifecycle: lifecycle}
-	if err := m.db.PrepareControlledShutdown(ids, cause.Instance, cause.Lifecycle, cause.Error()); err != nil {
-		m.shuttingDown.Store(false)
-		return nil, fmt.Errorf("record planned shutdown: %w", err)
-	}
-	for _, cancel := range cancels {
-		cancel(cause)
-	}
-	done := make(chan struct{})
-	go func() { m.wg.Wait(); close(done) }()
 	select {
-	case <-done:
-		for _, id := range ids {
+	case <-preparation.done:
+		if preparation.err != nil {
+			return nil, preparation.err
+		}
+		for _, id := range preparation.ids {
 			run, err := m.db.GetRun(id)
 			if err != nil || run == nil || (run.Status != "completed" && run.Status != "failed" && run.Status != "cancelled") {
 				return nil, fmt.Errorf("planned shutdown terminal outcome unavailable for run %s: %v", id, err)
 			}
 		}
-		return &ipc.ShutdownResult{PID: os.Getpid(), StartedAt: m.runtimeStartedAt.UTC().Format(time.RFC3339Nano), OK: true, Instance: cause.Instance, Lifecycle: cause.Lifecycle}, nil
+		return &ipc.ShutdownResult{PID: os.Getpid(), StartedAt: m.runtimeStartedAt.UTC().Format(time.RFC3339Nano), OK: true, Instance: preparation.cause.Instance, Lifecycle: preparation.cause.Lifecycle}, nil
 	case <-ctx.Done():
 		return nil, fmt.Errorf("planned shutdown did not drain terminal decisions: %w", ctx.Err())
 	}

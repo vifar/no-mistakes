@@ -34,7 +34,7 @@ func TestRunCancellationPreservesCommandProvenance(t *testing.T) {
 			return err
 		}},
 	} {
-		for _, mode := range []string{"cancelled process", "independent exit", "ambiguous cooperative exit", "independent signal"} {
+		for _, mode := range []string{"ambiguous signal", "independent exit", "ambiguous cooperative exit", "independent signal", "cancelled context"} {
 			t.Run(call.name+"/"+mode, func(t *testing.T) {
 				realGit, err := testgit.RealGit()
 				if err != nil {
@@ -58,52 +58,57 @@ func TestRunCancellationPreservesCommandProvenance(t *testing.T) {
 				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
+				if mode == "cancelled context" {
+					cancel()
+				}
 				done := make(chan error, 1)
 				go func() {
 					done <- call.run(ctx, dir, "ls-remote", "--exit-code", filepath.Join(t.TempDir(), "absent"), "refs/heads/main")
 				}()
-				deadline := time.After(10 * time.Second)
-				for {
-					raw, err := os.ReadFile(entered)
-					if err == nil {
-						pid, err := strconv.Atoi(string(raw))
-						if err == nil && (mode != "independent exit" || errors.Is(commandProcessProbe(pid), syscall.ESRCH)) {
-							break
+				if mode != "cancelled context" {
+					deadline := time.After(10 * time.Second)
+					for {
+						raw, err := os.ReadFile(entered)
+						if err == nil {
+							pid, err := strconv.Atoi(string(raw))
+							if err == nil && (mode != "independent exit" || errors.Is(commandProcessProbe(pid), syscall.ESRCH)) {
+								break
+							}
+						}
+						select {
+						case err := <-done:
+							t.Fatalf("command returned before race: %v", err)
+						case <-deadline:
+							t.Fatal("command did not reach barrier")
+						case <-time.After(10 * time.Millisecond):
 						}
 					}
-					select {
-					case err := <-done:
-						t.Fatalf("command returned before race: %v", err)
-					case <-deadline:
-						t.Fatal("command did not reach barrier")
-					case <-time.After(10 * time.Millisecond):
+					if mode == "independent signal" {
+						raw, err := os.ReadFile(entered)
+						if err != nil {
+							t.Fatal(err)
+						}
+						pid, err := strconv.Atoi(string(raw))
+						if err != nil {
+							t.Fatal(err)
+						}
+						process, err := os.FindProcess(pid)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := process.Kill(); err != nil {
+							t.Fatal(err)
+						}
 					}
+					cancel()
 				}
-				if mode == "independent signal" {
-					raw, err := os.ReadFile(entered)
-					if err != nil {
-						t.Fatal(err)
-					}
-					pid, err := strconv.Atoi(string(raw))
-					if err != nil {
-						t.Fatal(err)
-					}
-					process, err := os.FindProcess(pid)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if err := process.Kill(); err != nil {
-						t.Fatal(err)
-					}
-				}
-				cancel()
 				select {
 				case err := <-done:
 					var exit *exec.ExitError
-					if !errors.As(err, &exit) {
+					if mode != "cancelled context" && !errors.As(err, &exit) {
 						t.Errorf("original command exit is not inspectable: %v", err)
 					}
-					if errors.Is(err, context.Canceled) != (mode == "cancelled process") {
+					if errors.Is(err, context.Canceled) != (mode == "cancelled context") {
 						t.Errorf("cancellation classification = %v: %v", errors.Is(err, context.Canceled), err)
 					}
 					if strings.Contains(err.Error(), "private-token") {

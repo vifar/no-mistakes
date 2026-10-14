@@ -94,6 +94,11 @@ func TestPlannedStop_UnsettledAdmissionDoesNotStopSupervisor(t *testing.T) {
 			daemonKillPID = func(int) error { t.Error("unsettled live daemon reached PID fallback"); return fmt.Errorf("refused") }
 			writeDaemonPIDRecord(t, p.PIDFile(), daemonPIDFile{PID: os.Getpid(), StartedAt: mgr.runtimeStartedAt, Instance: mgr.runtimeInstance})
 			srv := ipc.NewServer()
+			if err := srv.Listen(p.Socket()); err != nil {
+				t.Fatal(err)
+			}
+			var latestACK ipc.ShutdownResult
+			var ackMu sync.Mutex
 			srv.Handle(ipc.MethodShutdown, func(ctx context.Context, raw json.RawMessage) (interface{}, error) {
 				var request ipc.ShutdownParams
 				if err := json.Unmarshal(raw, &request); err != nil {
@@ -101,11 +106,15 @@ func TestPlannedStop_UnsettledAdmissionDoesNotStopSupervisor(t *testing.T) {
 				}
 				bounded, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
 				defer cancel()
-				return mgr.prepareControlledShutdown(bounded, request)
+				ack, err := mgr.prepareControlledShutdown(bounded, request)
+				if err == nil {
+					ackMu.Lock()
+					latestACK = *ack
+					ackMu.Unlock()
+					_ = os.Remove(p.PIDFile())
+				}
+				return ack, err
 			})
-			if err := srv.Listen(p.Socket()); err != nil {
-				t.Fatal(err)
-			}
 			serving := make(chan error, 1)
 			go func() { serving <- srv.ServeReady() }()
 			defer func() { srv.Close(); <-serving }()
@@ -144,6 +153,29 @@ func TestPlannedStop_UnsettledAdmissionDoesNotStopSupervisor(t *testing.T) {
 			if _, err := os.Stat(*run.WorktreeDir); !os.IsNotExist(err) {
 				t.Errorf("setup resources remain after settlement: %v", err)
 			}
+			if !mgr.shuttingDown.Load() {
+				t.Error("failed preparation reopened admission")
+			}
+			if id, err := mgr.startRun(context.Background(), repo, "other", head, head, "test", nil, "intent", "", false, "", nil); err == nil || id != "" {
+				t.Errorf("fenced admission = %q,%v", id, err)
+			}
+			if err := stop.call(p); err != nil {
+				t.Errorf("settled matching retry failed: %v", err)
+			}
+			if supervisorStops.Load() != 1 {
+				t.Errorf("settled retry supervisor count = %d", supervisorStops.Load())
+			}
+			ackMu.Lock()
+			ack := latestACK
+			ackMu.Unlock()
+			if !ack.OK || ack.Instance != mgr.runtimeInstance || ack.Lifecycle == "" {
+				t.Errorf("retry lacks complete ACK: %+v", ack)
+			}
+			matches, err := reopened.ControlledShutdownMatches(run.ID, ack.Instance, ack.Lifecycle, "cancelled: planned daemon shutdown")
+			if err != nil || !matches {
+				t.Errorf("retry changed durable lifecycle: %v,%v", matches, err)
+			}
+
 		})
 	}
 }

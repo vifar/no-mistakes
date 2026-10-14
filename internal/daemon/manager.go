@@ -59,6 +59,8 @@ type RunManager struct {
 	paths            *paths.Paths
 	steps            StepFactory
 
+	shutdownPreparation *controlledShutdownPreparation
+
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
 	// evalCaptureMu serializes automatic eval collection. Concurrent runs

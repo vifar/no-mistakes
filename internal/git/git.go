@@ -10,8 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
@@ -105,23 +103,8 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	shellenv.ConfigureShellCommand(cmd)
-	var leaderSignalled atomic.Bool
-	cancelCommand := cmd.Cancel
-	cmd.Cancel = func() error {
-		if cmd.Process != nil && commandLeaderRunning(cmd.Process.Pid) && cmd.Process.Signal(syscall.SIGTERM) == nil {
-			leaderSignalled.Store(true)
-		}
-		return cancelCommand()
-	}
 	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil && leaderSignalled.Load() && cmd.ProcessState != nil {
-			if exit, ok := err.(*exec.ExitError); ok && exit.ProcessState == cmd.ProcessState {
-				if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() && status.Signal() == syscall.SIGTERM {
-					err = &CommandCancellationError{cause: err, cancellation: ctxErr}
-				}
-			}
-		}
 		return nil, fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(strings.TrimSpace(stderr.String())))
 	}
 	return out, nil
