@@ -49,6 +49,16 @@ func TestIdentityOrdinaryCloneNeverLaunchesTopLevel(t *testing.T) {
 	}
 }
 
+func TestIdentityFixtureBareGitConfigurationIsolation(t *testing.T) {
+	f := newTopologyFixture(t)
+	cmd := exec.Command("git", "rev-parse", "--is-bare-repository")
+	cmd.Dir = f.origin
+	out, err := cmd.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(out)) != "true" {
+		t.Fatalf("healthy bare fixture discovery: %q, %v", out, err)
+	}
+}
+
 func TestIdentityFirstQueryContextFailureIsReturned(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
