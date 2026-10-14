@@ -4,7 +4,7 @@
 
 Remove an unnecessary Git subprocess from ordinary-clone classification and fail closed when repository identity cannot be checked. The caller must retain normal enrollment and authenticated process-ancestry checks.
 
-Repository identity checks can exceed a caller's reply budget when a Git subprocess stalls. Ordinary-clone classification currently performs a worktree-root query that is not needed to establish managed identity. This change removes that unnecessary dependency and bounds identity Git execution. It does not diagnose every possible timeout or impose a deadline on the complete classifier.
+The implemented classification rules and execution-budget limits are owned by the [gate-model handbook](../src/content/docs/concepts/gate-model.md#recursive-run-containment).
 
 ## Scope
 
@@ -41,7 +41,7 @@ No enrollment rewrite, marker exception, empty-directory control request, raw mu
 
 ## Required evidence
 
-- A real ordinary clone with a separate small non-race Git helper that stalls only top-level lookup classifies successfully before the caller deadline. Assert the unnecessary lookup was not launched. Existing tests do not inject this failure.
+- A real ordinary clone with a separate small non-race Git helper that stalls only top-level lookup classifies successfully before the caller deadline. Assert the unnecessary lookup was not launched. Regression: `TestIdentityOrdinaryCloneNeverLaunchesTopLevel`.
 - Cancellation or an expired deadline during the first identity read produces a matching error instead of `Nested=false`.
 - Real malformed gitfiles, `.git` directories with missing/invalid HEAD, and corrupted bare metadata fail classification, including cases where Git emits an ordinary-discovery absence message. A truly metadata-free directory remains allowed only after ancestry is checked; an active descendant remains refused.
 - A registered managed bare repository remains positively nested.
