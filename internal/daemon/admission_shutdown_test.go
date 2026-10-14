@@ -87,7 +87,7 @@ func TestControlledShutdown_DrainsInflightAdmissionBeforeStopHandoff(t *testing.
 				}
 				startDone := make(chan error, 1)
 				go func() {
-					_, err := mgr.startRun(context.Background(), repo, "main", head, head, "test", nil, "intent", "", false, "", nil)
+					_, err := mgr.startRun(context.Background(), repo, "main", head, head, "test", nil, "intent", "", false, "", "", nil)
 					startDone <- err
 				}()
 				select {
@@ -138,7 +138,7 @@ func TestControlledShutdown_DrainsInflightAdmissionBeforeStopHandoff(t *testing.
 				if handoff.Load() {
 					t.Error("successful ACK handed off before admitted setup settled")
 				}
-				newID, newErr := mgr.startRun(context.Background(), repo, "other", head, head, "test", nil, "intent", "", false, "", nil)
+				newID, newErr := mgr.startRun(context.Background(), repo, "other", head, head, "test", nil, "intent", "", false, "", "", nil)
 				if newErr == nil || newID != "" {
 					t.Errorf("new admission during shutdown = %q,%v", newID, newErr)
 				}
@@ -228,7 +228,7 @@ func TestControlledShutdown_PersistenceFailureCannotReopenRawAdmission(t *testin
 	mgr.runtimeStartedAt = time.Now().UTC()
 	startDone := make(chan error, 1)
 	go func() {
-		_, err := mgr.startRun(context.Background(), repo, "main", head, head, "test", nil, "intent", "", false, "", nil)
+		_, err := mgr.startRun(context.Background(), repo, "main", head, head, "test", nil, "intent", "", false, "", "", nil)
 		startDone <- err
 	}()
 	select {
@@ -270,7 +270,7 @@ func TestControlledShutdown_PersistenceFailureCannotReopenRawAdmission(t *testin
 	if !mgr.shuttingDown.Load() {
 		t.Error("failed persistence cleared raw shutdown fence")
 	}
-	if _, err := mgr.startRun(context.Background(), repo, "queued", head, head, "test", nil, "intent", "", false, "", nil); err == nil {
+	if _, err := mgr.startRun(context.Background(), repo, "queued", head, head, "test", nil, "intent", "", false, "", "", nil); err == nil {
 		t.Error("queued admission escaped raw shutdown")
 	}
 	if mgr.shuttingDown.Load() {

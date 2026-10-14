@@ -2,7 +2,9 @@ package steps
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,6 +54,18 @@ func TestWatcherStrictProofRequiresExecutedPass(t *testing.T) {
 				gitCmd(t, remote, "init", "--bare")
 				gitCmd(t, sc.WorkDir, "config", "url."+remote+".insteadOf", sc.Repo.UpstreamURL)
 				sc.Repo.URLsVerified = true
+				bindComparison := func(head string) {
+					digest := sha256.Sum256([]byte(gitCmd(t, sc.WorkDir, "diff", "--binary", sc.Run.BaseSHA, head)))
+					if _, err := sc.DB.BindRunPRContext(sc.Run.ID, db.PRContextCandidate{
+						SourceRepo: "test/repo", SourceBranch: sc.Run.Branch, LocalHeadSHA: head,
+						TargetBranch: "main", TargetSHA: sc.Run.BaseSHA, MergeBaseSHA: sc.Run.BaseSHA,
+						DiffDigest: hex.EncodeToString(digest[:]),
+					}, types.StepRebase); err != nil {
+						t.Fatal(err)
+					}
+				}
+				bindComparison(sc.Run.HeadSHA)
+
 				var mu sync.Mutex
 				var states []string
 				var requestPaths []string
@@ -68,7 +82,7 @@ func TestWatcherStrictProofRequiresExecutedPass(t *testing.T) {
 				}))
 				defer server.Close()
 				env, _ := fakeGH(t, "")
-				env = append(env, "FAKE_CLI_STATUS_API_URL="+server.URL)
+				env = append(env, "FAKE_CLI_STATUS_API_URL="+server.URL, "FAKE_CLI_PR_FACTS_LIST_JSON=[]")
 				for key, value := range environmentEntries(t, env) {
 					t.Setenv(key, value)
 				}
@@ -129,6 +143,7 @@ func TestWatcherStrictProofRequiresExecutedPass(t *testing.T) {
 						if err := s.DB.UpdateRunHeadSHA(s.Run.ID, s.Run.HeadSHA); err != nil {
 							return nil, err
 						}
+						bindComparison(s.Run.HeadSHA)
 						return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
 					}
 					cancel(errors.New(types.RunCancelReasonAbortedByUser))
@@ -208,6 +223,9 @@ func TestWatcherStrictProofRequiresExecutedPass(t *testing.T) {
 				case err := <-done:
 					if err == nil {
 						t.Fatal("watcher did not cancel")
+					}
+					if context.Cause(ctx) == nil {
+						t.Fatalf("watcher exited before operator cancellation: %v", err)
 					}
 				case <-time.After(20 * time.Second):
 					t.Fatal("watcher did not settle")

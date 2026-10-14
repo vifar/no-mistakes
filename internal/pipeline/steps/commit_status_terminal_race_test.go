@@ -248,7 +248,7 @@ func TestCommitStatus_TerminalPreparationFailureIsDurable(t *testing.T) {
 	}
 }
 
-func TestCommitStatus_PRFinalizationSerializesPausedSuccess(t *testing.T) {
+func TestCommitStatus_ObservationIsNonterminalAndExecutorCompletionSerializesPausedSuccess(t *testing.T) {
 	for _, parked := range []bool{false, true} {
 		for _, observed := range []string{"MERGED", "CLOSED", "OPEN"} {
 			t.Run(fmt.Sprintf("parked_%v/%s", parked, observed), func(t *testing.T) {
@@ -262,6 +262,26 @@ func TestCommitStatus_PRFinalizationSerializesPausedSuccess(t *testing.T) {
 					if err := sc.DB.UpdateRunStatus(sc.Run.ID, types.RunRunning); err != nil {
 						t.Fatal(err)
 					}
+				}
+				if _, err := sc.DB.BindRunPRContext(sc.Run.ID, db.PRContextCandidate{
+					LocalHeadSHA: sc.Run.HeadSHA, TargetBranch: "main", TargetSHA: sc.Run.HeadSHA,
+					MergeBaseSHA: sc.Run.HeadSHA, DiffDigest: strings.Repeat("a", 64),
+				}, types.StepRebase); err != nil {
+					t.Fatal(err)
+				}
+				stepEntered, stepRelease := make(chan struct{}), make(chan struct{})
+				var stepOnce sync.Once
+				finishStep := func() { stepOnce.Do(func() { close(stepRelease) }) }
+				defer finishStep()
+				completionDone := make(chan error, 1)
+				completionRun := *sc.Run
+				executor := pipeline.NewExecutor(sc.DB, paths.WithRoot(t.TempDir()), sc.Config, sc.Agent,
+					[]pipeline.Step{&terminalCompletionBarrier{entered: stepEntered, release: stepRelease}}, nil)
+				go func() { completionDone <- executor.Execute(context.Background(), &completionRun, sc.Repo, sc.WorkDir) }()
+				select {
+				case <-stepEntered:
+				case <-time.After(10 * time.Second):
+					t.Fatal("executor did not enter completion step")
 				}
 				entered, release := make(chan struct{}), make(chan struct{})
 				var once sync.Once
@@ -312,9 +332,21 @@ func TestCommitStatus_PRFinalizationSerializesPausedSuccess(t *testing.T) {
 				}()
 				select {
 				case err := <-ciDone:
-					ciDone <- err
-					t.Errorf("CI bypassed publication boundary: %v", err)
-				case <-time.After(300 * time.Millisecond):
+					if err != nil && !errors.Is(err, stopPolling) {
+						t.Fatal(err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("nonterminal observation blocked behind status publication")
+				}
+				observedRun, err := sc.DB.GetRun(sc.Run.ID)
+				if err != nil || observedRun.Status != types.RunRunning {
+					t.Fatalf("observation terminalized run: %+v,%v", observedRun, err)
+				}
+				finishStep()
+				select {
+				case err := <-completionDone:
+					t.Fatalf("executor completion bypassed outstanding HTTP: %v", err)
+				case <-time.After(100 * time.Millisecond):
 				}
 				unblock()
 				select {
@@ -323,12 +355,12 @@ func TestCommitStatus_PRFinalizationSerializesPausedSuccess(t *testing.T) {
 					t.Fatal("reporter stuck")
 				}
 				select {
-				case err := <-ciDone:
-					if err != nil && !errors.Is(err, stopPolling) {
+				case err := <-completionDone:
+					if err != nil {
 						t.Fatal(err)
 					}
 				case <-time.After(10 * time.Second):
-					t.Fatal("CI completion stuck")
+					t.Fatal("executor completion stuck")
 				}
 				reopened, err := db.Open(path)
 				if err != nil {
@@ -454,4 +486,13 @@ func TestCommitStatus_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 	if fmt.Sprint(states) != "[success failure]" {
 		t.Fatalf("HTTP ordering = %v", states)
 	}
+}
+
+type terminalCompletionBarrier struct{ entered, release chan struct{} }
+
+func (*terminalCompletionBarrier) Name() types.StepName { return types.StepCI }
+func (s *terminalCompletionBarrier) Execute(*pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	close(s.entered)
+	<-s.release
+	return &pipeline.StepOutcome{}, nil
 }

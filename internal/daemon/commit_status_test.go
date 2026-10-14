@@ -1002,7 +1002,7 @@ func TestAdmissionFailure_SettlesBeforeReleasingCustody(t *testing.T) {
 	mgr.runtimeStartedAt = time.Now().UTC()
 	startDone := make(chan error, 1)
 	go func() {
-		_, err := mgr.startRun(context.Background(), repo, "main", head, head, "test", nil, "intent", "", false, "", nil)
+		_, err := mgr.startRun(context.Background(), repo, "main", head, head, "test", nil, "intent", "", false, "", "", nil)
 		startDone <- err
 	}()
 	select {

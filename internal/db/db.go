@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
@@ -27,7 +28,8 @@ const schemaVersion = 3
 
 // DB wraps a SQLite database connection.
 type DB struct {
-	sql *sql.DB
+	sql    *sql.DB
+	closed atomic.Bool
 	// queueClock stamps queued_at; nil means the wall clock. A test seam for
 	// proving the stored queue order does not depend on the clock.
 	queueClock func() int64
@@ -163,6 +165,7 @@ func isDuplicateColumnErr(err error) bool {
 
 // Close closes the database connection.
 func (d *DB) Close() error {
+	d.closed.Store(true)
 	return d.sql.Close()
 }
 
@@ -177,3 +180,5 @@ func newID() string {
 func now() int64 {
 	return time.Now().Unix()
 }
+
+func (d *DB) Closed() bool { return d.closed.Load() }
