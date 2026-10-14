@@ -144,8 +144,8 @@ func TestCheckScopeReadsRequiredContextsOncePerScope(t *testing.T) {
 	for range 5 {
 		scope.Apply(context.Background(), &PR{HeadSHA: "h"}, approvalChecks())
 	}
-	if host.calls != 1 || scope.ProviderFetches() != 1 {
-		t.Fatalf("provider reads = %d (scope reports %d), want 1 for five polls", host.calls, scope.ProviderFetches())
+	if host.calls != 1 {
+		t.Fatalf("provider reads = %d, want 1 for five polls", host.calls)
 	}
 	failing := &requiredChecksHost{err: ErrRequiredChecksUnavailable}
 	scope = NewCheckScope(failing, CheckScopePolicy{}, "main", nil)
@@ -173,9 +173,13 @@ func TestCheckScopeDoesNotCacheAnInterruptedRead(t *testing.T) {
 
 func TestCheckScopeProvidersWithoutAReaderEvaluateAllChecks(t *testing.T) {
 	t.Parallel()
-	scoped := NewCheckScope(nil, CheckScopePolicy{ExternalChecks: []string{"approve*"}}, "main", nil).Apply(context.Background(), &PR{}, approvalChecks())
+	var logs []string
+	scoped := NewCheckScope(nil, CheckScopePolicy{ExternalChecks: []string{"approve*"}}, "main", func(m string) { logs = append(logs, m) }).Apply(context.Background(), &PR{}, approvalChecks())
 	if got := names(scoped.Relevant); !reflect.DeepEqual(got, []string{"build", "approval-status", "extra"}) {
 		t.Fatalf("relevant = %v", got)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], "evaluating all checks") {
+		t.Fatalf("fallback logs = %v", logs)
 	}
 	if got := names(scoped.External); !reflect.DeepEqual(got, []string{"approve"}) {
 		t.Fatalf("external = %v", got)
@@ -190,5 +194,21 @@ func TestScopedChecksSummaryNamesUnsettledOnly(t *testing.T) {
 	want := "external (awaiting outside approval): approve (fail); informational (not required, ignored): approval-status (fail), extra (fail)"
 	if got != want {
 		t.Fatalf("Summary() = %q, want %q", got, want)
+	}
+}
+
+func TestCheckScopeLiteralMustPassUsesDisplayNameWithoutResurrectingExternal(t *testing.T) {
+	for _, external := range []string{"", "build", "CI / build"} {
+		t.Run(external, func(t *testing.T) {
+			policy := CheckScopePolicy{MustPass: []string{"CI / build"}, ExternalChecks: []string{external}}
+			scoped := NewCheckScope(&requiredChecksHost{contexts: []string{"build"}}, policy, "main", nil).Apply(context.Background(), &PR{}, []Check{{Name: "build", Workflow: "CI", Bucket: CheckBucketPass}})
+			if external == "" {
+				if len(scoped.Relevant) != 1 || scoped.Relevant[0].Bucket != CheckBucketPass {
+					t.Fatalf("reported must_pass duplicated: %+v", scoped)
+				}
+			} else if len(scoped.Relevant) != 0 || len(scoped.External) != 1 {
+				t.Fatalf("external check resurrected: %+v", scoped)
+			}
+		})
 	}
 }

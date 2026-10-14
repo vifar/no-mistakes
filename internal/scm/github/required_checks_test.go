@@ -5,6 +5,7 @@ import (
 	"errors"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -49,14 +50,31 @@ func dedupe(in []string) []string {
 	return out
 }
 
-func TestGetRequiredCheckContextsUsesRulesWhenProtectionIsAbsent(t *testing.T) {
-	t.Parallel()
-	contexts, err := requiredContexts(t, map[string]githubTestResponse{
-		protectionCmd: {stderr: "gh: Branch not protected (HTTP 404)", code: 1},
-		rulesCmd:      {stdout: `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`},
-	})
-	if err != nil || !reflect.DeepEqual(contexts, []string{"ci"}) {
-		t.Fatalf("contexts = %v, err = %v, want [ci]", contexts, err)
+func TestGetRequiredCheckContextsRejectsPartialSources(t *testing.T) {
+	for _, source := range []string{protectionCmd, rulesCmd} {
+		for _, failure := range []string{"HTTP 403", "HTTP 404", "HTTP 502"} {
+			t.Run(source+failure, func(t *testing.T) {
+				responses := map[string]githubTestResponse{
+					protectionCmd: {stdout: `{"contexts":["build"]}`},
+					rulesCmd:      {stdout: `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"test"}]}}]`},
+				}
+				responses[source] = githubTestResponse{stderr: failure, code: 1}
+				host := New(githubTestCmdFactory(responses), nil, "", "test/repo")
+				var logs []string
+				scope := scm.NewCheckScope(host, scm.CheckScopePolicy{}, "main", func(m string) { logs = append(logs, m) })
+				scoped := scope.Apply(context.Background(), &scm.PR{}, []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass}, {Name: "optional", Bucket: scm.CheckBucketFail}})
+				if len(scoped.Relevant) != 2 {
+					t.Fatalf("partial source omitted failures: %+v", scoped)
+				}
+				label := "branch protection"
+				if source == rulesCmd {
+					label = "branch rules"
+				}
+				if len(logs) != 1 || !strings.Contains(logs[0], label) || !strings.Contains(logs[0], "evaluating all checks") {
+					t.Fatalf("logs = %v", logs)
+				}
+			})
+		}
 	}
 }
 

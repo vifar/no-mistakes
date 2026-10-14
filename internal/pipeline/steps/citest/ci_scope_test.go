@@ -49,7 +49,8 @@ func runScoped(t *testing.T, checks []string, env []string, ci config.CI, maxPol
 	prURL := "https://github.com/test/repo/pull/42"
 	ag := &stepstest.MockAgent{AgentName: "test"}
 	sctx := stepstest.NewTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = append(ghEnv, env...)
+	sctx.Env = append(ghEnv, "FAKE_CLI_RULES_JSON=[]", "FAKE_CLI_PROTECTION_JSON={}")
+	sctx.Env = append(sctx.Env, env...)
 	stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
 	sctx.Config.CITimeout = 10 * time.Minute
 	sctx.Config.AutoFix.CI = 3

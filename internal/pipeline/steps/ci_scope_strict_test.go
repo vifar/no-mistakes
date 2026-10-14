@@ -53,6 +53,7 @@ func strictCIRun(t *testing.T, checksJSON, protection string, ci config.CI) (*pi
 		"FAKE_CLI_PR_HEAD_SHA="+head,
 		"FAKE_CLI_PR_BASE=main",
 		"FAKE_CLI_PROTECTION_JSON="+protection,
+		"FAKE_CLI_RULES_JSON=[]",
 	)
 	sctx.Config.CITimeout = 10 * time.Minute
 	sctx.Config.CI = ci

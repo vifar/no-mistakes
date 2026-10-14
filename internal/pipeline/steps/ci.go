@@ -246,7 +246,14 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		}
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
-	checks = newCIChecksScope(sctx, host, effectivePRBaseBranch(sctx)).Apply(ctx, pr, checks).Relevant
+	targetBranch, err := currentPRTargetBranch(sctx)
+	if err != nil {
+		return fmt.Sprintf("could not verify live CI target: %v", err), nil
+	}
+	pr.BaseBranch = targetBranch
+	scoped := newCIChecksScope(sctx, host, targetBranch).Apply(ctx, pr, checks)
+	excludedChecks := append(scoped.External, scoped.Informational...)
+	checks = scoped.Relevant
 	if allChecksPassed(checks) {
 		if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
 			return fmt.Sprintf("could not verify live CI comparison: %v", err), nil
@@ -254,7 +261,7 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		// A green head can still carry a green review bot's unresolved
 		// comments under ci.review_bot_comments: always; approving over
 		// them is an override, not a clean pass.
-		botFindings, err := s.greenReviewBotFindings(sctx, host, pr, checks)
+		botFindings, err := s.greenReviewBotFindings(sctx, host, pr, checks, excludedChecks...)
 		if err != nil {
 			return fmt.Sprintf("could not verify review bot comments: %v", err), nil
 		}
@@ -518,6 +525,17 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		sctx.Log(fmt.Sprintf("warning: %v", err))
 	}
 	if repairRequested {
+		pr.HeadSHA = sctx.Run.HeadSHA
+		checks, err := host.GetChecks(ctx, pr)
+		if err != nil {
+			return nil, fmt.Errorf("scope retained CI findings: %w", err)
+		}
+		if err := scm.ValidateCheckHeads(checks, pr.HeadSHA); err != nil {
+			return nil, err
+		}
+		if err := scopeRetainedCIFindings(sctx, checkScope, pr, checks); err != nil {
+			return nil, err
+		}
 		repairOutcome, err := s.repairFromFindings(sctx, host, pr)
 		if err != nil {
 			return nil, err
@@ -761,6 +779,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			// block the PR nor be handed to the fix agent.
 			scoped := checkScope.Apply(ctx, pr, checks)
 			checks = scoped.Relevant
+			excludedChecks := append(scoped.External, scoped.Informational...)
+			if err := s.scopeRetainedCIReruns(sctx, checkScope, pr, checks, excludedChecks); err != nil {
+				return nil, err
+			}
+			if err := scopeRetainedCIFindings(sctx, checkScope, pr, append(append([]scm.Check(nil), checks...), excludedChecks...)); err != nil {
+				return nil, err
+			}
 			if summary := scoped.Summary(); summary != lastScopeLog {
 				lastScopeLog = summary
 				if summary != "" {
@@ -916,8 +941,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						unresolvedCancelled: unresolvedCancelled,
 						mergeConflict:       mergeConflict,
 						reruns:              s.transientReruns.used,
-						botComments:         reviewBotComments(sctx, host, pr, checks),
+						botComments:         reviewBotComments(sctx, host, pr, checks, excludedChecks...),
 						greenBots:           reviewBotCommentsAlways(sctx),
+						excludedChecks:      excludedChecks,
 					})
 					if hasAwaitingApprovalChecks(checks) {
 						sctx.Log(ciChecksAwaitingApprovalMsg)
@@ -958,7 +984,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// red bot check produces, so checks-passed is never reported
 					// over a comment nobody has looked at. A trusted no_ci head
 					// with no checks at all reads them the same way.
-					botFindings, botErr := s.greenReviewBotFindings(sctx, host, pr, checks)
+					botFindings, botErr := s.greenReviewBotFindings(sctx, host, pr, checks, excludedChecks...)
 					if botErr != nil && pluginPollFailsStep(botErr) {
 						clearCIMonitorReady(sctx)
 						return nil, botErr

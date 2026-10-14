@@ -114,21 +114,12 @@ type CheckScope struct {
 	resolved bool
 	required []string
 	derived  bool
-	fetches  int
 }
 
 // NewCheckScope builds a scope for host and the PR's target branch. logf may
 // be nil.
 func NewCheckScope(host Host, policy CheckScopePolicy, branch string, logf func(string)) *CheckScope {
 	return &CheckScope{policy: policy, host: host, branch: strings.TrimSpace(branch), logf: logf}
-}
-
-// ProviderFetches reports how many times the provider was asked for the
-// required contexts.
-func (s *CheckScope) ProviderFetches() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.fetches
 }
 
 func (s *CheckScope) log(msg string) {
@@ -152,10 +143,10 @@ func (s *CheckScope) requiredContexts(ctx context.Context, pr *PR) ([]string, bo
 	}
 	reader, ok := s.host.(RequiredChecksReader)
 	if !ok || s.branch == "" {
+		s.log("CI scope: provider has no required-check reader or target branch; evaluating all checks")
 		s.resolved = true
 		return nil, false
 	}
-	s.fetches++
 	contexts, err := reader.GetRequiredCheckContexts(ctx, pr, s.branch)
 	switch {
 	case err != nil && ctx.Err() != nil:
@@ -201,11 +192,19 @@ func (s *CheckScope) Apply(ctx context.Context, pr *PR, checks []Check) ScopedCh
 	return s.partition(pr, checks, required, derived)
 }
 
+func (s *CheckScope) Includes(ctx context.Context, pr *PR, check Check) bool {
+	required, derived := s.requiredContexts(ctx, pr)
+	return s.classify(check, required, derived) == CheckRoleRequired
+}
+
 func (s *CheckScope) partition(pr *PR, checks []Check, required []string, derived bool) ScopedChecks {
 	var out ScopedChecks
 	reported := make(map[string]bool, len(checks))
+	reportedForms := make(map[string]bool, len(checks)*2)
 	for _, c := range checks {
 		reported[c.Name] = true
+		reportedForms[c.Name] = true
+		reportedForms[c.DisplayName()] = true
 		switch s.classify(c, required, derived) {
 		case CheckRoleExternal:
 			out.External = append(out.External, c)
@@ -217,7 +216,7 @@ func (s *CheckScope) partition(pr *PR, checks []Check, required []string, derive
 	}
 	expected := append([]string(nil), required...)
 	for _, p := range s.policy.MustPass {
-		if p = strings.TrimSpace(p); p != "" && !strings.ContainsAny(p, "*?") {
+		if p = strings.TrimSpace(p); p != "" && !strings.ContainsAny(p, "*?") && !reportedForms[p] {
 			expected = append(expected, p)
 		}
 	}
