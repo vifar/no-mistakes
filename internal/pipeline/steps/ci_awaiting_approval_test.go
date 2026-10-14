@@ -68,7 +68,7 @@ func TestHeldCheckIsNeitherFailingNorTerminal(t *testing.T) {
 	if !hasPendingChecks(checks) {
 		t.Error("a held workflow must keep the PR pending")
 	}
-	if allChecksPassed(checks) {
+	if (scm.ScopedChecks{Relevant: checks}).Ready() {
 		t.Error("a held workflow must never read as passed")
 	}
 	// It is not a terminal failure, so it is never classified as one either -

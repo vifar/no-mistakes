@@ -81,18 +81,6 @@ func hasUnresolvedChecks(checks []scm.Check) bool {
 	return false
 }
 
-func allChecksPassed(checks []scm.Check) bool {
-	if len(checks) == 0 {
-		return false
-	}
-	for _, c := range checks {
-		if c.Bucket != scm.CheckBucketPass && c.Bucket != scm.CheckBucketSkip {
-			return false
-		}
-	}
-	return true
-}
-
 // failingCheckNames returns the names of failing checks.
 func failingCheckNames(checks []scm.Check) []string {
 	var names []string

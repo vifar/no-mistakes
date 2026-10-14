@@ -212,3 +212,29 @@ func TestCheckScopeLiteralMustPassUsesDisplayNameWithoutResurrectingExternal(t *
 		})
 	}
 }
+
+func TestCheckScopeReadinessDistinguishesExcludedFromUnobserved(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		required []string
+		checks   []Check
+		noCI     bool
+		want     bool
+	}{
+		{"unknown required set waits", nil, []Check{{Name: "approval", Bucket: CheckBucketFail}}, false, false},
+		{"no_ci permits observed exclusions", nil, []Check{{Name: "approval", Bucket: CheckBucketFail}}, true, true},
+		{"no_ci cannot invent observed checks", nil, nil, true, false},
+		{"known required set permits exclusions", []string{"approval"}, []Check{{Name: "approval", Bucket: CheckBucketFail}}, false, true},
+		{"known required set is still unobserved", []string{"approval"}, nil, false, false},
+		{"missing required check blocks", []string{"build"}, []Check{{Name: "approval", Bucket: CheckBucketFail}}, true, false},
+		{"passing required check beats external failure", []string{"build"}, []Check{{Name: "build", Bucket: CheckBucketPass}, {Name: "approval", Bucket: CheckBucketFail}}, false, true},
+		{"pending required check blocks", []string{"build"}, []Check{{Name: "build", Bucket: CheckBucketPending}, {Name: "approval", Bucket: CheckBucketFail}}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := NewCheckScope(&requiredChecksHost{contexts: tc.required}, CheckScopePolicy{NoCI: tc.noCI, ExternalChecks: []string{"approval"}}, "main", nil)
+			if got := scope.Apply(context.Background(), &PR{}, tc.checks).Ready(); got != tc.want {
+				t.Fatalf("Ready()=%v want %v", got, tc.want)
+			}
+		})
+	}
+}

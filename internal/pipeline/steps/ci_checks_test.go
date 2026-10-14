@@ -25,15 +25,15 @@ func TestAllChecksPassedFailsClosed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			checks := []scm.Check{tt.check}
-			if got := allChecksPassed(checks); got != tt.ready {
-				t.Fatalf("allChecksPassed() = %v, want %v", got, tt.ready)
+			if got := (scm.ScopedChecks{Relevant: checks}).Ready(); got != tt.ready {
+				t.Fatalf("Ready() = %v, want %v", got, tt.ready)
 			}
 			if !tt.ready && !hasUnresolvedChecks(checks) && tt.check.Bucket != scm.CheckBucketFail {
 				t.Fatal("non-ready check must be unresolved or failing")
 			}
 		})
 	}
-	if allChecksPassed(nil) {
+	if (scm.ScopedChecks{}).Ready() {
 		t.Fatal("empty checks must not pass")
 	}
 }

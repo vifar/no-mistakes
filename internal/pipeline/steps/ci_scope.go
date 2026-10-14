@@ -16,7 +16,9 @@ func ciCheckScopePolicy(sctx *pipeline.StepContext) scm.CheckScopePolicy {
 	if sctx == nil || sctx.Config == nil {
 		return scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAll}
 	}
-	return sctx.Config.CI.CheckScopePolicy()
+	policy := sctx.Config.CI.CheckScopePolicy()
+	policy.NoCI = sctx.Config.NoCI
+	return policy
 }
 
 // newCIChecksScope builds the scope one CI step execution applies to every

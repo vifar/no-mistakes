@@ -16,7 +16,7 @@ import (
 
 // strictCIRun drives one CI step execution of a strict full-shipping run whose
 // head carries checksJSON, with the target branch protected as protection says.
-func strictCIRun(t *testing.T, checksJSON, protection string, ci config.CI) (*pipeline.StepOutcome, error, []string, *db.Run, string) {
+func strictCIRun(t *testing.T, checksJSON, protection string, ci config.CI, noCI ...bool) (*pipeline.StepOutcome, error, []string, *db.Run, string) {
 	t.Helper()
 	dir, base, head := setupGitRepo(t)
 	remote := t.TempDir()
@@ -57,6 +57,9 @@ func strictCIRun(t *testing.T, checksJSON, protection string, ci config.CI) (*pi
 	)
 	sctx.Config.CITimeout = 10 * time.Minute
 	sctx.Config.CI = ci
+	if len(noCI) > 0 {
+		sctx.Config.NoCI = noCI[0]
+	}
 	var logs []string
 	sctx.Log = func(s string) { logs = append(logs, s) }
 	ctx, cancel := context.WithCancel(context.Background())
@@ -76,6 +79,31 @@ func strictCIRun(t *testing.T, checksJSON, protection string, ci config.CI) (*pi
 		t.Fatal(getErr)
 	}
 	return outcome, err, logs, durable, scope
+}
+
+func TestStrictCIExternalOnlyReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		name, checks, protection string
+		noCI, ready              bool
+	}{
+		{"declared no_ci with observed external check", `[{"name":"approval-status","state":"FAILURE","bucket":"fail"}]`, "", true, true},
+		{"known required set all external", `[{"name":"approval-status","state":"FAILURE","bucket":"fail"}]`, `{"contexts":["approval-status"]}`, false, true},
+		{"unknown required set waits for real CI", `[{"name":"approval-status","state":"FAILURE","bucket":"fail"}]`, "", false, false},
+		{"declared no_ci still needs observed checks in strict shipping", `[]`, "", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outcome, err, logs, run, scope := strictCIRun(t, tc.checks, tc.protection, config.CI{ExternalChecks: []string{"approval-status"}}, tc.noCI)
+			if !errors.Is(err, context.Canceled) || outcome != nil {
+				t.Fatalf("Execute=%+v %v logs=%v", outcome, err, logs)
+			}
+			if (run.CIReadyAt != nil) != tc.ready || run.CIReadyNoCI {
+				t.Fatalf("ready=%v declared-empty=%v want=%v logs=%v", run.CIReadyAt, run.CIReadyNoCI, tc.ready, logs)
+			}
+			if tc.noCI && !strings.Contains(scope, `"no_ci":true`) {
+				t.Fatalf("trusted no_ci not recorded: %s", scope)
+			}
+		})
+	}
 }
 
 const strictChecks = `[{"name":"build","state":"SUCCESS","bucket":"pass"},` +

@@ -175,14 +175,12 @@ func Export(ctx context.Context, database *db.DB, repo *db.Repo, runID, phase st
 		if err != nil {
 			return nil, err
 		}
-		checks = scm.NewCheckScope(host, policy, first.TargetBranch, nil).Apply(ctx, pr, checks).Relevant
-		if len(checks) == 0 {
+		scoped := scm.NewCheckScope(host, policy, first.TargetBranch, nil).Apply(ctx, pr, checks)
+		if len(scoped.Relevant) == 0 && !scoped.Ready() {
 			return nil, fmt.Errorf("strict readiness requires live checks")
 		}
-		for _, check := range checks {
-			if check.Bucket != scm.CheckBucketPass && check.Bucket != scm.CheckBucketSkip {
-				return nil, fmt.Errorf("strict readiness requires all live checks green")
-			}
+		if !scoped.Ready() {
+			return nil, fmt.Errorf("strict readiness requires all live checks green")
 		}
 	}
 	afterFacts, err := reader.GetPRFacts(ctx, pr)

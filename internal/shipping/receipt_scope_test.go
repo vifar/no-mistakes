@@ -82,8 +82,6 @@ func TestCIReadyReceiptKeepsRequiredChecksStrict(t *testing.T) {
 		"required check missing": {[]scm.Check{{Name: "build", Bucket: scm.CheckBucketPass}}, scm.CheckScopePolicy{}},
 		"must_pass check failing": {[]scm.Check{{Name: "build", Bucket: scm.CheckBucketPass}, {Name: "deploy", Bucket: scm.CheckBucketPass}, {Name: "lint", Bucket: scm.CheckBucketFail}},
 			scm.CheckScopePolicy{MustPass: []string{"lint"}}},
-		"only external checks": {[]scm.Check{{Name: "build", Bucket: scm.CheckBucketPass}, {Name: "deploy", Bucket: scm.CheckBucketPass}},
-			scm.CheckScopePolicy{ExternalChecks: []string{"build", "deploy"}}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			f.forge.checks = tc.checks
@@ -97,5 +95,35 @@ func TestCIReadyReceiptKeepsRequiredChecksStrict(t *testing.T) {
 	recordScope(t, f, scm.CheckScopePolicy{})
 	if _, err := Export(ctx, f.database, f.repo, f.run.ID, "ci-ready", forge); err != nil {
 		t.Fatalf("green required checks were refused: %v", err)
+	}
+}
+
+func TestCIReadyReceiptExternalOnlyUsesSharedReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		required    []string
+		checks      []scm.Check
+		noCI, ready bool
+	}{
+		{"strict no_ci with external check", nil, []scm.Check{{Name: "approval", Bucket: scm.CheckBucketFail}}, true, true},
+		{"known required set entirely external", []string{"approval"}, []scm.Check{{Name: "approval", Bucket: scm.CheckBucketFail}}, false, true},
+		{"known passing requirement with external failure", []string{"build"}, []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass}, {Name: "approval", Bucket: scm.CheckBucketFail}}, false, true},
+		{"unknown required set waits", nil, []scm.Check{{Name: "approval", Bucket: scm.CheckBucketFail}}, false, false},
+		{"unobserved remains empty", nil, nil, true, false},
+		{"missing required check blocks despite no_ci", []string{"build"}, []scm.Check{{Name: "approval", Bucket: scm.CheckBucketFail}}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExportFixture(t)
+			if err := f.database.SetRunCIReadyWithReason(f.run.ID, true, false); err != nil {
+				t.Fatal(err)
+			}
+			f.forge.checks = tc.checks
+			forge := &protectedReceiptForge{receiptForge: f.forge, required: tc.required}
+			recordScope(t, f, scm.CheckScopePolicy{NoCI: tc.noCI, ExternalChecks: []string{"approval"}})
+			_, err := Export(context.Background(), f.database, f.repo, f.run.ID, "ci-ready", forge)
+			if (err == nil) != tc.ready {
+				t.Fatalf("receipt error=%v want ready=%v", err, tc.ready)
+			}
+		})
 	}
 }

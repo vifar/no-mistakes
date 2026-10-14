@@ -39,6 +39,7 @@ type RequiredChecksReader interface {
 // repair. It is plain data so a run can record the policy its CI step used and
 // a later reader (the strict readiness receipt) can apply the same one.
 type CheckScopePolicy struct {
+	NoCI bool `json:"no_ci,omitempty"`
 	// RequiredChecks is RequiredChecksAuto (the default when empty) or
 	// RequiredChecksAll.
 	RequiredChecks string `json:"required_checks,omitempty"`
@@ -71,6 +72,19 @@ type ScopedChecks struct {
 	Relevant      []Check
 	External      []Check
 	Informational []Check
+	emptyReady    bool
+}
+
+func (s ScopedChecks) Ready() bool {
+	if len(s.Relevant) == 0 {
+		return s.emptyReady
+	}
+	for _, check := range s.Relevant {
+		if check.Bucket != CheckBucketPass && check.Bucket != CheckBucketSkip {
+			return false
+		}
+	}
+	return true
 }
 
 // Summary describes the checks that do not decide readiness and are not yet
@@ -198,7 +212,7 @@ func (s *CheckScope) Includes(ctx context.Context, pr *PR, check Check) bool {
 }
 
 func (s *CheckScope) partition(pr *PR, checks []Check, required []string, derived bool) ScopedChecks {
-	var out ScopedChecks
+	out := ScopedChecks{emptyReady: len(checks) > 0 && (derived || s.policy.NoCI)}
 	reported := make(map[string]bool, len(checks))
 	reportedForms := make(map[string]bool, len(checks)*2)
 	for _, c := range checks {

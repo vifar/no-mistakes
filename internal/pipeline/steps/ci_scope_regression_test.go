@@ -39,6 +39,29 @@ func TestCIScopeApprovalUsesSelectedTarget(t *testing.T) {
 	}
 }
 
+func TestCIScopeApprovalExternalOnlyReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		name, protection, checks string
+		noCI, ready              bool
+	}{
+		{"no_ci permits observed exclusions", "", `[{"name":"Greptile Review","state":"FAILURE","bucket":"fail","app":"greptile-apps"}]`, true, true},
+		{"known required set permits exclusions", `{"contexts":["Greptile Review"]}`, `[{"name":"Greptile Review","state":"FAILURE","bucket":"fail","app":"greptile-apps"}]`, false, true},
+		{"unknown required set waits", "", `[{"name":"Greptile Review","state":"FAILURE","bucket":"fail","app":"greptile-apps"}]`, false, false},
+		{"unobserved rollup is not ready", "", `[]`, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := append(fakeCIGH(t, "OPEN", tc.checks), greenGreptileCommentJSON, "FAKE_CLI_PROTECTION_JSON="+tc.protection, `FAKE_CLI_RULES_JSON=[]`)
+			sctx, _, _, _, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsAlways, env)
+			sctx.Config.NoCI = tc.noCI
+			sctx.Config.CI.ExternalChecks = []string{"Greptile Review"}
+			reason, err := (&CIStep{}).VerifyApprovalOverride(sctx)
+			if err != nil || (reason == "") != tc.ready {
+				t.Fatalf("approval reason=%q err=%v want ready=%v", reason, err, tc.ready)
+			}
+		})
+	}
+}
+
 func TestCIScopeExcludedBotCannotReturnThroughComments(t *testing.T) {
 	for _, external := range []bool{false, true} {
 		for _, failing := range []bool{false, true} {

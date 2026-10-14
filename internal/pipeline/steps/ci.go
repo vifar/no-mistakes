@@ -254,7 +254,7 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	scoped := newCIChecksScope(sctx, host, targetBranch).Apply(ctx, pr, checks)
 	excludedChecks := append(scoped.External, scoped.Informational...)
 	checks = scoped.Relevant
-	if allChecksPassed(checks) {
+	if scoped.Ready() {
 		if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
 			return fmt.Sprintf("could not verify live CI comparison: %v", err), nil
 		}
@@ -967,16 +967,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// Applies even when no_ci is declared: registered checks are
 					// never waived.
 					lastMonitorLog = logCIMonitorStatus(sctx, ciWaitingMessage(checks), lastMonitorLog)
-				case len(checks) == 0 && (sctx.Config == nil || !sctx.Config.NoCI || sctx.Run.Shipping != nil):
-					// Only ordinary runs may use trusted no_ci: true as evidence
-					// for empty forge results. Strict shipping requires checks.
-					// Otherwise keep waiting - delayed registration
-					// is common and must never look green. Elapsed time is not
-					// evidence; there is no grace-period promotion path.
+				case len(checks) == 0 && !scoped.Ready() && (sctx.Config == nil || !sctx.Config.NoCI || sctx.Run.Shipping != nil):
 					clearCIMonitorReady(sctx)
 					lastMonitorLog = ""
 					sctx.Log("no CI checks reported yet, waiting for checks to register...")
-				case len(checks) == 0 || allChecksPassed(checks):
+				case len(checks) == 0 || scoped.Ready():
 					// Under ci.review_bot_comments: always, a review bot that
 					// concluded its check green, or has not registered one on
 					// this head yet, may still have left unresolved comments. They are read before the head is
@@ -1010,7 +1005,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					}
 					sctx.DeferredFindings = ""
 					passedMsg := ciChecksPassedMsg
-					if len(checks) == 0 {
+					if len(checks) == 0 && !scoped.Ready() {
 						passedMsg = ciNoChecksPassedMsg
 					}
 					lastMonitorLog = logVerifiedCIMonitorStatus(sctx, host, checks, passedMsg, lastMonitorLog)

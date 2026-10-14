@@ -1012,7 +1012,7 @@ A list in the trusted repository config replaces this one.
 
 ### ci.external_checks
 
-The operator-level fallback for [`ci.external_checks`](/no-mistakes/reference/repo-config/#ciexternal_checks): glob patterns for check contexts that pass only after an outside party acts, such as an external approval app. They are reported, never waited on, never repaired, and never become findings.
+The operator-level fallback for [`ci.external_checks`](/no-mistakes/reference/repo-config/#ciexternal_checks): glob patterns for check contexts that pass only after an outside party acts, such as an external approval app. They are reported, never waited on, never repaired, and never become findings. An entirely excluded observed rollup is ready when the required set is known or trusted repository `no_ci: true` applies, including in strict shipping. Otherwise registration waits to avoid declaring readiness before real CI registers.
 
 | | |
 |---|---|
