@@ -34,7 +34,7 @@ func TestRunCancellationPreservesCommandProvenance(t *testing.T) {
 			return err
 		}},
 	} {
-		for _, mode := range []string{"cancelled process", "independent exit", "ambiguous cooperative exit"} {
+		for _, mode := range []string{"cancelled process", "independent exit", "ambiguous cooperative exit", "independent signal"} {
 			t.Run(call.name+"/"+mode, func(t *testing.T) {
 				realGit, err := testgit.RealGit()
 				if err != nil {
@@ -48,6 +48,9 @@ func TestRunCancellationPreservesCommandProvenance(t *testing.T) {
 					script = fmt.Sprintf("#!/bin/sh\n(trap '' TERM; sleep 30) &\nprintf '%%s' \"$$\" > %q\nexec %q \"$@\"\n", entered, realGit)
 				} else if mode == "ambiguous cooperative exit" {
 					script = fmt.Sprintf("#!/bin/sh\ntrap 'exit 17' TERM\nprintf '%%s' \"$$\" > %q\nwhile :; do sleep 1; done\n", entered)
+				}
+				if mode == "independent signal" {
+					script = fmt.Sprintf("#!/bin/sh\n(trap '' TERM; sleep 30) &\nprintf '%%s' \"$$\" > %q\nwhile :; do sleep 1; done\n", entered)
 				}
 				if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
 					t.Fatal(err)
@@ -76,6 +79,23 @@ func TestRunCancellationPreservesCommandProvenance(t *testing.T) {
 					case <-time.After(10 * time.Millisecond):
 					}
 				}
+				if mode == "independent signal" {
+					raw, err := os.ReadFile(entered)
+					if err != nil {
+						t.Fatal(err)
+					}
+					pid, err := strconv.Atoi(string(raw))
+					if err != nil {
+						t.Fatal(err)
+					}
+					process, err := os.FindProcess(pid)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := process.Kill(); err != nil {
+						t.Fatal(err)
+					}
+				}
 				cancel()
 				select {
 				case err := <-done:
@@ -91,6 +111,12 @@ func TestRunCancellationPreservesCommandProvenance(t *testing.T) {
 					}
 					if mode == "independent exit" && (exit == nil || exit.ExitCode() != 128) {
 						t.Errorf("independent exit lost: %v", err)
+					}
+					if mode == "independent signal" && exit != nil {
+						status, ok := exit.Sys().(syscall.WaitStatus)
+						if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+							t.Errorf("independent signal identity = %v", exit)
+						}
 					}
 					if mode == "ambiguous cooperative exit" && (exit == nil || exit.ExitCode() != 17) {
 						t.Errorf("ambiguous exit lost: %v", err)

@@ -268,7 +268,7 @@ func TestIsRunningSurfacesExistingDeadSocket(t *testing.T) {
 	}
 }
 
-func TestStopDetachedDaemonFallsBackToPIDWhenSocketIsBroken(t *testing.T) {
+func TestStopDetachedDaemonRejectsPIDFallbackWhenSettlementIsUnknown(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("unix socket setup is platform-specific")
 	}
@@ -335,19 +335,19 @@ func TestStopDetachedDaemonFallsBackToPIDWhenSocketIsBroken(t *testing.T) {
 
 	t.Setenv("NM_TEST_DAEMON_STOP_TIMEOUT", "20ms")
 	if err := stopDetachedDaemon(p); err == nil || !strings.Contains(err.Error(), "transient ipc failure") {
-		t.Fatalf("lost preparation must stay visible after verified PID cleanup: %v", err)
+		t.Fatalf("lost preparation must refuse an unsettled live daemon: %v", err)
 	}
-	if killedPID != pid {
-		t.Fatalf("expected pid fallback to kill pid %d, got %d", pid, killedPID)
+	if killedPID != 0 {
+		t.Fatalf("unsettled preparation killed pid %d", killedPID)
 	}
 	if runningChecks == 0 {
 		t.Fatal("expected pid fallback to check process state")
 	}
-	if _, statErr := os.Stat(p.PIDFile()); !os.IsNotExist(statErr) {
-		t.Fatalf("expected pid file to be removed after PID fallback, got err=%v", statErr)
+	if _, statErr := os.Stat(p.PIDFile()); statErr != nil {
+		t.Fatalf("unsettled pid artifact was removed: %v", statErr)
 	}
-	if _, statErr := os.Stat(p.Socket()); !os.IsNotExist(statErr) {
-		t.Fatalf("expected socket file to be removed after PID fallback, got err=%v", statErr)
+	if _, statErr := os.Stat(p.Socket()); statErr != nil {
+		t.Fatalf("unsettled socket artifact was removed: %v", statErr)
 	}
 }
 
