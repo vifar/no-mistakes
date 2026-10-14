@@ -4,10 +4,13 @@ package gatecontext
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -18,6 +21,12 @@ import (
 )
 
 const ErrorCode = "nested_gate_context"
+
+// This budget belongs only to identity Git commands. Filesystem discovery,
+// database queries and authenticated process ancestry keep their own owners.
+const identityCommandBudget = 10 * time.Second
+
+var identityLocale = []string{"LC_ALL=C", "LANG=C"}
 
 // RefusalMessage is the stable, privacy-safe error contract used at daemon
 // ingress and non-AXI command boundaries.
@@ -73,11 +82,16 @@ func (i Inspector) Inspect(ctx context.Context, req Request) (Result, error) {
 	}
 
 	var managedRepoID string
-	var worktreeRoot string
+	var commonDir string
+	identityCtx, cancelIdentity := context.WithTimeout(ctx, identityCommandBudget)
+	defer cancelIdentity()
 	if !req.SkipManagedGit && strings.TrimSpace(req.CWD) != "" {
-		commonDir, top, ok := gitIdentity(ctx, req.CWD)
-		if ok {
-			worktreeRoot = top
+		var err error
+		commonDir, err = gitCommonDirectory(identityCtx, req.CWD)
+		if err != nil {
+			return result, err
+		}
+		if commonDir != "" {
 			id, managed, err := i.registeredManagedCommonDir(commonDir)
 			if err != nil {
 				return result, err
@@ -129,13 +143,29 @@ func (i Inspector) Inspect(ctx context.Context, req Request) (Result, error) {
 	// Canonical topology remains authoritative when a marker is removed or an
 	// adapter omits it. Attach run/phase only when the worktree path and active
 	// DB record agree exactly; otherwise omit them rather than guessing.
-	if result.ManagedGit && result.RunID == "" && managedRepoID != "" && worktreeRoot != "" {
+	if result.ManagedGit && result.RunID == "" && managedRepoID != "" {
+		var worktreeRoot string
 		// Where a run's worktree is is recorded on the run, so the comparison
 		// reads that placement rather than deriving one from configuration this
 		// process may not be able to read (see worktrees.RecordedDir).
 		for _, step := range active {
 			if step.repoID != managedRepoID {
 				continue
+			}
+			if worktreeRoot == "" {
+				top, err := git.RunWithEnv(identityCtx, req.CWD, identityLocale, "rev-parse", "--show-toplevel")
+				if err != nil {
+					// A registered bare gate has no worktree root. This known absence
+					// costs attribution only; positive managed identity remains decisive.
+					if sameCanonicalPath(req.CWD, commonDir) && normalGitDiagnostic(err, "fatal: this operation must be run in a work tree") {
+						break
+					}
+					return result, fmt.Errorf("gate execution context: attribute managed worktree: %w", err)
+				}
+				if top == "" || !filepath.IsAbs(top) {
+					return result, fmt.Errorf("gate execution context: managed worktree has no absolute top-level identity")
+				}
+				worktreeRoot = top
 			}
 			want := worktrees.RecordedDir(i.Paths, step.worktreeDir, step.repoID, step.runID)
 			if sameCanonicalPath(worktreeRoot, want) {
@@ -225,16 +255,71 @@ func (i Inspector) registeredManagedCommonDir(commonDir string) (string, bool, e
 	return repo.ID, true, nil
 }
 
-func gitIdentity(ctx context.Context, cwd string) (commonDir, top string, ok bool) {
-	common, err := git.Run(ctx, cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
+	common, err := git.RunWithEnv(ctx, cwd, identityLocale, "rev-parse", "--path-format=absolute", "--git-common-dir")
 	if err != nil {
-		return "", "", false
+		if normalGitDiagnostic(err, "fatal: not a git repository (or any of the parent directories): .git") {
+			absent, fsErr := gitMetadataAbsent(cwd)
+			if fsErr != nil {
+				return "", fmt.Errorf("gate execution context: corroborate Git discovery absence: %w: %w", err, fsErr)
+			}
+			if absent {
+				return "", nil
+			}
+		}
+		return "", fmt.Errorf("gate execution context: discover Git common directory: %w", err)
 	}
-	root, err := git.Run(ctx, cwd, "rev-parse", "--show-toplevel")
+	if common == "" || !filepath.IsAbs(common) {
+		return "", fmt.Errorf("gate execution context: Git returned no absolute common-directory identity")
+	}
+	return common, nil
+}
+
+// Only a sole normal exit can prove a discovery absence. A joined output-drain
+// failure or a context wrapper is deliberately ineligible, even with exit 128.
+func normalGitDiagnostic(err error, diagnostic string) bool {
+	var commandErr *git.CommandError
+	if !errors.As(err, &commandErr) {
+		return false
+	}
+	exitErr, ok := commandErr.Unwrap().(*exec.ExitError)
+	return ok && exitErr.ProcessState.Exited() && exitErr.ExitCode() == 128 &&
+		strings.TrimSpace(commandErr.Stderr) == diagnostic
+}
+
+// Git can report ordinary discovery absence for malformed metadata too.
+// Corroborate with physical ancestors, including incomplete bare repositories.
+// Any inaccessible entry leaves absence unproven.
+func gitMetadataAbsent(cwd string) (bool, error) {
+	absolute, err := filepath.Abs(cwd)
 	if err != nil {
-		return "", "", false
+		return false, err
 	}
-	return strings.TrimSpace(common), strings.TrimSpace(root), true
+	physical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return false, err
+	}
+	info, err := os.Stat(physical)
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("caller directory is not a directory")
+	}
+	for dir := physical; ; dir = filepath.Dir(dir) {
+		for _, entry := range []string{".git", "HEAD", "objects", "refs"} {
+			_, err := os.Lstat(filepath.Join(dir, entry))
+			if err == nil {
+				return false, nil
+			}
+			if !os.IsNotExist(err) {
+				return false, err
+			}
+		}
+		if filepath.Dir(dir) == dir {
+			return true, nil
+		}
+	}
 }
 
 func ancestry(pid int, parent func(int) (int, error)) (map[int]bool, error) {
