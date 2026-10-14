@@ -148,17 +148,36 @@ func limitAgent(a agent.Agent, slot RunSlot) agent.Agent {
 }
 
 func (a *limitedAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-	if a.slot != nil {
-		if err := a.slot.Acquire(ctx); err != nil {
-			return nil, err
-		}
-	}
-	release, err := agentLimiter.acquire(ctx)
+	inner, release, err := admitAgent(ctx, a, a.slot)
 	if err != nil {
 		return nil, err
 	}
 	defer release()
-	return a.Agent.Run(ctx, opts)
+	return inner.Run(ctx, opts)
+}
+
+func (sctx *StepContext) AcquireAgent(ctx context.Context) (agent.Agent, func(), error) {
+	if sctx == nil {
+		return nil, func() {}, nil
+	}
+	return admitAgent(ctx, sctx.Agent, sctx.Slot)
+}
+
+func admitAgent(ctx context.Context, ag agent.Agent, slot RunSlot) (agent.Agent, func(), error) {
+	if ag == nil {
+		return nil, func() {}, nil
+	}
+	a := limitAgent(ag, slot).(*limitedAgent)
+	if a.slot != nil {
+		if err := a.slot.Acquire(ctx); err != nil {
+			return nil, nil, err
+		}
+	}
+	release, err := agentLimiter.acquire(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	return a.Agent, release, nil
 }
 
 func (a *limitedAgent) SupportsSessionResume() bool {

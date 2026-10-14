@@ -287,7 +287,7 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		fail(fmt.Sprintf("load config: %s", err))
 		return
 	}
-	if _, err := m.launchRun(context.Background(), repo, run, globalCfg, spec.Trigger, spec.SkipSteps, slot, handle); err != nil {
+	if _, err := m.launchRun(handle.runCtx, repo, run, globalCfg, spec.Trigger, spec.SkipSteps, slot, handle); err != nil {
 		// launchRun already recorded the failure on the row for setup errors.
 		m.broadcastTerminal(run, types.RunFailed, err.Error())
 	}

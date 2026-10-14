@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -32,6 +35,75 @@ type schedStep struct {
 	mu      sync.Mutex
 	started []string
 	gates   map[string]chan struct{}
+}
+
+func TestQueuedSetupAbortCancelsStalledFetchAndReleasesSlot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture uses a POSIX git shim")
+	}
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, head := setupTestGitRepo(t, p, database, "queued-setup")
+	run, err := database.InsertRun(repo.ID, "feature", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.MarkRunQueued(run.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	realGit, err := testgit.RealGit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	marker := filepath.Join(bin, "fetch-started")
+	script := fmt.Sprintf("#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = fetch ]; then\n  touch '%s'\n  exec sleep 10\n fi\ndone\nexec '%s' \"$@\"\n", marker, realGit)
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	m := NewRunManager(database, p, nil)
+	m.sched = newSlotScheduler(func() (int, bool) { return 1, false })
+	m.sched.start = m.startQueuedRun
+	defer m.Shutdown()
+	m.sched.enqueue(run.ID)
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(marker); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("queued launch never reached trusted fetch")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := m.HandleCancel(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan struct{})
+	go func() { m.wg.Wait(); close(finished) }()
+	select {
+	case <-finished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("abort did not stop queued setup")
+	}
+	if usage := m.sched.stats(); usage.Active != 0 {
+		t.Fatalf("cancelled setup retained its slot: %+v", usage)
+	}
+	stored, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status.Active() {
+		t.Fatalf("cancelled setup left an active run: %+v", stored)
+	}
 }
 
 func newSchedStep() *schedStep { return &schedStep{gates: map[string]chan struct{}{}} }

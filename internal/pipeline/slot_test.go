@@ -94,6 +94,60 @@ func TestExecutorAgentCapIncludesBothIntentCallers(t *testing.T) {
 	}
 }
 
+func TestAgentCapacityWaitDoesNotConsumeInvocationBudget(t *testing.T) {
+	for _, mode := range []string{"direct", "step", "session"} {
+		t.Run(mode, func(t *testing.T) {
+			SetMaxConcurrentAgents(1)
+			defer SetMaxConcurrentAgents(0)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			a := &cappedInvocationAgent{entered: make(chan struct{}, 1), release: make(chan struct{})}
+			held := make(chan error, 1)
+			go func() { _, err := limitAgent(a, nil).Run(ctx, agent.RunOpts{}); held <- err }()
+			select {
+			case <-a.entered:
+			case <-ctx.Done():
+				t.Fatal("first agent never started")
+			}
+			budget := 20 * time.Millisecond
+			inner := &timeoutAgent{inner: agent.NewNoop(), timeout: budget, stall: budget}
+			sctx := &StepContext{Ctx: ctx, Agent: limitAgent(inner, nil), Config: &config.Config{AgentTimeout: budget, AgentStallTimeout: budget}, Sessions: NewRunSessions(nil, "budget", inner, false)}
+			done := make(chan error, 1)
+			go func() {
+				var err error
+				switch mode {
+				case "direct":
+					_, err = sctx.Agent.Run(ctx, agent.RunOpts{})
+				case "step":
+					_, err = sctx.RunAgent(agent.RunOpts{})
+				case "session":
+					_, err = sctx.RunAgentSession(SessionRoleFixer, agent.RunOpts{})
+				}
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				close(a.release)
+				<-held
+				t.Fatalf("waiting agent finished before admission: %v", err)
+			case <-time.After(5 * budget):
+			}
+			close(a.release)
+			if err := <-held; err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("fresh invocation budget: %v", err)
+				}
+			case <-ctx.Done():
+				t.Fatal("waiting agent did not run after admission")
+			}
+		})
+	}
+}
+
 type occupiedRunSlot struct {
 	occupied atomic.Bool
 	acquires atomic.Int32
