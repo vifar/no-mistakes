@@ -1333,6 +1333,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var restartFrom types.StepName
 	var statusProofHead, statusProofConfig string
 	var statusProofEpoch int64
+	var executionPassed bool
 	statusProofCore := stepName == types.StepReview || stepName == types.StepTest || stepName == types.StepDocument || stepName == types.StepLint
 
 	// Execute with possible fix loop
@@ -1576,6 +1577,7 @@ rounds:
 			skipRemaining = outcome.SkipRemaining
 			stepSkipped = outcome.Skipped
 			skipReason = safeurl.RedactText(outcome.SkipReason)
+			executionPassed = true
 			break
 		}
 
@@ -1799,7 +1801,7 @@ done:
 	} else if err := e.db.CompleteStepWithStatus(sr.ID, status, finalExitCode, durationMS, logPath); err != nil {
 		return false, "", fmt.Errorf("complete step %s: %w", stepName, err)
 	}
-	if statusProofCore && status == types.StepStatusCompleted && statusProofHead != "" && statusProofConfig == StatusConfigDigest(e.config) {
+	if statusProofCore && executionPassed && status == types.StepStatusCompleted && finalExitCode == 0 && statusProofHead != "" && statusProofConfig == StatusConfigDigest(e.config) {
 		observed, err := git.HeadSHA(ctx, workDir)
 		if err == nil && observed == statusProofHead {
 			if err := e.db.RecordStatusValidationStep(sr.ID, run.ID, observed, statusProofConfig, statusProofEpoch); err != nil {
