@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -162,17 +163,25 @@ func (i Inspector) Inspect(ctx context.Context, req Request) (Result, error) {
 				if err != nil {
 					// A registered bare gate has no worktree root. This known absence
 					// costs attribution only; positive managed identity remains decisive.
-					if sameCanonicalPath(req.CWD, commonDir) && normalGitDiagnostic(err, "fatal: this operation must be run in a work tree") {
-						break
+					if normalGitDiagnostic(err, "fatal: this operation must be run in a work tree") {
+						actual, _, fsErr := nearestGitMetadata(req.CWD)
+						if fsErr == nil && sameCanonicalPath(actual, commonDir) {
+							break
+						}
+						err = errors.Join(err, fsErr)
 					}
 					return result, fmt.Errorf("gate execution context: attribute managed worktree: %w", err)
 				}
+				top = strings.TrimSuffix(top, "\n")
 				if top == "" || !filepath.IsAbs(top) {
 					return result, fmt.Errorf("gate execution context: managed worktree has no absolute top-level identity")
 				}
 				worktreeRoot = top
 			}
-			want := worktrees.RecordedDir(i.Paths, step.worktreeDir, step.repoID, step.runID)
+			want := step.worktreeDir
+			if strings.TrimSpace(want) == "" {
+				want = worktrees.RecordedDir(i.Paths, step.worktreeDir, step.repoID, step.runID)
+			}
 			if sameCanonicalPath(worktreeRoot, want) {
 				result.RunID = step.runID
 				result.Phase = step.phase
@@ -276,28 +285,25 @@ func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
 	identity, err := runIdentityGit(ctx, cwd, "rev-parse", "--path-format=absolute", "--git-common-dir", "--absolute-git-dir")
 	if err != nil {
 		if normalGitDiagnostic(err, "fatal: not a git repository (or any of the parent directories): .git") {
-			absent, fsErr := gitMetadataMatchesDiscovery(cwd, "")
+			actual, _, fsErr := nearestGitMetadata(cwd)
 			if fsErr != nil {
 				return "", fmt.Errorf("gate execution context: corroborate Git discovery absence: %w: %w", err, fsErr)
 			}
-			if absent {
+			if actual == "" {
 				return "", nil
 			}
 		}
 		return "", fmt.Errorf("gate execution context: discover Git common directory: %w", err)
 	}
-	dirs := strings.Split(identity, "\n")
-	if len(dirs) != 2 || !filepath.IsAbs(dirs[0]) || !filepath.IsAbs(dirs[1]) {
-		return "", fmt.Errorf("gate execution context: Git returned no absolute directory identities")
-	}
-	matched, err := gitMetadataMatchesDiscovery(cwd, dirs[1])
+	actual, _, err := nearestGitMetadata(cwd)
 	if err != nil {
 		return "", fmt.Errorf("gate execution context: corroborate Git discovery identity: %w", err)
 	}
-	if !matched {
-		return "", fmt.Errorf("gate execution context: Git discovery skipped repository metadata")
+	common, matched := strings.CutSuffix(identity, "\n"+actual+"\n")
+	if actual == "" || !matched || !filepath.IsAbs(common) {
+		return "", fmt.Errorf("gate execution context: Git discovery skipped repository metadata or returned no absolute directory identities")
 	}
-	head, err := gitHeadPresent(dirs[0])
+	head, err := gitHeadPresent(common)
 	if err != nil {
 		return "", fmt.Errorf("gate execution context: verify Git common HEAD: %w", err)
 	}
@@ -305,7 +311,7 @@ func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
 		return "", fmt.Errorf("gate execution context: Git common directory has invalid HEAD")
 	}
 	for _, entry := range []string{"objects", "refs"} {
-		info, err := os.Stat(filepath.Join(dirs[0], entry))
+		info, err := os.Stat(filepath.Join(common, entry))
 		if err != nil {
 			return "", fmt.Errorf("gate execution context: verify Git common structure: %w", err)
 		}
@@ -313,30 +319,18 @@ func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
 			return "", fmt.Errorf("gate execution context: Git common directory has invalid %s", entry)
 		}
 	}
-	return dirs[0], nil
+	return common, nil
 }
 
 func runIdentityGit(ctx context.Context, cwd string, args ...string) (string, error) {
-	physical, err := filepath.Abs(cwd)
+	actual, bare, err := nearestGitMetadata(cwd)
 	if err != nil {
 		return "", err
 	}
-	physical, err = filepath.EvalSymlinks(physical)
-	if err != nil {
-		return "", err
+	if bare {
+		args = append([]string{"--git-dir=" + actual}, args...)
 	}
-	if _, err := os.Lstat(filepath.Join(physical, ".git")); err != nil {
-		if !os.IsNotExist(err) {
-			return "", err
-		}
-		bare, err := bareGitMetadataPresent(physical)
-		if err != nil {
-			return "", err
-		}
-		if bare {
-			args = append([]string{"--git-dir=" + physical}, args...)
-		}
-	}
+
 	return git.RunDiscoveryWithEnv(ctx, cwd, identityLocale, args...)
 }
 
@@ -352,71 +346,70 @@ func normalGitDiagnostic(err error, diagnostic string) bool {
 		strings.TrimSpace(commandErr.Stderr) == diagnostic
 }
 
-func gitMetadataMatchesDiscovery(cwd, gitDir string) (bool, error) {
+func nearestGitMetadata(cwd string) (string, bool, error) {
 	absolute, err := filepath.Abs(cwd)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	physical, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	info, err := os.Stat(physical)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
 	if !info.IsDir() {
-		return false, fmt.Errorf("caller directory is not a directory")
-	}
-	if gitDir != "" {
-		gitDir, err = filepath.EvalSymlinks(gitDir)
-		if err != nil {
-			return false, err
-		}
+		return "", false, fmt.Errorf("caller directory is not a directory")
 	}
 	for dir := physical; ; dir = filepath.Dir(dir) {
-		if dir == gitDir {
-			return true, nil
-		}
 		entry := filepath.Join(dir, ".git")
 		if _, err := os.Lstat(entry); err == nil {
-			if gitDir == "" {
-				return false, nil
-			}
 			info, err := os.Stat(entry)
 			if err != nil {
-				return false, err
+				return "", false, err
 			}
 			if info.Mode().IsRegular() {
-				data, err := os.ReadFile(entry)
+				file, err := os.OpenFile(entry, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 				if err != nil {
-					return false, err
+					return "", false, err
+				}
+				opened, statErr := file.Stat()
+				if statErr != nil || !opened.Mode().IsRegular() {
+					return "", false, errors.Join(statErr, file.Close(), fmt.Errorf("Git metadata file is not regular"))
+				}
+				data, readErr := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+				if err := errors.Join(readErr, file.Close()); err != nil {
+					return "", false, err
+				}
+				if len(data) > 1<<20 {
+					return "", false, fmt.Errorf("Git metadata file exceeds size limit")
 				}
 				target, ok := strings.CutPrefix(strings.TrimRight(string(data), "\r\n"), "gitdir: ")
 				if !ok || target == "" {
-					return false, nil
+					return "", false, fmt.Errorf("invalid Git metadata file")
 				}
 				if !filepath.IsAbs(target) {
 					target = filepath.Join(dir, target)
 				}
 				entry = target
 			} else if !info.IsDir() {
-				return false, nil
+				return "", false, fmt.Errorf("Git metadata entry is not a directory or regular file")
 			}
 			resolved, err := filepath.EvalSymlinks(entry)
-			return resolved == gitDir, err
+			return resolved, false, err
 		} else if !os.IsNotExist(err) {
-			return false, err
+			return "", false, err
 		}
 		bare, err := bareGitMetadataPresent(dir)
 		if err != nil {
-			return false, err
+			return "", false, err
 		}
 		if bare {
-			return false, nil
+			return dir, true, nil
 		}
 		if filepath.Dir(dir) == dir {
-			return gitDir == "", nil
+			return "", false, nil
 		}
 	}
 }

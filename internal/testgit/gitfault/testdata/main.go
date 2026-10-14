@@ -109,4 +109,17 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
+	if common && os.Getenv("NM_GIT_FAULT_MODE") == "grow-gitfile" {
+		file, err := os.OpenFile(os.Getenv("NM_GIT_FAULT_GITFILE"), os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			panic(err)
+		}
+		if _, err := file.WriteString(strings.Repeat("\n", (1<<20)+1)); err != nil {
+			panic(err)
+		}
+		if err := file.Close(); err != nil {
+			panic(err)
+		}
+	}
+
 }

@@ -83,18 +83,26 @@ Pipeline-control commands check the caller's Git common and actual metadata
 directories in one command first. Physical-ancestor checks corroborate successful
 discovery too: incomplete metadata skipped by Git cannot select an enclosing
 repository. Gitfile targets are compared with the actual metadata directory so
-linked and separate Git directories remain supported. Every discovered common directory
+linked and separate Git directories remain supported. Reopened gitfiles are limited
+to 1 MiB and must still be regular files. The independently resolved actual metadata
+path frames the raw common/actual command output, preserving embedded newlines and
+terminal whitespace without shell evaluation. Optional top-level attribution also
+preserves path bytes. Every discovered common directory
 must have a recognizable `HEAD` and object/reference directories, regardless of
 registration and even when the linked worktree metadata is healthy. Unborn
 symbolic and detached `HEAD` forms remain supported. Symbolic files require
-`ref:` followed by optional space, tab, CR or LF and a `refs/` prefix. A `HEAD`
+`ref:` followed by optional space, tab, CR or LF and a `refs/` prefix, matching
+Git's locale-independent whitespace table. Vertical tab and form feed are not
+recognized delimiters. A `HEAD`
 symlink whose target starts with `refs/` is recognized without following it,
 including an unborn target. Detached HEAD recognition uses a hexadecimal object-ID
 prefix, matching Git discovery.
 Identity commands select explicit bare discovery only after substantive metadata
-evidence, so mixed ordinary files and directories cannot force an invalid Git directory.
+evidence at the nearest physical ancestor boundary, with nearer `.git` entries
+taking precedence, so mixed ordinary files and directories cannot force an invalid
+Git directory.
 A canonical bare gate registered to the current owner proves managed identity,
-including when the caller is in the bare gate itself. Ordinary clones and their
+including when the caller is in the bare gate itself or one of its descendants. Ordinary clones and their
 linked worktrees do not need a worktree-root query. For managed callers, the
 root query is used only to attribute an active run; missing optional attribution
 does not remove the managed identity or permit pipeline control.
