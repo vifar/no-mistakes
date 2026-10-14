@@ -1010,11 +1010,53 @@ func TestCommitAgentFixes_DocumentDoesNotPersistUncertifiedRange(t *testing.T) {
 	ag := &mockAgent{name: "test"}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.ReviewStartingHeadSHA = headSHA
+	sctx.Run.ExternalCIOwner = types.ExternalCIOwnerControllerShipPR
 	if err := os.WriteFile(filepath.Join(dir, "docs-fix.txt"), []byte("fixed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := commitAgentFixes(sctx, types.StepDocument, "apply fix", "fallback"); err != nil {
 		t.Fatal(err)
+	}
+	if sctx.Run.HeadSHA == headSHA {
+		t.Fatal("document correction did not advance the head")
+	}
+	if err := sctx.DB.ValidatePipelineHeadForward(sctx.Run.ID, headSHA, sctx.Run.HeadSHA); err != nil {
+		t.Fatalf("document correction has no exact parent proof: %v", err)
+	}
+	got, err := sctx.DB.GetUncertifiedPipelineRange(sctx.Repo.ID, sctx.Run.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != nil {
+		t.Fatalf("document persist = %#v, want no uncertified range", got)
+	}
+}
+
+func TestCommitAgentFixes_ExternalCommitBeforeCorrectionCannotEarnHandoff(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{name: "test"}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.ReviewStartingHeadSHA = headSHA
+	sctx.Run.ExternalCIOwner = types.ExternalCIOwnerControllerShipPR
+	if err := os.WriteFile(filepath.Join(dir, "user.txt"), []byte("user change"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "user.txt")
+	gitCmd(t, dir, "commit", "-m", "user commit")
+	if err := os.WriteFile(filepath.Join(dir, "docs-fix.txt"), []byte("fixed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitAgentFixes(sctx, types.StepDocument, "apply fix", "fallback"); err != nil {
+		t.Fatal(err)
+	}
+	if sctx.Run.HeadSHA == headSHA {
+		t.Fatal("document correction did not advance the head")
+	}
+	if err := sctx.DB.ValidatePipelineHeadForward(sctx.Run.ID, headSHA, sctx.Run.HeadSHA); err == nil {
+		t.Fatal("pipeline correction laundered an external parent")
 	}
 	got, err := sctx.DB.GetUncertifiedPipelineRange(sctx.Repo.ID, sctx.Run.Branch)
 	if err != nil {
@@ -1788,7 +1830,13 @@ func TestCommitAgentFixes_CleanWorktreeRecordsAgentAdvancedHead(t *testing.T) {
 	dir, baseSHA, startingHead := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", startingHead)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, startingHead, config.Commands{})
-	gitCmd(t, dir, "commit", "--allow-empty", "-m", "agent commit")
+	prepareAgentCIHandoff(t, sctx, startingHead)
+	if _, err := runPipelineCorrectionAgent(sctx, func() (*agent.Result, error) {
+		gitCmd(t, dir, "commit", "--allow-empty", "-m", "agent commit")
+		return &agent.Result{}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	if err := commitAgentFixes(sctx, types.StepReview, "", ""); err != nil {
 		t.Fatal(err)
@@ -1803,5 +1851,169 @@ func TestCommitAgentFixes_CleanWorktreeRecordsAgentAdvancedHead(t *testing.T) {
 	rng, err := sctx.DB.GetUncertifiedPipelineRange(sctx.Repo.ID, sctx.Run.Branch)
 	if err != nil || rng == nil || rng.FromSHA != startingHead || rng.ToSHA != headSHA {
 		t.Fatalf("uncertified range = %+v, err = %v, want %s..%s", rng, err, startingHead, headSHA)
+	}
+	assertAgentCIHandoff(t, sctx, true)
+
+}
+
+func prepareAgentCIHandoff(t *testing.T, sctx *pipeline.StepContext, approved string) {
+	t.Helper()
+	run, err := sctx.DB.InsertRunWithExternalCIOwner(sctx.Repo.ID, sctx.Run.Branch, approved, sctx.Run.BaseSHA, nil, "", "", "", "main", false, false, types.ExternalCIOwnerControllerShipPR, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run = run
+	receipt := db.PRContextCandidate{SourceRepo: "test/repo", SourceBranch: "feature", LocalHeadSHA: approved, TargetBranch: "main", TargetSHA: run.BaseSHA, MergeBaseSHA: run.BaseSHA, DiffDigest: strings.Repeat("a", 64)}
+	if _, err := sctx.DB.BindRunPRContext(run.ID, receipt, types.StepRebase); err != nil {
+		t.Fatal(err)
+	}
+	review, err := sctx.DB.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const pending = `{"findings":[{"id":"historical","severity":"warning","action":"no-op","description":"CI claim","category":"review-support-pending","support":{"claim_type":"ci","ci":{"check_id":"build","head_sha":"1111111111111111111111111111111111111111"}}}]}`
+	if err := sctx.DB.SetStepFindings(review.ID, pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(review.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertReviewStepRound(review.ID, 1, "initial", nil, nil, approved, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateRunReviewApprovedHeadSHA(run.ID, approved); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run, err = sctx.DB.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertAgentCIHandoff(t, sctx, true)
+}
+
+func assertAgentCIHandoff(t *testing.T, sctx *pipeline.StepContext, accepted bool) {
+	t.Helper()
+	receipt, err := sctx.DB.GetRunPRContext(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.LocalHeadSHA = sctx.Run.HeadSHA
+	if _, err := sctx.DB.AdvanceRunPRContext(sctx.Run.ID, receipt.PRContextCandidate); err != nil {
+		t.Fatal(err)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims, err := sctx.DB.PendingExternalCISupport(run)
+	if accepted {
+		if err != nil || len(claims) != 1 || claims[0].SourceHeadSHA != run.HeadSHA {
+			t.Fatalf("handoff = %+v, %v", claims, err)
+		}
+	} else if err == nil || !strings.Contains(err.Error(), "pipeline-authored path") {
+		t.Fatalf("external head handoff = %+v, %v", claims, err)
+	}
+}
+
+func TestCorrectionInvocationHandoff(t *testing.T) {
+	for _, route := range []string{"document", "lint", "fix"} {
+		for _, mutation := range []string{"agent only", "agent then helper", "external after", "external before", "rewrite", "second-parent ancestry", "failed invocation"} {
+			t.Run(route+"/"+mutation, func(t *testing.T) {
+				dir, base, head := setupGitRepo(t)
+				gitCmd(t, dir, "checkout", "--detach", head)
+				ag := &mockAgent{name: "test"}
+				sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+				prepareAgentCIHandoff(t, sctx, head)
+				if mutation == "external before" {
+					gitCmd(t, dir, "commit", "--allow-empty", "-m", "external before invocation")
+				}
+				ag.runFn = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					if opts.CWD != dir {
+						t.Fatalf("agent CWD = %s", opts.CWD)
+					}
+					if mutation == "rewrite" || mutation == "second-parent ancestry" {
+						gitCmd(t, dir, "reset", "--hard", base)
+					}
+					gitCmd(t, dir, "commit", "--allow-empty", "-m", "agent commit")
+					if mutation == "second-parent ancestry" {
+						gitCmd(t, dir, "merge", "--no-ff", "-m", "merge original as second parent", head)
+					}
+					if mutation == "agent then helper" {
+						if err := os.WriteFile(filepath.Join(dir, "leftover.md"), []byte("helper change"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if mutation == "failed invocation" {
+						return nil, errors.New("agent failed")
+					}
+					return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"agent correction"}`)}, nil
+				}
+				var err error
+				switch route {
+				case "document":
+					_, err = (&DocumentStep{}).Execute(sctx)
+				case "lint":
+					_, err = (&LintStep{}).Execute(sctx)
+				case "fix":
+					sctx.Fixing = true
+					_, err = executeFixMode(sctx, types.StepTest, fixExecutionOptions{FallbackSummary: "correction"})
+				}
+				if mutation == "rewrite" || mutation == "second-parent ancestry" || mutation == "failed invocation" {
+					if err == nil {
+						t.Fatal("unsafe invocation accepted")
+					}
+					advanced := gitCmd(t, dir, "rev-parse", "HEAD")
+					if proofErr := sctx.DB.ValidatePipelineHeadForward(sctx.Run.ID, head, advanced); proofErr == nil {
+						t.Fatal("unsafe invocation earned provenance")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if sctx.Run.HeadSHA == head {
+					t.Fatal("agent did not advance run")
+				}
+				if mutation == "external after" {
+					assertAgentCIHandoff(t, sctx, true)
+					gitCmd(t, dir, "commit", "--allow-empty", "-m", "external after invocation")
+					if err := commitAgentFixes(sctx, types.StepDocument, "", ""); err != nil {
+						t.Fatal(err)
+					}
+				}
+				assertAgentCIHandoff(t, sctx, mutation != "external after" && mutation != "external before")
+			})
+		}
+	}
+}
+
+func TestCorrectionInvocationRejectsInvalidRange(t *testing.T) {
+	for _, kind := range []string{"rewrite", "second parent", "failure"} {
+		t.Run(kind, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "--detach", head)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+			prepareAgentCIHandoff(t, sctx, head)
+			_, err := runPipelineCorrectionAgent(sctx, func() (*agent.Result, error) {
+				if kind != "failure" {
+					gitCmd(t, dir, "reset", "--hard", base)
+				}
+				gitCmd(t, dir, "commit", "--allow-empty", "-m", "invocation commit")
+				if kind == "second parent" {
+					gitCmd(t, dir, "merge", "--no-ff", "-m", "second parent", head)
+				}
+				if kind == "failure" {
+					return &agent.Result{}, errors.New("invocation failed")
+				}
+				return &agent.Result{}, nil
+			})
+			if err == nil {
+				t.Fatal("invalid invocation accepted")
+			}
+			post := gitCmd(t, dir, "rev-parse", "HEAD")
+			if err := sctx.DB.ValidatePipelineHeadForward(sctx.Run.ID, head, post); err == nil {
+				t.Fatal("invalid invocation earned head proof")
+			}
+		})
 	}
 }

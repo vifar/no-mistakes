@@ -48,6 +48,15 @@ func RunRaw(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	return runInDirWithEnvRaw(ctx, dir, nil, args...)
 }
 
+// RunWithInput executes a git command with exact standard input and returns
+// trimmed stdout. It carries the same bare-repository handling as Run.
+func RunWithInput(ctx context.Context, dir, input string, args ...string) (string, error) {
+	if isBareGitDir(dir) {
+		return runInDirWithEnvAndInput(ctx, dir, nil, input, append([]string{"--git-dir=" + dir}, args...)...)
+	}
+	return runInDirWithEnvAndInput(ctx, dir, nil, input, args...)
+}
+
 // RunBare executes Git against exactly bareDir. Unlike Run, it never falls
 // back to cwd-based repository discovery when bareDir is malformed. Gate
 // recovery uses this after structural validation so an invalid directory under

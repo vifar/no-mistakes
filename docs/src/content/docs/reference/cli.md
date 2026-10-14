@@ -100,7 +100,7 @@ Commit and push the generated file to enable the checks.
 
 Agent eXperience Interface for non-interactive agents.
 Most agent workflows use the installed `/no-mistakes` skill, which drives this command surface underneath.
-It prints TOON to stdout (except [`review-receipt`](#strict-shipping-and-review-receipts), which emits JSON), prints progress to stderr, and uses structured stdout errors with exit code `1` for operational failures and `2` for bad usage.
+It prints TOON to stdout, except [`review-receipt`](#no-mistakes-axi-review-receipt) and [`ci-handoff`](#no-mistakes-axi-ci-handoff), which emit JSON on success. It prints progress to stderr and uses structured stdout errors with exit code `1` for operational failures and `2` for bad usage; `ci-handoff` uses JSON errors and exit code `1`.
 At the TOON output boundary, unsupported C0 control bytes are rendered as visible `\xNN` escapes while tabs, carriage returns, newlines, printable Unicode, and the underlying durable logs remain unchanged.
 If TOON encoding still fails, AXI prints a structured error instead of returning successful empty stdout.
 The calling agent drives AXI approval gates but does not replace the configured pipeline agent that performs validation.
@@ -130,6 +130,7 @@ no-mistakes axi run --intent "the user's goal"
 no-mistakes axi run --intent "the user's goal" --skip test,lint
 no-mistakes axi run --intent "the user's goal" --yes
 no-mistakes axi run --intent "the user's goal" --base-branch epic/foo
+no-mistakes axi run --intent "the user's goal" --skip=push,pr,ci --external-ci-owner=<owner>
 no-mistakes axi run --intent "the user's goal" --no-publish-intent
 no-mistakes axi run --intent "the user's goal" --closes 95 --closes owner/repo#12
 ```
@@ -144,8 +145,9 @@ no-mistakes axi run --intent "the user's goal" --closes 95 --closes owner/repo#1
 | `--base-branch` | `string` | (none)  | Integration branch for this run only; overrides [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) |
 | `--shipping-mode` | `string` | (none) | Select `full` or `immutable-source`; see [strict shipping](#strict-shipping-and-review-receipts) |
 | `--draft` | `bool` | (unset) | Pin the GitHub draft choice; requires `--shipping-mode`, supports explicit `false` |
+| `--external-ci-owner` | `string` | (none) | For ordinary runs, hand off an explicit CI claim; requires exactly `--skip=push,pr,ci`. Unavailable in strict shipping. |
 | `--no-publish-intent` | `bool` | `false` | Keep the generated `## Intent` section out of the PR body for this run; tighten-only, see below |
-| `--closes` | `string`, repeatable | (none) | GitHub issue the PR fully resolves (`95` or `owner/repo#95`); see [Closing issues](#closing-issues) |
+| `--closes` | `string`, repeatable | (none) | Issue the PR fully resolves (`95`, `owner/repo#95`, or a nested GitLab project path); see [Closing issues](#closing-issues) |
 | `--model` | `string` | (none) | Pi provider/model ID for an immutable [per-run profile](/no-mistakes/reference/global-config/#per-run-pi-profiles) |
 | `--effort` | `string` | (none) | Pi reasoning effort for that profile; omitted fields inherit `agent_config.pi` |
 | `--wait`        | `duration` | `8m`    | Maximum time for active-run lookup and run driving before the caller must reattach |
@@ -199,6 +201,7 @@ Only attached runs receive plan-aware guidance. Review and Test assess the propo
 
 `--base-branch` is persisted on the run and honored after resume; the [Pipeline Steps scope rules](/no-mistakes/reference/pipeline-steps/) own its integration and change-scoping behavior.
 Reattaching with a `--base-branch` that differs from the active run's stored target is refused rather than silently discarded; omit the flag to reattach, or abort the active run first.
+The [`pr.base_branch` reference](/no-mistakes/reference/repo-config/#prbase_branch) owns target precedence and the one-time retarget rules. `--external-ci-owner` is explicit per run and persisted for recovery; a new run or rerun does not inherit it. To reattach to an active run with external CI ownership, supply the same explicit owner and required skip set; omitting the owner or supplying a conflicting owner is refused. It does not turn a skipped CI step into a passing check. When Review has pending CI support and Push, PR, and CI are explicitly skipped, the outcome is `pending-external-ci`. Read the typed handoff below and let the named external owner prove those claims before merge. Without that owner, pending claims block completion.
 `--no-publish-intent` is likewise persisted on the run, and reattaching with it against an active run started without it is refused rather than silently discarded; omit the flag to reattach, or abort the active run first.
 Before starting a run that may omit the section (this flag set, the global `intent.publish_intent` default `false`, or a global config that cannot be read), `axi run` probes the running daemon for the capability and refuses to start anything when that daemon is too old to honor it (an older daemon would silently drop the field, never read the global default, and publish); restart the daemon with the current binary. Only a run that cannot omit (flag unset, global default `true`) may reuse an older daemon. `rerun` always probes, because it inherits omission from the selected prior run and only the daemon knows that selection.
 Under the flag the PR-drafting turns receive no intent text at all and draft from the diff and commit messages only; every other step prompt keeps the full intent.
@@ -206,13 +209,13 @@ The same omit-to-reattach rule applies to `--model`/`--effort` against an active
 
 ### Closing issues
 
-`--closes` declares an issue the PR fully resolves, so merging the PR closes it through GitHub's native closing keywords. Repeat it for each issue. A value is a same-repository issue number (`--closes 95`) or a cross-repository reference (`--closes owner/repo#95`); anything else, including `#95`, is rejected before a run starts. References are deduplicated case-insensitively and rendered in a deterministic order, one `Closes` line each, in the PR body's `## Issues` section (see the [PR step](/no-mistakes/reference/pipeline-steps/#pr)).
+`--closes` declares an issue the PR fully resolves, so merging the PR closes it through the forge's native closing keywords. Repeat it for each issue. A value is a same-repository issue number (`--closes 95`) or a project-qualified reference (`--closes owner/repo#95`, or `--closes group/subgroup/repo#95` for a GitLab project nested under subgroups); anything else, including `#95`, is rejected before a run starts. References are deduplicated case-insensitively and rendered in a deterministic order, one `Closes` line each, in the PR body's `## Issues` section (see the [PR step](/no-mistakes/reference/pipeline-steps/#pr)).
 
-`--closes` is the only way to request closure. Without it, no-mistakes never adds or infers a closing reference from the intent, commit messages, branch name, or linked issues: a PR may be partial work, so use ordinary references in your own text for that. Text the pipeline writes into the PR body never carries a live closing keyword: a reference such as `Fixes #12` in the intent or a drafted narrative is published as ``Fixes `#12` `` in an inline code span, which GitHub ignores. PR titles and commit messages are not rewritten, so a squash merge can still close an issue named after a closing keyword there.
+`--closes` is the only way to request closure. Without it, no-mistakes never adds or infers a closing reference from the intent, commit messages, branch name, or linked issues: a PR may be partial work, so use ordinary references in your own text for that. The [PR step](/no-mistakes/reference/pipeline-steps/#pr) documents generated-text closure protection, author-preserved text, and the limits for custom GitLab patterns, PR titles, and commit messages.
 
 The references are persisted on the run and survive daemon restarts, fix rounds, rebases, and that run's PR-body refreshes; `no-mistakes rerun` inherits them, and its own `--closes` adds to them. They can also be passed on a plain gate push as repeated `-o no-mistakes.closes=<ref>` push options; a gate push without them starts a run with none, and its PR-body refresh drops the `## Issues` section. Reattaching with `--closes` adds references to the active run until its PR body has been composed; after that the request is refused with an explicit error rather than reported as applied. Before starting a run with `--closes`, `axi run` refuses a running daemon too old to honor it, and rejects `--closes` combined with `--skip pr` as a usage error; a run whose PR step is skipped any other way fails at that step instead (see the [PR step](/no-mistakes/reference/pipeline-steps/#pr)).
 
-`--closes` is supported on GitHub only; on another forge the PR step fails rather than publish a PR that silently closes nothing. GitHub closes the issue only when the PR merges into the repository's default branch and the issue is eligible for keyword closure; a PR merged into another branch does not close it.
+`--closes` is supported on providers that close issues from the pull request body: GitHub and GitLab. On another forge the PR step fails rather than publish a PR that silently closes nothing; a GitLab subgroup reference on a non-GitLab provider is refused the same way, since that forge would read it as a different repository's reference. The forge closes the issue only when the PR merges into the repository's default branch (and, on GitLab, unless automatic issue closing is disabled for the project); a PR merged into another branch does not close it.
 Ordinary reattachment accepts either the run's immutable submitted head or its current pipeline head, so pipeline-created fix commits do not detach an unchanged submitting worktree.
 When neither identity matches, `axi run` keeps the fresh-run path but refuses a gate push while `branch_sync` says the pipeline still owns the branch.
 That refusal returns the complete structured state and its `continue_active_run` or `recover_custody` next action instead of a raw Git non-fast-forward.
@@ -232,23 +235,29 @@ Long-running `axi run` calls are working, not stalled; if one returns a `gate:`,
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
 When the CI step is still monitoring an open PR and checks are green - or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge. A generic empty check list without that declaration is not ready.
 Treat that as the agent stopping point: ask the user to review and merge the PR from the `help` line.
-If that PR later falls behind the default branch or hits a merge conflict, do not run `axi run`, `rerun`, or a manual rebase while the CI monitor is still running.
-The monitor auto-rebases onto the base, resolves actual conflicts, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push; a PR that is merely behind but clean needs no command.
-After that monitor ends, see [`no-mistakes rerun`](#no-mistakes-rerun) for the restart conditions.
+For ordinary runs, when the live target commit advances with green checks and no merge conflict, CI clears readiness and keeps monitoring, withholding checks-passed.
+It may wait until ci_timeout, or indefinitely when unlimited.
+When CI returns, including with findings, the boundary guard rejects the changed comparison and terminates the run.
+The monitor does not automatically repair or revalidate that changed comparison.
+After termination, restart from the current target and head; never hand-rebase.
+After the run stops, see [`no-mistakes rerun`](#no-mistakes-rerun) for restart and custody conditions.
+Reattaching with `axi run` while the monitor is still active leaves HEAD unchanged and does not refresh the target comparison.
 Successful outcomes (`checks-passed`, `passed`, `passed-with-override`, and `passed-with-skips`) also carry `help` instructions telling the agent to summarize the run.
 `passed-with-override` is a completed run with an explicitly approved Test exception or a CI approval over still-failing checks.
 It stays a success but is distinct from a clean `passed`.
 A Test exception is an approval past a failing configured `commands.test`, a `no-go` verdict, an `inconclusive` verdict, or a [`test_agent_timeout`](/no-mistakes/reference/global-config/#test_agent_timeout) budget cut; approving a `no-surface` park records its reason but completes as `passed`.
 `run.test_override_reason` preserves the Test exception explanation in drive and status output, including at the `checks-passed` stopping point; CI overrides retain their separate reason.
 Report those exceptions rather than describing Test as clean.
-`passed-with-skips` is a completed run where PR publication or CI verification automatically skipped because its provider was unavailable, or CI had no PR URL.
+`passed-with-skips` describes a completed run with an automatic PR or CI skip, such as CI having no PR URL or an adapter recording provider unavailability. Ordinary guarded network runs instead fail when provider availability cannot be established before Rebase or at a later comparison boundary; an adapter skip does not bypass that check.
 It retains exit code 0: missing verification is not a failing code verdict.
 `run.automatic_skips` names each affected step and cause, and `run.head_sha` gives the full recorded head in both drive output and `axi status`.
 Report that missing evidence; this outcome does not establish CI readiness or a merge.
 Explicit per-run skips retain their existing behavior.
 If the run also has a Test or CI approval override, `passed-with-override` takes precedence and the automatic skip causes remain visible.
 Legacy rows without a recorded skip cause keep their prior classification; their logs remain inspectable.
-When the pipeline applied fixes, they include a `fixes` table and a `help` instruction to acknowledge the misses and list those fixes for the user's review.
+For a completed run with an external CI owner, `pending-external-ci` takes precedence over override and skip outcomes while CI claims await the handoff owner. The Test override reason remains visible. If those claims cannot be read or validated, `external-ci-handoff-unavailable` reports the error instead; neither outcome certifies CI or authorizes merge. See [`axi ci-handoff`](#no-mistakes-axi-ci-handoff).
+
+When the pipeline applied fixes, successful outcomes include a `fixes` table and a `help` instruction to acknowledge the misses and list those fixes for the user's review.
 
 ### Strict launch receipts
 
@@ -275,9 +284,30 @@ A different nonce creates a distinct run rather than reattaching to a same-head 
 The up-to-date-push fallback preserves the latest same-head run's PR URL unless its recorded PR state is closed or merged, including when an explicit `--base-branch` retargets that PR.
 An explicit `--base-branch` is persisted on creation and must match the stored per-run base on replay; omitting it on replay preserves the stored base.
 A replay that adds `--no-publish-intent` against a run bound to publish the section is refused for the same reason; the stored omit decision folds in the global [`intent.publish_intent`](/no-mistakes/reference/global-config/#intent) default at creation, so a replay without the flag still matches a run whose row omits publication.
+An external CI owner must match the stored owner exactly on strict-launch replay; omitting it does not match a run created with that owner.
 Explicit `--model`/`--effort` must match a stored pin the same way; omitting both preserves it.
 A conflicting claim does not consume the first `created` disposition.
 Without the two proof flags, ordinary reattachment is unchanged, and historical runs without a nonce are not adopted into a proof binding.
+
+## no-mistakes axi ci-handoff
+
+Read a completed run's explicit external CI proof handoff as JSON:
+
+```sh
+no-mistakes axi ci-handoff --run <run-id>
+```
+
+This succeeds only for a completed run with `controller-ship-pr` ownership, skipped Push, PR, and CI steps, and 1–128 current pending Review CI claims from its approved Review. The JSON includes `outcome: pending-external-ci`, `run_id`, `external_ci_owner`, the run's source repository and branch, and each claim's provider check identity and PR comparison receipt. A missing, stale, or unreadable claim returns an error and a nonzero exit. The caller verifies the source identity, PR comparison, and live checks before merge. The handoff may advance from the Review-approved head only through helper-created correction commits or first-parent descendants recorded between the starting and ending heads of this run’s successful correction-agent invocation in its worktree. User or external commits outside that invocation, rewrites, and non-descendants block the handoff; restart Review at that head. The handoff does not assert that CI passed.
+
+## no-mistakes axi review-receipt
+
+Read the exact comparison recorded for a completed run as JSON:
+
+```sh
+no-mistakes axi review-receipt --run <run-id>
+```
+
+The command requires a verified terminal head and a current comparison receipt. It returns the run and source identity, any recorded PR URL and forge head, the local head, target branch and commit, merge base, raw diff digest, and receipt generation. It fails when the receipt is missing, points at a different head, or lacks the source repository or branch. The caller must reread the live PR and target immediately before publishing or merging; this stored receipt is evidence of what the run checked, not a claim that the forge still has those coordinates.
 
 ## no-mistakes axi respond
 
@@ -307,7 +337,7 @@ no-mistakes axi respond --run <id> --action approve
 
 Declines are explicit. With `--action fix`, every finding the gate shows must appear in `--findings` or `--ignore`; a response that leaves one out is refused with the unaccounted IDs named and the gate stays parked, so a partial selection can never silently decline the findings it omitted. An ID in both lists, or an ID the gate does not show, is refused the same way. A finding a previous response for the same step already decided may be omitted to keep that decision, including when recovery parks the same round again. Naming a finding previously chosen to fix in `--ignore` is refused too, because reverting an applied fix is out of scope for a gate response. The validation fails closed on the state it reads: if the gate's findings or this step's earlier decisions cannot be read, the response is refused, the gate stays parked, and the refusal names what could not be read. See [Finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history) for how these decisions are stored and carried into later rounds.
 
-Finding IDs are trimmed before validation. An added finding with no ID, or an ID that collides with any gate finding, receives a fresh ID. Ignored findings and selections already recorded for a recovered round also reserve their IDs. See [Finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history) for how a fix response restores acknowledged work after recovery.
+Finding IDs are trimmed before validation. Missing or repeated gate finding IDs receive fresh IDs before the gate is shown, so each ID selects only one finding. An added finding with no ID, or an ID that collides with any gate finding, receives a fresh ID. Ignored findings and selections already recorded for a recovered round also reserve their IDs. See [Finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history) for how a fix response restores acknowledged work after recovery.
 
 Every successful fix response echoes what it recorded in a `recorded:` object: `fixed` (the findings selected, including `--add-finding` items under their normalized IDs), `ignored` (the findings explicitly declined), and `kept` (the gate findings omitted that a previous response for this step had already decided). A finding the restored decision dispatched is reported under `fixed`, not also under `kept`. Approve, skip, and abort emit no disposition echo. They are not decision-free: a nonempty gate they resolve is recorded as a decline round, which is what later rounds read as `user_chose_to_ignore`. `--yes` resolution is unchanged: it selects every current finding.
 
@@ -377,6 +407,7 @@ no-mistakes axi status --run <id>
 
 When the resolved run is parked at an `awaiting_approval` or `fix_review` gate, its top-level `run:` or `other_branch_run:` object includes `awaiting_agent: parked <duration>` immediately after `status`.
 The field disappears after that run's gate is answered, on cancel, and on terminal outcomes; use it to distinguish a run waiting for the driving agent from one actively running, fixing, or watching CI.
+When a run has an exact PR comparison receipt, `run.review_generation` identifies its current receipt generation. Compare this field with `axi review-receipt`'s `generation` as well as the run head and live target before accepting a terminal review result.
 A pinned run also includes `pi_profile` with `model` and `effort`; see [per-run Pi profiles](/no-mistakes/reference/global-config/#per-run-pi-profiles).
 Status offers branch-scoped `axi respond` commands only for the current branch's implicitly resolved run. An explicitly selected gate stays inspection-only even when its branch matches, because a newer active run on that branch could receive the bare response command instead; the gate remains visible, its log commands retain `--run <id>`, and it names `axi respond --run <id>` as the response command.
 When a repository has no configured lint command and Document performs the combined Document/Lint housekeeping invocation, the run object includes `shared_work` evidence naming its `document+lint housekeeping` scope and the duration attributed to Document; Lint's own duration remains the cached-result handoff time.
@@ -599,7 +630,7 @@ use rerun to bypass a gate.
 | ---- | ---- | ------- | ----------- |
 | `--intent` | `string` | (none) | Explicit intent overriding inherited intent or fresh inference |
 | `--no-publish-intent` | `bool` | `false` | Keep the generated `## Intent` section out of the PR body for this rerun (adds to the inherited decision; tighten-only) |
-| `--closes` | `string`, repeatable | (none) | GitHub issue the PR fully resolves; adds to the [closing references](#closing-issues) inherited from the selected prior run |
+| `--closes` | `string`, repeatable | (none) | Issue the PR fully resolves; adds to the [closing references](#closing-issues) inherited from the selected prior run |
 | `--model` | `string` | (none) | Pi provider/model ID for an immutable [per-run profile](/no-mistakes/reference/global-config/#per-run-pi-profiles) |
 | `--effort` | `string` | (none) | Pi reasoning effort for that profile; omitted fields inherit `agent_config.pi` |
 
@@ -701,8 +732,8 @@ no-mistakes doctor
 Checks:
 
 - `git` binary
-- `gh` CLI (optional, needed for GitHub PR and CI steps)
-- `az` CLI (optional, needed for Azure DevOps PR and CI steps)
+- `gh` CLI (reported as optional by `doctor`; required for guarded GitHub network runs, including PR and CI)
+- `az` CLI (reported as optional by `doctor`; required for guarded Azure DevOps network runs, including PR and CI)
 - Data directory (`~/.no-mistakes/`)
 - SQLite database
 - Daemon status
@@ -736,7 +767,7 @@ no-mistakes update --force
 Downloads the latest release, verifies the SHA-256 checksum, atomically replaces the running binary, and resets the daemon when it is running or stale daemon artifacts exist so the new executable is picked up, preferring the managed service path and falling back to a detached daemon if service startup is unavailable or fails.
 By default this installs the latest stable release.
 Pass `--beta` to include prereleases and install the latest beta when one is newer than the current stable release.
-Version discovery reads this fork's `channels.json` manifest from `https://github.com/vifar/no-mistakes/releases/download/channels/channels.json` so it does not consume the unauthenticated REST API rate limit. Stable, beta, and background checks use the same fork destination. If the manifest is unavailable or invalid, the update fails without falling back to upstream or the REST API.
+Version discovery reads the configured fork's `channels.json` release asset to avoid the unauthenticated REST API rate limit. Stable, beta, and background checks use the same manifest. If the manifest is unavailable or invalid, update fails without falling back to upstream or the REST API. [Fork release prerequisites](/no-mistakes/guides/fork-updates/) explains publication and version ordering. Channel-manifest publication is a prerequisite; channel fallback is not implemented.
 If the daemon is running from a different executable path, update still prompts before replacing it; pass `-y`/`--yes` to answer that prompt non-interactively.
 If the daemon executable path cannot be determined, the update aborts before replacement.
 If the daemon does not come back cleanly after a successful replacement, the command reports that failure.
@@ -746,7 +777,7 @@ On macOS, removes the quarantine extended attribute.
 owns the active-run guard, the scope of `--force` and `--yes`, and recursive
 validation-step containment.
 
-Because `update` installs the latest official release binary, the replacement binary includes the default self-hosted telemetry host and website ID. Disable telemetry with `NO_MISTAKES_TELEMETRY=0`, or override the host and website ID with `NO_MISTAKES_UMAMI_HOST` and `NO_MISTAKES_UMAMI_WEBSITE_ID`.
+Fork release binaries include the default self-hosted telemetry host and website ID. Disable telemetry with `NO_MISTAKES_TELEMETRY=0`, or override the host and website ID with `NO_MISTAKES_UMAMI_HOST` and `NO_MISTAKES_UMAMI_WEBSITE_ID`.
 
 Background update checks run automatically on each CLI invocation (except `update` itself and version queries `--version` / `-v`, which stay side-effect-free). If a newer version is available, a notification is printed to stderr. Suppressed for dev builds, for Nix-store installs, or when `NO_MISTAKES_NO_UPDATE_CHECK=1` is set.
 
@@ -829,7 +860,7 @@ no-mistakes axi review-receipt --run <run-id> --phase review
 no-mistakes axi review-receipt --run <run-id> --phase ci-ready
 ```
 
-`review-receipt` emits JSON on success, unlike ordinary TOON AXI output. Errors retain the ordinary structured AXI error format. It reads the recorded run without changing it. `--run` is required; `--phase` defaults to `review`. The `review` phase requires all configured pre-CI validation and publication steps completed, with an active CI monitor and an exact approved Review generation. It is available while CI awaits external approval. `ci-ready` also requires persisted readiness for that comparison and fresh, nonempty, successful applicable live checks (optional skipped hosted lanes retain native provider semantics). Every configured [custom gate](/no-mistakes/reference/repo-config/#gates) must be completed; export never silently omits one. Overrides, skips, dirty worktrees, unsupported providers, unresolved findings, and moved source/target comparisons refuse either phase. An empty check list or a no-CI declaration cannot establish `ci-ready`. The initial exact-forge proof provider is GitHub.
+`review-receipt` emits JSON on success, unlike ordinary TOON AXI output. Errors retain the ordinary structured AXI error format. An ordinary run may expose a completed observed JSON receipt, but that receipt cannot be signed and does not establish strict-shipping readiness; strict signing and readiness claims require the strict receipt phases below. It reads the recorded run without changing it. `--run` is required; `--phase` defaults to `review`. The `review` phase requires all configured pre-CI validation and publication steps completed, with an active CI monitor and an exact approved Review generation. It is available while CI awaits external approval. `ci-ready` also requires persisted readiness for that comparison and fresh, nonempty, successful applicable live checks (optional skipped hosted lanes retain native provider semantics). Every configured [custom gate](/no-mistakes/reference/repo-config/#gates) must be completed; export never silently omits one. Overrides, skips, dirty worktrees, unsupported providers, unresolved findings, and moved source/target comparisons refuse either phase. An empty check list or a no-CI declaration cannot establish `ci-ready`. The initial exact-forge proof provider is GitHub.
 
 Both phases bracket live PR and Git observations and recompute the merge base and SHA-256 of the exact untrimmed bytes from `git diff --no-ext-diff --no-textconv --binary --full-index TARGET...HEAD`. The payload includes source repository/ref, submitted/local/forge heads, PR URL, target ref/SHA, merge base, diff digest, monotonic per-run review generation, intent digest, mode/draft, final non-actionable findings and their digest, and completed/running step evidence. The eight pre-CI core steps are completed; CI remains running until merge. The receipt grants no merge or cleanup authority.
 

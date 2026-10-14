@@ -336,6 +336,27 @@ func TestEquivalentButDivergedClassification(t *testing.T) {
 			if state.State != tc.wantState || state.Relation != RelationDiverged || state.Safety != tc.wantSafe || state.Changed {
 				t.Fatalf("state = %#v", state)
 			}
+			if tc.wantSafe == "blocked_diverged" {
+				want := "git log --oneline --left-right HEAD..." + f.pushed
+				if state.NextAction == nil || state.NextAction.Code != "inspect_and_reconcile_manually" || state.NextAction.Command != want {
+					t.Fatalf("next action = %+v, want read-only inspection %q", state.NextAction, want)
+				}
+				branchRef := mustRun(t, f.local, "symbolic-ref", "HEAD")
+				localHead := mustRun(t, f.local, "rev-parse", "HEAD")
+				status := mustRun(t, f.local, "status", "--porcelain")
+				if output := mustRun(t, f.local, strings.Fields(state.NextAction.Command)[1:]...); output == "" {
+					t.Fatal("history inspection returned no diverged commits")
+				}
+				if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != localHead {
+					t.Fatalf("HEAD after inspection = %s, want %s", got, localHead)
+				}
+				if got := mustRun(t, f.local, "symbolic-ref", "HEAD"); got != branchRef {
+					t.Fatalf("branch after inspection = %s, want %s", got, branchRef)
+				}
+				if got := mustRun(t, f.local, "status", "--porcelain"); got != status {
+					t.Fatalf("worktree status after inspection = %q, want %q", got, status)
+				}
+			}
 		})
 	}
 }

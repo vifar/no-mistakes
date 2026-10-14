@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/plugin"
 	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
@@ -98,7 +99,7 @@ func TestProviderPlugin_PRStepCreatesPRThroughPlugin(t *testing.T) {
 
 	outcome, err := (&PRStep{}).Execute(sctx)
 	if err != nil {
-		t.Fatalf("PR step: %v", err)
+		t.Fatalf("PR step: %v; plugin calls=%v", err, pluginOperations(t, logPath))
 	}
 	if outcome.Skipped {
 		t.Fatalf("PR step skipped: %s", outcome.SkipReason)
@@ -123,7 +124,7 @@ func TestProviderPlugin_PRStepCreatesPRThroughPlugin(t *testing.T) {
 		t.Fatalf("persisted PR URL = %v", run.PRURL)
 	}
 	ops := strings.Join(pluginOperations(t, logPath), ",")
-	if !strings.HasPrefix(ops, "status,pr find,pr create") {
+	if ops != "status,pr create" {
 		t.Fatalf("plugin operations = %s", ops)
 	}
 	t.Logf("plugin operations: %s\npersisted PR URL: %s", ops, *run.PRURL)
@@ -137,14 +138,21 @@ func TestProviderPlugin_PRStepUpdatesExistingPR(t *testing.T) {
 		NextNumber: 8,
 		PRs: []fakeplugin.PR{{
 			Number: "7", URL: "https://git.example.com/team/repo/pulls/7",
-			HeadBranch: "feature", BaseBranch: "main", Title: "existing title", Body: "old body", State: "open",
+			HeadBranch: "feature", BaseBranch: "main", HeadSHA: headSHA, Title: "existing title", Body: "old body", State: "open",
 		}},
 	})
+	prURL := "https://git.example.com/team/repo/pulls/7"
+	stepstest.BindCurrentPRComparison(t, sctx, prURL, "team/repo", "main")
+	selection, err := GuardPRContext(sctx, types.StepPR)
+	if err != nil {
+		t.Fatalf("guard PR context: %v", err)
+	}
+	sctx.PRTarget = &selection.Target
 	completeCleanReview(t, sctx)
 
 	outcome, err := (&PRStep{}).Execute(sctx)
 	if err != nil {
-		t.Fatalf("PR step: %v", err)
+		t.Fatalf("PR step: %v; plugin calls=%v", err, pluginOperations(t, logPath))
 	}
 	if outcome.Skipped {
 		t.Fatalf("PR step skipped: %s", outcome.SkipReason)
@@ -327,21 +335,27 @@ func TestProviderPlugin_RepairFailsOnLogProtocolViolation(t *testing.T) {
 	}
 }
 
-// A plugin whose status handshake breaks while a CI repair attests the
-// repaired head fails the step. The attestation failure is wrapped as an
-// unsettled repair push, which parks for approval; the plugin violation must
-// win, or a broken integration would read as a repair awaiting approval.
-func TestProviderPlugin_RepairFailsOnAttestationHandshakeViolation(t *testing.T) {
+// A malformed PR update during CI repair attestation fails closed and leaves
+// the repair unpublished until the attestation is settled.
+func TestProviderPlugin_RepairFailsOnAttestationProtocolViolation(t *testing.T) {
 	t.Parallel()
 	f := newCIRepairFixture(t, false, writeCIFix)
-	fakeProviderPlugin(t, f.sctx, fakeplugin.State{ProtocolVersion: 99})
+	pluginURL := "https://git.example.com/team/repo/pulls/42"
+	f.sctx.Repo.UpstreamURL = "https://git.example.com/team/repo"
+	f.sctx.Run.PRURL = &pluginURL
+	state := fakeplugin.State{MalformedOn: "pr update", PRs: []fakeplugin.PR{{
+		Number: "42", URL: pluginURL, HeadBranch: "feature", BaseBranch: "main", HeadSHA: f.headSHA, State: "open",
+		Body: fmt.Sprintf("<!-- no-mistakes-pipeline-attestation:v1 {\"head_sha\":%q,\"steps\":[]} -->", f.headSHA),
+	}}}
+	fakeProviderPlugin(t, f.sctx, state)
+	stepstest.BindCurrentPRComparison(t, f.sctx, pluginURL, "team/repo", "main")
 	f.sctx.PreviousFindings = `{"findings":[{"id":"ci-1","severity":"error","description":"failed","action":"auto-fix","category":"ci-check","check":"test"}]}`
 	f.sctx.Ctx = context.Background()
 	host := &completionSnapshotHost{checks: []scm.Check{{Name: "test", Bucket: scm.CheckBucketFail}}}
 
 	outcome, err := (&CIStep{}).repairFromFindings(f.sctx, host, &scm.PR{Number: "42"})
 	if outcome != nil || !errors.Is(err, plugin.ErrProtocol) || !errors.Is(err, errCIAttestationUnsettled) {
-		t.Fatalf("repair = %#v, %v; want the plugin protocol error, not a park\nlog:\n%s", outcome, err, f.log())
+		t.Fatalf("repair = %#v, %v; want the plugin protocol error and unsettled attestation\nlog:\n%s", outcome, err, f.log())
 	}
 	if f.remoteHead(t) != f.headSHA {
 		t.Fatal("the repair was pushed although its attestation failed")

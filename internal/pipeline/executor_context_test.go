@@ -16,7 +16,7 @@ const cancellationTestWait = 15 * time.Second
 
 func TestExecutor_ContextCancellation(t *testing.T) {
 	database, p, run, repo := setupTest(t)
-	workDir := t.TempDir()
+	workDir := completionFixture(t, database, run)
 
 	// Step that blocks until context is cancelled
 	started := make(chan struct{})
@@ -62,7 +62,7 @@ func TestExecutor_ContextCancellation(t *testing.T) {
 
 func TestExecutor_ContextCancelCause(t *testing.T) {
 	database, p, run, repo := setupTest(t)
-	workDir := t.TempDir()
+	workDir := completionFixture(t, database, run)
 
 	// Two steps: first passes, second blocks until context is cancelled.
 	// The handshake proves cancellation reaches the active second step.
@@ -121,7 +121,7 @@ func TestExecutor_ContextCancelCause(t *testing.T) {
 
 func TestExecutor_ContextCancelCauseBetweenSteps(t *testing.T) {
 	database, p, run, repo := setupTest(t)
-	workDir := t.TempDir()
+	workDir := completionFixture(t, database, run)
 
 	// First step passes and signals, cancel fires before second step starts.
 	started := make(chan struct{})

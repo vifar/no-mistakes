@@ -123,6 +123,7 @@ type runView struct {
 	Branch             string
 	Status             string
 	HeadSHA            string
+	ReviewGeneration   *int64
 	PRURL              string
 	CIReady            bool
 	CIReadyNoCI        bool
@@ -135,25 +136,40 @@ type runView struct {
 	// live check (see pipeline.ApprovalOverrideVerifier). outcomeForRun uses
 	// it to keep a deliberate override from reading identically to a
 	// genuinely green run in agent-facing output.
-	CIOverrideReason   string
-	TestOverrideReason string
+	CIOverrideReason      string
+	TestOverrideReason    string
+	ExternalCIOwner       string
+	PendingCISupport      []types.PendingCISupport
+	PendingCISupportError string
+}
+
+func ordinaryReviewGeneration(r *ipc.RunInfo) *int64 {
+	if r == nil || r.Shipping != nil || r.ReviewGeneration == 0 {
+		return nil
+	}
+	generation := r.ReviewGeneration
+	return &generation
 }
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
 	rv := runView{
-		Shipping:           r.Shipping,
-		SubmittedHeadSHA:   r.SubmittedHeadSHA,
-		ID:                 r.ID,
-		Branch:             r.Branch,
-		Status:             string(r.Status),
-		HeadSHA:            r.HeadSHA,
-		CIReady:            r.CIReady,
-		CIReadyNoCI:        r.CIReadyNoCI,
-		AwaitingAgentSince: r.AwaitingAgentSince,
-		CIOverrideReason:   r.CIOverrideReason,
-		TestOverrideReason: r.TestOverrideReason,
-		PiProfile:          r.PiProfile,
-		VerificationPlan:   r.VerificationPlan,
+		Shipping:              r.Shipping,
+		SubmittedHeadSHA:      r.SubmittedHeadSHA,
+		ID:                    r.ID,
+		Branch:                r.Branch,
+		Status:                string(r.Status),
+		HeadSHA:               r.HeadSHA,
+		ReviewGeneration:      ordinaryReviewGeneration(r),
+		CIReady:               r.CIReady,
+		CIReadyNoCI:           r.CIReadyNoCI,
+		AwaitingAgentSince:    r.AwaitingAgentSince,
+		CIOverrideReason:      r.CIOverrideReason,
+		TestOverrideReason:    r.TestOverrideReason,
+		ExternalCIOwner:       r.ExternalCIOwner,
+		PendingCISupport:      r.PendingCISupport,
+		PendingCISupportError: r.PendingCISupportError,
+		PiProfile:             r.PiProfile,
+		VerificationPlan:      r.VerificationPlan,
 	}
 	if r.Shipping != nil {
 		rv.ShippingComparison = &shipping.StatusIdentity{Generation: r.ReviewGeneration, SourceRepo: r.SourceRepo, SourceBranch: r.SourceBranch, TargetBranch: r.TargetBranch, TargetSHA: r.TargetSHA}
@@ -205,6 +221,18 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 		Status:             string(r.Status),
 		HeadSHA:            r.HeadSHA,
 		AwaitingAgentSince: r.AwaitingAgentSince,
+		ExternalCIOwner:    r.ExternalCIOwner,
+	}
+	if database != nil {
+		if context, err := database.GetRunPRContext(r.ID); err == nil && context != nil {
+			generation := context.Generation
+			rv.ReviewGeneration = &generation
+		}
+		if pending, err := database.PendingExternalCISupport(r); err == nil {
+			rv.PendingCISupport = pending
+		} else {
+			rv.PendingCISupportError = err.Error()
+		}
 	}
 	if r.Shipping != nil {
 		rv.ShippingComparison = shipping.CachedStatusIdentity(database, r)
@@ -516,6 +544,17 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 			target = c.TargetBranch
 		}
 		fields = append(fields, toon.Field{Key: "submitted_head_sha", Value: rv.SubmittedHeadSHA}, toon.Field{Key: "shipping_mode", Value: rv.Shipping.Mode}, toon.Field{Key: "source_repo", Value: sourceRepo}, toon.Field{Key: "source_branch", Value: strings.TrimPrefix(rv.Branch, "refs/heads/")}, toon.Field{Key: "target_branch", Value: target}, toon.Field{Key: "target_sha", Value: targetSHA}, toon.Field{Key: "review_generation", Value: generation}, toon.Field{Key: "ci_ready", Value: rv.CIReady}, toon.Field{Key: "ci_ready_no_ci", Value: rv.CIReadyNoCI})
+	} else if rv.ReviewGeneration != nil {
+		fields = append(fields, toon.Field{Key: "review_generation", Value: *rv.ReviewGeneration})
+	}
+	if rv.ExternalCIOwner != "" {
+		fields = append(fields, toon.Field{Key: "external_ci_owner", Value: rv.ExternalCIOwner})
+		if len(rv.PendingCISupport) > 0 {
+			fields = append(fields, toon.Field{Key: "pending_ci_support", Value: rv.PendingCISupport})
+		}
+		if rv.PendingCISupportError != "" {
+			fields = append(fields, toon.Field{Key: "pending_ci_support_error", Value: rv.PendingCISupportError})
+		}
 	}
 	if rv.TestOverrideReason != "" {
 		fields = append(fields, toon.Field{Key: "test_override_reason", Value: rv.TestOverrideReason})

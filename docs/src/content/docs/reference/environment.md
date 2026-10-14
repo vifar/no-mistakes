@@ -47,7 +47,24 @@ Canonical Forgejo web base URL used for provider discovery and forgejo-axi comma
 | Type    | `URL`    |
 | Default | (none)   |
 
-Set this for every SSH origin, because an SSH remote does not identify the canonical Forgejo web scheme, port, or path prefix. Also set it when an HTTPS origin uses a self-hosted hostname other than `codeberg.org` or one containing `forgejo`. Recognized HTTPS origins are detected automatically, including non-default ports and path prefixes inferred from the origin. When set, the host and prefix must match the repository's upstream origin; credentials, query strings, and fragments are rejected.
+Set this for every SSH origin, because an SSH remote does not identify the canonical Forgejo web scheme, port, or path prefix. Also set it when an HTTPS origin uses a self-hosted hostname other than `codeberg.org` or one containing `forgejo`. Recognized HTTPS origins are detected automatically, including non-default ports and path prefixes inferred from the origin. When set, the host and prefix must match the repository's upstream origin - name the clone hostname with [`FORGEJO_SSH_DOMAIN`](#forgejo_ssh_domain) when the instance serves SSH from a different host; credentials, query strings, and fragments are rejected.
+
+## `FORGEJO_SSH_DOMAIN`
+
+Hostname a Forgejo instance publishes in SSH clone URLs when it differs from the `FORGEJO_BASE_URL` host.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+Set this to the instance's own `SSH_DOMAIN` value when Forgejo serves SSH from a hostname other than its web host, so an origin such as `git@ssh.forgejo.example:octo/widgets.git` is still recognized as that instance.
+
+Give a bare ASCII hostname or IP address, with an optional port that is ignored, because an instance's SSH clone port varies independently of its hostname. Hostname labels hold letters, digits, hyphens, and underscores, with a hyphen or underscore never first or last in a label, and an IPv6 address is bracketed (`[2001:db8::1]`). Any other value is treated as unset: a scheme, path, credentials, query string, or fragment, and also a name that could never match an origin, such as a wildcard or a trailing dot. no-mistakes never echoes a rejected value back into a log or an error, because the setting can hold a pasted credential.
+
+The variable only widens which SSH origins belong to the instance `FORGEJO_BASE_URL` already names, so it does nothing while that variable is unset or invalid. The upstream path prefix must still match, and HTTPS origins are unaffected. GitHub, GitLab, Bitbucket, and Azure DevOps hosts, plus any host configured in `glab`, `gh`, or `tea`, are all matched before the declared domain; against the remaining hostname guesses, the declared domain carries exactly the weight a `FORGEJO_BASE_URL` match already carries.
+
+If you worked around a split host by adding a `tea` login for it, delete that login when you set this variable. Because tea's configured hosts are matched first, a login whose `url` host or `ssh_host` equals the origin's host keeps the repository on the Gitea provider: the PR and CI steps keep running through `tea` instead of forgejo-axi, and where `tea` is not installed or not logged in, an ordinary guarded network run fails at PR-context resolution before Rebase or at a later comparison boundary. Find the login with `tea logins list` and remove it with `tea logins delete <name>`.
 
 ## `FORGEJO_TOKEN_<HOST_KEY>`
 
@@ -93,6 +110,14 @@ Path to a replacement CA trust bundle used by forgejo-axi for HTTPS requests.
 
 This replaces rather than appends to the platform trust store. See [Provider Integration](/no-mistakes/guides/provider-integration/#forgejo) for provider setup.
 
+## `NO_MISTAKES_FINDINGS_FILE`
+
+Absolute path to the empty JSON report file supplied to each repository [gate command](/no-mistakes/reference/repo-config/#structured-findings).
+
+This is a command-child variable, not a daemon setting. no-mistakes creates a fresh file outside the worktree before every gate command and removes it after reading the result. Commands can write `{"findings":[...]}` using the existing finding shape to report stable finding IDs and locations. Commands that leave it empty retain their exit-code-only behavior.
+
+See the [gate contract](/no-mistakes/reference/repo-config/#structured-findings) for the report schema, limits, verdicts, and approval behavior.
+
 ## `NO_MISTAKES_BITBUCKET_EMAIL`
 
 Bitbucket Cloud account email used for PR creation and CI monitoring.
@@ -100,7 +125,7 @@ Bitbucket Cloud account email used for PR creation and CI monitoring.
 |         |                                               |
 | ------- | --------------------------------------------- |
 | Type    | `string`                                      |
-| Default | (none; Bitbucket PR/CI steps skip when unset) |
+| Default | (none; guarded Bitbucket network runs fail when unset) |
 
 Used alongside `NO_MISTAKES_BITBUCKET_API_TOKEN`. See [Provider Integration](/no-mistakes/guides/provider-integration/#bitbucket-cloud).
 

@@ -121,7 +121,7 @@ func Export(ctx context.Context, database *db.DB, repo *db.Repo, runID, phase st
 	if phase != "review" && phase != "ci-ready" {
 		return nil, fmt.Errorf("receipt phase must be review or ci-ready")
 	}
-	reader, ok := host.(scm.PRFactsReader)
+	reader, ok := host.(scm.ShippingPRFactsReader)
 	if !ok {
 		return nil, fmt.Errorf("exact shipping proof is unsupported by this provider")
 	}

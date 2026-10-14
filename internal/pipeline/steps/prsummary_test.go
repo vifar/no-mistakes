@@ -1112,6 +1112,77 @@ func TestBuildTestingSummaryForPR_FallsBackForBinaryEvidence(t *testing.T) {
 	}
 }
 
+func TestBuildPRTestingSummary_PutsEachAttachmentInItsOwnParagraph(t *testing.T) {
+	t.Parallel()
+	const (
+		image   = `{"kind":"screenshot","label":"Shot","path":"shot.png"}`
+		image2  = `{"kind":"screenshot","label":"Shot two","path":"shot2.png"}`
+		video   = `{"kind":"video","label":"Rec","path":"rec.mp4"}`
+		details = `{"kind":"log","label":"Inline","content":"output"}`
+	)
+	tests := []struct {
+		name        string
+		artifacts   []string
+		attachments int
+		upstreamURL string
+		status      types.StepStatus
+	}{
+		{name: "image before outcome", artifacts: []string{image}, attachments: 1, status: types.StepStatusFailed},
+		{name: "video before outcome", artifacts: []string{video}, attachments: 1, status: types.StepStatusFailed},
+		{name: "image then video", artifacts: []string{image, video}, attachments: 2},
+		{name: "video then image", artifacts: []string{video, image}, attachments: 2},
+		{name: "image video image", artifacts: []string{image, video, image2}, attachments: 3},
+		{name: "image and video next to details", artifacts: []string{details, image, video, details}, attachments: 2},
+		{name: "evidence link then video", artifacts: []string{image, video}, attachments: 2, upstreamURL: "git@github.com:example/widgets.git"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			findings := `{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[` + strings.Join(tt.artifacts, ",") + `]}`
+			status := tt.status
+			if status == "" {
+				status = types.StepStatusCompleted
+			}
+			steps := []*db.StepResult{
+				{ID: "s1", StepName: types.StepTest, Status: status, FindingsJSON: &findings},
+			}
+			rounds := map[string][]*db.StepRound{
+				"s1": {{Round: 1, Trigger: "initial", FindingsJSON: &findings, DurationMS: 300}},
+			}
+			attachments := map[string]string{
+				"shot.png":  "https://github.com/user-attachments/assets/shot",
+				"shot2.png": "https://github.com/user-attachments/assets/shot2",
+				"rec.mp4":   "https://github.com/user-attachments/assets/rec",
+			}
+
+			md := buildPRTestingSummary(steps, rounds, tt.upstreamURL, "abc123", t.TempDir(), "", nil, scm.ProviderUnknown, attachments)
+
+			lines := strings.Split(md, "\n")
+			found := 0
+			for i, line := range lines {
+				if !strings.Contains(line, "https://github.com/user-attachments/assets/") {
+					continue
+				}
+				found++
+				if i == 0 || lines[i-1] != "" {
+					t.Errorf("attachment line %q is not preceded by a blank line, got:\n%s", line, md)
+				}
+				// A list item interrupts a paragraph, so the attachment's own
+				// evidence link may follow it directly.
+				if i+1 < len(lines) && lines[i+1] != "" && !strings.HasPrefix(lines[i+1], "- Evidence: [") {
+					t.Errorf("attachment line %q is not followed by a blank line, got:\n%s", line, md)
+				}
+			}
+			if found != tt.attachments {
+				t.Errorf("expected %d attachment lines, found %d, got:\n%s", tt.attachments, found, md)
+			}
+			if tt.status == types.StepStatusFailed && !strings.Contains(md, "\n\n- Outcome:") {
+				t.Errorf("expected a blank line before the outcome, got:\n%s", md)
+			}
+		})
+	}
+}
+
 func TestBuildPRTestingSummary_SeparatesDetailsFromAdjacentAttachments(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

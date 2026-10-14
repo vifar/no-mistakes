@@ -25,6 +25,24 @@ type ghStatefulPR struct {
 	State  string `json:"state"`
 }
 
+type ghStatefulAPIRef struct {
+	Ref  string `json:"ref"`
+	SHA  string `json:"sha"`
+	Repo struct {
+		FullName string `json:"full_name"`
+	} `json:"repo"`
+}
+
+type ghStatefulAPI struct {
+	Number int              `json:"number"`
+	URL    string           `json:"html_url"`
+	State  string           `json:"state"`
+	Draft  bool             `json:"draft"`
+	Merged bool             `json:"merged"`
+	Head   ghStatefulAPIRef `json:"head"`
+	Base   ghStatefulAPIRef `json:"base"`
+}
+
 type ghStatefulState struct {
 	PRs map[string]*ghStatefulPR `json:"prs"`
 }
@@ -75,6 +93,57 @@ func runGhStatefulPRStub(args []string) int {
 			return 0
 		case strings.Contains(query, "reviewThreads"):
 			fmt.Println(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}}}`)
+			return 0
+		}
+	}
+	if len(args) >= 3 && args[0] == "api" && slices.Contains(args, "--method") && argAfter(args, "--method") == "GET" {
+		endpoint := ""
+		for _, arg := range args[1:] {
+			if strings.HasPrefix(arg, "repos/") {
+				endpoint = arg
+				break
+			}
+		}
+		if endpoint == "repos/"+repo+"/pulls" {
+			headFilter := ""
+			for i := 0; i+1 < len(args); i++ {
+				if args[i] == "-f" && strings.HasPrefix(args[i+1], "head=") {
+					headFilter = strings.TrimPrefix(args[i+1], "head=")
+				}
+			}
+			owner, branch, ok := strings.Cut(headFilter, ":")
+			if !ok || owner == "" || branch == "" || !slices.Contains(args, "--paginate") || !slices.Contains(args, "--slurp") {
+				fmt.Fprintf(os.Stderr, "fakeagent gh stateful-pr: unsupported pull list request: %v\n", args)
+				return 1
+			}
+			page := []ghStatefulAPI{}
+			if owner == strings.Split(repo, "/")[0] {
+				for _, pr := range state.PRs {
+					if pr.State == "OPEN" && pr.Head == branch {
+						page = append(page, ghStatefulFacts(repo, pr))
+					}
+				}
+			}
+			data, _ := json.Marshal([][]ghStatefulAPI{page})
+			fmt.Println(string(data))
+			return 0
+		}
+		parts := strings.Split(endpoint, "/")
+		if len(parts) == 5 && parts[0] == "repos" && parts[1]+"/"+parts[2] == repo && parts[3] == "pulls" {
+			number, err := strconv.Atoi(parts[4])
+			var pr *ghStatefulPR
+			for _, candidate := range state.PRs {
+				if err == nil && candidate.Number == number {
+					pr = candidate
+					break
+				}
+			}
+			if pr == nil {
+				fmt.Fprintf(os.Stderr, "fakeagent gh stateful-pr: no pull request %q in %s\n", parts[4], repo)
+				return 1
+			}
+			data, _ := json.Marshal(ghStatefulFacts(repo, pr))
+			fmt.Println(string(data))
 			return 0
 		}
 	}
@@ -185,6 +254,15 @@ func runGhStatefulPRStub(args []string) int {
 	data, _ := json.Marshal(out)
 	fmt.Println(string(data))
 	return 0
+}
+
+func ghStatefulFacts(repo string, pr *ghStatefulPR) ghStatefulAPI {
+	targetOwner := strings.Split(repo, "/")[0]
+	repoName := strings.Split(repo, "/")[1]
+	facts := ghStatefulAPI{Number: pr.Number, URL: pr.URL, State: strings.ToLower(pr.State)}
+	facts.Head.Ref, facts.Head.SHA, facts.Head.Repo.FullName = pr.Head, ghStatefulHeadOID(repo, pr.Head), repo
+	facts.Base.Ref, facts.Base.SHA, facts.Base.Repo.FullName = pr.Base, ghStatefulHeadOID(repo, pr.Base), targetOwner+"/"+repoName
+	return facts
 }
 
 // lookup resolves `gh pr <verb> <selector>` where the selector is a PR number

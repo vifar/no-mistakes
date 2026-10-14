@@ -75,7 +75,10 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	if strings.HasPrefix(branch, "refs/heads/") {
 		branch = strings.TrimPrefix(branch, "refs/heads/")
 	}
-	baseBranch := effectivePRBaseBranch(sctx)
+	baseBranch, err := currentPRTargetBranch(sctx)
+	if err != nil {
+		return nil, err
+	}
 	if branch == baseBranch {
 		if err := refuseSkipWithClosingIssues(sctx, fmt.Sprintf("the branch is the PR base branch %s", branch)); err != nil {
 			return nil, err
@@ -122,11 +125,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 	bodyLimit := scm.HostMaxPRBodyChars(host)
 	sctx.Log(fmt.Sprintf("checking for existing pull request on branch %s...", branch))
-	existing, err := host.FindPR(ctx, branch, "")
-	if err != nil {
-		return nil, err
-	}
-	existing, err = bindExistingPR(sctx, host, existing)
+	existing, err := mutablePR(sctx, host)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +162,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				if err != nil {
 					return nil, err
 				}
-				emptyNarrative = neutralizeAttestationMarkers(draft.Body)
+				emptyNarrative = neutralizeAttestationMarkers(provider, draft.Body)
 				title = draft.Title
 			} else if sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
 				title, err = s.draftConfiguredPRTitle(sctx, branch, baseBranch, baseSHA)
@@ -175,10 +174,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err != nil {
 				return nil, err
 			}
-			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
-				return nil, err
-			}
-			if err := updateOwnedPR(sctx, host, existing, live, title, emptyNarrative, appendix, bodyLimit); err != nil {
+			if err := updateOwnedPR(sctx, host, existing, live, title, emptyNarrative, appendix, bodyLimit, func() error {
+				return verifyPRMutationComparison(sctx, host, existing, sctx.Run.HeadSHA, false)
+			}); err != nil {
 				return nil, err
 			}
 		} else {
@@ -189,7 +187,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err := verifyClosingIssuesInBody(content.Body, sctx); err != nil {
 				return nil, err
 			}
-			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
+			if err := verifyPRMutationComparison(sctx, host, existing, sctx.Run.HeadSHA, false); err != nil {
 				return nil, err
 			}
 			updated, err = host.UpdatePR(ctx, existing, scm.PRContent(content))
@@ -259,93 +257,50 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	return &pipeline.StepOutcome{PRURL: created.URL}, nil
 }
 
-// retargetExistingPRIfNeeded moves an already-open PR onto a per-run
-// --base-branch override when the live forge base disagrees. Repo-config
-// pr.base_branch changes still do not retarget: requested is empty in that
-// path, so title and body update in place and CI keeps following the live
-// forge base.
-func retargetExistingPRIfNeeded(sctx *pipeline.StepContext, host scm.Host, existing *scm.PR, requested string) error {
-	requested = strings.TrimSpace(requested)
-	if requested == "" || existing == nil {
-		return nil
-	}
-	actual := strings.TrimSpace(existing.BaseBranch)
-	if actual == requested {
-		return nil
-	}
-	if err := requireOwnedPRIdentity(sctx, existing); err != nil {
-		return err
-	}
-	retargeter, ok := host.(scm.PRBaseRetargeter)
-	if !ok {
-		if actual == "" {
-			return fmt.Errorf("existing pull request %s has no readable base branch, and this provider cannot retarget it to %s", describePR(existing), requested)
-		}
-		return fmt.Errorf("existing pull request %s targets %s, not %s, and this provider cannot retarget it", describePR(existing), actual, requested)
-	}
-	from := actual
-	if from == "" {
-		from = "its current base"
-	}
-	sctx.Log(fmt.Sprintf("retargeting existing pull request %s from %s to %s", describePR(existing), from, requested))
-	if err := retargeter.SetPRBaseBranch(sctx.Ctx, existing, requested); err != nil {
-		return fmt.Errorf("retarget pull request to %s: %w", requested, err)
-	}
-	existing.BaseBranch = requested
-	return nil
-}
-
-// bindExistingPR prefers the run's persisted PR URL over a branch-only
-// FindPR hit after GetPRState proves that identity is still open. A closed
-// or merged persisted PR is stale: title/body update the discovered PR, and
-// a per-run --base-branch retarget is refused rather than moving either
-// object. First-attach (no persisted URL) keeps the discovered PR.
-func bindExistingPR(sctx *pipeline.StepContext, host scm.Host, discovered *scm.PR) (*scm.PR, error) {
+func mutablePR(sctx *pipeline.StepContext, host scm.Host) (*scm.PR, error) {
 	owned := runPRURL(sctx)
-	if owned == "" {
-		return discovered, nil
+	selected := ""
+	if sctx != nil && sctx.PRTarget != nil {
+		selected = strings.TrimSpace(sctx.PRTarget.PRURL)
+	}
+	if owned != "" && selected != "" && !samePRIdentity(owned, &scm.PR{URL: selected}) {
+		return nil, fmt.Errorf("persisted pull request %s does not match selected pull request %s", owned, selected)
+	}
+	identity := owned
+	if identity == "" {
+		identity = selected
+	}
+	if identity == "" {
+		if sctx != nil && sctx.Run != nil && sctx.Run.Shipping != nil {
+			ctx := sctx.Ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
+			pr, err := host.FindPR(ctx, branch, "")
+			if err != nil {
+				return nil, fmt.Errorf("find strict shipping pull request for %s: %w", branch, err)
+			}
+			return pr, nil
+		}
+		return nil, nil
 	}
 	if host == nil {
-		return nil, fmt.Errorf("read persisted pull request %s state: host unavailable", owned)
-	}
-	ownedPR := discovered
-	if !samePRIdentity(owned, discovered) {
-		ownedPR = prFromOwnedURL(owned)
+		return nil, fmt.Errorf("read bound pull request %s state: host unavailable", identity)
 	}
 	ctx := context.Background()
 	if sctx != nil && sctx.Ctx != nil {
 		ctx = sctx.Ctx
 	}
-	state, err := host.GetPRState(ctx, ownedPR)
+	pr := prFromOwnedURL(identity)
+	state, err := host.GetPRState(ctx, pr)
 	if err != nil {
-		return nil, fmt.Errorf("read persisted pull request %s state: %w", owned, err)
+		return nil, fmt.Errorf("read bound pull request %s state: %w", identity, err)
 	}
 	if state != scm.PRStateOpen {
-		if runPRBaseBranch(sctx) != "" {
-			return nil, fmt.Errorf("persisted pull request %s is stale (%s); refusing to retarget another pull request", owned, strings.ToLower(string(state)))
-		}
-		return discovered, nil
+		return nil, fmt.Errorf("bound pull request %s is %s", identity, strings.ToLower(string(state)))
 	}
-	existing := discovered
-	if !samePRIdentity(owned, discovered) {
-		existing = ownedPR
-		if sctx != nil && sctx.Log != nil {
-			sctx.Log(fmt.Sprintf("using persisted pull request %s instead of discovered %s", owned, describePR(discovered)))
-		}
-	}
-	if strings.TrimSpace(existing.BaseBranch) != "" {
-		return existing, nil
-	}
-	reader, ok := host.(scm.PRBaseBranchReader)
-	if !ok {
-		return existing, nil
-	}
-	base, err := reader.GetPRBaseBranch(ctx, existing)
-	if err != nil {
-		return nil, fmt.Errorf("read persisted pull request %s: %w", owned, err)
-	}
-	existing.BaseBranch = strings.TrimSpace(base)
-	return existing, nil
+	return pr, nil
 }
 
 func prFromOwnedURL(owned string) *scm.PR {
@@ -354,22 +309,6 @@ func prFromOwnedURL(owned string) *scm.PR {
 		pr.Number = n
 	}
 	return pr
-}
-
-// requireOwnedPRIdentity fails closed unless the PR about to be mutated is
-// proven to be the run's persisted review object. Retarget uses this before
-// any base move. Title/body update of a first-attach FindPR hit (no
-// persisted URL) still proceeds so a later pr.base_branch change updates
-// the open PR instead of opening a duplicate.
-func requireOwnedPRIdentity(sctx *pipeline.StepContext, existing *scm.PR) error {
-	owned := runPRURL(sctx)
-	if owned == "" {
-		return fmt.Errorf("refusing to retarget pull request %s: this run has no persisted PR identity", describePR(existing))
-	}
-	if samePRIdentity(owned, existing) {
-		return nil
-	}
-	return fmt.Errorf("discovered pull request %s does not match this run's persisted pull request %s", describePR(existing), owned)
 }
 
 func runPRURL(sctx *pipeline.StepContext) string {
@@ -436,7 +375,7 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		if err != nil {
 			return prContent{}, err
 		}
-		narrative := neutralizeAttestationMarkers(content.Body)
+		narrative := neutralizeAttestationMarkers(provider, content.Body)
 		appendix = appendIssuesSection(appendix, issuesSection(sctx, narrative))
 		return composeOwnedPRContent(prOwnedBody{before: narrative}, content.Title, appendix, bodyLimit)
 	}
@@ -516,7 +455,7 @@ Final diff paths and statuses:
 			content.Body = strings.TrimSpace(content.Body)
 			content.Body = unwrapNestedPRBody(content.Body)
 			content.Body = stripGeneratedSections(content.Body)
-			content.Body = neutralizeAttestationMarkers(content.Body)
+			content.Body = neutralizeAttestationMarkers(provider, content.Body)
 			if content.Title != "" && content.Body != "" {
 				originalTitle := content.Title
 				content.Title, err = renderPRTitle(sctx, content.Title)
@@ -690,24 +629,24 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 // log dumps while keeping its Intent, What Changed, Risk, and Pipeline
 // narrative intact. prependIntentSectionWithinLimit is the final backstop
 // when even that core overruns.
-func assemblePRBodyFull(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int) string {
-	sections := appendGeneratedSections(whatChanged, riskLine, testingMD, pipelineMD)
+func assemblePRBodyFull(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) string {
+	sections := appendGeneratedSections(whatChanged, riskLine, testingMD, pipelineMD, provider)
 	full := prependIntentSection(sections, sctx)
 	if bodyLimit <= 0 || scm.PRBodyLen(full) <= bodyLimit {
 		return full
 	}
 	if testingMD != "" {
-		sections = appendGeneratedSections(whatChanged, riskLine, "", pipelineMD)
+		sections = appendGeneratedSections(whatChanged, riskLine, "", pipelineMD, provider)
 		core := prependIntentSection(sections, sctx)
 		if scm.PRBodyLen(core) <= bodyLimit {
 			return core
 		}
 	}
-	return assemblePRBodyCoreWithinLimit(sctx, whatChanged, riskLine, pipelineMD, bodyLimit)
+	return assemblePRBodyCoreWithinLimit(sctx, whatChanged, riskLine, pipelineMD, bodyLimit, provider)
 }
 
-func assemblePRBodyCoreWithinLimit(sctx *pipeline.StepContext, whatChanged, riskLine, pipelineMD string, bodyLimit int) string {
-	prefix := prependIntentSection(appendGeneratedSections(whatChanged, riskLine, "", ""), sctx)
+func assemblePRBodyCoreWithinLimit(sctx *pipeline.StepContext, whatChanged, riskLine, pipelineMD string, bodyLimit int, provider scm.Provider) string {
+	prefix := prependIntentSection(appendGeneratedSections(whatChanged, riskLine, "", "", provider), sctx)
 	if pipelineMD == "" {
 		return scm.ClampPRBody(prefix, bodyLimit)
 	}
@@ -752,17 +691,17 @@ func clampPipelineSectionWithinLimit(pipelineMD string, bodyLimit int) string {
 	return header + updates
 }
 
-func appendGeneratedSections(body, riskLine, testingMD, pipelineMD string) string {
+func appendGeneratedSections(body, riskLine, testingMD, pipelineMD string, provider scm.Provider) string {
 	body = stripGeneratedSections(body)
-	return appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD)
+	return appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD, provider)
 }
 
-func buildPRBodyFull(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, maxBytes int) string {
+func buildPRBodyFull(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, maxBytes int, provider scm.Provider) string {
 	body = stripGeneratedSections(body)
-	sections := appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, maxBytes)
+	sections := appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, maxBytes, provider)
 	// Neutralized for the same reason as in prependIntentSection: intent is
 	// agent-extracted text placed ahead of the pipeline section.
-	cleaned := neutralizeAttestationMarkers(publicPRIntent(sctx))
+	cleaned := neutralizeAttestationMarkers(provider, publicPRIntent(sctx))
 	if cleaned == "" {
 		return sections
 	}
@@ -775,7 +714,7 @@ func buildPRBodyFull(body, riskLine, testingMD, pipelineMD string, sctx *pipelin
 	sectionsBudget := maxBytes - len(separator) - len(intent)
 	minimumSectionsBytes := len(pipelineSectionHeader(pipelineMD))
 	if sectionsBudget > 0 && (minimumSectionsBytes == 0 || sectionsBudget >= minimumSectionsBytes) {
-		sections = appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, sectionsBudget)
+		sections = appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, sectionsBudget, provider)
 		return intent + separator + sections
 	}
 
@@ -786,8 +725,8 @@ func buildPRBodyFull(body, riskLine, testingMD, pipelineMD string, sctx *pipelin
 	return truncateTextAtLineBoundary(intent, intentBudget, essentialPRBodyTruncationMarker()) + separator + sections
 }
 
-func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD string) string {
-	return appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, maxPullRequestBodyBytes)
+func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD string, provider scm.Provider) string {
+	return appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, maxPullRequestBodyBytes, provider)
 }
 
 // appendGeneratedSectionsToCleanBodyWithinLimit is the single choke point that
@@ -808,10 +747,10 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 // still shipped three live foreign markers ahead of the real one. Fencing is no
 // defense either - verify.py reads raw text, so a marker inside a ```text block
 // counts exactly the same.
-func appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD string, maxBytes int) string {
-	body = neutralizeAttestationMarkers(body)
-	riskLine = neutralizeAttestationMarkers(riskLine)
-	testingMD = neutralizeAttestationMarkers(testingMD)
+func appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
+	body = neutralizeAttestationMarkers(provider, body)
+	riskLine = neutralizeAttestationMarkers(provider, riskLine)
+	testingMD = neutralizeAttestationMarkers(provider, testingMD)
 	generatedSections := generatedEssentialSections(riskLine, testingMD)
 	prefix := body + generatedSections
 	if pipelineMD == "" {
@@ -1520,7 +1459,7 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 	// Intent is agent-extracted text that lands ahead of the pipeline section,
 	// so it can shadow the real attestation the same way the Testing section
 	// can. See appendGeneratedSectionsToCleanBodyWithinLimit.
-	cleaned := neutralizeAttestationMarkers(publicPRIntent(sctx))
+	cleaned := neutralizeAttestationMarkers(resolvedProviderForBody(sctx), publicPRIntent(sctx))
 	if cleaned == "" {
 		return body
 	}
@@ -1541,7 +1480,7 @@ func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingM
 	if diffSummary == "" {
 		body = "## What Changed\n\nFinal diff unavailable; no complete scope summary was generated."
 	}
-	body = neutralizeAttestationMarkers(body)
+	body = neutralizeAttestationMarkers(provider, body)
 	body = assembleDraftPRBody(sctx, body, riskLine, testingMD, pipelineMD, bodyLimit, provider)
 	return prContent{
 		Title: title,

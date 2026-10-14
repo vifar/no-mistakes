@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -39,12 +38,9 @@ func TestShippingNoSurfaceManagerAdmission(t *testing.T) {
 						t.Fatal(err)
 					}
 					defer database.Close()
-					dir := t.TempDir()
-					repo, err := database.InsertRepo(dir, "https://github.com/test/repo.git", "main")
-					if err != nil {
-						t.Fatal(err)
-					}
-					run, err := database.InsertRunWithShipping(repo.ID, "feature", strings.Repeat("a", 40), strings.Repeat("b", 40), nil, "", "", "", "main", false, nil, &types.ShippingOptions{Mode: types.ShippingFull})
+					repo, head := setupTestGitRepo(t, p, database, "shipping-no-surface")
+					dir := repo.WorkingPath
+					run, err := database.InsertRunWithShipping(repo.ID, "feature", head, head, nil, "", "", "", "main", false, nil, &types.ShippingOptions{Mode: types.ShippingFull})
 					if err != nil {
 						t.Fatal(err)
 					}

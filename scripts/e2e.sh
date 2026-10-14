@@ -54,18 +54,95 @@ if [[ -n "${NM_E2E_DAEMON_INVENTORY_PARENT:-}" ]]; then
   unset NM_E2E_REAP_ABANDONED
 fi
 
-trap 'reap_inventory; if [[ "${OWNED_INVENTORY}" -eq 1 ]]; then rm -rf "$NM_E2E_DAEMON_INVENTORY" 2>/dev/null || true; fi' EXIT INT TERM
+cleanup_inventory() {
+  reap_inventory
+  if [[ "${OWNED_INVENTORY}" -eq 1 ]]; then
+    rm -rf "$NM_E2E_DAEMON_INVENTORY" 2>/dev/null || true
+  fi
+}
+trap cleanup_inventory EXIT INT TERM
 
 # Default args match the historical Makefile e2e target; callers may override.
 if [[ "$#" -eq 0 ]]; then
-  # The user-journey matrix runs native backends serially because each case
-  # owns process-wide environment. The combined fork/upstream suite has 104
-  # journeys; king-server reached journey 67 while still advancing at 720s.
-  # Keep the package deadline inside the 45m CI job bound and allow the full
-  # serial journey matrix to finish, including the fork's Pi/Omp coverage.
-  # The matrix takes ~30m locally and hit the old 25m deadline in its last
-  # journeys on CI.
-  set -- -tags=e2e -count=1 -timeout 2400s ./internal/e2e/... ./internal/pipeline/steps/...
+  # The default suite has one shared 2400s budget, including the journey
+  # matrix. Split only that matrix across two Go processes: each process has
+  # its own process-wide test environment, while daemon slots remain shared.
+  budget_seconds=2400
+  # Bash puts each asynchronous job in its own process group while monitor
+  # mode is enabled. A group contains go test and its test binary descendants.
+  set -m
+  handle_signal() {
+    local status="$1"
+    local job_pid
+    local job_pids=()
+    trap - INT TERM
+    while IFS= read -r job_pid; do
+      [[ -n "$job_pid" ]] && job_pids+=("$job_pid")
+    done < <(jobs -pr)
+    for job_pid in "${job_pids[@]}"; do
+      kill -TERM -- "-$job_pid" 2>/dev/null || true
+    done
+    for job_pid in "${job_pids[@]}"; do
+      wait "$job_pid" 2>/dev/null || true
+    done
+    exit "$status"
+  }
+  trap 'handle_signal 130' INT
+  trap 'handle_signal 143' TERM
+
+  daemon_cap="${NM_E2E_DAEMON_MAX:-2}"
+  if [[ "$daemon_cap" =~ ^\+?[0-9]+$ ]]; then
+    daemon_cap="${daemon_cap#+}"
+    while [[ "$daemon_cap" == 0* && "${#daemon_cap}" -gt 1 ]]; do
+      daemon_cap="${daemon_cap#0}"
+    done
+    if [[ "$daemon_cap" == 0 ]]; then
+      daemon_cap=2
+    fi
+  else
+    daemon_cap=2
+  fi
+
+  if [[ "$daemon_cap" == 0 || "$daemon_cap" == 1 ]]; then
+    go test -tags=e2e -count=1 -timeout "${budget_seconds}s" ./internal/e2e/... ./internal/pipeline/steps/... &
+    serial_pid=$!
+    wait "$serial_pid"
+    serial_status=$?
+    exit "$serial_status"
+  fi
+
+  start_seconds=$SECONDS
+  go test -tags=e2e -count=1 -timeout "${budget_seconds}s" \
+    -run '^TestUserJourney$/(claude|codex)$' ./internal/e2e/... &
+  first_pid=$!
+  go test -tags=e2e -count=1 -timeout "${budget_seconds}s" \
+    -run '^TestUserJourney$' -skip '^TestUserJourney$/(claude|codex)$' ./internal/e2e/... &
+  second_pid=$!
+
+  first_status=0
+  second_status=0
+  wait "$first_pid" || first_status=$?
+  wait "$second_pid" || second_status=$?
+  if (( first_status != 0 || second_status != 0 )); then
+    if (( first_status != 0 )); then
+      exit "$first_status"
+    fi
+    exit "$second_status"
+  fi
+
+  elapsed_seconds=$((SECONDS - start_seconds))
+  remaining_seconds=$((budget_seconds - elapsed_seconds))
+  if (( remaining_seconds <= 0 )); then
+    echo "e2e suite budget exhausted during the user-journey matrix" >&2
+    exit 1
+  fi
+
+  go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
+    -skip '^TestUserJourney$' ./internal/e2e/... ./internal/pipeline/steps/... &
+  remaining_pid=$!
+  wait "$remaining_pid"
+  remaining_status=$?
+  exit "$remaining_status"
 fi
 
 go test "$@"

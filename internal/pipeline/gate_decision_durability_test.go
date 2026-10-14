@@ -29,7 +29,7 @@ func TestExecutor_FixResponseRefusedWhenTheDecisionWriteFails(t *testing.T) {
 	}
 	database, p, run, repo := setupTest(t)
 	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
-	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+	done, _ := startExecutor(t, exec, run, repo, completionFixture(t, database, run))
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	<-contexts // the parking round
 

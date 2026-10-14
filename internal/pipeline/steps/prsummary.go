@@ -146,7 +146,7 @@ func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 			// worth holding: it survives any future reordering of this section
 			// and is what the regression asserts. The real attestation is
 			// emitted separately by buildPipelineAttestation and is untouched.
-			detailBlocks = append(detailBlocks, neutralizeAttestationMarkers(detail))
+			detailBlocks = append(detailBlocks, neutralizeAttestationMarkers(provider, detail))
 		}
 	}
 
@@ -423,12 +423,19 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 		}
 		renderState := testingArtifactRenderState{remainingEmbeddedBytes: maxEmbeddedArtifactsTotalBytes}
 		previousArtifact := ""
+		previousAttachment := false
 		for _, artifact := range artifacts {
 			rendered := renderTestingArtifact(artifact, opts, &renderState)
 			if rendered == "" {
 				continue
 			}
+			// A compact block with an uploaded attachment always starts with
+			// it. GitHub plays a bare video URL inline only when the URL is a
+			// paragraph by itself, so the block gets a blank line on both sides.
+			attachment := opts.compactArtifacts && opts.attachmentURL(artifact) != ""
 			if needsArtifactBlockSeparator(previousArtifact, rendered) {
+				b.WriteString("\n")
+			} else if (attachment || previousAttachment) && !strings.HasSuffix(b.String(), "\n\n") {
 				b.WriteString("\n")
 			}
 			b.WriteString(rendered)
@@ -436,10 +443,11 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 				b.WriteString("\n")
 			}
 			previousArtifact = rendered
+			previousAttachment = attachment
 		}
 		if outcome := buildTestingOutcomeLine(line, stepRounds); shouldRenderTestingOutcome(opts, wroteSummary, outcome) {
 			outcomeLine := "- " + outcome
-			if needsArtifactBlockSeparator(previousArtifact, outcomeLine) {
+			if needsArtifactBlockSeparator(previousArtifact, outcomeLine) || previousAttachment {
 				b.WriteString("\n")
 			}
 			b.WriteString(outcomeLine)
@@ -1636,10 +1644,13 @@ func escapePipelineFoldMarkers(s string) string {
 // first marker in the body to the PR head. It also breaks copied PR-appendix
 // ownership markers (e.g. Testing evidence quoting a templated body): a raw
 // pair in an ordinary body makes every later restamp refuse it as ambiguous.
-// And it neutralizes closing references (neutralizeClosingReferences), since
-// every PR-body site that generates text passes through here.
-func neutralizeAttestationMarkers(s string) string {
-	return neutralizeClosingReferences(escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix)))
+// And it neutralizes closing references in the provider's own grammar
+// (closingGrammarFor), since every PR-body site that generates text passes
+// through here - the grammar has to travel with the text, because GitLab
+// resolves a reference inside a code block where GitHub does not.
+func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
+	escaped := escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
+	return closingGrammarFor(provider).neutralize(escaped)
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {

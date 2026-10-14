@@ -92,6 +92,7 @@ var (
 	_ scm.PRBaseBranchReader = (*Host)(nil)
 	_ scm.PRBaseRetargeter   = (*Host)(nil)
 	_ scm.MergedProofHost    = (*Host)(nil)
+	_ scm.PRFactsReader      = (*Host)(nil)
 	_ scm.PRBodyLimiter      = (*Host)(nil)
 )
 
@@ -340,6 +341,9 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 		}
 		checks = append(checks, check)
 	}
+	if err := scm.ValidateCheckHeads(checks, strings.TrimSpace(pr.HeadSHA)); err != nil {
+		return nil, err
+	}
 	return checks, nil
 }
 
@@ -351,6 +355,7 @@ func normalizeCheck(raw wireCheck) (scm.Check, error) {
 	check := scm.Check{
 		Name:        name,
 		ProviderID:  strings.TrimSpace(raw.ID),
+		HeadSHA:     strings.TrimSpace(raw.HeadSHA),
 		Kind:        scm.CheckKindRun,
 		State:       strings.TrimSpace(raw.State),
 		ExecutionID: strings.TrimSpace(raw.ExecutionID),

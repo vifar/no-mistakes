@@ -205,7 +205,7 @@ func respondFixStepFindings(t *testing.T) (*Executor, *db.DB, *db.Run, *db.Repo,
 		},
 	}
 	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
-	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+	done, _ := startExecutor(t, exec, run, repo, completionFixture(t, database, run))
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	return exec, database, run, repo, done
 }
@@ -401,7 +401,7 @@ func TestExecutor_FixResponseNormalizesIDsBeforeDispatchAndPersistence(t *testin
 	}
 	database, p, run, repo := setupTest(t)
 	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
-	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+	done, _ := startExecutor(t, exec, run, repo, completionFixture(t, database, run))
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	<-contexts // the parking round
 	steps, err := database.GetStepsByRun(run.ID)
@@ -645,7 +645,7 @@ func TestExecutor_RecoveredGateValidatesAndRecordsTheDecision(t *testing.T) {
 	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
 	done := make(chan error, 1)
 	go func() {
-		done <- exec.Resume(context.Background(), run, repo, t.TempDir())
+		done <- exec.Resume(context.Background(), run, repo, completionFixture(t, database, run))
 	}()
 
 	// The recovered park is registered asynchronously, so the refusal is
@@ -827,7 +827,7 @@ func TestExecutor_AddedFindingCannotTakeADeclinedGateFindingID(t *testing.T) {
 	}
 	database, p, run, repo := setupTest(t)
 	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
-	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+	done, _ := startExecutor(t, exec, run, repo, completionFixture(t, database, run))
 	waitForStepStatus(t, database, run.ID, types.StepLint, types.StepStatusAwaitingApproval)
 	<-contexts // the parking round
 

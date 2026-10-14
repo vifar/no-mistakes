@@ -39,7 +39,8 @@ type reviewBotCheck struct {
 // authorized transient rerun was spent. It is the input to the classifier
 // that turns each issue into a finding carrying its action.
 type ciIssues struct {
-	checks []scm.Check
+	provider scm.Provider
+	checks   []scm.Check
 	// failing is the sorted list of fail-bucket check names. It may carry a
 	// name more than once when same-named checks fail together.
 	failing []string
@@ -107,7 +108,7 @@ func ciObservationFindings(issues ciIssues) Findings {
 	if issues.greenBots {
 		botChecks = append(botChecks, greenReviewBotChecks(issues.checks)...)
 	}
-	items = append(items, reviewBotFindings(botChecks, issues.botComments)...)
+	items = append(items, reviewBotFindings(issues.provider, botChecks, issues.botComments)...)
 	if issues.mergeConflict {
 		items = append(items, Finding{
 			Severity:    types.FindingSeverityError,
@@ -201,14 +202,14 @@ func ciCheckDescription(check scm.Check) string {
 // their unresolved comments, bounded once across the complete observation.
 // A red check with no unresolved comment still needs a decision, so it becomes
 // one finding of its own rather than disappearing.
-func reviewBotFindings(checks []reviewBotCheck, comments []scm.ReviewComment) []Finding {
+func reviewBotFindings(provider scm.Provider, checks []reviewBotCheck, comments []scm.ReviewComment) []Finding {
 	var candidates []Finding
 	seenComments := map[string]bool{}
 	for _, checked := range checks {
 		matched := false
 		hasComments := false
 		for _, comment := range comments {
-			author, ok := scm.ReviewBotForLogin(comment.Author)
+			author, ok := scm.ReviewBotForLogin(provider, comment.Author)
 			if !ok || author.AppSlug != checked.bot.AppSlug {
 				continue
 			}
@@ -415,6 +416,7 @@ func (s *CIStep) greenReviewBotFindings(sctx *pipeline.StepContext, host scm.Hos
 		return Findings{}, err
 	}
 	return ciObservationFindings(ciIssues{
+		provider:    host.Provider(),
 		checks:      checks,
 		reruns:      s.transientReruns.used,
 		botComments: comments,

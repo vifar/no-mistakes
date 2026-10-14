@@ -158,6 +158,82 @@ func safetyReap(t *testing.T) {
 	})
 }
 
+func TestReapOwnedOnlyRemovesExactOwner(t *testing.T) {
+	lab := labRoot(t)
+	t.Setenv(EnvInventory, filepath.Join(lab, "inv"))
+	inv, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv.findDaemons = func(string) ([]int, error) { return nil, nil }
+	for _, entry := range []Entry{
+		{ID: "own", NMHome: filepath.Join(lab, "nm-e2e-own"), OwnerPID: os.Getpid()},
+		{ID: "foreign", NMHome: filepath.Join(lab, "nm-e2e-foreign"), OwnerPID: os.Getpid() + 1},
+	} {
+		if err := inv.Register(entry.ID, entry.NMHome, "", 0, entry.OwnerPID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result := inv.ReapOwned(os.Getpid())
+	if result.Removed != 1 {
+		t.Fatalf("ReapOwned result = %+v, want only own entry removed", result)
+	}
+	entries, err := inv.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].ID != "foreign" {
+		t.Fatalf("remaining entries = %+v, want foreign owner retained", entries)
+	}
+}
+
+func TestReapStaleRequiresConfirmedDeadOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix process model")
+	}
+	lab := labRoot(t)
+	t.Setenv(EnvInventory, filepath.Join(lab, "inv"))
+	inv, err := Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv.findDaemons = func(string) ([]int, error) { return nil, nil }
+	cmd := exec.Command("sh", "-c", "sleep 60")
+	detachTestProcess(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+	entries := []Entry{
+		{ID: "stale", NMHome: filepath.Join(lab, "nm-e2e-stale"), OwnerPID: 2147483647},
+		{ID: "live", NMHome: filepath.Join(lab, "nm-e2e-live"), OwnerPID: cmd.Process.Pid},
+		{ID: "invalid", NMHome: filepath.Join(lab, "nm-e2e-invalid"), OwnerPID: 0},
+	}
+	for _, entry := range entries {
+		if err := inv.Register(entry.ID, entry.NMHome, "", 0, entry.OwnerPID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result := inv.ReapStale()
+	if result.Removed != 1 {
+		t.Fatalf("ReapStale result = %+v, want only confirmed-dead owner removed", result)
+	}
+	remaining, err := inv.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, entry := range remaining {
+		ids[entry.ID] = true
+	}
+	if len(ids) != 2 || !ids["live"] || !ids["invalid"] {
+		t.Fatalf("remaining entries = %+v, want live and invalid owners retained", remaining)
+	}
+}
+
 func TestSyncProcessAllowsCandidateThatAlreadyExited(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv(EnvInventory, filepath.Join(root, "inventory"))

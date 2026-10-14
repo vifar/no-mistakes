@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
@@ -505,9 +506,9 @@ func TestViewPR_StateContentAndBase(t *testing.T) {
 func TestGetChecks(t *testing.T) {
 	host, transport := newTestHost(t, Options{})
 	transport.reply(`{"checks":[
-		{"name":"build","id":"b1","bucket":"pass","state":"SUCCESS","link":"https://ci/1","started_at":"2026-01-02T03:04:05Z","completed_at":"2026-01-02T03:05:05Z","execution_id":"run-1"},
-		{"name":"lint","bucket":"FAIL"},
-		{"name":"deploy","bucket":"skipping"}
+		{"name":"build","head_sha":"abc123","id":"b1","bucket":"pass","state":"SUCCESS","link":"https://ci/1","started_at":"2026-01-02T03:04:05Z","completed_at":"2026-01-02T03:05:05Z","execution_id":"run-1"},
+		{"name":"lint","head_sha":"abc123","bucket":"FAIL"},
+		{"name":"deploy","head_sha":"abc123","bucket":"skipping"}
 	]}`)
 	checks, err := host.GetChecks(context.Background(), testPR())
 	if err != nil {
@@ -695,5 +696,20 @@ func TestPrefixBufferNeverFailsWrites(t *testing.T) {
 	}
 	if buf.String() != "abc" {
 		t.Fatalf("buffer = %q", buf.String())
+	}
+}
+
+func TestGetChecksRejectsNonCurrentEvidence(t *testing.T) {
+	for _, head := range []string{"", "old-head"} {
+		for _, bucket := range []string{"pass", "fail", "cancel"} {
+			t.Run(head+"/"+bucket, func(t *testing.T) {
+				host, transport := newTestHost(t, Options{})
+				transport.reply(fmt.Sprintf(`{"checks":[{"name":"test","bucket":%q,"head_sha":%q}]}`, bucket, head))
+				checks, err := host.GetChecks(context.Background(), testPR())
+				if !errors.Is(err, scm.ErrHeadChanged) || len(checks) != 0 {
+					t.Fatalf("non-current evidence is actionable: checks=%+v err=%v", checks, err)
+				}
+			})
+		}
 	}
 }

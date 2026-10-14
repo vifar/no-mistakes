@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	machineLocalRemote     = "https://example.invalid/acme/widget.git"
+	machineLocalRemote     = "https://github.com/acme/widget.git"
 	testStepPromptMarker   = "You are validating a code change by driving the product itself"
 	machineLocalConfigFile = "command-config.ndjson"
 )
@@ -26,6 +26,9 @@ const (
 // initializes the gate, and points origin at a forge-shaped URL that matches it.
 func setupMachineLocalCommands(t *testing.T, h *Harness, overrides string) {
 	t.Helper()
+	t.Setenv("FAKEAGENT_GH_MODE", "fork-pr")
+	t.Setenv("FAKEAGENT_GH_LOG", filepath.Join(filepath.Dir(h.AgentLog), "gh-machine-local.log"))
+	t.Setenv("FAKEAGENT_GH_PARENT", "acme/widget")
 	if overrides != "" {
 		globalConfig := filepath.Join(h.NMHome, "config.yaml")
 		data, err := os.ReadFile(globalConfig)

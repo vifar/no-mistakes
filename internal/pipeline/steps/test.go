@@ -34,8 +34,11 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	ctx := sctx.Ctx
 	startHead := sctx.Run.HeadSHA
-	baseBranch := effectivePRBaseBranch(sctx)
-	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
+	targetBranch, err := currentPRTargetBranch(sctx)
+	if err != nil {
+		return nil, err
+	}
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, targetBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -137,6 +140,8 @@ Previous test findings to address:
 	var baselineFindings []Finding
 	var baselineSummary string
 	var baselineExitCode int
+	var testCommandExit *int
+	var testCommandHead, testCommandObservedAt string
 	var attributionSection string
 	if testCmd != "" || len(sctx.Config.CommandOverrides["test"].Additional) > 0 {
 		if err := ensurePrepared(sctx, s.Name()); err != nil {
@@ -154,6 +159,12 @@ Previous test findings to address:
 		baselineResults = results
 		for _, result := range results {
 			tested = append(tested, result.Command)
+		}
+		if testCmd != "" && len(results) > 0 && !results[0].Local {
+			exitCode := results[0].ExitCode
+			testCommandExit = &exitCode
+			testCommandHead = currentTestCommandHead(sctx)
+			testCommandObservedAt = supportObservationTime()
 		}
 
 		projectedOutput := logConfiguredCommandOutput(sctx, output, types.StepTest)
@@ -321,6 +332,15 @@ Rules:
 	}
 
 	findings.Items = append(findings.Items, verdictFindings(findings)...)
+	ownerResults, err := resolveTestReviewSupport(sctx, testCmd, testCommandExit, testCommandHead, testCommandObservedAt)
+	if err != nil {
+		if errors.Is(err, errReviewSupportHeadAdvanced) {
+			return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
+		}
+		return nil, fmt.Errorf("resolve Review test support: %w", err)
+	}
+	findings.Items = append(findings.Items, ownerResults...)
+	findings.Items = append(findings.Items, unselectedTestFindings(sctx, findings.Items)...)
 
 	needsApproval := hasBlockingFindings(findings.Items)
 	autoFixable := needsApproval
@@ -416,6 +436,11 @@ func parseTestAnalyzerOutput(result *agent.Result) (Findings, error) {
 		return Findings{}, err
 	}
 	for i := range findings.Items {
+		item := &findings.Items[i]
+		if item.Category == types.FindingCategoryReviewSupportResolved || item.Category == types.FindingCategoryReviewSupportUnresolved ||
+			(item.Support != nil && item.Support.OwnerResult != nil) {
+			return Findings{}, fmt.Errorf("test analyzer finding %d cannot supply Review support owner result", i)
+		}
 		if slices.Contains(testBudgetCutIDs, findings.Items[i].ID) {
 			findings.Items[i].ID = ""
 		}
@@ -493,12 +518,14 @@ func verdictFindings(findings Findings) []Finding {
 	switch findings.Verdict {
 	case types.TestVerdictNoGo:
 		return []Finding{{
+			Category:    types.FindingCategoryTestVerdict,
 			Severity:    types.FindingSeverityError,
 			Action:      types.ActionAutoFix,
 			Description: fmt.Sprintf("live validation verdict: no-go (%s)%s", coverage, failedScenarioSuffix(findings.Scenarios)),
 		}}
 	case types.TestVerdictInconclusive:
 		return []Finding{{
+			Category:    types.FindingCategoryTestVerdict,
 			Severity:    types.FindingSeverityWarning,
 			Action:      types.ActionAskUser,
 			Description: fmt.Sprintf("live validation verdict: inconclusive (%s)%s", coverage, untestedScenarioSuffix(findings.Scenarios)),
@@ -663,6 +690,44 @@ func answeredTestGate(sctx *pipeline.StepContext) Findings {
 			item.ID = ""
 			carried.Items = append(carried.Items, item)
 		}
+	}
+	return carried
+}
+
+// unselectedTestFindings returns the ask-user or blocking findings an earlier
+// round deferred when the automatic fix loop started this round. They can
+// record what an earlier turn observed - a write outside the workspace, say -
+// rather than a property of the code, so this round's clean result cannot
+// clear them; only a human response can. Step-owned findings are skipped
+// because this execution derives them again. A re-report replaces a deferred
+// finding only when SameFinding and the effective action both match: matching
+// content alone could erase an undecided ask-user finding after an action change.
+func unselectedTestFindings(sctx *pipeline.StepContext, current []Finding) []Finding {
+	if !sctx.AutoFixRound {
+		return nil
+	}
+	// Fails only when nothing was deferred: the executor builds this from the
+	// findings JSON it just parsed to select the round.
+	deferred, err := types.ParseFindingsJSON(sctx.DeferredFindings)
+	if err != nil {
+		return nil
+	}
+	var carried []Finding
+	for _, item := range deferred.Items {
+		if slices.Contains(testBudgetCutIDs, item.ID) || item.Category == types.FindingCategoryTestCommand || item.Category == types.FindingCategoryTestVerdict {
+			continue
+		}
+		if item.ActionOrDefault() != types.ActionAskUser && item.Severity != types.FindingSeverityError && item.Severity != types.FindingSeverityWarning {
+			continue
+		}
+		if slices.ContainsFunc(current, func(reported Finding) bool {
+			return pipeline.SameFinding(reported, item) && reported.ActionOrDefault() == item.ActionOrDefault()
+		}) {
+			continue
+		}
+		// Cleared so it is renumbered: this round's own findings may reuse the ID.
+		item.ID = ""
+		carried = append(carried, item)
 	}
 	return carried
 }

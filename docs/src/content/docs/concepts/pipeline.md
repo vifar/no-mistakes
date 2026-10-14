@@ -54,6 +54,10 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 - **Rebase next** so everything else runs against the latest upstream and pushed-branch target.
   It also stops when the branch would silently bundle commits from a local default branch that were never pushed to `origin/<default_branch>`.
   If there's no diff left after the rebase, the pipeline skips the rest.
+  The first executed core step at or after Rebase fetches the comparison if no
+  receipt exists yet. Skipped core steps and custom gates anchored to skipped
+  steps defer that fetch; independent custom commands still run. Once a receipt
+  exists, comparison checking continues at later eligible boundaries.
 - **Review before test** so the agent reads fresh code, not code it may have touched during fixes.
   A later run's initial review also receives fix-round provenance for any uncertified pipeline-authored commits left on the branch when a previous run's re-review did not complete.
 - **Document after test** so docs are updated against code that's known to work.
@@ -61,6 +65,9 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 - **Push → PR → CI** happens after all local checks pass.
   CI publishes a repair through the Push step's guarded path and keeps monitoring only when it can prove the repair descends from the reviewed head; otherwise the repair revalidates from Review before Push republishes it, which is what a merge-conflict repair always does. [`ci.revalidate_repairs`](/no-mistakes/reference/repo-config/#cirevalidate_repairs) sets that intent: `false` (default) publishes when it is provable, `true` revalidates every repair.
   CI owns remote validation after publication. A repository gate command still runs before Push, although the command itself may contact an external service.
+
+Strict shipping keeps its separate pinned signed-proof contract and does not
+use external CI ownership.
 
 ## What core steps can do
 
@@ -70,7 +77,7 @@ Core steps use these outcomes as applicable:
 - **Return findings** with severity (`error`, `warning`, `info`) and an action (`auto-fix`, `ask-user`, `no-op`).
 - **Trigger auto-fix** if the step's `auto_fix` limit is above 0, the step result is auto-fixable, and any finding is `auto-fix`-eligible. The document step applies safe documentation fixes during its initial pass and, when `commands.lint` is empty, combines that pass with initial safe lint fixes before the lint step consumes its findings.
 - **Pause for approval** if blocking findings remain after auto-fix, any finding is `ask-user`, or Review has a selected finding still awaiting positive rereview verification. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns that carry-forward rule.
-- **Skip** when there's nothing to do (e.g., no diff, unsupported host).
+- **Skip** when there's nothing to do (e.g., no diff). [Unsupported network hosts](/no-mistakes/guides/provider-integration/#unsupported-hosts) fail before core validation rather than skip through it.
 - **Fail** on fatal errors and stop the pipeline.
 
 See [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/) for how the fix cycle works, and [Using the TUI](/no-mistakes/guides/tui/) for what the approval UI looks like.

@@ -67,8 +67,11 @@ func (s *LintStep) executeRepositoryLint(sctx *pipeline.StepContext) (*pipeline.
 		return nil, err
 	}
 	ctx := sctx.Ctx
-	baseBranch := effectivePRBaseBranch(sctx)
-	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
+	targetBranch, err := currentPRTargetBranch(sctx)
+	if err != nil {
+		return nil, err
+	}
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, targetBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -120,12 +123,14 @@ Rules:
 Previous lint findings to address:
 ` + sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
 		}
-		result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
-			Prompt:     fixerPrompt(prompt),
-			CWD:        sctx.WorkDir,
-			JSONSchema: findingsSchema,
-			OnChunk:    sctx.LogChunk,
-			Purpose:    "lint",
+		result, err := runPipelineCorrectionAgent(sctx, func() (*agent.Result, error) {
+			return sctx.RunAgentContext(ctx, agent.RunOpts{
+				Prompt:     fixerPrompt(prompt),
+				CWD:        sctx.WorkDir,
+				JSONSchema: findingsSchema,
+				OnChunk:    sctx.LogChunk,
+				Purpose:    "lint",
+			})
 		})
 		if err != nil {
 			return nil, fmt.Errorf("agent lint: %w", err)

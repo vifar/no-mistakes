@@ -129,6 +129,12 @@ func outcomeFor(status string) string {
 // skips carry no automatic cause and retain their existing outcome.
 func outcomeForRun(rv runView) string {
 	word := outcomeFor(rv.Status)
+	if word == "passed" && rv.ExternalCIOwner == types.ExternalCIOwnerControllerShipPR && rv.PendingCISupportError != "" {
+		return "external-ci-handoff-unavailable"
+	}
+	if word == "passed" && rv.ExternalCIOwner == types.ExternalCIOwnerControllerShipPR && len(rv.PendingCISupport) > 0 {
+		return "pending-external-ci"
+	}
 	if word == "passed" && (rv.CIOverrideReason != "" || rv.TestOverrideReason != "") {
 		return "passed-with-override"
 	}
@@ -148,6 +154,7 @@ func newAxiRunCmd() *cobra.Command {
 	var validationGeneration string
 	var baseBranch string
 	var noPublishIntent bool
+	var externalCIOwner string
 	var model, effort string
 	var wait time.Duration
 	var closesIssues []string
@@ -190,14 +197,17 @@ func newAxiRunCmd() *cobra.Command {
 			"draft from the diff and commit messages only. It is persisted on the run;\n" +
 			"the global intent.publish_intent: false default applies to runs started\n" +
 			"without it. The running daemon must honor it; an older daemon is refused.\n\n" +
-			"--closes <issue> adds a GitHub closing reference (Closes #42) to the PR\n" +
-			"body's Issues section. Repeat it for each issue the PR fully resolves; a\n" +
-			"value is an issue number or owner/repo#42. References are deduplicated,\n" +
-			"kept through that run's PR-body refreshes, inherited by rerun, and verified\n" +
-			"on the live PR; a later run started without --closes drops them. Without it\n" +
-			"no closing reference is added or inferred. GitHub closes the issue only when\n" +
-			"the PR merges into the default branch. Reattaching may add references until\n" +
-			"the PR body has been composed. It cannot be combined with --skip pr.\n\n" +
+			"--closes <issue> adds a closing reference (Closes #42) to the PR body's\n" +
+			"Issues section. Repeat it for each issue the PR fully resolves; a value is\n" +
+			"an issue number or a project-qualified reference (owner/repo#42, or\n" +
+			"group/subgroup/repo#42 on GitLab). References are deduplicated, kept through\n" +
+			"that run's PR-body refreshes, inherited by rerun, and verified on the live\n" +
+			"PR; a later run started without --closes drops them. Without it no closing\n" +
+			"reference is added or inferred. The forge closes the issue only when the PR\n" +
+			"merges into the default branch. A provider that does not close issues from\n" +
+			"the PR body fails the step instead of publishing a reference that would\n" +
+			"close nothing. Reattaching may add references until the PR body has been\n" +
+			"composed. It cannot be combined with --skip pr.\n\n" +
 			"--model and/or --effort opt into an immutable Pi profile for a new run.\n" +
 			"An omitted field comes from agent_config.pi; both must resolve. Requires\n" +
 			"Pi-only agents; raw native selection flags conflict. The pin outranks\n" +
@@ -260,8 +270,9 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&launchNonce, "launch-nonce", "", "opaque nonce for a daemon-bound pre-drive launch receipt")
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
+	cmd.Flags().StringVar(&externalCIOwner, "external-ci-owner", "", "explicit external CI owner (controller-ship-pr); requires --skip=push,pr,ci")
 	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this run (tighten-only; full intent still reaches every step prompt except PR drafting)")
-	cmd.Flags().StringArrayVar(&closesIssues, "closes", nil, "GitHub issue this PR closes when merged; repeat for multiple issues (42 or owner/repo#42)")
+	cmd.Flags().StringArrayVar(&closesIssues, "closes", nil, "issue this PR closes when merged; repeat for multiple issues (42, owner/repo#42, or a nested GitLab project path)")
 	cmd.Flags().String("verification-plan", "", "capture a nonempty UTF-8 verification plan as separate run evidence (new runs only)")
 	bindAxiWaitFlag(cmd, &wait)
 	bindPiProfileFlags(cmd, &model, &effort)
@@ -275,6 +286,13 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, launchNonce, validationGeneration string, wait time.Duration, profiles ...*agentcfg.PiProfile) error {
 	profile := agentcfg.OptionalPiProfile(profiles)
 	if err := profile.ValidateRequest(); err != nil {
+		return emitError(cmd, 2, err.Error())
+	}
+	externalCIOwner, _ := cmd.Flags().GetString("external-ci-owner")
+	if types.ShippingFromContext(cmd.Context()) != nil && externalCIOwner != "" {
+		return emitError(cmd, 2, "strict shipping cannot be combined with --external-ci-owner")
+	}
+	if err := types.ValidateExternalCIOwnerRequest(externalCIOwner, skipSteps); err != nil {
 		return emitError(cmd, 2, err.Error())
 	}
 	if err := validateAxiWait(wait); err != nil {
@@ -292,7 +310,7 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 	// never starts or touches a run.
 	closesIssues, err := closingIssueRefsFromFlags(cmd)
 	if err != nil {
-		return emitError(cmd, 2, err.Error(), "Use a positive issue number or owner/repository-qualified reference, e.g. --closes 42 --closes owner/repo#99.")
+		return emitError(cmd, 2, err.Error(), "Use a positive issue number or project-qualified reference, e.g. --closes 42 --closes owner/repo#99 (group/subgroup/repo#99 on GitLab).")
 	}
 	if len(closesIssues) > 0 && slices.Contains(skipSteps, types.StepPR) {
 		return emitError(cmd, 2, "--closes cannot be combined with --skip pr: skipping the PR step publishes no closing reference", "Drop pr from --skip, or drop --closes.")
@@ -318,6 +336,12 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 	}
 	if err := requireDaemonHonorsOmitIntent(env.client, omitIntent, globalCfg); err != nil {
 		return emitError(cmd, 2, err.Error())
+	}
+	if externalCIOwner != "" {
+		var capability ipc.ProbeExternalCIOwnerResult
+		if err := env.client.Call(ipc.MethodProbeExternalCIOwner, &ipc.ProbeExternalCIOwnerParams{}, &capability); err != nil || !capability.OK {
+			return emitError(cmd, 2, "running daemon cannot honor --external-ci-owner; restart it with the current binary")
+		}
 	}
 	// Same reasoning: an older daemon would drop closing_issue_refs silently
 	// and open a PR that never closes the requested issues.
@@ -358,7 +382,7 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		if strings.TrimSpace(validationGeneration) == "" {
 			return emitError(cmd, 2, "--validation-generation is required with --launch-nonce")
 		}
-		receipt, err := claimShippingLaunchReceipt(types.ShippingFromContext(ctx), env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profile)
+		receipt, err := claimLaunchReceiptWithOptions(types.ShippingFromContext(ctx), externalCIOwner, env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profile)
 		if err != nil {
 			return emitError(cmd, 1, fmt.Sprintf("claim launch receipt: %v", err))
 		}
@@ -380,6 +404,9 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		if active != nil {
 			if !active.Shipping.Matches(shipping) {
 				return emitError(cmd, 2, "active run has a different shipping pin")
+			}
+			if active.ExternalCIOwner != externalCIOwner {
+				return emitError(cmd, 2, "active run has a different external CI owner")
 			}
 			if !active.PiProfile.Matches(profile) {
 				return emitError(cmd, 2, "active run has a different Pi profile; omit --model/--effort to reattach")
@@ -470,12 +497,12 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		}
 		var err error
 		if launchNonce != "" {
-			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, omitIntent, launchNonce, validationGeneration, planID, closesIssues, profile)
+			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, omitIntent, externalCIOwner, launchNonce, validationGeneration, planID, closesIssues, profile)
 			if err == nil {
 				runID = launchReceipt.RunID
 			}
 		} else {
-			runID, err = triggerRun(ctx, env, branch, skipSteps, intent, baseBranch, omitIntent, planID, closesIssues, profile)
+			runID, err = triggerRun(ctx, env, branch, skipSteps, intent, baseBranch, omitIntent, externalCIOwner, planID, closesIssues, profile)
 		}
 		if err == nil && planID != "" && runID != planID {
 			err = fmt.Errorf("launched run does not own the captured verification plan")
@@ -798,7 +825,7 @@ func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.
 // the gate to trigger a pipeline, and falls back to a rerun when the push was a
 // no-op (the gate already had this commit). Callers must check for an existing
 // active run first (see activeRunID) and apply pre-flight guards.
-func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, planID string, closesIssues []string, profiles ...*agentcfg.PiProfile) (string, error) {
+func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, externalCIOwner, planID string, closesIssues []string, profiles ...*agentcfg.PiProfile) (string, error) {
 	profile := agentcfg.OptionalPiProfile(profiles)
 	pushOptions := append(formatSkipPushOptions(skipSteps), formatPiProfilePushOptions(profile)...)
 	pushOptions = append(pushOptions, formatVerificationPlanPushOptions(planID)...)
@@ -811,6 +838,9 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 	}
 	if opt := formatOmitIntentPushOption(omitIntent); opt != "" {
 		pushOptions = append(pushOptions, opt)
+	}
+	if externalCIOwner != "" {
+		pushOptions = append(pushOptions, formatExternalCIOwnerPushOption(externalCIOwner))
 	}
 	observedHead, err := git.HeadSHA(ctx, ".")
 	if err != nil {
@@ -867,6 +897,9 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 	}
 
 	if run, _ := waitForTriggeredRunForHead(ctx, env.client, env.repo.ID, branch, submissionHead, priorRunIDs, triggerWaitTimeout); run != nil {
+		if run.ExternalCIOwner != externalCIOwner {
+			return "", fmt.Errorf("triggered run did not retain the requested external CI owner")
+		}
 		if !run.PiProfile.Matches(profile) {
 			return "", fmt.Errorf("triggered run has a conflicting Pi profile")
 		}
@@ -884,6 +917,7 @@ func triggerRun(ctx context.Context, env *axiEnv, branch string, skipSteps []typ
 	var rr ipc.RerunResult
 	params := rerunParams(env.repo.ID, branch, skipSteps, intent, baseBranch)
 	params.OmitIntent = omitIntent
+	params.ExternalCIOwner = externalCIOwner
 	params.PiProfile = profile
 	params.ClosingIssueRefs = closesIssues
 	params.VerificationPlanID = planID
@@ -975,9 +1009,16 @@ func claimLaunchReceipt(client *ipc.Client, repoID, branch, launchNonce, submitt
 }
 
 func claimShippingLaunchReceipt(shipping *types.ShippingOptions, client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch string, omitIntent bool, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+	return claimLaunchReceiptWithOptions(shipping, "", client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch, omitIntent, profiles...)
+}
+
+func claimLaunchReceiptWithOptions(shipping *types.ShippingOptions, externalCIOwner string, client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch string, omitIntent bool, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+	if shipping != nil && externalCIOwner != "" {
+		return nil, fmt.Errorf("strict shipping cannot be combined with an external CI owner")
+	}
 	var result ipc.ClaimLaunchReceiptResult
 	if err := client.Call(ipc.MethodClaimLaunchReceipt, &ipc.ClaimLaunchReceiptParams{
-		Shipping: shipping, RepoID: repoID, Branch: branch, LaunchNonce: launchNonce, PiProfile: agentcfg.OptionalPiProfile(profiles),
+		Shipping: shipping, ExternalCIOwner: externalCIOwner, RepoID: repoID, Branch: branch, LaunchNonce: launchNonce, PiProfile: agentcfg.OptionalPiProfile(profiles),
 		SubmittedHeadSHA: submittedHeadSHA, ValidationGeneration: validationGeneration, IntentDigest: intentDigest, PRBaseBranch: baseBranch, OmitIntent: omitIntent,
 	}, &result); err != nil {
 		return nil, err
@@ -991,7 +1032,7 @@ func claimShippingLaunchReceipt(shipping *types.ShippingOptions, client *ipc.Cli
 // triggerProofRun captures the immutable submitted commit and waits only for
 // the matching nonce-bound receipt. Ordinary active-run heuristics never prove
 // strict launch identity.
-func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, launchNonce, validationGeneration, planID string, closesIssues []string, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, skipSteps []types.StepName, intent, baseBranch string, omitIntent bool, externalCIOwner, launchNonce, validationGeneration, planID string, closesIssues []string, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
 	profile := agentcfg.OptionalPiProfile(profiles)
 	shipping := types.ShippingFromContext(ctx)
 	if shipping != nil && shipping.Mode == types.ShippingImmutableSource {
@@ -1023,6 +1064,9 @@ func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, s
 	if opt := formatOmitIntentPushOption(omitIntent); opt != "" {
 		pushOptions = append(pushOptions, opt)
 	}
+	if externalCIOwner != "" {
+		pushOptions = append(pushOptions, formatExternalCIOwnerPushOption(externalCIOwner))
+	}
 	if state := freshRunBranchOwnershipState(ctx, env); state != nil {
 		return nil, &branchOwnershipError{state: *state}
 	}
@@ -1043,31 +1087,30 @@ func triggerProofRun(ctx context.Context, env *axiEnv, branch, headSHA string, s
 		}
 		return nil, fmt.Errorf("push %q to gate: %w", branch, pushErr)
 	}
-	if receipt, err := waitForLaunchReceipt(ctx, env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, intent, baseBranch, omitIntent, triggerWaitTimeout, profile); err != nil {
+	if receipt, err := waitForLaunchReceipt(ctx, env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, intent, baseBranch, omitIntent, externalCIOwner, triggerWaitTimeout, profile); err != nil {
 		return nil, err
 	} else if receipt != nil {
 		return receipt, nil
 	}
 	var result ipc.StartFreshRunResult
 	if err := env.client.Call(ipc.MethodStartFreshRun, &ipc.StartFreshRunParams{
-		Shipping: shipping,
-		RepoID:   env.repo.ID, Branch: branch, HeadSHA: headSHA, SkipSteps: skipSteps,
-		Intent: intent, LaunchNonce: launchNonce, ValidationGeneration: validationGeneration, PRBaseBranch: baseBranch, OmitIntent: omitIntent, PiProfile: profile,
-		VerificationPlanID: planID,
-		ClosingIssueRefs:   closesIssues,
+		Shipping: shipping, ExternalCIOwner: externalCIOwner,
+		RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, SkipSteps: skipSteps,
+		Intent: intent, LaunchNonce: launchNonce, ValidationGeneration: validationGeneration, PRBaseBranch: baseBranch, OmitIntent: omitIntent, PiProfile: profile, VerificationPlanID: planID,
+		ClosingIssueRefs: closesIssues,
 	}, &result); err != nil {
 		return nil, fmt.Errorf("start fresh run: %w", err)
 	}
 	return &result.Receipt, nil
 }
 
-func waitForLaunchReceipt(ctx context.Context, client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intent, baseBranch string, omitIntent bool, timeout time.Duration, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+func waitForLaunchReceipt(ctx context.Context, client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intent, baseBranch string, omitIntent bool, externalCIOwner string, timeout time.Duration, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	poll := time.NewTicker(150 * time.Millisecond)
 	defer poll.Stop()
 	for {
-		receipt, err := claimShippingLaunchReceipt(types.ShippingFromContext(ctx), client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profiles...)
+		receipt, err := claimLaunchReceiptWithOptions(types.ShippingFromContext(ctx), externalCIOwner, client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profiles...)
 		if err != nil {
 			return nil, err
 		}
@@ -1569,11 +1612,23 @@ func renderDriveResultForRun(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool,
 		fixes := rv.fixRows()
 		fields = appendFixesField(fields, fixes)
 		var help []string
-		if rv.CIOverrideReason != "" {
-			help = append(help, fmt.Sprintf("A human approved past a live CI failure: %s", rv.CIOverrideReason))
-		}
 		if rv.TestOverrideReason != "" {
 			help = append(help, "Report the approved Test exception, not a clean Test pass: "+rv.TestOverrideReason)
+		}
+		if rv.PendingCISupportError != "" {
+			help = append(help, "External CI handoff is unavailable: "+rv.PendingCISupportError)
+			fields = append(fields, toon.Field{Key: "help", Value: help})
+			emitDoc(cmd, fields...)
+			return nil
+		}
+		if rv.ExternalCIOwner == types.ExternalCIOwnerControllerShipPR && len(rv.PendingCISupport) > 0 {
+			help = append(help, "CI remains pending. Read `no-mistakes axi ci-handoff --run "+rv.ID+"` and verify current checks before merge.")
+			fields = append(fields, toon.Field{Key: "help", Value: help})
+			emitDoc(cmd, fields...)
+			return nil
+		}
+		if rv.CIOverrideReason != "" {
+			help = append(help, fmt.Sprintf("A human approved past a live CI failure: %s", rv.CIOverrideReason))
 		}
 		if len(rv.automaticSkips()) > 0 {
 			help = append(help, "Publication or CI verification did not run (see `run.automatic_skips` and `run.head_sha`). Report the missing evidence and its cause; this outcome does not establish CI readiness or a code failure.")

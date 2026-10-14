@@ -1,0 +1,389 @@
+package db
+
+const schemaSQL = `
+CREATE TABLE IF NOT EXISTS review_comparisons (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    source_repo TEXT NOT NULL, source_branch TEXT NOT NULL,
+    target_branch TEXT NOT NULL, target_sha TEXT NOT NULL,
+    head_sha TEXT NOT NULL, merge_base_sha TEXT NOT NULL,
+    diff_digest TEXT NOT NULL, generation INTEGER NOT NULL,
+    approved INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS repos (
+    id             TEXT PRIMARY KEY,
+    working_path   TEXT NOT NULL UNIQUE,
+    upstream_url   TEXT NOT NULL,
+    fork_url       TEXT,
+    default_branch TEXT NOT NULL DEFAULT 'main',
+    created_at     INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+    id                   TEXT PRIMARY KEY,
+    repo_id              TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    branch               TEXT NOT NULL,
+    head_sha                TEXT NOT NULL,
+    base_sha                TEXT NOT NULL,
+    worktree_dir            TEXT,
+    submitted_head_sha      TEXT,
+    no_mistakes_version     TEXT,
+    no_mistakes_build_sha   TEXT,
+    review_approved_head_sha TEXT,
+    status                  TEXT NOT NULL DEFAULT 'pending',
+    pr_url                  TEXT,
+    pr_state                TEXT,
+    pr_state_observed_at    INTEGER,
+    ci_ready_at             INTEGER,
+    ci_ready_no_ci          INTEGER NOT NULL DEFAULT 0,
+    last_pushed_sha         TEXT,
+    push_target_kind        TEXT,
+    push_target_fingerprint TEXT,
+    push_ref                TEXT,
+    last_pushed_at          INTEGER,
+    push_generation         INTEGER,
+    push_active             INTEGER NOT NULL DEFAULT 0,
+    terminal_head_verified_at INTEGER,
+    gates_json              TEXT,
+    error                   TEXT,
+    awaiting_agent_since INTEGER,
+    parked_ms            INTEGER,
+    launch_nonce         TEXT,
+    launch_validation_generation TEXT,
+    launch_intent_digest TEXT,
+    launch_receipt_claimed_at INTEGER,
+    pr_base_branch       TEXT,
+    omit_intent          INTEGER NOT NULL DEFAULT 0,
+    pi_profile           TEXT,
+    verification_plan    TEXT,
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS step_results (
+    id               TEXT PRIMARY KEY,
+    run_id           TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    step_name        TEXT NOT NULL,
+    step_order       INTEGER NOT NULL,
+    status           TEXT NOT NULL DEFAULT 'pending',
+    exit_code        INTEGER,
+    duration_ms      INTEGER,
+    log_path         TEXT,
+    findings_json    TEXT,
+    error            TEXT,
+    started_at       INTEGER,
+    round_started_at INTEGER,
+    completed_at     INTEGER,
+    last_activity_at INTEGER,
+    last_activity    TEXT,
+    agent_pid        INTEGER,
+    auto_fix_limit              INTEGER,
+    ci_fix_attempts             INTEGER NOT NULL DEFAULT 0,
+    override_reason             TEXT
+);
+
+CREATE TABLE IF NOT EXISTS step_rounds (
+    id                   TEXT PRIMARY KEY,
+    step_result_id       TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+    round                INTEGER NOT NULL,
+    trigger_type         TEXT NOT NULL,
+    findings_json        TEXT,
+    reviewed_head_sha    TEXT,
+    starting_head_sha    TEXT,
+    trusted_config_sha   TEXT,
+    global_config_yaml   BLOB,
+    repo_config_yaml     BLOB,
+    user_findings_json   TEXT,
+    selected_finding_ids TEXT,
+    selection_source     TEXT,
+    fix_summary          TEXT,
+    repair_published     INTEGER NOT NULL DEFAULT 0,
+    duration_ms          INTEGER NOT NULL,
+    created_at           INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agent_invocations (
+    id                    TEXT PRIMARY KEY,
+    run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    step_name             TEXT NOT NULL,
+    round                 INTEGER NOT NULL,
+    purpose               TEXT NOT NULL,
+    agent                 TEXT NOT NULL,
+    model                 TEXT,
+    model_provider        TEXT,
+    session_mode          TEXT NOT NULL,
+    session_key           TEXT,
+    fallback_reason       TEXT,
+    started_at            INTEGER NOT NULL,
+    completed_at          INTEGER NOT NULL,
+    duration_ms           INTEGER NOT NULL,
+    subprocess_wait_ms    INTEGER,
+    exit_status           TEXT NOT NULL,
+    failure_category      TEXT,
+    input_tokens          INTEGER,
+    output_tokens         INTEGER,
+    cache_read_tokens     INTEGER,
+    cache_creation_tokens INTEGER,
+    fresh_input_tokens    INTEGER,
+    reasoning_tokens      INTEGER,
+    delta_input_tokens    INTEGER,
+    delta_output_tokens   INTEGER,
+    delta_cache_read_tokens INTEGER,
+    model_roundtrips      INTEGER,
+    tool_calls            INTEGER,
+    tool_wait_calls       INTEGER,
+    tool_test_lint_calls  INTEGER,
+    tool_edit_calls       INTEGER,
+    tool_read_calls       INTEGER,
+    tool_git_calls        INTEGER,
+    tool_other_calls      INTEGER,
+    workload_files        INTEGER,
+    workload_lines        INTEGER,
+    finding_count         INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_invocations_run_started_id
+    ON agent_invocations (run_id, started_at, id);
+
+-- A recovery archive is an append-only provenance snapshot binding one exact
+-- existing archive ref to the terminal run whose later head it preserves.
+-- owner_run_id is the lookup association; run_id is deliberately repeated in
+-- the immutable evidence so malformed or cross-bound records fail closed.
+CREATE TABLE IF NOT EXISTS recovery_archives (
+    id                 TEXT PRIMARY KEY,
+    owner_run_id       TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    repo_id            TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    run_id             TEXT NOT NULL,
+    branch             TEXT NOT NULL,
+    required_head_sha  TEXT NOT NULL,
+    preserved_head_sha TEXT NOT NULL,
+    archive_ref        TEXT NOT NULL,
+    created_at         INTEGER NOT NULL,
+    UNIQUE (owner_run_id, archive_ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_recovery_archives_owner_created_id
+    ON recovery_archives (owner_run_id, created_at, id);
+
+CREATE TABLE IF NOT EXISTS run_agent_sessions (
+    run_id     TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    role       TEXT NOT NULL,
+    agent      TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (run_id, role)
+);
+
+-- User-attachment URLs are durable for the life of a run so restarting the
+-- pipeline from Review can render the same evidence without uploading another
+-- orphaned GitHub asset. The digest prevents reuse if a file is overwritten at
+-- the same path during a repair.
+CREATE TABLE IF NOT EXISTS run_media_attachments (
+    run_id    TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    path      TEXT NOT NULL,
+    digest    TEXT NOT NULL,
+    url       TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (run_id, path)
+);
+
+CREATE TABLE IF NOT EXISTS intent_cache (
+    cache_key   TEXT PRIMARY KEY,
+    summary     TEXT NOT NULL,
+    agent_name  TEXT NOT NULL,
+    session_id  TEXT NOT NULL,
+    created_at  INTEGER NOT NULL
+);
+
+-- Answers a human gave to a review turn's questions, keyed by branch so the
+-- next COLD reviewer - in this run or any later one - reads what is already
+-- settled. A mid-turn answer is not a gate response, so it cannot ride the
+-- step_rounds decision channel; nothing deletes these rows, for the same
+-- reason nothing deletes a branch decision. PRIMARY KEY per
+-- branch+question+run+ask: a correction to the SAME ask replaces its earlier
+-- answer, two runs that both happen to use the question id "q1" - ids are
+-- chosen by the agent and unique only by accident - keep their own rows
+-- instead of one overwriting the other's settled decision, and a re-ask of an
+-- id WITHIN one run (a cold rereview in a fix round is shown only the
+-- still-open questions, so it starts numbering at q1 again) records its own
+-- decision instead of overwriting the earlier ask's.
+CREATE TABLE IF NOT EXISTS review_questions (
+    repo_id      TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    branch       TEXT NOT NULL,
+    question_id  TEXT NOT NULL,
+    run_id       TEXT NOT NULL,
+    ask_ordinal  INTEGER NOT NULL,
+    question     TEXT NOT NULL,
+    options_json TEXT,
+    file         TEXT,
+    line         INTEGER,
+    answer       TEXT NOT NULL,
+    answered_by  TEXT,
+    answered_at  TEXT,
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, branch, question_id, run_id, ask_ordinal)
+);
+
+-- Per-branch range of pipeline-authored commits whose re-review did not
+-- complete. The next run's initial review reads this so it is not cold on
+-- uncertified fixer commits. PRIMARY KEY per branch: the latest uncertified
+-- HEAD replaces an older range.
+CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
+    repo_id       TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    branch        TEXT NOT NULL,
+    from_sha      TEXT NOT NULL,
+    to_sha        TEXT NOT NULL,
+    source_run_id TEXT NOT NULL,
+    created_at    INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, branch)
+);
+`
+
+// migrationStatements hold additive schema changes applied to databases that
+// were created before the referenced columns existed. Each statement must be
+// idempotent via its error being tolerated when the column already exists.
+var migrationStatements = []string{
+	`ALTER TABLE runs ADD COLUMN verification_plan TEXT`,
+	`CREATE TRIGGER IF NOT EXISTS runs_verification_plan_immutable BEFORE UPDATE OF verification_plan ON runs WHEN NEW.verification_plan IS NOT OLD.verification_plan BEGIN SELECT RAISE(ABORT, 'run verification plan is immutable'); END`,
+	`ALTER TABLE runs ADD COLUMN shipping_options TEXT`,
+	`ALTER TABLE runs ADD COLUMN pi_profile TEXT`,
+	`CREATE TRIGGER IF NOT EXISTS runs_pi_profile_immutable BEFORE UPDATE OF pi_profile ON runs WHEN NEW.pi_profile IS NOT OLD.pi_profile BEGIN SELECT RAISE(ABORT, 'run Pi profile is immutable'); END`,
+	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN fix_summary TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN repair_published INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE step_rounds ADD COLUMN user_findings_json TEXT`,
+	// A parked round may retain the reviewed commit as a non-authoritative
+	// candidate. Only atomic review completion promotes it onto the run.
+	`ALTER TABLE step_rounds ADD COLUMN reviewed_head_sha TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN starting_head_sha TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN trusted_config_sha TEXT`,
+	`ALTER TABLE step_rounds ADD COLUMN global_config_yaml BLOB`,
+	`ALTER TABLE step_rounds ADD COLUMN repo_config_yaml BLOB`,
+	`ALTER TABLE runs ADD COLUMN intent TEXT`,
+	`ALTER TABLE runs ADD COLUMN intent_source TEXT`,
+	`ALTER TABLE runs ADD COLUMN intent_session_id TEXT`,
+	`ALTER TABLE runs ADD COLUMN intent_score REAL`,
+	`ALTER TABLE runs ADD COLUMN awaiting_agent_since INTEGER`,
+	`ALTER TABLE runs ADD COLUMN parked_ms INTEGER`,
+	// The CI step's per-check rerun budget. It is durable because a run
+	// recovered after a daemon restart would otherwise get a fresh budget and
+	// could issue reruns beyond the documented limit; the reservation is
+	// written before the provider call, so a crash mid-request spends the
+	// budget rather than silently granting a free retry.
+	`ALTER TABLE runs ADD COLUMN ci_rerun_state TEXT`,
+	// Branch synchronization provenance is intentionally nullable. Historical
+	// rows stay unbound because mutable head_sha cannot prove a successful push.
+	`ALTER TABLE runs ADD COLUMN submitted_head_sha TEXT`,
+	// The directory this run's worktree was created in. It is durable because
+	// placement comes from operator configuration (worktree_roots) that may be
+	// edited while a run exists: recording it makes such an edit inert for
+	// runs already in flight instead of retargeting their resume, diff, and
+	// cleanup at a directory they were never created in. Nullable for rows
+	// written before the column existed, which resolve to the default
+	// <NM_HOME>/worktrees placement at read time - the only one they can have,
+	// since this column shipped with the setting that moves it
+	// (worktrees.RecordedDir).
+	`ALTER TABLE runs ADD COLUMN worktree_dir TEXT`,
+	// Build identity is nullable for historical records. New runs record the
+	// version and embedded build SHA used by the running binary.
+	`ALTER TABLE runs ADD COLUMN no_mistakes_version TEXT`,
+	`ALTER TABLE runs ADD COLUMN no_mistakes_build_sha TEXT`,
+	// Review authority is nullable and never backfilled. A historical mutable
+	// head_sha cannot prove which exact commit a completed review approved.
+	`ALTER TABLE runs ADD COLUMN review_approved_head_sha TEXT`,
+	`ALTER TABLE runs ADD COLUMN last_pushed_sha TEXT`,
+	`ALTER TABLE runs ADD COLUMN push_target_kind TEXT`,
+	`ALTER TABLE runs ADD COLUMN push_target_fingerprint TEXT`,
+	`ALTER TABLE runs ADD COLUMN push_ref TEXT`,
+	`ALTER TABLE runs ADD COLUMN last_pushed_at INTEGER`,
+	`ALTER TABLE runs ADD COLUMN push_generation INTEGER`,
+	`ALTER TABLE runs ADD COLUMN push_active INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE runs ADD COLUMN terminal_head_verified_at INTEGER`,
+	`ALTER TABLE runs ADD COLUMN pr_state TEXT`,
+	`ALTER TABLE runs ADD COLUMN pr_state_observed_at INTEGER`,
+	`ALTER TABLE runs ADD COLUMN ci_ready_at INTEGER`,
+	`ALTER TABLE runs ADD COLUMN ci_ready_no_ci INTEGER NOT NULL DEFAULT 0`,
+	// Custody return is nullable: NULL means the pipeline still owns any
+	// unpublished head this run produced; a timestamp means an explicit
+	// guarded recovery ended that ownership (internal/branchsync).
+	`ALTER TABLE runs ADD COLUMN custody_returned_at INTEGER`,
+	// Proof bindings remain nullable for ordinary and historical rows. The
+	// partial unique index is the cross-process duplicate defense.
+	`ALTER TABLE runs ADD COLUMN launch_nonce TEXT`,
+	`ALTER TABLE runs ADD COLUMN launch_validation_generation TEXT`,
+	`ALTER TABLE runs ADD COLUMN launch_intent_digest TEXT`,
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_repo_branch_launch_nonce ON runs (repo_id, branch, launch_nonce) WHERE launch_nonce IS NOT NULL`,
+	// The first successful conditional update marks the sole `created`
+	// observer; all later claims are durable replays.
+	`ALTER TABLE runs ADD COLUMN launch_receipt_claimed_at INTEGER`,
+	// Per-run PR target branch chosen by the operator (e.g. axi run
+	// --base-branch). Nullable: absent means fall back to repo config and the
+	// forge default branch.
+	`ALTER TABLE runs ADD COLUMN pr_base_branch TEXT`,
+	// The caller-side, tighten-only decision to keep the generated Intent
+	// section out of the PR body (axi run --no-publish-intent, or
+	// intent.publish_intent: false in global config). Resolved once at run
+	// start and stamped here so recovery and reruns inherit it instead of
+	// re-reading a since-changed global config. It can only reduce
+	// publication; the repository's trusted pr.publish_intent still wins
+	// independently at render time.
+	`ALTER TABLE runs ADD COLUMN omit_intent INTEGER NOT NULL DEFAULT 0`,
+	// The start of the currently displayed execution/fix round is separate
+	// from started_at, which remains the whole-step clock.
+	`ALTER TABLE step_results ADD COLUMN round_started_at INTEGER`,
+	`ALTER TABLE step_results ADD COLUMN last_activity_at INTEGER`,
+	`ALTER TABLE step_results ADD COLUMN last_activity TEXT`,
+	`ALTER TABLE step_results ADD COLUMN agent_pid INTEGER`,
+	// The repository-declared extra gates this run resolved at creation. It is
+	// durable for the same reason worktree_dir is: the gates come from the
+	// trusted default branch, which may gain or lose one while a run is parked,
+	// and recovery re-deriving them would rebuild a step sequence the run never
+	// executed - failing an otherwise healthy parked run as a crash. NULL and
+	// empty both mean the bare core pipeline, which is the only sequence a row
+	// written before this column existed can have had.
+	`ALTER TABLE runs ADD COLUMN gates_json TEXT`,
+	`ALTER TABLE step_results ADD COLUMN auto_fix_limit INTEGER`,
+	`ALTER TABLE step_results ADD COLUMN ci_fix_attempts INTEGER NOT NULL DEFAULT 0`,
+	// Non-nil exactly when a human answered ActionApprove on a step whose gate
+	// existed because of an unresolved external condition (currently: the CI
+	// step's live checks were still failing) - see
+	// pipeline.ApprovalOverrideVerifier. Durable so the distinction between a
+	// verified-green completion and a deliberate override survives daemon
+	// restart, resume, and axi status/logs on an already-terminal run.
+	`ALTER TABLE step_results ADD COLUMN override_reason TEXT`,
+	`ALTER TABLE step_results ADD COLUMN skip_reason TEXT`,
+	// Session-fidelity telemetry columns (all nullable so pre-existing rows read
+	// back as unknown, never a fabricated zero).
+	`ALTER TABLE agent_invocations ADD COLUMN model_provider TEXT`,
+	`ALTER TABLE agent_invocations ADD COLUMN fallback_reason TEXT`,
+	`ALTER TABLE agent_invocations ADD COLUMN subprocess_wait_ms INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN fresh_input_tokens INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN reasoning_tokens INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN delta_input_tokens INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN delta_output_tokens INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN delta_cache_read_tokens INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN model_roundtrips INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN tool_calls INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN tool_wait_calls INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN tool_test_lint_calls INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN tool_edit_calls INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN tool_read_calls INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN tool_git_calls INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN tool_other_calls INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN workload_files INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN workload_lines INTEGER`,
+	`ALTER TABLE agent_invocations ADD COLUMN finding_count INTEGER`,
+	`ALTER TABLE step_results ADD COLUMN approval_reason TEXT`,
+	// Explicit axi run --closes references for the PR body Issues section (nullable;
+	// NULL means none).
+	`ALTER TABLE runs ADD COLUMN closing_issue_refs TEXT`,
+	// Set once, atomically with the read that resolves the closing issue references into
+	// the PR body. NULL means no PR body has sampled the closing issue references yet, so
+	// a late --closes can still reach the Issues section; non-NULL closes that window
+	// (see UpdateRunClosingIssueRefs / ClaimClosingIssueRefsForPRBody).
+	`ALTER TABLE runs ADD COLUMN closing_issue_refs_locked_at INTEGER`,
+}

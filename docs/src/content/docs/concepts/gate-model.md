@@ -96,13 +96,22 @@ work unchanged.
 ### Private mirror reconciliation
 
 A rebase can leave the gate branch on an older history that rejects the next
-ordinary push. Reconciliation compares exact commit heads and per-file
-`git patch-id --stable` identities; commit messages are not evidence. Historical
-patch matches also require a clean three-way merge of the private head into the
-live head whose resulting tree equals the live tree. This prevents changes
-discarded by a merge or revert from being counted as surviving content. If that
-survival check cannot prove preservation, the private-only range is reported
-as at risk.
+ordinary push. Reconciliation compares exact commit heads and final-tree
+survival; commit messages and per-commit patch identities are not evidence. A
+clean three-way merge of the private head into the live head whose resulting
+tree equals the live tree proves every private commit contained, so a rebased
+copy whose patch ID changed only because the new base edited nearby context
+lines is not at risk, while changes discarded by a merge or revert are never
+counted as surviving content.
+
+A later live edit can make this merge conflict. Conflict resolution toward the
+live head cannot prove that the private content survived: the same resolution
+can hide a partial revert. A historical replay alone supplies no containment
+credit at the live head. Reconciliation therefore fails closed on a conflicting
+merge, even when an earlier live commit contained a clean replay.
+
+If survival cannot be proven, the whole private-only range is reported as at
+risk.
 
 **Recovery-anchor preservation credit (issue #1233):** a private-only commit
 that a `refs/no-mistakes/recover/<run>` anchor reaches is *preserved*, so it is
@@ -115,8 +124,8 @@ the sanctioned `sync --recover` -> rerun -> push loop cannot deadlock against
 the very anchor that loop wrote to declare the work preserved.
 
 This is a **preservation credit, not containment evidence**. It says nothing
-about whether the content lands in the published tree; ancestry, patch
-identity and final-tree survival remain the only proofs of that, and Decision
+about whether the content lands in the published tree; ancestry and
+final-tree survival remain the only proofs of that, and Decision
 41-A below remains the only head exception. The archive-before-delete contract
 is unchanged, so a credited reconciliation still archives the exact private
 head before removing the branch ref. A commit no anchor reaches is still
@@ -137,7 +146,7 @@ deadlock the credit exists to end.
 
 **Accepted Decision 41-A (issue #983):** pipeline publication may replace a
 private mirror head that is **exactly equal to a head the publishing run itself
-placed on the mirror** without patch-ID or tree-survival proof: its
+placed on the mirror** without tree-survival proof: its
 `Run.SubmittedHeadSHA`, or, once it has published, its durable
 `Run.LastPushedSHA`. The last pushed head is recorded only after a verified push to the configured
 push target and mirror settlement, so it is never an external or newer head.

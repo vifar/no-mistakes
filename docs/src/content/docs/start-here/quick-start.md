@@ -25,12 +25,12 @@ You need:
 
 - `git`
 - One supported agent runner (`claude`, `codex`, `grok`, `acli` for Rovo Dev, `opencode`, `pi`, `omp`, `copilot`, or `agy` for Antigravity), or a configured Cursor, Devin, or other ACP runner such as `agent: cursor` or `agent: devin`; see [Global Config](/no-mistakes/reference/global-config/) for ACP requirements
-- For PRs and CI: `gh` (GitHub), `glab` (GitLab), `forgejo-axi` (Forgejo), Bitbucket Cloud credentials, `az` with the `azure-devops` extension (Azure DevOps), `tea` (Gitea), or a configured [provider plugin](/no-mistakes/reference/global-config/#provider_plugins)
+- For guarded network runs, including PRs and CI: `gh` (GitHub), `glab` (GitLab), `forgejo-axi` (Forgejo), Bitbucket Cloud credentials, `az` with the `azure-devops` extension (Azure DevOps), `tea` (Gitea), or a configured [provider plugin](/no-mistakes/reference/global-config/#provider_plugins)
 
 `no-mistakes doctor` reports whether the configured global runner can start a validation gate.
 Every validation gate requires a runnable pipeline agent and otherwise fails before its first pipeline step.
 
-See [Provider Integration](/no-mistakes/guides/provider-integration/) for PR/CI setup.
+An unavailable provider or unsupported route fails an ordinary guarded network run before Rebase, even when delivery steps are skipped. See [Provider Integration](/no-mistakes/guides/provider-integration/) for setup and the local-only exception.
 
 ## 3. Initialize a repo
 

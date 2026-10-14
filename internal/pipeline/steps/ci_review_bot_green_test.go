@@ -8,6 +8,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -24,9 +25,10 @@ func newGreenReviewBotContext(t *testing.T, policy string, env []string) (*pipel
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{name: "test"}
 	prURL := "https://github.com/test/repo/pull/42"
-	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
-	sctx.Run.PRURL = &prURL
+	stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
+	sctx.PRTarget = &pipeline.PRTargetSelection{PRURL: prURL, SourceRepo: "test/repo", SourceBranch: "feature", ForgeHeadSHA: headSHA, TargetBranch: "main"}
 	sctx.Config.CITimeout = 30 * time.Second
 	sctx.Config.AutoFix = config.AutoFix{CI: 3}
 	sctx.Config.CI.ReviewBotComments = policy
@@ -293,6 +295,7 @@ func TestCIStep_GreenReviewBotUnreadableCommentsParkUnderAlways(t *testing.T) {
 func TestCIObservationFindings_GreenReviewBotCommentsFollowThePolicy(t *testing.T) {
 	t.Parallel()
 	issues := ciIssues{
+		provider: scm.ProviderGitHub,
 		checks: []scm.Check{
 			{Name: "test", Bucket: scm.CheckBucketFail, State: "FAILURE", App: "github-actions"},
 			{Name: "Greptile Review", Bucket: scm.CheckBucketPass, State: "SUCCESS", App: "greptile-apps"},
@@ -432,6 +435,89 @@ func TestCIStep_JobFailureWithGreenReviewBotFollowsThePolicy(t *testing.T) {
 			}
 			if bots != tc.wantBots || len(findings.Items) != 1+tc.wantBots {
 				t.Fatalf("findings = %+v, want the job failure and %d review-bot finding(s)", findings.Items, tc.wantBots)
+			}
+		})
+	}
+}
+
+// gitlabReviewCommentHost stands in for the GitLab adapter's read half: it
+// declares the capability GitLab now does and answers with the login the bot
+// comments under there.
+type gitlabReviewCommentHost struct {
+	scm.Host
+	calls    int
+	comments []scm.ReviewComment
+}
+
+func (h *gitlabReviewCommentHost) Provider() scm.Provider { return scm.ProviderGitLab }
+
+func (h *gitlabReviewCommentHost) Capabilities() scm.Capabilities {
+	return scm.Capabilities{MergeableState: true, FailedCheckLogs: true, ReviewComments: true}
+}
+
+func (h *gitlabReviewCommentHost) GetReviewComments(context.Context, *scm.PR) ([]scm.ReviewComment, error) {
+	h.calls++
+	return h.comments, nil
+}
+
+// On GitLab a review bot is identified by the login it comments as, and only
+// the comment half exists: no job names a publishing application, so no check
+// can ever be attributed to a bot. ci.review_bot_comments: always therefore
+// reads the bot's unresolved discussions through the green/not-yet-registered
+// path, and on_failure never consults the reader at all.
+func TestReviewBotCommentsOnGitLabFollowThePolicy(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name     string
+		policy   string
+		wantRead bool
+	}{
+		{name: "always reads the bot's discussions", policy: config.CIReviewBotCommentsAlways, wantRead: true},
+		{name: "on_failure has no bot check to attribute", policy: config.CIReviewBotCommentsOnFailure, wantRead: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sctx := &pipeline.StepContext{
+				Ctx:    context.Background(),
+				Config: &config.Config{CI: config.CI{ReviewBotComments: tc.policy}},
+				Log:    func(string) {},
+			}
+			host := &gitlabReviewCommentHost{comments: []scm.ReviewComment{{
+				ID:     "1126",
+				Author: "greptileai",
+				Path:   "internal/app.go",
+				Line:   42,
+				Body:   "This retry loop can spin forever",
+			}}}
+			pr := &scm.PR{Number: "42", URL: "https://gitlab.com/test/repo/-/merge_requests/42"}
+			checks := []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass, ProviderID: "gitlab-job:1"}}
+
+			findings, err := (&CIStep{}).greenReviewBotFindings(sctx, host, pr, checks)
+			if err != nil {
+				t.Fatalf("greenReviewBotFindings() error = %v", err)
+			}
+			if tc.wantRead {
+				if host.calls == 0 {
+					t.Fatal("the review-comment reader was never consulted under ci.review_bot_comments: always")
+				}
+				if len(findings.Items) != 1 {
+					t.Fatalf("findings = %+v, want one per unresolved bot discussion note", findings.Items)
+				}
+				item := findings.Items[0]
+				if item.Category != types.FindingCategoryCIReviewBot || item.Action != types.ActionAskUser || item.File != "internal/app.go" || item.Line != 42 {
+					t.Fatalf("finding = %+v, want an ask-user ci-review-bot finding anchored to the note", item)
+				}
+				if !strings.Contains(item.Description, "greptileai") {
+					t.Fatalf("finding = %+v, want the GitLab comment-author login", item)
+				}
+				return
+			}
+			if host.calls != 0 {
+				t.Fatalf("reader calls = %d, want none: on_failure has no GitLab bot check to attribute comments to", host.calls)
+			}
+			if len(findings.Items) != 0 {
+				t.Fatalf("findings = %+v, want none", findings.Items)
 			}
 		})
 	}
