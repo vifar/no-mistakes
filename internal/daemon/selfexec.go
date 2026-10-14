@@ -569,9 +569,7 @@ func stopPlannedDaemon(p *paths.Paths) error {
 	instance := captureRunningDaemon(p)
 	if instance.pid > 0 {
 		if exited, err := instance.exited(); err == nil && exited {
-			cleanupCapturedDaemonArtifacts(p, instance)
-			_, serviceErr := stopManagedService(p)
-			return serviceErr
+			instance = daemonInstance{}
 		}
 	}
 	if instance.pid <= 0 || instance.startedAt.IsZero() || instance.instance == "" {
@@ -581,8 +579,7 @@ func stopPlannedDaemon(p *paths.Paths) error {
 			if record, err := readDaemonPIDFile(p.PIDFile()); err == nil && record.PID > 0 {
 				running, inspectErr := daemonProcessRunning(record.PID)
 				if inspectErr != nil || running {
-					_, serviceErr := stopManagedService(p)
-					return errors.Join(fmt.Errorf("captured daemon identity is unavailable"), inspectErr, serviceErr)
+					return errors.Join(fmt.Errorf("captured daemon identity is unavailable"), inspectErr)
 				}
 			}
 		}
@@ -594,14 +591,20 @@ func stopPlannedDaemon(p *paths.Paths) error {
 			_, serviceErr := stopManagedService(p)
 			return serviceErr
 		}
-		// The requested supervisor may be cleaned up, but an unidentified
-		// process never receives a preserving RPC or an individual kill.
-		_, serviceErr := stopManagedService(p)
-		alive, healthErr := daemonHealthCheck(p)
-		if healthErr == nil && !alive {
-			return serviceErr
+		if errors.Is(err, os.ErrNotExist) {
+			if _, socketErr := os.Stat(p.Socket()); os.IsNotExist(socketErr) {
+				lock, lockErr := acquireSingletonLock(p)
+				if lockErr != nil {
+					return lockErr
+				}
+				defer lock.Release()
+				if _, pidErr := os.Stat(p.PIDFile()); os.IsNotExist(pidErr) {
+					_, serviceErr := stopManagedService(p)
+					return serviceErr
+				}
+			}
 		}
-		return errors.Join(fmt.Errorf("captured daemon identity is unavailable"), serviceErr, healthErr)
+		return fmt.Errorf("captured daemon identity is unavailable")
 	}
 	client, dialErr := daemonDial(p.Socket())
 	var requestErr error
@@ -614,15 +617,19 @@ func stopPlannedDaemon(p *paths.Paths) error {
 			requestErr = fmt.Errorf("daemon shutdown acknowledgement identity is incomplete or changed")
 		}
 	} else {
-		stale, staleErr := staleDaemonArtifacts(p)
-		if staleErr != nil {
-			requestErr = staleErr
-		} else if !stale {
-			requestErr = fmt.Errorf("dial daemon shutdown: %w", dialErr)
-		}
+		requestErr = fmt.Errorf("dial daemon shutdown: %w", dialErr)
 	}
-	// Cleanup the installed supervisor even if the captured process exited or
-	// a replacement became healthy. PID fallback below still names only capture.
+	if requestErr != nil {
+		if exited, inspectErr := instance.exited(); inspectErr == nil && exited {
+			if cleared, clearErr := clearDeadDaemonArtifacts(p); clearErr != nil && !errors.Is(clearErr, os.ErrNotExist) {
+				return errors.Join(requestErr, clearErr)
+			} else if cleared {
+				_, serviceErr := stopManagedService(p)
+				return errors.Join(requestErr, serviceErr)
+			}
+		}
+		return requestErr
+	}
 	_, serviceErr := stopManagedService(p)
 	waitErr := waitForDaemonStop(p, instance)
 	return errors.Join(requestErr, serviceErr, waitErr)

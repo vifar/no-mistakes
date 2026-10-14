@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -75,6 +76,25 @@ func TestPlannedStop_RequiresCapturedIdentityAndMatchingAcknowledgement(t *testi
 				if err := p.EnsureDirs(); err != nil {
 					t.Fatal(err)
 				}
+				cleanupService := stubServiceRuntime(t)
+				defer cleanupService()
+				runtimeGOOS = "linux"
+				home := t.TempDir()
+				serviceUserHomeDir = func() (string, error) { return home, nil }
+				unit := filepath.Join(home, ".config", "systemd", "user", systemdServiceName(p))
+				if err := os.MkdirAll(filepath.Dir(unit), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(unit, []byte("WorkingDirectory="+p.Root()+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				var supervisorStops atomic.Int32
+				serviceCommandRunner = func(_ string, args ...string) ([]byte, error) {
+					if strings.Contains(strings.Join(args, " "), "stop ") {
+						supervisorStops.Add(1)
+					}
+					return nil, nil
+				}
 				started := time.Now().UTC()
 				record := daemonPIDFile{PID: 424242, StartedAt: started, Instance: "captured-runtime"}
 				if mode == "missing start" {
@@ -116,7 +136,6 @@ func TestPlannedStop_RequiresCapturedIdentityAndMatchingAcknowledgement(t *testi
 					if request.ExpectedPID != record.PID || request.ExpectedStartedAt != started.Format(time.RFC3339Nano) || request.ExpectedInstance != "captured-runtime" {
 						t.Errorf("request lost captured tuple: %+v", request)
 					}
-					exited.Store(true)
 					if mode == "replacement before dial" {
 						return nil, fmt.Errorf("shutdown targets a different daemon instance")
 					}
@@ -175,6 +194,9 @@ func TestPlannedStop_RequiresCapturedIdentityAndMatchingAcknowledgement(t *testi
 				}
 				if !missing && calls.Load() != 1 {
 					t.Fatalf("captured identity was not prepared: %d", calls.Load())
+				}
+				if mode != "lost ack" && supervisorStops.Load() != 0 {
+					t.Errorf("unverified live settlement stopped supervisor %d times", supervisorStops.Load())
 				}
 				if mode == "replacement before dial" {
 					got, err := readDaemonPIDFile(p.PIDFile())

@@ -276,7 +276,7 @@ func TestWatcherStrictProofRequiresExecutedPass(t *testing.T) {
 }
 
 func TestWatcherTargetRefReadCancellation(t *testing.T) {
-	for _, mode := range []string{"certified", "missing proof", "joined failure", "independent Git failure"} {
+	for _, mode := range []string{"certified", "missing proof", "joined failure", "independent Git failure", "independent signal"} {
 		t.Run(mode, func(t *testing.T) {
 			sc, databasePath, publication := strictStatusContext(t)
 			comparison, err := sc.DB.CaptureReviewComparison(sc.Run.ID, db.ReviewComparison{SourceRepo: "test/repo", SourceBranch: "feature", TargetBranch: "main", TargetSHA: sc.Run.BaseSHA, HeadSHA: sc.Run.HeadSHA, MergeBaseSHA: sc.Run.BaseSHA, DiffDigest: strings.Repeat("b", 64)})
@@ -336,6 +336,9 @@ func TestWatcherTargetRefReadCancellation(t *testing.T) {
 			if mode == "independent Git failure" {
 				script = fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = ls-remote ] && [ \"$2\" = --exit-code ]; then\n(trap '' TERM; sleep 30) &\nprintf '%%s' \"$$\" > %q\nexec %q ls-remote --exit-code %q \"$4\"\nfi\nexec %q \"$@\"\n", entered, realGit, t.TempDir(), realGit)
 			}
+			if mode == "independent signal" {
+				script = fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = ls-remote ] && [ \"$2\" = --exit-code ]; then\n(trap '' TERM; sleep 30) &\nprintf '%%s' \"$$\" > %q\nwhile :; do sleep 1; done\nfi\nexec %q \"$@\"\n", entered, realGit)
+			}
 			if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -379,6 +382,23 @@ func TestWatcherTargetRefReadCancellation(t *testing.T) {
 				case <-time.After(10 * time.Millisecond):
 				}
 			}
+			if mode == "independent signal" {
+				raw, err := os.ReadFile(entered)
+				if err != nil {
+					t.Fatal(err)
+				}
+				pid, err := strconv.Atoi(string(raw))
+				if err != nil {
+					t.Fatal(err)
+				}
+				process, err := os.FindProcess(pid)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := process.Kill(); err != nil {
+					t.Fatal(err)
+				}
+			}
 			cancel(errors.New(types.RunCancelReasonAbortedByUser))
 			select {
 			case err := <-done:
@@ -392,6 +412,17 @@ func TestWatcherTargetRefReadCancellation(t *testing.T) {
 				var exit *exec.ExitError
 				if !errors.As(readErr, &exit) || exit.ExitCode() != 128 || errors.Is(readErr, context.Canceled) {
 					t.Errorf("independent Git exit lost identity: %v", readErr)
+				}
+			} else if mode == "independent signal" {
+				var exit *exec.ExitError
+				if !errors.As(readErr, &exit) || errors.Is(readErr, context.Canceled) {
+					t.Errorf("independent signal lost failure identity: %v", readErr)
+				}
+				if exit != nil {
+					status, ok := exit.Sys().(syscall.WaitStatus)
+					if !ok || !status.Signaled() || status.Signal() != syscall.SIGKILL {
+						t.Errorf("independent leader exit = %v", exit)
+					}
 				}
 			} else if !errors.Is(readErr, context.Canceled) {
 				t.Errorf("target read lost cancellation identity: %v", readErr)
@@ -409,7 +440,7 @@ func TestWatcherTargetRefReadCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantStatus := types.RunCancelled
-			if mode == "joined failure" || mode == "independent Git failure" {
+			if mode == "joined failure" || mode == "independent Git failure" || mode == "independent signal" {
 				wantStatus = types.RunFailed
 			}
 			if run.Status != wantStatus {
@@ -418,6 +449,11 @@ func TestWatcherTargetRefReadCancellation(t *testing.T) {
 			if run.Error == nil || strings.Contains(*run.Error, "private-token") {
 				t.Errorf("terminal reason leaked or missing: %v", run.Error)
 			}
+			sc.DB, sc.Run = reopened, run
+			for _, requested := range []string{"pending", "success", "failure"} {
+				(&PushStep{}).ReportPublishedHeadStatus(sc, requested, "")
+			}
+			executor.ReportRecoveredPublishedHeadStatus(context.Background(), run, sc.Repo)
 			stored, err := reopened.GetCommitStatusPublication(context.Background(), run.ID, publication)
 			if err != nil {
 				t.Fatal(err)
@@ -453,56 +489,78 @@ func (*watcherReconciledStep) ReconcileApprovalGate(*pipeline.StepContext) (bool
 
 func TestWatcherImmutableRefErrorsRetainIdentity(t *testing.T) {
 	for _, check := range []string{"source", "target"} {
-		t.Run(check, func(t *testing.T) {
-			sc, _, _ := strictStatusContext(t)
-			sc.Run.Shipping = &types.ShippingOptions{Mode: types.ShippingImmutableSource, TargetBranch: "main", TargetSHA: sc.Run.BaseSHA}
-			realGit, err := testgit.RealGit()
-			if err != nil {
-				t.Fatal(err)
-			}
-			bin := t.TempDir()
-			entered := filepath.Join(bin, "entered")
-			script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = ls-remote ]; then\n: > %q\nwhile :; do sleep 1; done\nfi\nexec %q \"$@\"\n", entered, realGit)
-			if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			done := make(chan error, 1)
-			go func() {
-				if check == "source" {
-					done <- shipping.CheckImmutableSource(ctx, sc.Run, sc.Repo, sc.WorkDir)
-				} else {
-					done <- shipping.CheckImmutableTarget(ctx, sc.Run, sc.Repo, sc.WorkDir, shipping.RemoteHead)
+		for _, mode := range []string{"cancelled", "independent signal"} {
+			t.Run(check+"/"+mode, func(t *testing.T) {
+				sc, _, _ := strictStatusContext(t)
+				sc.Run.Shipping = &types.ShippingOptions{Mode: types.ShippingImmutableSource, TargetBranch: "main", TargetSHA: sc.Run.BaseSHA}
+				realGit, err := testgit.RealGit()
+				if err != nil {
+					t.Fatal(err)
 				}
-			}()
-			deadline := time.After(10 * time.Second)
-			for {
-				if _, err := os.Stat(entered); err == nil {
-					break
+				bin := t.TempDir()
+				entered := filepath.Join(bin, "entered")
+				script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = ls-remote ]; then\n: > %q\nwhile :; do sleep 1; done\nfi\nexec %q \"$@\"\n", entered, realGit)
+				if mode == "independent signal" {
+					script = fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = ls-remote ]; then\n(trap '' TERM; sleep 30) &\nprintf '%%s' \"$$\" > %q\nwhile :; do sleep 1; done\nfi\nexec %q \"$@\"\n", entered, realGit)
 				}
+				if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				done := make(chan error, 1)
+				go func() {
+					if check == "source" {
+						done <- shipping.CheckImmutableSource(ctx, sc.Run, sc.Repo, sc.WorkDir)
+					} else {
+						done <- shipping.CheckImmutableTarget(ctx, sc.Run, sc.Repo, sc.WorkDir, shipping.RemoteHead)
+					}
+				}()
+				deadline := time.After(10 * time.Second)
+				for {
+					if _, err := os.Stat(entered); err == nil {
+						break
+					}
+					select {
+					case err := <-done:
+						t.Fatalf("ref check exited early: %v", err)
+					case <-deadline:
+						t.Fatal("ref read never started")
+					case <-time.After(10 * time.Millisecond):
+					}
+				}
+				if mode == "independent signal" {
+					raw, err := os.ReadFile(entered)
+					if err != nil {
+						t.Fatal(err)
+					}
+					pid, err := strconv.Atoi(string(raw))
+					if err != nil {
+						t.Fatal(err)
+					}
+					process, err := os.FindProcess(pid)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := process.Kill(); err != nil {
+						t.Fatal(err)
+					}
+				}
+				cancel()
 				select {
 				case err := <-done:
-					t.Fatalf("ref check exited early: %v", err)
-				case <-deadline:
-					t.Fatal("ref read never started")
-				case <-time.After(10 * time.Millisecond):
+					if errors.Is(err, context.Canceled) != (mode == "cancelled") {
+						t.Errorf("%s ref error lost cancellation identity: %v", check, err)
+					}
+					if err.Error() != "observe shipping ref: remote observation failed" {
+						t.Errorf("ref error changed redacted rendering: %v", err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("ref check did not cancel")
 				}
-			}
-			cancel()
-			select {
-			case err := <-done:
-				if !errors.Is(err, context.Canceled) {
-					t.Errorf("%s ref error lost cancellation identity: %v", check, err)
-				}
-				if err.Error() != "observe shipping ref: remote observation failed" {
-					t.Errorf("ref error changed redacted rendering: %v", err)
-				}
-			case <-time.After(10 * time.Second):
-				t.Fatal("ref check did not cancel")
-			}
-		})
+			})
+		}
 	}
 }
 
