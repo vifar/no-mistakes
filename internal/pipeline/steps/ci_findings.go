@@ -234,6 +234,7 @@ func reviewBotFindings(provider scm.Provider, checks []reviewBotCheck, comments 
 				Category:    types.FindingCategoryCIReviewBot,
 				Check:       checked.check.Name,
 				CheckID:     checked.check.ProviderID,
+				CheckApp:    checked.bot.AppSlug,
 				File:        comment.Path,
 				Line:        comment.Line,
 				Description: fmt.Sprintf("%s: %s", strings.TrimSpace(comment.Author), body),
@@ -257,6 +258,7 @@ func reviewBotFindings(provider scm.Provider, checks []reviewBotCheck, comments 
 			Category:    types.FindingCategoryCIReviewBot,
 			Check:       checked.check.Name,
 			CheckID:     checked.check.ProviderID,
+			CheckApp:    checked.bot.AppSlug,
 			Description: description,
 		})
 	}
@@ -285,6 +287,7 @@ func reviewBotFindings(provider scm.Provider, checks []reviewBotCheck, comments 
 		Category:    types.FindingCategoryCIReviewBot,
 		Check:       checks[0].check.Name,
 		CheckID:     checks[0].check.ProviderID,
+		CheckApp:    checks[0].bot.AppSlug,
 		Description: fmt.Sprintf("%d more review-bot findings were omitted from this gate; read them on the pull request", omitted),
 	}
 	for len(items) > 0 && (len(items) >= maxReviewBotCommentFindings || bytesUsed+findingSize(marker) > maxReviewBotObservationBytes) {

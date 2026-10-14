@@ -158,3 +158,74 @@ func TestCIStep_EmptyRepairPropagatesMarkRunningFailure(t *testing.T) {
 		t.Fatalf("outcome = %+v err = %v, want running transition failure", outcome, err)
 	}
 }
+
+func TestCIScopeRetainedAbsentBotIsDroppedAfterExternalCheckRegisters(t *testing.T) {
+	initial := `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`
+	env := append(fakeCIGH(t, "OPEN", initial), greenGreptileCommentJSON)
+	sctx, ag, _, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsAlways, env)
+	step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error { return context.Canceled })
+	observation, err := step.Execute(sctx)
+	if err != nil || observation == nil || !observation.NeedsApproval {
+		t.Fatalf("absent bot observation = %+v, %v", observation, err)
+	}
+	findings, err := types.ParseFindingsJSON(observation.Findings)
+	if err != nil || len(findings.Items) != 1 {
+		t.Fatalf("absent bot findings = %+v, %v", findings, err)
+	}
+	if item := findings.Items[0]; item.Check != "" || item.CheckApp != "greptile-apps" {
+		t.Fatalf("absent bot lost app identity: %+v", item)
+	}
+	sctx.PreviousFindings = observation.Findings
+	sctx.DeferredFindings = observation.Findings
+	sctx.Fixing = true
+	sctx.Config.CI.ExternalChecks = []string{"Greptile Review"}
+	sctx.Env = append(sctx.Env, "FAKE_CLI_CHECKS="+greenGreptileChecksJSON)
+	marked := false
+	sctx.MarkRunning = func() error {
+		if sctx.PreviousFindings != "" || sctx.DeferredFindings != "" {
+			t.Fatalf("retained external bot survived scoping: %s %s", sctx.PreviousFindings, sctx.DeferredFindings)
+		}
+		marked = true
+		return nil
+	}
+	outcome, err := step.Execute(sctx)
+	if !errors.Is(err, context.Canceled) || outcome != nil || !marked || !*ready || len(ag.calls) != 0 {
+		t.Fatalf("external bot triggered repair or blocked monitoring: outcome=%+v err=%v marked=%v ready=%v calls=%d", outcome, err, marked, *ready, len(ag.calls))
+	}
+}
+
+func TestCIScopeRetainedBotExclusionKeepsUnrelatedNamelessFindings(t *testing.T) {
+	for _, excluded := range []bool{false, true} {
+		policy := scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAll}
+		if excluded {
+			policy.ExternalChecks = []string{"Greptile Review"}
+		}
+		sctx := &pipeline.StepContext{Ctx: context.Background()}
+		encoded, err := types.MarshalFindingsJSON(Findings{Items: []Finding{
+			{ID: "bot", Category: types.FindingCategoryCIReviewBot, CheckApp: "greptile-apps", Description: "bot comment"},
+			{ID: "unrelated", Description: "unrelated concern"},
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.PreviousFindings, sctx.DeferredFindings = encoded, encoded
+		scope := scm.NewCheckScope(nil, policy, "main", nil)
+		checks := []scm.Check{{Name: "Greptile Review", App: "greptile-apps", Bucket: scm.CheckBucketPass}}
+		if err := scopeRetainedCIFindings(sctx, scope, &scm.PR{}, checks); err != nil {
+			t.Fatal(err)
+		}
+		for _, raw := range []string{sctx.PreviousFindings, sctx.DeferredFindings} {
+			got, err := types.ParseFindingsJSON(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if excluded {
+				if len(got.Items) != 1 || got.Items[0].ID != "unrelated" {
+					t.Fatalf("excluded bot or unrelated finding mishandled: %+v", got)
+				}
+			} else if len(got.Items) != 2 {
+				t.Fatalf("included bot dropped: %+v", got)
+			}
+		}
+	}
+}

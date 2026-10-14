@@ -3,6 +3,7 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -61,6 +62,16 @@ func retainedCICheckIncluded(sctx *pipeline.StepContext, scope *scm.CheckScope, 
 }
 
 func scopeRetainedCIFindings(sctx *pipeline.StepContext, scope *scm.CheckScope, pr *scm.PR, checks []scm.Check) error {
+	scoped := scope.Apply(sctx.Ctx, pr, checks)
+	excludedApps := map[string]bool{}
+	for _, check := range append(scoped.External, scoped.Informational...) {
+		if check.App != "" {
+			excludedApps[strings.ToLower(strings.TrimSpace(check.App))] = true
+		}
+	}
+	for _, check := range scoped.Relevant {
+		delete(excludedApps, strings.ToLower(strings.TrimSpace(check.App)))
+	}
 	for _, encoded := range []*string{&sctx.PreviousFindings, &sctx.DeferredFindings} {
 		if *encoded == "" {
 			continue
@@ -71,6 +82,9 @@ func scopeRetainedCIFindings(sctx *pipeline.StepContext, scope *scm.CheckScope, 
 		}
 		kept := findings.Items[:0]
 		for _, item := range findings.Items {
+			if item.Category == types.FindingCategoryCIReviewBot && excludedApps[strings.ToLower(strings.TrimSpace(item.CheckApp))] {
+				continue
+			}
 			if item.Check == "" || retainedCICheckIncluded(sctx, scope, pr, checks, item.Check, item.CheckID) {
 				kept = append(kept, item)
 			}
