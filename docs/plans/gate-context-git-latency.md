@@ -20,7 +20,7 @@ No enrollment rewrite, marker exception, empty-directory control request, raw mu
 
 ## Contract
 
-1. The common-directory proof is authoritative only after canonical path, registered owner, and bare-repository structure agree. Every discovered common directory must have recognizable HEAD and object/reference directories, independently of registration and even when linked actual metadata remains healthy. Unborn symbolic and detached HEAD forms remain supported; damaged common metadata cannot become an unmanaged verdict.
+1. The common-directory proof is authoritative only after canonical path, registered owner, and bare-repository structure agree. Every discovered common directory must have recognizable HEAD and object/reference directories, independently of registration and even when linked actual metadata remains healthy. HEAD recognition follows Git discovery: `ref:` with optional space, tab, CR or LF and a `refs/` prefix; a `refs/` symlink target without dereferencing it, including unborn targets; or a detached hexadecimal object-ID prefix. These forms remain supported; damaged common metadata cannot become an unmanaged verdict.
 2. An ordinary clone completes classification even if its top-level lookup would block. It does not execute that unnecessary lookup.
 3. A managed gate remains nested even when top-level attribution is unavailable. Run and phase metadata are optional; they cannot determine refusal.
 4. A canceled or failed first identity query returns an error. It never becomes a successful ordinary-caller verdict.
@@ -58,3 +58,5 @@ Run the package owners first, then `make lint`, `go test -race ./...`, the appli
 Repository absence requires filesystem corroboration, and simultaneous command-exit and output-drain errors must remain visible. Error composition changes only at the existing lifecycle owner; process cleanup and grace policy remain unchanged. Supply red-first evidence for both contracts.
 
 Behavioral validation must prove ordinary-clone classification, positive managed identity, and authenticated-descendant refusal through isolated fixtures. Successful classification in one snapshot does not prove that every intermittent timeout is resolved. Installation and daemon lifecycle changes are outside this source change.
+
+Windows native runtime remains UNTESTED in this local review; no cross-platform runtime claim is made.

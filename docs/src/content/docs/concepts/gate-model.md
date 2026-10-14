@@ -86,7 +86,11 @@ repository. Gitfile targets are compared with the actual metadata directory so
 linked and separate Git directories remain supported. Every discovered common directory
 must have a recognizable `HEAD` and object/reference directories, regardless of
 registration and even when the linked worktree metadata is healthy. Unborn
-symbolic and detached `HEAD` forms remain supported.
+symbolic and detached `HEAD` forms remain supported. Symbolic files require
+`ref:` followed by optional space, tab, CR or LF and a `refs/` prefix. A `HEAD`
+symlink whose target starts with `refs/` is recognized without following it,
+including an unborn target. Detached HEAD recognition uses a hexadecimal object-ID
+prefix, matching Git discovery.
 Identity commands select explicit bare discovery only after substantive metadata
 evidence, so mixed ordinary files and directories cannot force an invalid Git directory.
 A canonical bare gate registered to the current owner proves managed identity,

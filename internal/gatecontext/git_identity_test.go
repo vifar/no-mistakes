@@ -423,8 +423,11 @@ func TestIdentityValidMetadataTopologies(t *testing.T) {
 func TestIdentityLinkedCommonMetadataFailsClosed(t *testing.T) {
 	for _, topology := range []string{"registered", "unregistered", "ordinary"} {
 		t.Run(topology, func(t *testing.T) {
-			for _, damage := range []string{"missing-head", "directory-head", "invalid-head", "missing-objects", "file-objects", "missing-refs", "file-refs"} {
+			for _, damage := range []string{"missing-head", "directory-head", "invalid-head", "garbage-symbolic-head", "garbage-symlink-head", "missing-objects", "file-objects", "missing-refs", "file-refs"} {
 				t.Run(damage, func(t *testing.T) {
+					if damage == "garbage-symlink-head" && runtime.GOOS == "windows" {
+						t.Skip("native Windows symlink runtime is untested")
+					}
 					f := newTopologyFixture(t)
 					common, linked := f.gate, f.managed
 					switch topology {
@@ -450,6 +453,14 @@ func TestIdentityLinkedCommonMetadataFailsClosed(t *testing.T) {
 					switch damage {
 					case "directory-head":
 						if err := os.Mkdir(path, 0o755); err != nil {
+							t.Fatal(err)
+						}
+					case "garbage-symlink-head":
+						if err := os.Symlink("garbage", path); err != nil {
+							t.Fatal(err)
+						}
+					case "garbage-symbolic-head":
+						if err := os.WriteFile(path, []byte("ref: garbage\n"), 0o644); err != nil {
 							t.Fatal(err)
 						}
 					case "invalid-head", "file-objects", "file-refs":
@@ -489,14 +500,33 @@ func TestIdentityLinkedCommonHeadForms(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, head := range []string{"ref: refs/heads/unborn\n", string(detached)} {
+			for _, head := range []string{"ref: refs/heads/unborn\n", "ref:refs/heads/unborn\n", "ref:\trefs/heads/unborn\n", "ref:\r\n refs/heads/unborn\n", string(detached)} {
 				if err := os.WriteFile(filepath.Join(common, "HEAD"), []byte(head), 0o644); err != nil {
 					t.Fatal(err)
 				}
-				got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: linked})
-				managed := topology == "registered"
-				if err != nil || got.ManagedGit != managed || got.Nested != managed {
-					t.Fatalf("valid common HEAD form refused or misclassified: %+v, %v", got, err)
+				run(t, "", "git", "--git-dir="+common, "rev-parse", "--git-common-dir")
+				for _, cwd := range []string{linked, common} {
+					got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: cwd})
+					managed := topology == "registered"
+					if err != nil || got.ManagedGit != managed || got.Nested != managed {
+						t.Errorf("valid common HEAD form refused or misclassified: %+v, %v", got, err)
+					}
+				}
+			}
+			if runtime.GOOS != "windows" {
+				if err := os.Remove(filepath.Join(common, "HEAD")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink("refs/heads/unborn", filepath.Join(common, "HEAD")); err != nil {
+					t.Fatal(err)
+				}
+				run(t, "", "git", "--git-dir="+common, "rev-parse", "--git-common-dir")
+				for _, cwd := range []string{linked, common} {
+					got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: cwd})
+					managed := topology == "registered"
+					if err != nil || got.ManagedGit != managed || got.Nested != managed {
+						t.Errorf("unborn common HEAD symlink refused or misclassified: %+v, %v", got, err)
+					}
 				}
 			}
 		})
