@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -143,7 +144,7 @@ func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 	}
 	defer tx.Rollback()
 	if stepOrder <= types.StepLint.Order() {
-		if err := invalidateStatusValidation(tx, runID); err != nil {
+		if err := invalidateStatusValidation(context.Background(), tx, runID); err != nil {
 			return err
 		}
 	}
@@ -258,7 +259,7 @@ func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
 	if err := tx.QueryRow(`SELECT run_id FROM step_results WHERE id=?`, id).Scan(&runID); err != nil {
 		return err
 	}
-	if err := invalidateStatusValidation(tx, runID); err != nil {
+	if err := invalidateStatusValidation(context.Background(), tx, runID); err != nil {
 		return err
 	}
 	ts := now()

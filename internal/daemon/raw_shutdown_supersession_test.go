@@ -351,9 +351,7 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 							t.Fatalf("persistent raw storage failure acknowledged planned shutdown: %+v,%v", ack, err)
 						}
 						storageHealthy.Store(true)
-						if err := pipeline.WithCommitStatusLock(context.Background(), func() error { return nil }); err != nil {
-							t.Fatal(err)
-						}
+
 					}
 					select {
 					case err := <-finished:

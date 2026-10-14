@@ -187,6 +187,17 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, fmt.Errorf("resolve forge profile: %w", err)
 	}
+	var obsolete bool
+	if err := pipeline.WithCommitStatusLock(ctx, func() error {
+		var err error
+		obsolete, err = m.db.ReconcileRecoveredRun(run.ID, m.runtimeInstance)
+		return err
+	}); err != nil {
+		return nil, err
+	}
+	if obsolete {
+		return nil, fmt.Errorf("unsettled shutdown from previous daemon runtime")
+	}
 	ag, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
 	if err != nil {
 		return nil, err

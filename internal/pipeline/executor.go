@@ -634,6 +634,20 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if err := ValidateRecoveredRun(e.db, run, e.steps); err != nil {
 		return err
 	}
+	var obsolete bool
+	if err := WithCommitStatusLock(context.Background(), func() error {
+		var err error
+		obsolete, err = e.db.ReconcileRecoveredRun(run.ID, e.runtimeInstance)
+		return err
+	}); err != nil {
+		return err
+	}
+	if obsolete {
+		if err := e.ReportSettledRunFailure(context.Background(), run, repo); err != nil {
+			return err
+		}
+		return fmt.Errorf("unsettled shutdown from previous daemon runtime")
+	}
 	gate, err := e.recoveredGate(run.ID)
 	if err != nil {
 		return err

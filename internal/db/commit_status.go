@@ -85,7 +85,7 @@ func (d *DB) putCommitStatusPublication(runID string, p CommitStatusPublication,
 	if revoked && (p.StrictCertificate != nil || (p.LastState != "" && p.LastState != "failure")) {
 		return false, fmt.Errorf("raw shutdown forbids status promotion")
 	}
-	if (status == types.RunFailed || status == types.RunCancelled) && p.LastState != "" && p.LastState != "failure" {
+	if (status == types.RunFailed || status == types.RunCancelled || status == types.RunCIMonitorInterrupted) && p.LastState != "" && p.LastState != "failure" {
 		return false, fmt.Errorf("terminal outcome forbids %s status", p.LastState)
 	}
 	if status == types.RunCompleted && p.LastState != "" {
@@ -166,7 +166,7 @@ func (d *DB) GetCommitStatusPublications(ctx context.Context, runID string) ([]C
 // CommitStatusRecoveryRunIDs includes terminal runs whose durable outcome has
 // not reached the forge. Selection shares the reporting deadline.
 func (d *DB) CommitStatusRecoveryRunIDs(ctx context.Context) ([]string, error) {
-	rows, err := d.sql.QueryContext(ctx, `SELECT DISTINCT r.id FROM runs r LEFT JOIN commit_status_publications p ON p.run_id=r.id AND p.retired=0 LEFT JOIN commit_status_attempts a ON a.run_id=r.id AND a.retired=0 WHERE r.status IN ('completed','failed','cancelled') AND (a.run_id IS NOT NULL OR (p.run_id IS NOT NULL AND p.last_state != CASE WHEN r.status='completed' AND p.validated=1 THEN 'success' WHEN r.status='cancelled' AND p.preserve_success=1 AND p.strict_certificate IS NOT NULL THEN 'success' ELSE 'failure' END)) ORDER BY r.created_at,r.id`)
+	rows, err := d.sql.QueryContext(ctx, `SELECT DISTINCT r.id FROM runs r LEFT JOIN commit_status_publications p ON p.run_id=r.id AND p.retired=0 LEFT JOIN commit_status_attempts a ON a.run_id=r.id AND a.retired=0 WHERE r.status IN ('completed','failed','cancelled','ci_monitor_interrupted') AND (a.run_id IS NOT NULL OR (p.run_id IS NOT NULL AND p.last_state != CASE WHEN r.status='completed' AND p.validated=1 THEN 'success' WHEN r.status='cancelled' AND p.preserve_success=1 AND p.strict_certificate IS NOT NULL THEN 'success' ELSE 'failure' END)) ORDER BY r.created_at,r.id`)
 	if err != nil {
 		return nil, err
 	}

@@ -41,3 +41,14 @@ Implementation and evidence:
 Use owning Go package tests, focused race checks, and the supported full shipping
 pipeline. No manual status repair, runtime installation, or deployment belongs
 to this source change.
+
+The database wrapper exposes no storage-recovery notification. A failed raw
+supersession therefore retains one queue-owned recovery continuation. It checks
+again at one-second intervals using the existing bounded publication-lock
+attempt and a five-second raw-supersession transaction deadline, stops when its owned queue drains, and keeps raw supersession ahead of
+terminal decisions throughout recovery. Executors keep custody until their
+settlement result arrives; recovery never needs another caller to acquire the
+lock. Process loss discards the continuation, so startup invalidates unfinished
+proof and settles obsolete runtime intent rather than treating it as authority.
+Interrupted CI retains its display state while its status ledger and outbound
+reporting reconcile to failure.

@@ -147,9 +147,17 @@ func TestTerminalSettlement_RawStorageRecoveryFencesCapturedBatch(t *testing.T) 
 		}
 	}
 	var healthy atomic.Bool
+	queued := make(chan struct{})
+	var queuedOnce sync.Once
 	function := "raw_storage_" + first.ID
 	if err := sqlite.RegisterScalarFunction(function, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
 		if !healthy.Load() {
+			terminalSettlementMu.Lock()
+			ready := len(terminalSettlements) >= 2
+			terminalSettlementMu.Unlock()
+			if ready {
+				queuedOnce.Do(func() { close(queued) })
+			}
 			return nil, errors.New("raw storage unavailable")
 		}
 		return int64(1), nil
@@ -192,23 +200,27 @@ func TestTerminalSettlement_RawStorageRecoveryFencesCapturedBatch(t *testing.T) 
 			t.Fatalf("raw failure preempted executor truth: %+v,%v", run, err)
 		}
 	}
+	results := make(chan error, 2)
+	for _, id := range ids {
+		go func(id string) {
+			results <- RecordRunFailure(context.Background(), d, id, "independent provider failure", nil)
+		}(id)
+	}
+	select {
+	case <-queued:
+	case <-time.After(5 * time.Second):
+		t.Fatal("terminal owners never reached retained custody")
+	}
 	healthy.Store(true)
-	if err := WithCommitStatusLock(context.Background(), func() error {
-		for _, id := range ids {
-			revoked, err := d.RawShutdownSuperseded(id)
+	for range ids {
+		select {
+		case err := <-results:
 			if err != nil {
-				return err
+				t.Fatal(err)
 			}
-			if !revoked {
-				return fmt.Errorf("captured run remains eligible")
-			}
-			if err := d.RecordIneligibleTerminal(id, "independent provider failure", types.RunFailed, nil); err != nil {
-				return err
-			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("storage recovery needed an outsider to acquire the publication lock")
 		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
 	}
 	reopened, err := db.Open(p.DB())
 	if err != nil {
