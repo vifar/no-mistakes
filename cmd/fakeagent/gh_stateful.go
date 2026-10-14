@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"slices"
@@ -53,7 +56,8 @@ type ghStatefulState struct {
 // in $FAKEAGENT_GH_STATE (a JSON file the e2e test may also edit, standing in
 // for an author editing the PR description on the forge). It implements only
 // the PR surface the pipeline drives: auth status, pr list/create/edit/view,
-// and pr checks (always empty).
+// and pr checks. Checks are empty unless the certificate journey opts into
+// a successful external check; native status POSTs go only to its HTTP oracle.
 func runGhStatefulPRStub(args []string) int {
 	var stdin string
 	if hasArgValue(args, "--body-file", "-") {
@@ -85,9 +89,12 @@ func runGhStatefulPRStub(args []string) int {
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		return 0
 	}
+	if len(args) >= 1 && args[0] == "api" && argAfter(args, "--method") == "POST" {
+		return postGhStatefulStatus(args, repo)
+	}
 	if len(args) >= 1 && args[0] == "api" && slices.Contains(args, "graphql") {
-		// The forge has no checks, workflow runs or review threads: answer the commit
-		// check rollup and review-thread queries with empty results.
+		// Workflow runs and review threads remain empty. The certificate journey
+		// supplies one successful external check in the commit rollup.
 		query := ""
 		for _, arg := range args {
 			if strings.HasPrefix(arg, "query=") {
@@ -100,6 +107,10 @@ func runGhStatefulPRStub(args []string) int {
 		}
 		switch {
 		case strings.Contains(query, "statusCheckRollup"):
+			if os.Getenv("FAKEAGENT_GH_CHECKS") == "success" {
+				fmt.Println(`{"data":{"repository":{"object":{"statusCheckRollup":{"contexts":{"nodes":[{"__typename":"CheckRun","databaseId":1,"name":"fixture-ci","status":"COMPLETED","conclusion":"SUCCESS","checkSuite":{"app":{"slug":"github-actions"}}}],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}}}}`)
+				return 0
+			}
 			fmt.Println(answers.graphqlChecks())
 			return 0
 		case strings.Contains(query, "reviewThreads"):
@@ -286,6 +297,56 @@ func runGhStatefulPRStub(args []string) int {
 	}
 	data, _ := json.Marshal(out)
 	fmt.Println(string(data))
+	return 0
+}
+
+// The external gh boundary forwards native status requests to a loopback HTTP
+// oracle. Missing or nonlocal endpoints fail closed, never contacting GitHub.
+func postGhStatefulStatus(args []string, repo string) int {
+	base, err := url.Parse(os.Getenv("FAKEAGENT_GH_STATUS_URL"))
+	if err != nil || base.Scheme != "http" || base.Hostname() != "127.0.0.1" {
+		fmt.Fprintln(os.Stderr, "fakeagent gh stateful-pr: loopback status URL required")
+		return 1
+	}
+	endpoint := ""
+	payload := map[string]string{}
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "repos/"+repo+"/statuses/") {
+			endpoint = arg
+		}
+		if arg == "-f" && i+1 < len(args) {
+			key, value, ok := strings.Cut(args[i+1], "=")
+			if ok {
+				payload[key] = value
+			}
+		}
+	}
+	if endpoint == "" {
+		fmt.Fprintln(os.Stderr, "fakeagent gh stateful-pr: unsupported POST")
+		return 1
+	}
+	base.Path = "/" + endpoint
+	body, err := json.Marshal(payload)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	response, err := client.Post(base.String(), "application/json", bytes.NewReader(body))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		fmt.Fprintf(os.Stderr, "status HTTP response: %d\n", response.StatusCode)
+		return 1
+	}
+	_, err = io.Copy(os.Stdout, response.Body)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	return 0
 }
 
