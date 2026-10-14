@@ -195,7 +195,16 @@ func stepGitRun(sctx *pipeline.StepContext, args ...string) (string, error) {
 
 // stepGitRunRaw preserves NUL-delimited paths and porcelain status columns.
 func stepGitRunRaw(sctx *pipeline.StepContext, args ...string) (string, error) {
+	return stepGitRunInput(sctx, "", args...)
+}
+
+// stepGitRunInput is stepGitRunRaw with stdin, for plumbing such as
+// `cat-file --batch-check` that reads its object list from input.
+func stepGitRunInput(sctx *pipeline.StepContext, input string, args ...string) (string, error) {
 	cmd := stepCmd(sctx, "git", args...)
+	if input != "" {
+		cmd.Stdin = strings.NewReader(input)
+	}
 	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
 	out, err := cmd.Output()
 	if err != nil {

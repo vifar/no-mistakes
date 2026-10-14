@@ -69,6 +69,10 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	}
 	if strings.TrimSpace(status) != "" {
 		sctx.Log("committing agent changes...")
+		headBeforeCommit, err := git.HeadSHA(ctx, sctx.WorkDir)
+		if err != nil {
+			return nil, fmt.Errorf("resolve head before commit: %w", err)
+		}
 		if err := stagePipelineChanges(sctx); err != nil {
 			return nil, fmt.Errorf("stage agent changes: %w", err)
 		}
@@ -79,7 +83,11 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		if err != nil {
 			return nil, fmt.Errorf("resolve head after commit: %w", err)
 		}
-		newHeadSHA = headSHA
+		// Scratch-safe staging can leave nothing to commit; an unchanged head
+		// is not a new pipeline commit and must not restart Review.
+		if headSHA != headBeforeCommit {
+			newHeadSHA = headSHA
+		}
 	}
 
 	headBeingPushed, err := git.HeadSHA(ctx, sctx.WorkDir)
@@ -179,6 +187,9 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	}
 
 	if err := assertReviewApprovedPushHead(sctx, headBeingPushed); err != nil {
+		return err
+	}
+	if err := assertPublishedRangeClean(sctx, headBeingPushed); err != nil {
 		return err
 	}
 	// Prove the private mirror is safe to reconcile BEFORE anything is

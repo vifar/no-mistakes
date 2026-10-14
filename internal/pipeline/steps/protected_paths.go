@@ -10,6 +10,8 @@ import (
 
 // stagePipelineChanges guards every pipeline-owned catch-all staging path,
 // including Push's leftover commit. Refusal preserves the index and worktree.
+// Staging is scratch-safe (see stageUntrackedChanges) and refuses blobs over
+// max_file_size_bytes (see refuseOversizedStaged).
 func stagePipelineChanges(sctx *pipeline.StepContext) error {
 	if len(sctx.Config.ProtectedPaths) > 0 {
 		// Disable renames so both source and destination are checked, and list
@@ -34,10 +36,22 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 			}
 		}
 	}
-	if _, err := stepGitRun(sctx, "add", "-A"); err != nil {
+	// Snapshot the index so an oversized-file refusal can restore it exactly.
+	// An empty snapshot (unmerged entries, for example) falls back to resetting
+	// only the refused paths.
+	snapshot, _ := stepGitRun(sctx, "write-tree")
+	// Tracked modifications and deletions first; untracked paths are staged
+	// selectively so tool scratch never rides into an automatic commit.
+	if _, err := stepGitRun(sctx, "add", "-u"); err != nil {
 		return err
 	}
-	return unstageSubmodulePointerMoves(sctx)
+	if err := stageUntrackedChanges(sctx); err != nil {
+		return err
+	}
+	if err := unstageSubmodulePointerMoves(sctx); err != nil {
+		return err
+	}
+	return refuseOversizedStaged(sctx, snapshot)
 }
 
 // unstageSubmodulePointerMoves keeps catch-all staging from recording a

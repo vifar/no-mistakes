@@ -109,12 +109,22 @@ func approvalRefusal(step types.StepName, findingsJSON string) string {
 	return ""
 }
 
+// ProtectedPathError is the typed refusal of an automatic commit. Besides a
+// dirty protected path it carries the oversized-file refusal of scratch-safe
+// staging: Detail, when set, is the complete operator-facing message, Path is
+// the first offending file and Rule names the setting that refused. Sharing
+// the type keeps the explicit-response gate, CI retained-repair handling and
+// every auto-resolve carve-out identical for both refusals.
 type ProtectedPathError struct {
-	Path string
-	Rule string
+	Path   string
+	Rule   string
+	Detail string
 }
 
 func (e *ProtectedPathError) Error() string {
+	if e.Detail != "" {
+		return e.Detail
+	}
 	return fmt.Sprintf("refusing automatic commit: dirty protected path %q matches protected_paths rule %q; index and worktree preserved, inspect and resolve the edit before retrying", e.Path, e.Rule)
 }
 
@@ -123,8 +133,12 @@ func ProtectedPathOutcome(err error) *StepOutcome {
 	if !errors.As(err, &refusal) {
 		return nil
 	}
+	summary := "Automatic commit refused for a protected path"
+	if refusal.Detail != "" {
+		summary = "Automatic commit refused: " + refusal.Rule
+	}
 	findings, _ := types.MarshalFindingsJSON(types.Findings{
-		Summary: "Automatic commit refused for a protected path",
+		Summary: summary,
 		Items: []types.Finding{{
 			ID:          protectedPathFindingID,
 			Severity:    "error",

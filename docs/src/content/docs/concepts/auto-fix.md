@@ -108,7 +108,7 @@ It allows a legitimate forward commit made by an agent, but aborts the run if an
 
 The template does not control commits created by the Rebase or Push steps.
 The Push step uses `no-mistakes: apply agent fixes` for remaining uncommitted changes.
-Repositories can opt into [`protected_paths`](/no-mistakes/reference/repo-config/#protected_paths) to refuse automatic staging when a protected file is dirty, including at this Push catch-all boundary. Refusal preserves the edits for inspection.
+Repositories can opt into [`protected_paths`](/no-mistakes/reference/repo-config/#protected_paths) to refuse automatic staging when a protected file is dirty, including at this Push catch-all boundary. Refusal preserves the edits for inspection. Automatic staging also leaves untracked tool scratch (new hidden directories, `node_modules/`, and [`staging_exclude`](/no-mistakes/reference/repo-config/#staging_exclude) matches) out of the commit and refuses files over [`max_file_size_bytes`](/no-mistakes/reference/repo-config/#max_file_size_bytes); see [scratch-safe automatic staging](/no-mistakes/reference/repo-config/#scratch-safe-automatic-staging).
 
 ## Step rounds
 

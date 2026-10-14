@@ -8,7 +8,7 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `staging_exclude`, `max_file_size_bytes`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
@@ -652,7 +652,48 @@ A protected-path refusal always requires an explicit response, including under A
 
 For CI, that explicit fix finishes the retained repair before normal monitoring can report `checks-passed`, even if forge checks turned green while parked or the response selects only an added finding. It uses the existing [repair revalidation policy](#cirevalidate_repairs), including mandatory revalidation from Review for a rebased conflict repair, and the existing publication guards. If the retained repair cannot finish, the refusal remains available for another explicit fix response.
 
-This is a staging guard, not an agent filesystem sandbox or a check on semantic intent. It does not inspect changes already committed by the author or an agent, and it does not infer whether an unprotected edit belongs to a finding. With an empty list, automatic staging keeps its existing behavior. `ignore_patterns` only filters checks and does not prevent staging.
+This is a staging guard, not an agent filesystem sandbox or a check on semantic intent. It does not inspect changes already committed by the author or an agent, and it does not infer whether an unprotected edit belongs to a finding. With an empty list, no path is protected. `ignore_patterns` only filters checks and does not prevent staging; see [scratch-safe automatic staging](#scratch-safe-automatic-staging) for what staging leaves out.
+
+### staging_exclude
+
+Untracked paths that automatic commits never stage. The pipeline already skips tool scratch on its own (see below); use this for additional patterns.
+
+| | |
+| --- | --- |
+| Type | `string[]` |
+| Default | Empty |
+| Trust | Trusted default branch only, regardless of `allow_repo_commands` |
+
+```yaml
+staging_exclude:
+  - "*.bin"
+  - "build/**"
+```
+
+Patterns use the same syntax as [`ignore_patterns`](#ignore_patterns). Empty or malformed rules fail config loading.
+
+### max_file_size_bytes
+
+Largest file an automatic commit may stage or a published branch may add.
+
+| | |
+| --- | --- |
+| Type | `integer` (bytes) |
+| Default | `52428800` (50 MiB) |
+| Trust | Trusted default branch only, regardless of `allow_repo_commands` |
+
+`0` disables the check; a negative value fails config loading. The default sits under GitHub's 100 MB push limit, so an oversized file fails fast with a named path instead of at the forge.
+
+### Scratch-safe automatic staging
+
+Every automatic commit (the Review, Test, Document, Lint, and CI repair commits, a repository gate repair, and the Push leftover commit) stages tracked modifications and deletions, then stages untracked files selectively, so tool scratch does not land in PR history:
+
+- A wholly untracked directory whose name starts with `.` (for example `.cache/` or `.test-fixture/`) or is `node_modules/` is skipped at any depth. A new file inside an already tracked hidden directory, such as a new `.github/workflows/new.yml`, is staged. New `.github`, `.gitlab`, `.circleci`, `.devcontainer`, `.vscode`, `.husky`, `.changeset`, and `.storybook` directories are treated as project configuration and staged.
+- Untracked paths matching [`staging_exclude`](#staging_exclude) are skipped.
+- Skipped entries are logged once: add a `.gitignore` entry for them or commit them deliberately.
+- After staging, any added or modified file larger than [`max_file_size_bytes`](#max_file_size_bytes) refuses the whole commit, like a protected path: the index is restored, the worktree is untouched, the error names each file and size, and the step parks at the same explicit-response gate. Fix by ignoring or deleting the file, or raise the limit on the default branch, then use `no-mistakes axi respond --action fix`.
+
+Before Push publishes, the same policy is checked against the commits that will be pushed (compared with the merge-base with the PR target, else the run's base), which covers commits an agent made itself. Publication is refused, with the offending paths (first 20 and a total) and remediation, when the range adds a file over the size limit, a path under a new hidden directory (other than the project-configuration directories above) or a new `node_modules/`, or a path matching `staging_exclude`. Remove the files from the branch history or ignore them. If the base cannot be resolved, the check is skipped with a log line.
 
 ### auto_fix
 

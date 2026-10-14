@@ -372,6 +372,11 @@ type RepositoryPRRaw struct {
 // RepositoryOverrides maps remote URLs to machine-local per-repository settings.
 type RepositoryOverrides map[string]RepositoryOverride
 
+// DefaultMaxFileSizeBytes is the largest blob an automatic commit may stage or
+// a published range may add when max_file_size_bytes is unset (50 MiB, under
+// GitHub's 100 MB hard push limit with room for the warning threshold).
+const DefaultMaxFileSizeBytes int64 = 50 * 1024 * 1024
+
 // RepoConfig represents .no-mistakes.yaml in a repo root.
 type RepoConfig struct {
 	Agent          types.AgentName   `yaml:"agent"`
@@ -382,6 +387,14 @@ type RepoConfig struct {
 	// trusted-only, regardless of allow_repo_commands, so a pushed branch cannot
 	// remove the maintainer's protection from its own fixes.
 	ProtectedPaths []string `yaml:"protected_paths"`
+	// StagingExclude lists untracked-path patterns that automatic staging
+	// leaves out of pipeline commits. MaxFileSizeBytes caps the size of any
+	// blob an automatic commit stages or a published range adds (0 disables the
+	// check; unset uses DefaultMaxFileSizeBytes). Both are trusted-only,
+	// regardless of allow_repo_commands, so a pushed branch cannot weaken the
+	// maintainer's scratch protection for its own run.
+	StagingExclude   []string `yaml:"staging_exclude"`
+	MaxFileSizeBytes *int64   `yaml:"max_file_size_bytes"`
 	// AllowRepoCommands opts in to honoring the code-executing selection
 	// fields (commands.{prepare,test,lint,format} and agent) from a contributor's
 	// pushed branch instead of the trusted default-branch copy. It is read
@@ -636,6 +649,8 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 		Commands               Commands     `yaml:"commands"`
 		IgnorePatterns         []string     `yaml:"ignore_patterns"`
 		ProtectedPaths         []string     `yaml:"protected_paths"`
+		StagingExclude         []string     `yaml:"staging_exclude"`
+		MaxFileSizeBytes       *int64       `yaml:"max_file_size_bytes"`
 		AllowRepoCommands      bool         `yaml:"allow_repo_commands"`
 		AutoFix                AutoFixRaw   `yaml:"auto_fix"`
 		CI                     CIRaw        `yaml:"ci"`
@@ -660,6 +675,8 @@ func (c *RepoConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.Commands = raw.Commands
 	c.IgnorePatterns = raw.IgnorePatterns
 	c.ProtectedPaths = raw.ProtectedPaths
+	c.StagingExclude = raw.StagingExclude
+	c.MaxFileSizeBytes = raw.MaxFileSizeBytes
 	c.AllowRepoCommands = raw.AllowRepoCommands
 	c.AutoFix = raw.AutoFix
 	c.CI = raw.CI
@@ -843,16 +860,20 @@ type Config struct {
 	Gates          []Gate
 	IgnorePatterns []string
 	ProtectedPaths []string
-	AutoFix        AutoFix
-	CI             CI
-	Rebase         Rebase
-	Commit         Commit
-	Intent         Intent
-	Test           Test
-	Document       Document
-	Review         Review
-	PR             PR
-	ForgeProfiles  ForgeProfiles
+	// StagingExclude and MaxFileSizeBytes are the trusted scratch-safe staging
+	// policy; MaxFileSizeBytes 0 disables the size check.
+	StagingExclude   []string
+	MaxFileSizeBytes int64
+	AutoFix          AutoFix
+	CI               CI
+	Rebase           Rebase
+	Commit           Commit
+	Intent           Intent
+	Test             Test
+	Document         Document
+	Review           Review
+	PR               PR
+	ForgeProfiles    ForgeProfiles
 	// ProviderPlugins is copied from global config only (see ProviderPlugin);
 	// no repository layer can add or change an entry.
 	ProviderPlugins ProviderPlugins
@@ -2877,6 +2898,19 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 		}
 		cfg.ProtectedPaths[i] = pattern
 	}
+	for i, pattern := range cfg.StagingExclude {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			return nil, fmt.Errorf("staging_exclude[%d] must not be empty", i)
+		}
+		if err := validatePathInstructionGlob(pattern); err != nil {
+			return nil, fmt.Errorf("staging_exclude[%d] %q is not a valid glob: %w", i, pattern, err)
+		}
+		cfg.StagingExclude[i] = pattern
+	}
+	if cfg.MaxFileSizeBytes != nil && *cfg.MaxFileSizeBytes < 0 {
+		return nil, fmt.Errorf("max_file_size_bytes must not be negative")
+	}
 	if err := validateTestRaw(cfg.Test); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
@@ -3071,6 +3105,8 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 	if trusted != nil {
 		effective.Document = trusted.Document
 		effective.ProtectedPaths = append([]string(nil), trusted.ProtectedPaths...)
+		effective.StagingExclude = append([]string(nil), trusted.StagingExclude...)
+		effective.MaxFileSizeBytes = trusted.MaxFileSizeBytes
 		// review.path_instructions steers the gate agent that reviews the pushed
 		// branch, so it is trusted-only exactly like document.instructions and
 		// regardless of allow_repo_commands: a contributor must not be able to
@@ -3162,6 +3198,8 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 	} else {
 		effective.Document = DocumentRaw{}
 		effective.ProtectedPaths = nil
+		effective.StagingExclude = nil
+		effective.MaxFileSizeBytes = nil
 		effective.Review = ReviewRaw{}
 		effective.Gates = nil
 		effective.AutoFix.Gates = nil
@@ -3732,6 +3770,11 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		pr.TitleFormat = *repo.PR.TitleFormat
 	}
 
+	maxFileSize := DefaultMaxFileSizeBytes
+	if repo.MaxFileSizeBytes != nil {
+		maxFileSize = *repo.MaxFileSizeBytes
+	}
+
 	cfg := &Config{
 		Agent:                     global.Agent,
 		Agents:                    copyAgents(global.Agents),
@@ -3758,19 +3801,21 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		// Eval is global-only by design (see GlobalConfig.Eval), so it is
 		// copied straight through with no repository override step. Worktree
 		// is global-only for the same reason (see GlobalConfig.Worktree).
-		Eval:           global.Eval,
-		Worktree:       global.Worktree,
-		Commands:       repo.Commands,
-		Gates:          copyGates(repo.Gates),
-		IgnorePatterns: repo.IgnorePatterns,
-		ProtectedPaths: repo.ProtectedPaths,
-		AutoFix:        af,
-		CI:             ci,
-		Rebase:         rebase,
-		Commit:         commit,
-		Intent:         intent,
-		Test:           test,
-		Document:       Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
+		Eval:             global.Eval,
+		Worktree:         global.Worktree,
+		Commands:         repo.Commands,
+		Gates:            copyGates(repo.Gates),
+		IgnorePatterns:   repo.IgnorePatterns,
+		ProtectedPaths:   repo.ProtectedPaths,
+		StagingExclude:   repo.StagingExclude,
+		MaxFileSizeBytes: maxFileSize,
+		AutoFix:          af,
+		CI:               ci,
+		Rebase:           rebase,
+		Commit:           commit,
+		Intent:           intent,
+		Test:             test,
+		Document:         Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
 		// repo is the EffectiveRepoConfig result, so both repository values are
 		// already trusted-only. The operator's path instructions are added as
 		// separate sources rather than overlaid: they can only add rules, never
