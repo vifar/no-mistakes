@@ -250,7 +250,7 @@ func (i Inspector) registeredManagedCommonDir(commonDir string) (string, bool, e
 		return "", false, nil
 	}
 	base := filepath.Base(common)
-	if !strings.HasSuffix(base, ".git") || base == ".git" || !git.LooksLikeBareRepository(common) {
+	if !strings.HasSuffix(base, ".git") || base == ".git" {
 		return "", false, nil
 	}
 	id := strings.TrimSuffix(base, ".git")
@@ -263,6 +263,13 @@ func (i Inspector) registeredManagedCommonDir(commonDir string) (string, bool, e
 	}
 	if repo == nil || !sameCanonicalPath(common, i.Paths.RepoDir(repo.ID)) {
 		return "", false, nil
+	}
+	head, err := gitHeadPresent(common)
+	if err != nil {
+		return "", false, fmt.Errorf("gate execution context: verify managed gate HEAD: %w", err)
+	}
+	if !git.LooksLikeBareRepository(common) || !head {
+		return "", false, fmt.Errorf("gate execution context: registered gate has invalid bare structure")
 	}
 	return repo.ID, true, nil
 }
@@ -402,7 +409,7 @@ func gitMetadataMatchesDiscovery(cwd, gitDir string) (bool, error) {
 	}
 }
 
-func bareGitMetadataPresent(dir string) (bool, error) {
+func gitHeadPresent(dir string) (bool, error) {
 	if info, err := os.Stat(filepath.Join(dir, "HEAD")); err == nil {
 		if info.Mode().IsRegular() {
 			file, err := os.Open(filepath.Join(dir, "HEAD"))
@@ -426,6 +433,14 @@ func bareGitMetadataPresent(dir string) (bool, error) {
 		}
 	} else if !os.IsNotExist(err) {
 		return false, err
+	}
+	return false, nil
+}
+
+func bareGitMetadataPresent(dir string) (bool, error) {
+	head, err := gitHeadPresent(dir)
+	if err != nil || head {
+		return head, err
 	}
 	for _, structure := range [][]string{
 		{"objects", "objects/info"},
