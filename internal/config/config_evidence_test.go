@@ -199,6 +199,30 @@ test:
 	}
 }
 
+func TestLoadConfig_InvalidEvidenceCommitMessageFailsClosed(t *testing.T) {
+	for name, template := range map[string]string{
+		"empty":               `"  "`,
+		"unknown placeholder": `"{{.Step}}"`,
+		"template function":   `'{{printf "%s" .Branch}}'`,
+		"control character":   `"evidence\tfor {{.Branch}}"`,
+		"too many":            `"` + strings.Repeat("{{.RunID}}", maxFixMessagePlaceholders+1) + `"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			yaml := "test:\n  evidence:\n    commit_message: " + template + "\n"
+			if _, err := LoadGlobalFromBytes([]byte(yaml)); err == nil || !strings.Contains(err.Error(), "test.evidence.commit_message") {
+				t.Errorf("global config error = %v, want test.evidence.commit_message rejection", err)
+			}
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, ".no-mistakes.yaml"), []byte(yaml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadRepo(dir); err == nil || !strings.Contains(err.Error(), "test.evidence.commit_message") {
+				t.Errorf("repo config error = %v, want test.evidence.commit_message rejection", err)
+			}
+		})
+	}
+}
+
 // The evidence branch names a ref the daemon pushes to with the maintainer's
 // credentials, so a contributor's pushed branch must not be able to pick it.
 func TestEffectiveRepoConfig_EvidenceBranchTrustedOnly(t *testing.T) {

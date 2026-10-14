@@ -45,7 +45,7 @@ type StepResult struct {
 	SkipReason *string
 }
 
-const stepResultColumns = `id, run_id, step_name, step_order, status, exit_code, duration_ms, log_path, findings_json, error, started_at, completed_at, last_activity_at, last_activity, agent_pid, auto_fix_limit`
+const stepResultColumns = `id, run_id, step_name, step_order, status, exit_code, duration_ms, log_path, findings_json, error, started_at, completed_at`
 
 // readableStepResultColumns tolerates databases that predate the optional
 // columns. The ci_fix_attempts column is no longer read: the CI step's fix
@@ -54,25 +54,12 @@ const stepResultColumns = `id, run_id, step_name, step_order, status, exit_code,
 // append-only.
 func (d *DB) readableStepResultColumns() string {
 	columns := stepResultColumns
-	if d.hasColumn("step_results", "round_started_at") {
-		columns += ", round_started_at"
-	} else {
-		columns += ", NULL AS round_started_at"
-	}
-	if d.hasColumn("step_results", "override_reason") {
-		columns += ", override_reason"
-	} else {
-		columns += ", NULL AS override_reason"
-	}
-	if d.hasColumn("step_results", "skip_reason") {
-		columns += ", skip_reason"
-	} else {
-		columns += ", NULL AS skip_reason"
-	}
-	if d.hasColumn("step_results", "approval_reason") {
-		columns += ", approval_reason"
-	} else {
-		columns += ", NULL AS approval_reason"
+	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid", "auto_fix_limit", "round_started_at", "override_reason", "skip_reason", "approval_reason"} {
+		if d.hasColumn("step_results", column) {
+			columns += ", " + column
+		} else {
+			columns += ", NULL AS " + column
+		}
 	}
 	if d.hasColumn("step_results", "accepted_gaps_json") {
 		columns += ", accepted_gaps_json"

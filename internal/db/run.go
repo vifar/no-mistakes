@@ -649,11 +649,14 @@ func (d *DB) UpdateRunPushBinding(id string, binding PushBinding) error {
 }
 
 // UpdateRunPublication atomically records the exact published head and its
-// successful-push provenance.
+// successful-push provenance. A publication also settles a pending Test
+// restart (see UpdateRunHeadSHAWithCarriedReview): while one is pending the CI
+// step refuses to publish, so only the Push step - after Test onward ran - can
+// reach this write.
 func (d *DB) UpdateRunPublication(id string, binding PushBinding) error {
 	ts := now()
 	_, err := d.sql.Exec(
-		`UPDATE runs SET head_sha = ?, last_pushed_sha = ?, push_target_kind = ?, push_target_fingerprint = ?, push_ref = ?, last_pushed_at = ?, push_generation = COALESCE(push_generation, 0) + 1, updated_at = ? WHERE id = ?`,
+		`UPDATE runs SET head_sha = ?, last_pushed_sha = ?, push_target_kind = ?, push_target_fingerprint = ?, push_ref = ?, last_pushed_at = ?, push_generation = COALESCE(push_generation, 0) + 1, ci_test_restart_pending = 0, updated_at = ? WHERE id = ?`,
 		binding.HeadSHA, binding.HeadSHA, binding.TargetKind, binding.TargetFingerprint, binding.Ref, ts, ts, id,
 	)
 	if err != nil {
@@ -864,6 +867,39 @@ func (d *DB) UpdateRunHeadSHAForRevalidation(id, headSHA string) error {
 	return nil
 }
 
+// UpdateRunHeadSHAWithCarriedReview records a late repair that was proven to
+// be a pure replay of the approved commits and moves the review approval to
+// it in the same write. The update applies only while the run still holds
+// approvedHeadSHA as its approval, so an approval revoked or replaced in the
+// meantime is never resurrected onto the new head; it reports whether the
+// carry was recorded.
+//
+// The same write marks a Test restart pending. The carried head has not been
+// through Test onward yet, and the outcome that asks for that restart does not
+// survive a later fix response or a daemon restart while the CI step is
+// parked; the durable flag does, until UpdateRunPublication settles it.
+func (d *DB) UpdateRunHeadSHAWithCarriedReview(id, approvedHeadSHA, headSHA string) (bool, error) {
+	result, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, review_approved_head_sha = ?, ci_test_restart_pending = 1, updated_at = ? WHERE id = ? AND review_approved_head_sha = ?`, headSHA, headSHA, now(), id, approvedHeadSHA)
+	if err != nil {
+		return false, fmt.Errorf("update run head sha with carried review: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("update run head sha with carried review: %w", err)
+	}
+	return rows == 1, nil
+}
+
+// RunTestRestartPending reports whether a carried review approval still
+// awaits its restart at Test (see UpdateRunHeadSHAWithCarriedReview).
+func (d *DB) RunTestRestartPending(id string) (bool, error) {
+	var pending bool
+	if err := d.sql.QueryRow(`SELECT ci_test_restart_pending FROM runs WHERE id = ?`, id).Scan(&pending); err != nil {
+		return false, fmt.Errorf("read run test restart pending: %w", err)
+	}
+	return pending, nil
+}
+
 // UpdateRunError sets the error message on a run.
 func (d *DB) UpdateRunError(id, errMsg string) error {
 	return d.UpdateRunErrorStatus(id, errMsg, types.RunFailed)
@@ -901,6 +937,21 @@ func (d *DB) VerifyTerminalRunHeadRewrite(id string, status types.RunStatus, rec
 	result, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status = ? AND head_sha = ? AND review_approved_head_sha = ? AND terminal_head_verified_at IS NULL AND custody_returned_at IS NULL`, liveHead, ts, ts, id, status, recordedHead, recordedHead)
 	if err != nil {
 		return false, fmt.Errorf("verify terminal run head rewrite: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	return updated == 1, err
+}
+
+// VerifyTerminalRunRecordedHead stamps a terminal run's recorded head as its
+// verified head without moving it. It is a compare-and-swap on everything the
+// caller's proof read - status, recorded head, review authority, no earlier
+// stamp, custody not yet returned - so a run that changed while the proof was
+// being built is left alone and the caller refuses.
+func (d *DB) VerifyTerminalRunRecordedHead(id string, status types.RunStatus, recordedHead, reviewedHead string) (bool, error) {
+	ts := now()
+	result, err := d.sql.Exec(`UPDATE runs SET push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status = ? AND head_sha = ? AND review_approved_head_sha = ? AND terminal_head_verified_at IS NULL AND custody_returned_at IS NULL`, ts, ts, id, status, recordedHead, reviewedHead)
+	if err != nil {
+		return false, fmt.Errorf("verify terminal run recorded head: %w", err)
 	}
 	updated, err := result.RowsAffected()
 	return updated == 1, err

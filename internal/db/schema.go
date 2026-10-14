@@ -442,4 +442,7 @@ var migrationStatements = []string{
 	// Owner-approved Test gaps accepted under strict shipping (see
 	// StepResult.AcceptedGapRefusal). NULL means no gap was accepted.
 	`ALTER TABLE step_results ADD COLUMN accepted_gaps_json TEXT`,
+	// Set with a CI repair's carried review approval and cleared by the next
+	// publication (UpdateRunHeadSHAWithCarriedReview / UpdateRunPublication).
+	`ALTER TABLE runs ADD COLUMN ci_test_restart_pending INTEGER NOT NULL DEFAULT 0`,
 }

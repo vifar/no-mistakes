@@ -1185,6 +1185,76 @@ func TestVerifyTerminalRunHeadRewriteUsesRecordedReviewCAS(t *testing.T) {
 	}
 }
 
+func TestVerifyTerminalRunRecordedHeadIsACompareAndSwap(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/tmp/terminal-recorded-cas", "https://example.com/terminal-recorded-cas", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "submitted", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunHeadSHA(run.ID, "recorded"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunReviewApprovedHeadSHA(run.ID, "reviewed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	for name, args := range map[string][3]any{
+		"status":    {types.RunCancelled, "recorded", "reviewed"},
+		"head":      {types.RunFailed, "other", "reviewed"},
+		"authority": {types.RunFailed, "recorded", "other"},
+	} {
+		if updated, err := d.VerifyTerminalRunRecordedHead(run.ID, args[0].(types.RunStatus), args[1].(string), args[2].(string)); err != nil || updated {
+			t.Fatalf("%s mismatch CAS = %t, %v", name, updated, err)
+		}
+	}
+	got, err := d.GetRun(run.ID)
+	if err != nil || got.HeadSHA != "recorded" || got.TerminalHeadVerifiedAt != nil {
+		t.Fatalf("failed CAS changed run = %#v, %v", got, err)
+	}
+	if updated, err := d.VerifyTerminalRunRecordedHead(run.ID, types.RunFailed, "recorded", "reviewed"); err != nil || !updated {
+		t.Fatalf("matching CAS = %t, %v", updated, err)
+	}
+	got, err = d.GetRun(run.ID)
+	if err != nil || got.HeadSHA != "recorded" || got.TerminalHeadVerifiedAt == nil || got.Status != types.RunFailed {
+		t.Fatalf("successful CAS did not verify the recorded head in place = %#v, %v", got, err)
+	}
+	if updated, err := d.VerifyTerminalRunRecordedHead(run.ID, types.RunFailed, "recorded", "reviewed"); err != nil || updated {
+		t.Fatalf("already-verified CAS = %t, %v", updated, err)
+	}
+
+	// A run whose custody was already returned is never re-stamped, even when
+	// every other predicate matches.
+	returned, err := d.InsertRun(repo.ID, "feature-returned", "submitted", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunHeadSHA(returned.ID, "recorded"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunReviewApprovedHeadSHA(returned.ID, "reviewed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(returned.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunCustodyReturned(returned.ID); err != nil {
+		t.Fatal(err)
+	}
+	if updated, err := d.VerifyTerminalRunRecordedHead(returned.ID, types.RunFailed, "recorded", "reviewed"); err != nil || updated {
+		t.Fatalf("custody-returned CAS = %t, %v", updated, err)
+	}
+	got, err = d.GetRun(returned.ID)
+	if err != nil || got.TerminalHeadVerifiedAt != nil || got.CustodyReturnedAt == nil {
+		t.Fatalf("custody-returned CAS changed run = %#v, %v", got, err)
+	}
+}
+
 func TestRunPushBindingIsForwardOnlyAndLegacyRowsStayNullable(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/tmp/repo-sync-binding", "https://example.com/repo.git", "main")
