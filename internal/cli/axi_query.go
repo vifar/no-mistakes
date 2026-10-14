@@ -153,6 +153,9 @@ func annotateRunView(env *axiEnv, rv *runView) {
 	if env == nil || rv == nil {
 		return
 	}
+	if live := fetchRunScheduling(env.p, rv.ID); live != nil {
+		rv.QueuePosition, rv.QueueTotal, rv.WaitingForSlot = live.QueuePosition, live.QueueTotal, live.WaitingForSlot
+	}
 	quietWarning := configQuietWarning(env)
 	for i := range rv.Steps {
 		step := &rv.Steps[i]

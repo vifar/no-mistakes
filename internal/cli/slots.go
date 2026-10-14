@@ -33,6 +33,25 @@ var fetchSlots = func(p *paths.Paths) *ipc.SlotsResult {
 	return &result
 }
 
+var fetchRunScheduling = func(p *paths.Paths, runID string) *ipc.RunInfo {
+	if p == nil {
+		return nil
+	}
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		return nil
+	}
+	defer client.Close()
+	var result ipc.GetRunResult
+	if err := client.CallWithTimeout(ipc.MethodGetRun, &ipc.GetRunParams{RunID: runID}, &result, 2*time.Second); err != nil {
+		return nil
+	}
+	if result.Run == nil || result.Run.ID != runID {
+		return nil
+	}
+	return result.Run
+}
+
 // slotsSummary is the one-line slot usage: "2/3 in use, 4 queued". Runs that
 // released their slot while parked are named only when there are any, unless
 // always is set (doctor reports the count even at zero).

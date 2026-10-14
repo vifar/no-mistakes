@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -18,6 +20,176 @@ type recordingSlot struct {
 	mu        sync.Mutex
 	events    []string
 	acquireOK error
+}
+
+type cappedInvocationAgent struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (a *cappedInvocationAgent) Name() string { return "capped" }
+func (a *cappedInvocationAgent) Close() error { return nil }
+func (a *cappedInvocationAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	a.entered <- struct{}{}
+	select {
+	case <-a.release:
+		return &agent.Result{Text: `{"summary":"intent","agent_name":"capped","session_id":"s1"}`}, nil
+	case <-ctx.Done():
+		return nil, context.Cause(ctx)
+	}
+}
+
+func TestExecutorAgentCapIncludesBothIntentCallers(t *testing.T) {
+	SetMaxConcurrentAgents(1)
+	defer SetMaxConcurrentAgents(0)
+	database, p, run, repo := setupTest(t)
+	workDir := completionFixture(t, database, run)
+	a := &cappedInvocationAgent{entered: make(chan struct{}, 3), release: make(chan struct{})}
+	defer close(a.release)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	step := &adaptiveCallStep{name: types.StepIntent, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		done := make(chan error, 3)
+		go func() { _, err := sctx.RunAgent(agent.RunOpts{Prompt: "review"}); done <- err }()
+		select {
+		case <-a.entered:
+		case <-ctx.Done():
+			return nil, context.Cause(ctx)
+		}
+		sess := &intent.Session{AgentName: "capped", SessionID: "s1", Messages: []intent.Message{{Role: intent.RoleUser, Text: "cap pipeline agents"}}}
+		go func() { _, err := intent.NewAgentSummarizer(sctx.Agent, workDir).Summarize(ctx, sess); done <- err }()
+		go func() {
+			_, err := intent.NewAgentDisambiguator(sctx.Agent, workDir).Disambiguate(ctx, []string{"file.go"}, []*intent.Match{{Session: sess}})
+			done <- err
+		}()
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			agentLimiter.mu.Lock()
+			waiting := len(agentLimiter.waiters)
+			agentLimiter.mu.Unlock()
+			if waiting == 2 {
+				break
+			}
+			select {
+			case <-a.entered:
+				return nil, errors.New("intent bypassed the agent cap")
+			default:
+			}
+			if time.Now().After(deadline) {
+				return nil, errors.New("intent callers never reached the cap")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		for i := 0; i < 3; i++ {
+			a.release <- struct{}{}
+			if err := <-done; err != nil {
+				return nil, err
+			}
+		}
+		return &StepOutcome{}, nil
+	}}
+	exec := NewExecutor(database, p, nil, a, []Step{step}, nil)
+	if err := exec.Execute(ctx, run, repo, workDir); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type occupiedRunSlot struct {
+	occupied atomic.Bool
+	acquires atomic.Int32
+}
+
+func (s *occupiedRunSlot) Yield() { s.occupied.Store(true) }
+func (s *occupiedRunSlot) Acquire(ctx context.Context) error {
+	s.acquires.Add(1)
+	if s.occupied.Load() {
+		<-ctx.Done()
+		return context.Cause(ctx)
+	}
+	return nil
+}
+
+func TestExecutorAbortDoesNotWaitForOccupiedSlot(t *testing.T) {
+	for _, recovered := range []bool{false, true} {
+		t.Run(map[bool]string{false: "live", true: "recovered"}[recovered], func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			workDir := completionFixture(t, database, run)
+			step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+				return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[],"summary":"review"}`}, nil
+			}}
+			if recovered {
+				if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+					t.Fatal(err)
+				}
+				sr, err := database.InsertStepResult(run.ID, types.StepReview)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.StartStep(sr.ID); err != nil {
+					t.Fatal(err)
+				}
+				findings := `{"findings":[],"summary":"review"}`
+				if err := database.SetStepFindings(sr.ID, findings); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := database.InsertReviewStepRound(sr.ID, 1, "initial", &findings, nil, run.HeadSHA, 1); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.UpdateStepStatusWithDuration(sr.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+					t.Fatal(err)
+				}
+				run, err = database.GetRun(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			slot := &occupiedRunSlot{}
+			exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+			exec.SetRunSlot(slot)
+			var guards atomic.Int32
+			exec.SetPRContextGuard(func(*StepContext, types.StepName) (PRContextDecision, error) {
+				guards.Add(1)
+				return PRContextDecision{Target: PRTargetSelection{TargetBranch: "main"}}, nil
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() {
+				if recovered {
+					done <- exec.Resume(ctx, run, repo, workDir)
+				} else {
+					done <- exec.Execute(ctx, run, repo, workDir)
+				}
+			}()
+			deadline := time.Now().Add(3 * time.Second)
+			for !slot.occupied.Load() {
+				if time.Now().After(deadline) {
+					t.Fatal("run never yielded its slot")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			beforeAcquire, beforeGuard := slot.acquires.Load(), guards.Load()
+			if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), "aborted by user") {
+					t.Fatalf("abort: %v", err)
+				}
+			case <-time.After(time.Second):
+				cancel()
+				<-done
+				t.Fatal("abort waited for another run's slot")
+			}
+			if slot.acquires.Load() != beforeAcquire || guards.Load() != beforeGuard {
+				t.Fatal("abort acquired a slot or revalidated PR context")
+			}
+		})
+	}
 }
 
 func (s *recordingSlot) record(e string) {
@@ -55,6 +227,10 @@ func TestExecutor_YieldsSlotWhileParkedAndReacquiresOnResponse(t *testing.T) {
 	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	deadline := time.Now().Add(3 * time.Second)
+	for len(slot.log()) < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	// Parked: the slot has been given back and not taken again yet.
 	if got := slot.log(); len(got) != 2 || got[0] != "acquire" || got[1] != "yield" {
 		t.Fatalf("slot events while parked = %v, want [acquire yield] (taken for the step, yielded at the gate)", got)

@@ -3,6 +3,8 @@ package pipeline
 import (
 	"context"
 	"sync"
+
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 )
 
 // RunSlot is the daemon's run-concurrency slot as the pipeline sees it. A run
@@ -128,4 +130,49 @@ func (s *agentSemaphore) release() {
 	s.active--
 	s.wakeLocked()
 	s.mu.Unlock()
+}
+
+type limitedAgent struct {
+	agent.Agent
+	slot RunSlot
+}
+
+func limitAgent(a agent.Agent, slot RunSlot) agent.Agent {
+	if a == nil {
+		return nil
+	}
+	if _, ok := a.(*limitedAgent); ok {
+		return a
+	}
+	return &limitedAgent{Agent: a, slot: slot}
+}
+
+func (a *limitedAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	if a.slot != nil {
+		if err := a.slot.Acquire(ctx); err != nil {
+			return nil, err
+		}
+	}
+	release, err := agentLimiter.acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return a.Agent.Run(ctx, opts)
+}
+
+func (a *limitedAgent) SupportsSessionResume() bool {
+	return agent.SupportsSessionResume(a.Agent)
+}
+
+func (a *limitedAgent) SupportsSessionProvider(provider string) bool {
+	return agent.SupportsSessionProvider(a.Agent, provider)
+}
+
+func (a *limitedAgent) ReportsAgentAttempts() bool {
+	return agent.ReportsAgentAttempts(a.Agent)
+}
+
+func (a *limitedAgent) NeutralizesGateInstructions() bool {
+	return agent.NeutralizesGateInstructions(a.Agent)
 }

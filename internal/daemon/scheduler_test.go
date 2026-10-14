@@ -29,11 +29,12 @@ func newSchedHarness(max int, hold bool) *schedHarness {
 		defer h.mu.Unlock()
 		return h.max, h.hold
 	})
-	h.start = func(id string, slot *runSlot) {
+	h.start = func(id string, slot *runSlot) func() {
 		h.mu.Lock()
 		h.started = append(h.started, id)
 		h.slots[id] = slot
 		h.mu.Unlock()
+		return func() {}
 	}
 	return h
 }
@@ -66,6 +67,46 @@ func equalIDs(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func TestSchedulerDispatchCancellationHandoff(t *testing.T) {
+	for i := 0; i < 40; i++ {
+		m := NewRunManager(nil, nil, nil)
+		m.sched = newSlotScheduler(func() (int, bool) { return 1, false })
+		preparing := make(chan struct{})
+		proceed := make(chan struct{})
+		registered := make(chan struct{})
+		m.sched.start = func(id string, slot *runSlot) func() {
+			close(preparing)
+			<-proceed
+			m.startQueuedRun(id, slot)
+			close(registered)
+			return func() {}
+		}
+		m.sched.restoreQueue([]string{"queued"})
+		dispatched := make(chan struct{})
+		go func() { m.sched.dispatch(); close(dispatched) }()
+		<-preparing
+		cancelled := make(chan error, 1)
+		go func() { cancelled <- m.HandleCancel("queued") }()
+		select {
+		case err := <-cancelled:
+			t.Errorf("cancellation crossed the unregistered handoff: %v", err)
+		case <-time.After(time.Millisecond):
+		}
+		close(proceed)
+		<-registered
+		<-dispatched
+		select {
+		case err := <-cancelled:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("cancellation did not find the dispatched run")
+		}
+		m.wg.Done()
+	}
 }
 
 func position(h *schedHarness, id string) (int, int, bool) {

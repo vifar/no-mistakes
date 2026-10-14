@@ -762,7 +762,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		ForgeContext: e.forge,
 		DB:           e.db,
 		StepResultID: gate.stepResult.ID,
-		Agent:        e.agent,
+		Agent:        limitAgent(e.agent, e.slot),
 		Sessions:     e.sessions,
 		Shared:       e.shared,
 		// The same value executeStep supplies. A reconciler or resumer that
@@ -822,6 +822,14 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
 	}
+	if err == nil && !reconciled && response.action == types.ActionAbort {
+		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
+		if dbErr := e.db.FailStep(gate.stepResult.ID, "aborted by user", duration); dbErr != nil {
+			slog.Warn("failed to mark recovered step as aborted", "step", gate.step.Name(), "error", dbErr)
+		}
+		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "aborted by user", &duration)
+		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
+	}
 	if err == nil {
 		err = e.acquireSlot(ctx)
 	}
@@ -874,13 +882,6 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusSkipped), "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, "")
-	case types.ActionAbort:
-		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
-		if dbErr := e.db.FailStep(gate.stepResult.ID, "aborted by user", duration); dbErr != nil {
-			slog.Warn("failed to mark recovered step as aborted", "step", gate.step.Name(), "error", dbErr)
-		}
-		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "aborted by user", &duration)
-		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
 	// A fix round and an answered review question re-enter the same step the
 	// same way; only the bookkeeping before it and the state handed in differ.
 	// An answer is not a verdict, so it records no selection on the round -
@@ -1437,7 +1438,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Repo:              repo,
 		WorkDir:           workDir,
 		GateDir:           e.paths.RepoDir(repo.ID),
-		Agent:             stepAgent,
+		Agent:             limitAgent(stepAgent, e.slot),
 		Config:            e.config,
 		ForgeContext:      e.forge,
 		PRTarget:          e.prTarget,
@@ -1834,6 +1835,14 @@ rounds:
 			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
 			}
+			if err == nil && !reconciled && response.action == types.ActionAbort {
+				e.recordDeclinedRound(currentRoundID, effectiveFindings, stepName, roundNum)
+				if dbErr := e.db.FailStep(sr.ID, "aborted by user", executionMS); dbErr != nil {
+					slog.Warn("failed to mark step as aborted", "step", stepName, "error", dbErr)
+				}
+				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "aborted by user", &executionMS)
+				return false, "", fmt.Errorf("step %s: aborted by user", stepName)
+			}
 			if err == nil {
 				err = e.acquireSlot(ctx)
 			}
@@ -1924,14 +1933,6 @@ rounds:
 				}
 				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusSkipped), "", "", &executionMS)
 				return false, "", nil
-
-			case types.ActionAbort:
-				e.recordDeclinedRound(currentRoundID, effectiveFindings, stepName, roundNum)
-				if dbErr := e.db.FailStep(sr.ID, "aborted by user", executionMS); dbErr != nil {
-					slog.Warn("failed to mark step as aborted", "step", stepName, "error", dbErr)
-				}
-				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "aborted by user", &executionMS)
-				return false, "", fmt.Errorf("step %s: aborted by user", stepName)
 
 			case types.ActionFix:
 				telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(effectiveFindings, response.findingIDs), 0))

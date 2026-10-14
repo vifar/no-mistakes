@@ -210,10 +210,9 @@ func (m *RunManager) SlotUsage() ipc.SlotsResult {
 // must not block: it registers the run's cancel/done pair synchronously, so an
 // abort arriving at any moment after the run left the queue still finds it,
 // and finishes the launch on its own goroutine.
-func (m *RunManager) startQueuedRun(runID string, slot *runSlot) {
+func (m *RunManager) startQueuedRun(runID string, slot *runSlot) func() {
 	if m.shuttingDown.Load() {
-		slot.Release()
-		return
+		return slot.Release
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	handle := &runHandle{cancel: cancel, runCtx: runCtx, done: make(chan struct{})}
@@ -222,10 +221,12 @@ func (m *RunManager) startQueuedRun(runID string, slot *runSlot) {
 	m.dones[runID] = handle.done
 	m.mu.Unlock()
 	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
-		m.launchQueuedRun(runID, slot, handle)
-	}()
+	return func() {
+		go func() {
+			defer m.wg.Done()
+			m.launchQueuedRun(runID, slot, handle)
+		}()
+	}
 }
 
 // launchQueuedRun finishes the launch of a run taken off the queue, rebuilding

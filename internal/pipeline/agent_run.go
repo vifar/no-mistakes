@@ -149,11 +149,7 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 			return nil, err
 		}
 	}
-	releaseAgent, err := agentLimiter.acquire(parent)
-	if err != nil {
-		return nil, err
-	}
-	defer releaseAgent()
+	ag = limitAgent(ag, nil)
 	activity := observeAgentActivity(&opts)
 	return invokeAgent(parent, timeout, working, stall, cause, activity, func(ctx context.Context) (*agent.Result, error) {
 		if sessionRole != "" && sctx != nil && sctx.Sessions != nil {

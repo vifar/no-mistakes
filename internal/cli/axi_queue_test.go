@@ -132,6 +132,73 @@ func TestAxiStatusShowsQueuedRunAndPosition(t *testing.T) {
 	}
 }
 
+func TestAxiStatusAndHomeOverlayLiveScheduling(t *testing.T) {
+	repoDir, _, database, repo := setupAxiQueryRepo(t)
+	run(t, repoDir, "git", "checkout", "-b", "feature/resumed")
+	chdir(t, repoDir)
+	resumed, err := database.InsertRun(repo.ID, "feature/resumed", "head-a", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(resumed.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := database.InsertRun(repo.ID, "feature/queued", "head-c", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.MarkRunQueued(queued.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	old := fetchRunScheduling
+	t.Cleanup(func() { fetchRunScheduling = old })
+	fetchRunScheduling = func(_ *paths.Paths, id string) *ipc.RunInfo {
+		if id == resumed.ID {
+			return &ipc.RunInfo{ID: id, QueuePosition: 1, QueueTotal: 2, WaitingForSlot: true}
+		}
+		if id == queued.ID {
+			return &ipc.RunInfo{ID: id, QueuePosition: 2, QueueTotal: 2}
+		}
+		return nil
+	}
+	home := func() string {
+		var out bytes.Buffer
+		cmd := &cobra.Command{}
+		cmd.SetContext(context.Background())
+		cmd.SetOut(&out)
+		if err := runAxiHome(cmd); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	for _, out := range []string{axiStatusOutput(t, ""), home()} {
+		for _, want := range []string{"queue_position: 1", "queue_length: 2", "waiting_for_slot: true"} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("resumed view missing %q:\n%s", want, out)
+			}
+		}
+	}
+	run(t, repoDir, "git", "checkout", "-b", "feature/queued")
+	for _, out := range []string{axiStatusOutput(t, ""), home()} {
+		if !strings.Contains(out, "queue_position: 2") || !strings.Contains(out, "queue_length: 2") {
+			t.Fatalf("queued view omitted priority waiter:\n%s", out)
+		}
+	}
+	fetchRunScheduling = func(*paths.Paths, string) *ipc.RunInfo { return nil }
+	for _, out := range []string{axiStatusOutput(t, ""), home()} {
+		if !strings.Contains(out, "queue_position: 1") || !strings.Contains(out, "queue_length: 1") {
+			t.Fatalf("offline view lost database position:\n%s", out)
+		}
+	}
+	fetchRunScheduling = func(_ *paths.Paths, id string) *ipc.RunInfo {
+		return &ipc.RunInfo{ID: id, QueuePosition: 1, QueueTotal: 1, WaitingForSlot: true}
+	}
+	run(t, repoDir, "git", "checkout", "main")
+	if out := home(); !strings.Contains(out, "other_branch_active_run:") || !strings.Contains(out, "waiting_for_slot: true") {
+		t.Fatalf("other branch view missed scheduling:\n%s", out)
+	}
+}
+
 func TestSlotsSummary(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

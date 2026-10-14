@@ -26,7 +26,7 @@ type slotScheduler struct {
 
 	// start launches a queued run that has just been given a slot. The slot is
 	// already held: the callee owns releasing it.
-	start func(runID string, slot *runSlot)
+	start func(runID string, slot *runSlot) func()
 
 	// admitMu serialises admission so the in-memory queue order is exactly the
 	// order of the queued_at stamps written to the database.
@@ -144,8 +144,9 @@ func (s *slotScheduler) dispatch() {
 			id := s.queued[0]
 			s.queued = s.queued[1:]
 			s.active++
+			launch := s.start(id, &runSlot{s: s, runID: id, held: true})
 			s.mu.Unlock()
-			s.start(id, &runSlot{s: s, runID: id, held: true})
+			launch()
 			continue
 		}
 		s.mu.Unlock()
