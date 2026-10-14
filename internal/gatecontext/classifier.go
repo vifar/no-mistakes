@@ -4,8 +4,10 @@ package gatecontext
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -365,17 +367,35 @@ func gitMetadataMatchesDiscovery(cwd, gitDir string) (bool, error) {
 }
 
 func bareGitMetadataPresent(dir string) (bool, error) {
-	evidence := 0
 	if info, err := os.Stat(filepath.Join(dir, "HEAD")); err == nil {
 		if info.Mode().IsRegular() {
-			evidence++
+			file, err := os.Open(filepath.Join(dir, "HEAD"))
+			if err != nil {
+				return false, err
+			}
+			data, err := io.ReadAll(io.LimitReader(file, 128))
+			_ = file.Close()
+			if err != nil {
+				return false, err
+			}
+			head := strings.TrimSpace(string(data))
+			if strings.HasPrefix(head, "ref: ") && strings.TrimSpace(strings.TrimPrefix(head, "ref: ")) != "" {
+				return true, nil
+			}
+			if len(head) == 40 || len(head) == 64 {
+				if _, err := hex.DecodeString(head); err == nil {
+					return true, nil
+				}
+			}
 		}
 	} else if !os.IsNotExist(err) {
 		return false, err
 	}
 	for _, structure := range [][]string{
-		{"objects", "objects/info", "objects/pack"},
-		{"refs", "refs/heads", "refs/tags"},
+		{"objects", "objects/info"},
+		{"objects", "objects/pack"},
+		{"refs", "refs/heads"},
+		{"refs", "refs/tags"},
 	} {
 		present := true
 		for _, entry := range structure {
@@ -393,10 +413,10 @@ func bareGitMetadataPresent(dir string) (bool, error) {
 			}
 		}
 		if present {
-			evidence++
+			return true, nil
 		}
 	}
-	return evidence >= 2, nil
+	return false, nil
 }
 
 func ancestry(pid int, parent func(int) (int, error)) (map[int]bool, error) {
