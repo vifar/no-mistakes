@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestCIScopeApprovalUsesSelectedTarget(t *testing.T) {
@@ -88,6 +90,19 @@ func TestCIScopeRecoveredWorkDropsExcludedChecksAndKeepsBudget(t *testing.T) {
 				sctx.Env = append(sctx.Env, `FAKE_CLI_CHECKS=[{"name":"build","state":"SUCCESS","bucket":"pass"}]`)
 			}
 			sctx.Fixing = true
+			result, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sctx.StepResultID = result.ID
+			if err := sctx.DB.UpdateStepStatus(result.ID, types.StepStatusFixing); err != nil {
+				t.Fatal(err)
+			}
+			marked := 0
+			sctx.MarkRunning = func() error {
+				marked++
+				return sctx.DB.UpdateStepStatus(result.ID, types.StepStatusRunning)
+			}
 			sctx.PreviousFindings = `{"findings":[{"check":"optional","check_id":"previous-execution","category":"ci-check","action":"auto-fix","description":"old failure"}]}`
 			sctx.DeferredFindings = sctx.PreviousFindings
 			budget := checkRerunBudget{}
@@ -103,6 +118,13 @@ func TestCIScopeRecoveredWorkDropsExcludedChecksAndKeepsBudget(t *testing.T) {
 			outcome, err := step.Execute(sctx)
 			if !errors.Is(err, context.Canceled) || outcome != nil || !*ready || len(ag.calls) != 0 {
 				t.Fatalf("retained excluded work blocked green checks: %+v %v calls=%d", outcome, err, len(ag.calls))
+			}
+			stored, err := sctx.DB.GetStepResult(result.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if marked != 1 || stored.Status != types.StepStatusRunning {
+				t.Fatalf("monitor resumed with status %s and %d running transitions", stored.Status, marked)
 			}
 			if sctx.PreviousFindings != "" || sctx.DeferredFindings != "" {
 				t.Fatalf("excluded findings retained: %s %s", sctx.PreviousFindings, sctx.DeferredFindings)
@@ -122,5 +144,17 @@ func TestCIScopeRecoveredWorkDropsExcludedChecksAndKeepsBudget(t *testing.T) {
 				t.Fatal("excluded rerun regained spent budget")
 			}
 		})
+	}
+}
+
+func TestCIStep_EmptyRepairPropagatesMarkRunningFailure(t *testing.T) {
+	markErr := errors.New("persist running status")
+	sctx := &pipeline.StepContext{
+		Log:         func(string) {},
+		MarkRunning: func() error { return markErr },
+	}
+	outcome, err := (&CIStep{}).repairFromFindings(sctx, nil, nil)
+	if outcome != nil || !errors.Is(err, markErr) {
+		t.Fatalf("outcome = %+v err = %v, want running transition failure", outcome, err)
 	}
 }

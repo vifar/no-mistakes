@@ -74,6 +74,11 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	}
 	if targets.empty() {
 		sctx.Log("fix requested with no CI findings to repair, resuming monitoring...")
+		if sctx.MarkRunning != nil {
+			if err := sctx.MarkRunning(); err != nil {
+				return nil, err
+			}
+		}
 		return nil, nil
 	}
 	if len(targets.Checks) > 0 && s.observedCompletedAt == nil {
