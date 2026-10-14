@@ -529,7 +529,8 @@ type HealthResult struct {
 	Status string `json:"status"`
 }
 
-// ShutdownResult confirms shutdown was initiated.
+// ShutdownResult acknowledges durable run settlement for the captured runtime
+// and shutdown lifecycle; process exit is verified separately by the client.
 type ShutdownResult struct {
 	PID       int    `json:"pid,omitempty"`
 	StartedAt string `json:"started_at,omitempty"`
