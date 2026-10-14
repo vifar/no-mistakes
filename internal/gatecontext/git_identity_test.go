@@ -40,6 +40,9 @@ func TestIdentityOrdinaryCloneNeverLaunchesTopLevel(t *testing.T) {
 	if !strings.Contains(string(calls), "--git-common-dir") {
 		t.Errorf("common-directory identity was not read:\n%s", calls)
 	}
+	if lines := strings.Count(strings.TrimSpace(string(calls)), "\n") + 1; lines != 1 {
+		t.Errorf("ordinary clone launched %d Git commands:\n%s", lines, calls)
+	}
 	if !strings.Contains(string(calls), "locale=C/C") {
 		t.Errorf("identity queries did not use English locale:\n%s", calls)
 	}
@@ -115,6 +118,123 @@ func TestIdentityMalformedMetadataFailsClosed(t *testing.T) {
 			if err == nil {
 				t.Fatal("malformed repository metadata was admitted")
 			}
+		})
+	}
+}
+
+func TestIdentitySkippedNestedMetadataFailsClosed(t *testing.T) {
+	for _, name := range []string{"empty-dotgit", "missing-head", "invalid-head", "bare-missing-head", "bare-invalid-head", "bare-missing-objects"} {
+		t.Run(name, func(t *testing.T) {
+			outer := t.TempDir()
+			run(t, outer, "git", "init")
+			nested := filepath.Join(outer, "nested")
+			if err := os.Mkdir(nested, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			metadata := filepath.Join(nested, ".git")
+			if name == "empty-dotgit" {
+				if err := os.Mkdir(metadata, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if strings.HasPrefix(name, "bare-") {
+					run(t, "", "git", "init", "--bare", nested)
+					metadata = nested
+				} else {
+					run(t, nested, "git", "init")
+				}
+				if strings.HasSuffix(name, "invalid-head") {
+					if err := os.WriteFile(filepath.Join(metadata, "HEAD"), []byte("invalid\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					entry := "HEAD"
+					if strings.HasSuffix(name, "missing-objects") {
+						entry = "objects"
+					}
+					if err := os.RemoveAll(filepath.Join(metadata, entry)); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			cwd := filepath.Join(nested, "child")
+			if err := os.Mkdir(cwd, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-common-dir")
+			cmd.Dir = cwd
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("real Git did not skip nested metadata: %v\n%s", err, out)
+			}
+			want, err := filepath.EvalSymlinks(filepath.Join(outer, ".git"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if filepath.Clean(strings.TrimSpace(string(out))) != want {
+				t.Fatalf("real Git identity = %q, want enclosing %q", out, want)
+			}
+			got, err := (gatecontext.Inspector{Paths: paths.WithRoot(t.TempDir())}).Inspect(context.Background(), gatecontext.Request{CWD: cwd})
+			if err == nil {
+				t.Fatalf("skipped nested metadata was admitted: %+v; Git reported %q", got, out)
+			}
+		})
+	}
+}
+
+func TestIdentityValidMetadataTopologies(t *testing.T) {
+	f := newTopologyFixture(t)
+	linked := filepath.Join(t.TempDir(), "linked")
+	run(t, f.work, "git", "worktree", "add", "--detach", linked, "HEAD")
+	separate := filepath.Join(t.TempDir(), "separate")
+	gitDir := filepath.Join(filepath.Dir(separate), "metadata")
+	run(t, "", "git", "init", "--separate-git-dir", gitDir, separate)
+	relative := filepath.Join(t.TempDir(), "relative")
+	relativeGitDir := filepath.Join(filepath.Dir(relative), "metadata")
+	run(t, "", "git", "init", "--separate-git-dir", relativeGitDir, relative)
+	if err := os.WriteFile(filepath.Join(relative, ".git"), []byte("gitdir: ../metadata\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(f.work, "nested")
+	run(t, "", "git", "init", nested)
+	for _, tc := range []struct {
+		name, root string
+		managed    bool
+	}{
+		{"ordinary", f.work, false},
+		{"linked", linked, false},
+		{"separate", separate, false},
+		{"relative-gitfile", relative, false},
+		{"nested", nested, false},
+		{"bare", f.origin, false},
+		{"managed-bare", f.gate, true},
+		{"managed-linked", f.managed, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			child := filepath.Join(tc.root, "child")
+			if err := os.Mkdir(child, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, cwd := range []string{tc.root, child} {
+				got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: cwd})
+				if err != nil || got.ManagedGit != tc.managed || got.Nested != tc.managed {
+					t.Fatalf("valid topology: %+v, %v", got, err)
+				}
+			}
+		})
+	}
+	if runtime.GOOS != "windows" {
+		t.Run("symlinked-metadata", func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.Symlink(gitDir, filepath.Join(root, ".git")); err != nil {
+				t.Fatal(err)
+			}
+			assertAllowed(t, gatecontext.Inspector{Paths: f.p}, root, "symlinked Git directory")
+			link := filepath.Join(t.TempDir(), "worktree-link")
+			if err := os.Symlink(relative, link); err != nil {
+				t.Fatal(err)
+			}
+			assertAllowed(t, gatecontext.Inspector{Paths: f.p}, link, "symlinked separate worktree")
 		})
 	}
 }
