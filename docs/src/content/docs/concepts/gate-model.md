@@ -79,7 +79,11 @@ That is a core design choice, not an implementation detail.
 
 ### Recursive-run containment
 
-Pipeline-control commands check the caller's Git common directory first.
+Pipeline-control commands check the caller's Git common and actual metadata
+directories in one command first. Physical-ancestor checks corroborate successful
+discovery too: incomplete metadata skipped by Git cannot select an enclosing
+repository. Gitfile targets are compared with the actual metadata directory so
+linked and separate Git directories remain supported.
 A canonical bare gate registered to the current owner proves managed identity,
 including when the caller is in the bare gate itself. Ordinary clones and their
 linked worktrees do not need a worktree-root query. For managed callers, the

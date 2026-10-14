@@ -266,10 +266,10 @@ func (i Inspector) registeredManagedCommonDir(commonDir string) (string, bool, e
 }
 
 func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
-	common, err := git.RunWithEnv(ctx, cwd, identityLocale, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	identity, err := git.RunWithEnv(ctx, cwd, identityLocale, "rev-parse", "--path-format=absolute", "--git-common-dir", "--absolute-git-dir")
 	if err != nil {
 		if normalGitDiagnostic(err, "fatal: not a git repository (or any of the parent directories): .git") {
-			absent, fsErr := gitMetadataAbsent(cwd)
+			absent, fsErr := gitMetadataMatchesDiscovery(cwd, "")
 			if fsErr != nil {
 				return "", fmt.Errorf("gate execution context: corroborate Git discovery absence: %w: %w", err, fsErr)
 			}
@@ -279,10 +279,18 @@ func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
 		}
 		return "", fmt.Errorf("gate execution context: discover Git common directory: %w", err)
 	}
-	if common == "" || !filepath.IsAbs(common) {
-		return "", fmt.Errorf("gate execution context: Git returned no absolute common-directory identity")
+	dirs := strings.Split(identity, "\n")
+	if len(dirs) != 2 || !filepath.IsAbs(dirs[0]) || !filepath.IsAbs(dirs[1]) {
+		return "", fmt.Errorf("gate execution context: Git returned no absolute directory identities")
 	}
-	return common, nil
+	matched, err := gitMetadataMatchesDiscovery(cwd, dirs[1])
+	if err != nil {
+		return "", fmt.Errorf("gate execution context: corroborate Git discovery identity: %w", err)
+	}
+	if !matched {
+		return "", fmt.Errorf("gate execution context: Git discovery skipped repository metadata")
+	}
+	return dirs[0], nil
 }
 
 // Only a sole normal exit can prove a discovery absence. A joined output-drain
@@ -297,10 +305,7 @@ func normalGitDiagnostic(err error, diagnostic string) bool {
 		strings.TrimSpace(commandErr.Stderr) == diagnostic
 }
 
-// Git can report ordinary discovery absence for malformed metadata too.
-// Corroborate with physical ancestors, including incomplete bare repositories.
-// Any inaccessible entry leaves absence unproven.
-func gitMetadataAbsent(cwd string) (bool, error) {
+func gitMetadataMatchesDiscovery(cwd, gitDir string) (bool, error) {
 	absolute, err := filepath.Abs(cwd)
 	if err != nil {
 		return false, err
@@ -316,8 +321,47 @@ func gitMetadataAbsent(cwd string) (bool, error) {
 	if !info.IsDir() {
 		return false, fmt.Errorf("caller directory is not a directory")
 	}
+	if gitDir != "" {
+		gitDir, err = filepath.EvalSymlinks(gitDir)
+		if err != nil {
+			return false, err
+		}
+	}
 	for dir := physical; ; dir = filepath.Dir(dir) {
-		for _, entry := range []string{".git", "HEAD", "objects", "refs"} {
+		if dir == gitDir {
+			return true, nil
+		}
+		entry := filepath.Join(dir, ".git")
+		if _, err := os.Lstat(entry); err == nil {
+			if gitDir == "" {
+				return false, nil
+			}
+			info, err := os.Stat(entry)
+			if err != nil {
+				return false, err
+			}
+			if info.Mode().IsRegular() {
+				data, err := os.ReadFile(entry)
+				if err != nil {
+					return false, err
+				}
+				target, ok := strings.CutPrefix(strings.TrimRight(string(data), "\r\n"), "gitdir: ")
+				if !ok || target == "" {
+					return false, nil
+				}
+				if !filepath.IsAbs(target) {
+					target = filepath.Join(dir, target)
+				}
+				entry = target
+			} else if !info.IsDir() {
+				return false, nil
+			}
+			resolved, err := filepath.EvalSymlinks(entry)
+			return resolved == gitDir, err
+		} else if !os.IsNotExist(err) {
+			return false, err
+		}
+		for _, entry := range []string{"HEAD", "objects", "refs"} {
 			_, err := os.Lstat(filepath.Join(dir, entry))
 			if err == nil {
 				return false, nil
@@ -327,7 +371,7 @@ func gitMetadataAbsent(cwd string) (bool, error) {
 			}
 		}
 		if filepath.Dir(dir) == dir {
-			return true, nil
+			return gitDir == "", nil
 		}
 	}
 }

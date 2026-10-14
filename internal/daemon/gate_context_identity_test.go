@@ -27,8 +27,10 @@ func TestGateContextIngressPropagatesIdentityFailureWithoutAdmission(t *testing.
 		t.Fatal(err)
 	}
 	defer d.Close()
-	cwd := t.TempDir()
-	if err := os.Mkdir(filepath.Join(cwd, ".git"), 0o755); err != nil {
+	outer := t.TempDir()
+	runGit(t, outer, "init")
+	cwd := filepath.Join(outer, "nested")
+	if err := os.MkdirAll(filepath.Join(cwd, ".git"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	repo, err := d.InsertRepo(cwd, "https://example.com/identity.git", "main")
