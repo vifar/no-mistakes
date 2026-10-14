@@ -248,6 +248,7 @@ func TestIdentityCommandsHaveSharedExecutionBudget(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 			defer cancel()
 			got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(ctx, gatecontext.Request{CWD: f.managed})
+			completed := time.Now()
 			if !errors.Is(err, context.DeadlineExceeded) {
 				t.Fatalf("identity command not canceled by execution budget: %+v, %v", got, err)
 			}
@@ -261,9 +262,16 @@ func TestIdentityCommandsHaveSharedExecutionBudget(t *testing.T) {
 					t.Fatalf("positive proof lost: %+v", got)
 				}
 			}
-			canceled := faultEvent(t, log, event+"-canceled")
+			canceled := completed
+			if runtime.GOOS == "windows" {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.Success() {
+					t.Fatalf("budget cancellation did not terminate the helper: %v", err)
+				}
+			} else {
+				canceled = faultEvent(t, log, event+"-canceled")
+			}
 			initial := faultEvent(t, log, "common-start")
-			// Measure helper execution, not total classifier time or filesystem I/O.
 			if elapsed := canceled.Sub(initial); elapsed < 9*time.Second || elapsed > 13*time.Second {
 				t.Errorf("shared command budget = %v", elapsed)
 			}
