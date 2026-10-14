@@ -88,6 +88,8 @@ ci:
   rerun_transient: 0
   revalidate_repairs: false
   review_bot_comments: on_failure # or: always
+  rebase_behind: false
+  carry_review_on_replay: false
 
 rebase:
   strategy: rebase # or: merge
@@ -117,6 +119,7 @@ test:
     attach_media: true
     dir: .no-mistakes/evidence
     branch: no-mistakes/evidence
+    commit_message: "no-mistakes: evidence for {{.Branch}} (run {{.RunID}})"
     retention: 336h
     max_runs: 200
 
@@ -128,6 +131,8 @@ providers:
   bitbucket:
     draft_pull_requests: false
   azuredevops:
+    draft_pull_requests: false
+  origin:
     draft_pull_requests: false
 ```
 
@@ -567,7 +572,7 @@ The [provider plugin protocol](/no-mistakes/reference/provider-plugin-protocol/)
 
 ### ci_timeout
 
-How long the CI step monitors an open PR, including provider CI status and PR mergeability (on GitHub, GitLab, Forgejo, Azure DevOps, or a provider plugin declaring `mergeable_state`), before giving up.
+How long the CI step monitors an open PR, including provider CI status and PR mergeability (on GitHub, GitLab, Forgejo, Azure DevOps, Cursor Origin, or a provider plugin declaring `mergeable_state`), before giving up.
 
 |         |                                                 |
 | ------- | ----------------------------------------------- |
@@ -916,7 +921,7 @@ For empty `commands.lint`, the document step's combined housekeeping pass also a
 | `auto_fix.test`     | `int` | `3`     | Test failure auto-fix attempts                                                              |
 | `auto_fix.document` | `int` | `3`     | Not used by the automatic document pass                                                     |
 | `auto_fix.lint`     | `int` | `3`     | Lint issue auto-fix attempts                                                                |
-| `auto_fix.ci`       | `int` | `3`     | CI auto-fix attempts for CI failures, plus merge conflicts on GitHub, GitLab, Forgejo, Azure DevOps, and provider plugins declaring `mergeable_state` |
+| `auto_fix.ci`       | `int` | `3`     | CI auto-fix attempts for CI failures, plus merge conflicts on GitHub, GitLab, Forgejo, Azure DevOps, Cursor Origin, and provider plugins declaring `mergeable_state` |
 
 Legacy alias: `auto_fix.babysit`.
 
@@ -974,6 +979,38 @@ ci:
 ```
 
 A value in the trusted repository config overrides this global value. An unrecognized value fails the config rather than falling back to the default.
+
+### ci.rebase_behind
+
+The operator-level fallback for [`ci.rebase_behind`](/no-mistakes/reference/repo-config/#cirebase_behind), whose per-repository reference owns the semantics, the cost, and the trust boundary.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `false` |
+
+```yaml
+ci:
+  rebase_behind: true
+```
+
+A value in the trusted repository config overrides this global value in both directions. When the trusted repository config omits the key, this global value applies.
+
+### ci.carry_review_on_replay
+
+The operator-level fallback for [`ci.carry_review_on_replay`](/no-mistakes/reference/repo-config/#cicarry_review_on_replay), whose per-repository reference owns the pure-replay proof, its limits, and the trust boundary.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `false` |
+
+```yaml
+ci:
+  carry_review_on_replay: true
+```
+
+A value in the trusted repository config overrides this global value in both directions. When the trusted repository config omits the key, this global value applies.
 
 ### rebase.strategy
 
@@ -1037,7 +1074,7 @@ The template supports literal text and three Go-style placeholders:
 
 | Variable | Value |
 | --- | --- |
-| `{{.Step}}` | Pipeline step name, such as `review`, `test`, `document`, `lint`, `ci`, or `gate.test.mutation-budget` |
+| `{{.Step}}` | Pipeline step name, such as `review`, `test`, `document`, `lint`, `ci`, `push`, or `gate.test.mutation-budget` |
 | `{{.Summary}}` | Sanitized one-line summary returned by the fix agent, or the step's deterministic fallback summary |
 | `{{.Branch}}` | Normalized branch name, or the identifier captured and optionally transformed by [`commit.branch_pattern`](#commitbranch_pattern) and [`commit.branch_replacement`](#commitbranch_replacement) |
 
@@ -1049,7 +1086,7 @@ Template functions, control actions, named templates, unknown placeholders, malf
 The blocked format set includes every Unicode `Bidi_Control` code point plus `U+00AD`, `U+180E`, `U+200B`, `U+2060` through `U+2064`, the deprecated bidi controls `U+206A` through `U+206F`, `U+FEFF`, `U+FFF9` through `U+FFFB`, and Unicode tag characters in `U+E0000` through `U+E007F`.
 Legitimate `U+200C` zero-width non-joiner and `U+200D` zero-width joiner text shaping remains allowed.
 The final rendered subject is validated again, so unsafe characters in an agent-provided summary are also rejected.
-The setting does not change commit subjects created by the Rebase or Push steps.
+The setting does not change commit subjects created by the Rebase step or the evidence-branch commit; see [`test.evidence`](#testevidence) for the latter.
 A per-repo [`commit.fix_message`](/no-mistakes/reference/repo-config/#commitfix_message) value overrides this global setting.
 
 ### commit.branch_pattern
@@ -1155,6 +1192,23 @@ A `commit.branch_replacement` must be paired with `commit.branch_pattern` in the
 Precedence for these formatting fields is explicit: `.no-mistakes.yaml` wins for every field it sets, then a matching machine-local override, then the plain global value, then the built-in default.
 As with the global replacement, a repository `commit.branch_pattern` replaces the matching machine-local pattern and clears its replacement.
 Repositories matching no block keep existing global and built-in behavior.
+
+#### Machine-local PR publication defaults
+
+A matching entry can select a repository's existing PR template without committing `.no-mistakes.yaml`:
+
+```yaml
+repository_overrides:
+  https://github.com/acme/widget.git:
+    pr:
+      template: .github/pull_request_template.md
+      appendix: collapsed
+```
+
+`pr.template` selects a repository-relative file, never local template contents. It uses the same [path and file validation](/no-mistakes/reference/repo-config/#prtemplate) as the repository setting, and its bytes are read only from the pinned trusted default-branch tree, never from the pushed branch or worktree.
+`pr.appendix` accepts `full`, `collapsed`, or `minimal` and can be set with or without `pr.template`; it uses the same [appendix and attestation behavior](/no-mistakes/reference/repo-config/#prappendix) as the repository setting. When template mode is active, author-edited narrative is preserved on later updates.
+For each field, a non-empty trusted repository value wins over the matching machine-local value. Leaving either unset retains existing behavior; an unset appendix defaults to `full`.
+These fields are available only under `repository_overrides`, not as machine-wide PR settings. `pr.publish_intent` remains trusted-repository-only.
 
 #### Machine-local review and documentation guidance
 
@@ -1276,6 +1330,7 @@ By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>`. On 
 | `test.evidence.attach_media`  | `bool`   | `true`                   | Upload image and video evidence to GitHub user-attachments when the PR is rendered |
 | `test.evidence.dir`           | `string` | `.no-mistakes/evidence`  | Directory prefix inside the evidence branch                                |
 | `test.evidence.branch`        | `string` | `no-mistakes/evidence`   | Name of the orphan evidence branch                                         |
+| `test.evidence.commit_message` | `string` | `no-mistakes: evidence for {{.Branch}} (run {{.RunID}})` | Subject template for evidence-branch commits |
 | `test.evidence.local_root`    | `string` | `<NM_HOME>/evidence`     | Absolute directory where run evidence is written on local disk             |
 | `test.evidence.retention`     | `string` | `336h` (14 days)         | How long a run's evidence survives; `unlimited`/`none`/`off`/`never` or a non-positive duration disables the bound |
 | `test.evidence.max_runs`      | `int`    | `200`                    | How many run directories survive regardless of age; `0` disables the bound |
@@ -1289,6 +1344,7 @@ When both `attach_media` and `store_in_repo` apply, the testing section carries 
 The branch is an orphan: it shares no history with your code branches, so evidence never reaches the default branch. Links use the evidence commit rather than the branch, so they keep resolving after later runs.
 Branch slashes become nested directories, unsafe branch characters are replaced, and an empty branch slug falls back to the run ID.
 `branch` must be a valid Git branch name; an invalid value fails the config with the offending key and value.
+`commit_message` supports literal text and two placeholders: `{{.Branch}}` (the code branch name) and `{{.RunID}}` (the run ID). It follows the same template restrictions, size limits, and unsafe-character rules as [`commit.fix_message`](#commitfix_message); an invalid template fails configuration loading, and a subject that fails validation at publish time leaves the evidence unpublished.
 The publisher never force-pushes. It appends to the fetched evidence-branch tip with a fast-forward push, retries one lost race, and refuses to use the run branch, default branch, or an existing branch whose tip lacks the `.no-mistakes-evidence` marker.
 Publication is also refused when the remote cannot be read or pushed, an artifact exceeds 64 MiB, a run exceeds 500 files or 256 MiB, or another writer wins the retry. The PR body then keeps its local rendering instead of adding links that would not resolve.
 Evidence-branch publication currently supports GitHub links only. On other providers, no evidence branch is pushed and the PR body keeps its local rendering.
@@ -1309,7 +1365,7 @@ Reaping runs after each finished run and again at daemon startup. An upgraded da
 
 `local_root` must be an absolute path outside `<NM_HOME>/worktrees`; a relative or managed-worktree path fails daemon startup and prevents new or recovered runs from starting. Because `retention` bounds how long a PR body's local artifact links keep resolving, raise it rather than lowering it if your reviews run long.
 
-The publication fields are global defaults. Repo config can override `store_in_repo`, `attach_media`, and `dir`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
+The publication fields are global defaults. Repo config can override `store_in_repo`, `attach_media`, `dir`, and `commit_message`; it can override `branch` only through the trusted default-branch copy. `local_root`, `retention`, and `max_runs` are global-only: a repository does not get to name a filesystem path this machine's daemon writes to, or set the retention budget for a directory every repository on the machine shares.
 
 `test.evidence.retention` and `test.evidence.max_runs` also bound `<NM_HOME>/logs/<run-id>` (per-run step logs), reaped on the same cadence rather than through a second config surface for the same kind of per-run diagnostic artifact.
 
@@ -1385,6 +1441,19 @@ Open pull requests created on Azure DevOps as drafts (`az repos pr create --draf
 
 Only affects PR creation; existing PRs are not toggled between draft and ready. Azure DevOps only — ignored for other providers.
 This is a global default. Per-repo config can override it via `providers.azuredevops.draft_pull_requests`.
+
+### providers.origin.draft_pull_requests
+
+Open pull requests created on Cursor Origin as drafts (`origin pr create --status draft`).
+When false (the default), no-mistakes passes `--status open` because the Origin CLI otherwise defaults to draft.
+
+| | |
+|---|---|
+| Type | `bool` |
+| Default | `false` |
+
+Only affects PR creation; existing PRs are not toggled between draft and ready. Cursor Origin only — ignored for other providers.
+This is a global default. Per-repo config can override it via `providers.origin.draft_pull_requests`.
 
 ## Environment variables
 

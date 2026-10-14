@@ -461,8 +461,9 @@ All modes return the complete `branch_sync` object as TOON.
 Exit code `0` means an eligible check, applied synchronization or recovery, already-synchronized, a live-verified custody-returned no-op, a user-owned no-op, or an expected merged-and-removed no-op; blocked operational states return `1`.
 The ordinary worktree mutation is either a strict fast-forward of the invoking clean checked-out branch to the freshly verified pipeline-owned pushed SHA, or an equivalent-diverged advance.
 When a clean local branch and the pipeline-pushed head are diverged but the local unique work is content-equivalent to work already represented in the live pipeline head, `sync` reports `safety: safe_equivalent_advance`, anchors the pre-sync head under `refs/no-mistakes/sync-anchor/<run>`, and moves to the pipeline head with reset semantics.
-Genuine divergence still reports `safety: blocked_diverged` and changes nothing during ordinary synchronization.
+Genuine divergence still reports `safety: blocked_diverged` and changes nothing during ordinary synchronization. Its `next_action.command` is `git checkout --detach <pushed-sha>`, which needs no approval, moves no branch ref, and loses no work; the local branch stays where it was.
 Under `--recover`, the possible worktree mutation is a strict fast-forward to the preserved pipeline head, or an adoption of a preserved head proven to carry every local change, both after relation-specific preservation checks. The bound-archive exception described below never changes the worktree at all.
+A terminal run whose recorded head was never verified (for example a Review fix and a Test fix followed by a Document fetch failure) is verified by recovery itself only from fresh gate state: either the live gate branch is an equal-tree rewrite of the exact reviewed result, or the recorded head extends the live gate branch as the reviewed result plus the pipeline's own later commits while the clean local checkout already sits exactly at it. Recovery never moves a worktree onto an unverified head; a behind or dirty worktree, a rebased head, a missing review authority, or a moved gate branch stays `blocked_recover_unverified_head`.
 When the local gate branch is exactly at a newer same-branch pushed binding and Git proves that an older terminal run's unpublished preserved head is its ancestor, branch synchronization selects the newer binding; missing gate evidence, non-ancestor heads, or different or ambiguous target provenance remain blocked.
 Fork configurations verify the configured fork URL and exact feature ref rather than assuming `origin`.
 Dirty, in-progress, ahead, genuinely diverged, detached, wrong-branch, offline, changed-target, rewritten, deleted, legacy, or retired states fail closed without destructive recovery.
@@ -762,7 +763,7 @@ The standalone runner rows inspect default binary names; each ACP alias row (`cu
 The [Global Config Reference](/no-mistakes/reference/global-config/) owns ACP gate-validation availability and probing semantics.
 Each validation run performs the authoritative agent resolution again after applying any trusted repository-level override.
 
-`doctor` checks `gh` and `az` availability, and that each configured [provider plugin](/no-mistakes/reference/global-config/#provider_plugins) command resolves (it does not run the plugin's handshake). [Provider Integration](/no-mistakes/guides/provider-integration/) owns the separate setup checks for GitLab, Forgejo, Bitbucket Cloud, Gitea, and the Azure DevOps extension and PAT.
+`doctor` checks `gh`, `az`, and `origin` (Cursor Origin) availability, and that each configured [provider plugin](/no-mistakes/reference/global-config/#provider_plugins) command resolves (it does not run the plugin's handshake). [Provider Integration](/no-mistakes/guides/provider-integration/) owns the separate setup checks for GitLab, Forgejo, Bitbucket Cloud, Gitea, and the Azure DevOps extension and PAT.
 
 `tea` stays docs-only like `glab`, `forgejo-axi`, and Bitbucket's env vars, rather than an active `doctor` check like `gh`/`az`: Gitea is almost always self-hosted, so a bare "`tea` not found" row would be a near-universal, low-value warning for the vast majority of users who have no Gitea instance at all.
 
@@ -800,9 +801,10 @@ Start the daemon, installing or refreshing the managed service when possible.
 
 ```sh
 no-mistakes daemon start
+no-mistakes daemon start --force
 ```
 
-Prefers the managed service path and falls back to a detached daemon if service install or startup is unavailable or fails. If the daemon is already running, the command refreshes a stale macOS `launchd` or Linux `systemd` service definition and restarts through the managed service; if the definition is unchanged, it reports that the daemon is already running. [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the startup readiness, timeout, fallback cleanup, and singleton lifecycle details.
+Prefers the managed service path and falls back to a detached daemon if service install or startup is unavailable or fails. If the daemon is already running, the command refreshes a stale macOS `launchd` or Linux `systemd` service definition and restarts through the managed service; if the definition is unchanged, it reports that the daemon is already running. That restart passes the same active-run guard as `daemon restart`, so `--force` is needed to refresh a definition while pipeline runs are active. [Daemon & Worktrees](/no-mistakes/concepts/daemon/#starting-and-stopping) owns the active-run guard, the scope of `--force`, and the startup readiness, timeout, fallback cleanup, and singleton lifecycle details.
 
 ## no-mistakes daemon stop
 

@@ -230,9 +230,20 @@ Directory holding gh's `hosts.yml`, consulted when detecting self-hosted GitHub 
 
 When the upstream hostname is not `github.com`, no-mistakes reads gh's configured hosts from `$GH_CONFIG_DIR/hosts.yml` to decide whether the host is a GitHub Enterprise instance. It takes precedence over `XDG_CONFIG_HOME`. A selected [`forge_profiles`](/no-mistakes/reference/global-config/#forge_profiles) entry overrides this variable for that run and removes `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`, `GH_HOST`, and `GH_REPO` from all child processes. See [Provider Integration](/no-mistakes/guides/provider-integration/#self-hosted-githubgitlab).
 
+## `TEA_CONFIG_DIR`
+
+Directory holding tea 1.0's `hosts.yml`, consulted when detecting self-hosted Gitea.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+tea 1.0 ([gitea/tea#1126](https://gitea.com/gitea/tea/pulls/1126)) keeps its instances in `$TEA_CONFIG_DIR/hosts.yml`, and no-mistakes reads the same file to match the upstream host to an instance URL or `ssh_host`. It takes precedence over `XDG_CONFIG_HOME`. tea 0.x ignores it. See [Provider Integration](/no-mistakes/guides/provider-integration/#self-hosted-gitea).
+
 ## `XDG_CONFIG_HOME`
 
-Config directory used to locate glab's `config.yml` for self-hosted GitLab detection, gh's `hosts.yml` for self-hosted GitHub Enterprise detection, and tea's `config.yml` for Gitea detection.
+Config directory used to locate glab's `config.yml` for self-hosted GitLab detection, gh's `hosts.yml` for self-hosted GitHub Enterprise detection, and tea's `config.yml` (tea 0.x) and `hosts.yml` (tea 1.0) for Gitea detection.
 
 |         |             |
 | ------- | ----------- |
@@ -241,7 +252,7 @@ Config directory used to locate glab's `config.yml` for self-hosted GitLab detec
 
 When `GLAB_CONFIG_DIR` is unset, no-mistakes looks for glab's configured hosts at `$XDG_CONFIG_HOME/glab-cli/config.yml`, falling back to `~/.config/glab-cli/config.yml` when `XDG_CONFIG_HOME` is unset.
 When `GH_CONFIG_DIR` is unset, no-mistakes looks for gh's configured hosts at `$XDG_CONFIG_HOME/gh/hosts.yml`, falling back to `~/.config/gh/hosts.yml` when `XDG_CONFIG_HOME` is unset.
-tea has no CLI-specific override env var (unlike `GLAB_CONFIG_DIR`/`GH_CONFIG_DIR`); no-mistakes always looks for its configured logins at `$XDG_CONFIG_HOME/tea/config.yml`, falling back to `~/.config/tea/config.yml` when `XDG_CONFIG_HOME` is unset. See [Provider Integration](/no-mistakes/guides/provider-integration/#self-hosted-gitea).
+tea 0.x has no CLI-specific override env var (unlike `GLAB_CONFIG_DIR`/`GH_CONFIG_DIR`); no-mistakes always looks for its configured logins at `$XDG_CONFIG_HOME/tea/config.yml`, falling back to `~/.config/tea/config.yml` when `XDG_CONFIG_HOME` is unset. When `TEA_CONFIG_DIR` is unset, tea 1.0's configured instances are read from `hosts.yml` in that same directory. See [Provider Integration](/no-mistakes/guides/provider-integration/#self-hosted-gitea).
 
 ## `COMPACT_ADVISER_DISABLE`
 

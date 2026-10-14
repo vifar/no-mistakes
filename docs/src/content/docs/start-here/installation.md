@@ -89,6 +89,7 @@ This fork's source build uses its release-please version baseline and records th
   - `NO_MISTAKES_BITBUCKET_EMAIL` and `NO_MISTAKES_BITBUCKET_API_TOKEN` (Bitbucket Cloud)
   - `az` CLI with the `azure-devops` extension (Azure DevOps)
   - `tea` CLI (Gitea)
+  - `origin` CLI (Cursor Origin)
   - or a configured [provider plugin](/no-mistakes/reference/global-config/#provider_plugins) for custom hosts
 
 Run `no-mistakes doctor` to check native agents, ACP aliases such as `cursor` and `devin`, provider tools, configured provider plugins, and whether the configured global runner can start a validation gate.
