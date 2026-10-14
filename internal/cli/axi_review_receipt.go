@@ -50,7 +50,7 @@ func newAxiReviewReceiptCmd() *cobra.Command {
 			var caller gatecontext.Result
 			if sign {
 				var err error
-				caller, err = classifyGateControlCaller(cmd.Context())
+				caller, _, err = classifyGateControlCaller(cmd.Context(), false)
 				if err != nil {
 					return emitError(cmd, 1, err.Error())
 				}
