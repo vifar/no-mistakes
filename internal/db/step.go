@@ -156,25 +156,32 @@ func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
 }
 
 func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
-	if stepOrder <= types.StepReview.Order() {
-		if _, err := sqlitewrite.Exec(context.Background(), d.sql, "ResetStepsFrom", `UPDATE review_comparisons SET approved=0 WHERE run_id=?`, runID); err != nil {
-			return err
+	return sqlitewrite.Transaction(context.Background(), d.sql, "ResetStepsFrom", func(writeCtx context.Context, tx *sql.Tx) error {
+		if stepOrder <= types.StepLint.Order() {
+			if err := invalidateStatusValidation(writeCtx, tx, runID); err != nil {
+				return err
+			}
 		}
-		if _, err := sqlitewrite.Exec(context.Background(), d.sql, "ResetStepsFrom", `UPDATE runs SET ci_ready_at=NULL,ci_ready_no_ci=0 WHERE id=? AND shipping_options IS NOT NULL`, runID); err != nil {
-			return err
+		if stepOrder <= types.StepReview.Order() {
+			if _, err := tx.ExecContext(writeCtx, `UPDATE review_comparisons SET approved=0 WHERE run_id=?`, runID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(writeCtx, `UPDATE runs SET ci_ready_at=NULL,ci_ready_no_ci=0 WHERE id=? AND shipping_options IS NOT NULL`, runID); err != nil {
+				return err
+			}
 		}
-	}
-	_, err := sqlitewrite.Exec(context.Background(), d.sql, "ResetStepsFrom", `
+		_, err := tx.ExecContext(writeCtx, `
 		UPDATE step_results
 		SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL,
 			findings_json = NULL, error = NULL, started_at = NULL,
 			round_started_at = NULL, completed_at = NULL, last_activity_at = NULL, last_activity = NULL,
 			agent_pid = NULL, auto_fix_limit = NULL, override_reason = NULL, approval_reason = NULL, accepted_gaps_json = NULL
 		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped)
-	if err != nil {
-		return fmt.Errorf("reset steps for revalidation: %w", err)
-	}
-	return nil
+		if err != nil {
+			return fmt.Errorf("reset steps for revalidation: %w", err)
+		}
+		return nil
+	})
 }
 
 // UpdateStepStatus updates a step's status.
@@ -331,12 +338,21 @@ func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
 // a newly loaded trusted configuration, so its supplied limit replaces the
 // one recorded by an earlier execution.
 func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
-	ts := now()
-	_, err := sqlitewrite.Exec(context.Background(), d.sql, "StartStepFixRound", `UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = ?, override_reason = NULL, approval_reason = NULL, accepted_gaps_json = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimitDBValue(autoFixLimit), id)
-	if err != nil {
-		return fmt.Errorf("start step fix round: %w", err)
-	}
-	return nil
+	return sqlitewrite.Transaction(context.Background(), d.sql, "StartStepFixRound", func(writeCtx context.Context, tx *sql.Tx) error {
+		var runID string
+		if err := tx.QueryRowContext(writeCtx, `SELECT run_id FROM step_results WHERE id=?`, id).Scan(&runID); err != nil {
+			return err
+		}
+		if err := invalidateStatusValidation(writeCtx, tx, runID); err != nil {
+			return err
+		}
+		ts := now()
+		_, err := tx.ExecContext(writeCtx, `UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = ?, override_reason = NULL, approval_reason = NULL, accepted_gaps_json = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimitDBValue(autoFixLimit), id)
+		if err != nil {
+			return fmt.Errorf("start step fix round: %w", err)
+		}
+		return nil
+	})
 }
 
 func (d *DB) SetStepAutoFixLimit(id string, autoFixLimit int) error {

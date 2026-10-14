@@ -25,6 +25,7 @@ var processStartTimeFunc = processStartTime
 var terminateOrphanProcessGroupFunc = terminateOrphanProcessGroup
 
 type daemonPIDFile struct {
+	Instance  string    `json:"instance,omitempty"`
 	PID       int       `json:"pid"`
 	StartedAt time.Time `json:"started_at,omitempty"`
 }
@@ -239,7 +240,7 @@ func daemonPIDRecordMatchesProcess(p *paths.Paths, record daemonPIDFile, actualS
 		if !alive {
 			return false, nil
 		}
-		upgraded := daemonPIDFile{PID: record.PID, StartedAt: actualStart.UTC()}
+		upgraded := daemonPIDFile{PID: record.PID, StartedAt: actualStart.UTC(), Instance: record.Instance}
 		if err := writeDaemonPIDFile(p.PIDFile(), upgraded); err != nil {
 			slog.Warn("upgrade legacy daemon pid file", "path", p.PIDFile(), "pid", record.PID, "error", err)
 		}

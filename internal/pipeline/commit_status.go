@@ -18,6 +18,44 @@ import (
 
 const commitStatusTimeout = 15 * time.Second
 
+// CommitStatusLock serializes publication ownership, terminal decisions and POSTs.
+var CommitStatusLock = make(chan struct{}, 1)
+
+func AcquireCommitStatusLock(ctx context.Context) error {
+	select {
+	case CommitStatusLock <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-CommitStatusLock
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func WithCommitStatusLock(ctx context.Context, write func() error) error {
+	bounded, cancel := context.WithTimeout(ctx, commitStatusTimeout)
+	defer cancel()
+	if err := AcquireCommitStatusLock(bounded); err != nil {
+		return err
+	}
+	defer func() { <-CommitStatusLock }()
+	return write()
+}
+
+// RecordRunFailure is shared by daemon panic and recovery fallbacks.
+func RecordRunFailure(ctx context.Context, d *db.DB, runID, message string, head *string) error {
+	err := WithCommitStatusLock(ctx, func() error { return d.RecordIneligibleTerminal(runID, message, types.RunFailed, head) })
+	if err != nil {
+		// An unavailable serialization boundary never leaves a usable DB active
+		// or retains eligibility. The ledger also rejects stale success saves.
+		slog.Warn("recording ineligible terminal fallback", "run", runID, "error", err)
+		return d.RecordIneligibleTerminal(runID, message, types.RunFailed, nil)
+	}
+	return nil
+}
+
 // PublishedHeadStatusReporter is an optional step hook for best-effort status
 // updates at run completion, failure, and CI readiness, including recovery.
 type PublishedHeadStatusReporter interface {

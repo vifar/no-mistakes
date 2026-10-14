@@ -410,7 +410,7 @@ func TestCIStep_MixedGreptileAndTestFailureRoutesOnlyTheTestToAutoFix(t *testing
 		return &agent.Result{Output: json.RawMessage(`{"summary":"repair the failing test","code_change_needed":true}`)}, nil
 	}}
 	prURL := "https://github.com/test/repo/pull/42"
-	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.Run.PRURL = &prURL
 	sctx.Repo.UpstreamURL = "https://github.com/test/repo"
@@ -477,7 +477,7 @@ func TestCIResumedRepairSnapshotsSelectedCheckCompletion(t *testing.T) {
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 		return &agent.Result{Output: json.RawMessage(`{"summary":"no code change","code_change_needed":false}`)}, nil
 	}}
-	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.PreviousFindings = `{"findings":[{"id":"ci-1","severity":"error","description":"failed","action":"auto-fix","category":"ci-check","check":"test","check_id":"github-check-run:42"}]}`
 	host := &completionSnapshotHost{checks: []scm.Check{{Name: "test", ProviderID: "github-check-run:42", Bucket: scm.CheckBucketFail, CompletedAt: completed}}}
 	step := &CIStep{}
@@ -557,7 +557,7 @@ func TestCIStep_UserFixOfTransientFindingIsHonored(t *testing.T) {
 		return &agent.Result{Output: json.RawMessage(`{"summary":"nothing to change","code_change_needed":false}`)}, nil
 	}}
 	prURL := "https://github.com/test/repo/pull/42"
-	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = fakeCIGH(t, "OPEN", checksJSON)
 	sctx.Run.PRURL = &prURL
 	sctx.Config.CITimeout = 30 * time.Second

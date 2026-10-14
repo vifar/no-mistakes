@@ -215,7 +215,7 @@ func TestDetachedDaemonStartupFailureDiagnostics(t *testing.T) {
 func shutdownIsolatedDaemon(t *testing.T, p *paths.Paths, pid int) {
 	t.Helper()
 	if client, err := ipc.Dial(p.Socket()); err == nil {
-		_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+		_ = client.Call(ipc.MethodShutdown, testShutdownParams(t, p), nil)
 		_ = client.Close()
 	}
 	// Allow the daemon's bounded graceful shutdown to complete before killing

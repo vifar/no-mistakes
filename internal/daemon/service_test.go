@@ -1137,8 +1137,8 @@ func TestStopFallsBackToDetachedDaemonWhenManagedStopFails(t *testing.T) {
 		return nil, fmt.Errorf("user manager unavailable")
 	}
 
-	if err := Stop(p); err != nil {
-		t.Fatalf("Stop should fall back to detached daemon shutdown: %v", err)
+	if err := Stop(p); err == nil || !strings.Contains(err.Error(), "user manager unavailable") {
+		t.Fatalf("Stop must report supervisor cleanup failure: %v", err)
 	}
 
 	if len(commands) != 1 {
@@ -1219,8 +1219,8 @@ func TestManagedStopErrorsStillWaitForCapturedDaemonExit(t *testing.T) {
 				daemonProcessRunning = oldProcessRunning
 			})
 
-			if err := tc.stop(p); err != nil {
-				t.Fatalf("stop should succeed after confirming daemon exit: %v", err)
+			if err := tc.stop(p); err == nil || !strings.Contains(err.Error(), "user manager unavailable") {
+				t.Fatalf("stop must retain supervisor cleanup error: %v", err)
 			}
 			if probes == 0 {
 				t.Fatal("stop returned without probing the captured daemon process")
@@ -1242,7 +1242,7 @@ func TestStopFallsBackToDetachedDaemonOnWindowsWithoutManagedService(t *testing.
 	}
 
 	if err := Stop(p); err != nil {
-		t.Fatalf("Stop should fall back to detached daemon shutdown: %v", err)
+		t.Fatalf("Stop must succeed when no managed service is installed: %v", err)
 	}
 	if len(commands) != 1 {
 		t.Fatalf("expected one scheduled-task query, got %v", commands)

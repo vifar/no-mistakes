@@ -124,7 +124,7 @@ func TestCommitStatusRemoteConfirmationHasOwnDeadline(t *testing.T) {
 	if err := acquireCommitStatusLock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	<-commitStatusLock
+	pipeline.ReleaseCommitStatusLock()
 }
 
 func TestPushCommitStatusRecordingErrorsOnlyWarn(t *testing.T) {
@@ -254,7 +254,7 @@ func TestCommitStatusLockWaitHonorsContext(t *testing.T) {
 				if err := acquireCommitStatusLock(context.Background()); err != nil {
 					t.Fatal(err)
 				}
-				defer func() { <-commitStatusLock }()
+				defer pipeline.ReleaseCommitStatusLock()
 				ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 				defer cancel()
 				bounded := *sc
@@ -391,8 +391,8 @@ func TestCommitStatusSerializesRecoveryAndNewPublication(t *testing.T) {
 		t.Fatal("recovery POST did not reach the endpoint")
 	}
 	select {
-	case commitStatusLock <- struct{}{}:
-		<-commitStatusLock
+	case pipeline.CommitStatusLock <- struct{}{}:
+		pipeline.ReleaseCommitStatusLock()
 		t.Fatal("recovery POST did not hold the shared status lock")
 	default:
 	}
@@ -556,9 +556,6 @@ func TestCommitStatusNewerPublicationOwnsStatus(t *testing.T) {
 					want = append(want, statusRequest{Path: "/repos/test/repo/statuses/" + repairSHA, State: "pending"}, statusRequest{Path: "/repos/test/repo/statuses/" + repairSHA, State: "success"})
 				}
 				if scope != "same" && scope != "repair head" {
-					if path == "attempt" {
-						want = append(want, statusRequest{Path: "/repos/test/repo/statuses/" + head, State: "pending"})
-					}
 					want = append(want, statusRequest{Path: "/repos/test/repo/statuses/" + head, State: "failure"})
 				}
 				if fmt.Sprint(requests) != fmt.Sprint(want) {
@@ -570,8 +567,10 @@ func TestCommitStatusNewerPublicationOwnsStatus(t *testing.T) {
 }
 
 func TestPipeline_GitHubCommitStatuses(t *testing.T) {
-	for _, scenario := range []string{"pass", "push reply lost", "fail after push", "cancel after push", "no push", "forgejo", "bitbucket", "repair head", "confirmation timeout then repair", "posting fails", "already upstream", "attempt already upstream", "fork", "formatter head", "recovered failure", "CI repair readiness", "Test no-go exception", "Test inconclusive exception", "skipped Test", "late Document", "late Lint", "stale tested head"} {
+	for _, scenario := range []string{"pass", "push reply lost", "fail after push", "cancel after push", "explicit watcher cancel", "independent error cancel race", "controlled watcher shutdown", "controlled missing reason", "controlled stale instance", "raw shutdown", "config changed cancel", "unpublished cancel", "repair no-op cancel", "external merge cancel", "no push", "forgejo", "bitbucket", "repair head", "confirmation timeout then repair", "posting fails", "already upstream", "attempt already upstream", "fork", "formatter head", "recovered failure", "CI repair readiness", "Test no-go exception", "Test inconclusive exception", "skipped Test", "late Document", "late Lint", "stale tested head"} {
 		t.Run(scenario, func(t *testing.T) {
+			runCtx, cancelRun := context.WithCancelCause(context.Background())
+			defer cancelRun(nil)
 			dir, base, head := setupGitRepo(t)
 			remote := t.TempDir()
 			gitCmd(t, remote, "init", "--bare", ".")
@@ -726,6 +725,49 @@ func TestPipeline_GitHubCommitStatuses(t *testing.T) {
 				if scenario == "cancel after push" {
 					return nil, errors.New(types.RunCancelReasonAbortedByUser)
 				}
+				switch scenario {
+				case "controlled watcher shutdown", "controlled missing reason", "controlled stale instance":
+					cause := &pipeline.ControlledShutdownCause{Instance: "current-instance", Lifecycle: "current-lifecycle"}
+					if scenario != "controlled missing reason" {
+						instance := cause.Instance
+						if scenario == "controlled stale instance" {
+							instance = "older-instance"
+						}
+						if err := sc.DB.PrepareControlledShutdown([]string{sc.Run.ID}, instance, cause.Lifecycle, cause.Error()); err != nil {
+							t.Fatal(err)
+						}
+					}
+					cancelRun(cause)
+					return nil, sc.Ctx.Err()
+				case "raw shutdown":
+					cancelRun(errors.New("daemon shutting down"))
+					return nil, sc.Ctx.Err()
+				case "config changed cancel":
+					sc.Config.Commands.Lint = "changed"
+				case "unpublished cancel":
+					if err := os.WriteFile(filepath.Join(dir, "unpublished.txt"), []byte("repair"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					gitCmd(t, dir, "add", "unpublished.txt")
+					gitCmd(t, dir, "commit", "-m", "unpublished repair")
+				case "repair no-op cancel":
+					if err := sc.DB.InvalidateStatusValidation(sc.Run.ID); err != nil {
+						t.Fatal(err)
+					}
+				case "external merge cancel":
+					gitCmd(t, remote, "update-ref", "refs/heads/main", head)
+				}
+				if strings.HasSuffix(scenario, " cancel") && scenario != "explicit watcher cancel" {
+					cancelRun(errors.New(types.RunCancelReasonAbortedByUser))
+					return nil, sc.Ctx.Err()
+				}
+				if scenario == "explicit watcher cancel" || scenario == "independent error cancel race" {
+					cancelRun(errors.New(types.RunCancelReasonAbortedByUser))
+					if scenario == "independent error cancel race" {
+						return nil, errors.Join(errors.New("genuine CI failure"), sc.Ctx.Err())
+					}
+					return nil, sc.Ctx.Err()
+				}
 				if (scenario == "repair head" || scenario == "CI repair readiness" || scenario == "confirmation timeout then repair") && ciCalls == 1 {
 					if err := os.WriteFile(filepath.Join(dir, "repair.txt"), []byte("repair"), 0600); err != nil {
 						t.Fatal(err)
@@ -777,6 +819,7 @@ func TestPipeline_GitHubCommitStatuses(t *testing.T) {
 				}
 			})
 			exec.SetForgeContext(&forgecontext.Context{Provider: provider, Host: "github.com"})
+			exec.SetRuntimeInstance("current-instance")
 			// The synthetic Review/CI steps above model validation and repair,
 			// not forge discovery. Supply their comparison receipts from real
 			// Git heads at the executor's existing comparison boundary.
@@ -819,16 +862,26 @@ func TestPipeline_GitHubCommitStatuses(t *testing.T) {
 					t.Fatal("approved run did not complete")
 				}
 			} else {
-				err = exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir)
+				err = exec.Execute(runCtx, sctx.Run, sctx.Repo, dir)
 			}
-			wantError := scenario == "push reply lost" || scenario == "fail after push" || scenario == "cancel after push"
+			wantError := scenario == "push reply lost" || scenario == "fail after push" || scenario == "cancel after push" || scenario == "explicit watcher cancel" || scenario == "independent error cancel race" || strings.HasSuffix(scenario, " cancel") || strings.HasPrefix(scenario, "controlled ") || scenario == "raw shutdown"
 			if (err != nil) != wantError {
 				t.Fatalf("Execute = %v, wantError %v", err, wantError)
+			}
+			if scenario == "explicit watcher cancel" && sctx.Run.Status != types.RunCancelled {
+				t.Fatalf("run status = %s, want cancelled", sctx.Run.Status)
+			}
+			if scenario == "independent error cancel race" && (sctx.Run.Status != types.RunFailed || sctx.Run.Error == nil || !strings.Contains(*sctx.Run.Error, "genuine CI failure")) {
+				t.Fatalf("independent failure lost: status %s, error %v", sctx.Run.Status, sctx.Run.Error)
 			}
 			if scenario == "formatter head" {
 				repaired = gitCmd(t, dir, "rev-parse", "HEAD")
 			}
 			if scenario == "recovered failure" {
+				if err := sctx.DB.UpdateRunStatus(sctx.Run.ID, types.RunRunning); err != nil {
+					t.Fatal(err)
+				}
+				sctx.Run.Status = types.RunRunning
 				// A fresh executor has no in-memory reporter. Change its mutable head to
 				// prove the failure update still uses the persisted publication SHA.
 				sctx.Run.HeadSHA = base
@@ -853,13 +906,25 @@ func TestPipeline_GitHubCommitStatuses(t *testing.T) {
 					}
 				}
 			}
+			if scenario == "explicit watcher cancel" || scenario == "controlled watcher shutdown" || scenario == "external merge cancel" {
+				for _, state := range []string{"pending", "success", "failure"} {
+					(&PushStep{}).ReportPublishedHeadStatus(sctx, state, head)
+				}
+				recovered := pipeline.NewExecutor(sctx.DB, appPaths, sctx.Config, sctx.Agent, []pipeline.Step{&PushStep{}}, nil)
+				recovered.SetForgeContext(&forgecontext.Context{Provider: provider, Host: "github.com"})
+				recovered.ReportRecoveredPublishedHeadStatus(context.Background(), sctx.Run, sctx.Repo)
+				ids, err := sctx.DB.CommitStatusRecoveryRunIDs(context.Background())
+				if err != nil || len(ids) != 0 {
+					t.Fatalf("preserved terminal decision needs recovery: %v,%v", ids, err)
+				}
+			}
 			mu.Lock()
 			got := append([]statusRequest(nil), requests...)
 			mu.Unlock()
 			var want []statusRequest
 			if scenario != "no push" && scenario != "forgejo" && scenario != "bitbucket" {
 				want = []statusRequest{{Path: "/repos/test/repo/statuses/" + head, State: "pending"}, {Path: "/repos/test/repo/statuses/" + head, State: "success"}}
-				if wantError || scenario == "recovered failure" {
+				if (wantError && scenario != "explicit watcher cancel" && scenario != "controlled watcher shutdown" && scenario != "external merge cancel") || scenario == "recovered failure" {
 					want = append(want, statusRequest{Path: want[0].Path, State: "failure"})
 				}
 				if scenario == "repair head" || scenario == "CI repair readiness" || scenario == "confirmation timeout then repair" {
@@ -867,7 +932,7 @@ func TestPipeline_GitHubCommitStatuses(t *testing.T) {
 				}
 			}
 			if scenario == "push reply lost" {
-				want = []statusRequest{{Path: "/repos/test/repo/statuses/" + head, State: "pending"}, {Path: "/repos/test/repo/statuses/" + head, State: "failure"}}
+				want = []statusRequest{{Path: "/repos/test/repo/statuses/" + head, State: "failure"}}
 				if ciCalls != 0 {
 					t.Fatal("CI ran after a lost push response")
 				}

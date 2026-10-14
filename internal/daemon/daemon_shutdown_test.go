@@ -41,7 +41,7 @@ func TestShutdownRefusesActiveAgentPeer(t *testing.T) {
 		t.Fatalf("dial daemon: %v", err)
 	}
 	defer client.Close()
-	err = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, &ipc.ShutdownResult{})
+	err = client.Call(ipc.MethodShutdown, testShutdownParams(t, p), &ipc.ShutdownResult{})
 	if err == nil || !strings.Contains(err.Error(), gatecontext.ErrorCode) {
 		t.Fatalf("shutdown error = %v, want %s refusal", err, gatecontext.ErrorCode)
 	}

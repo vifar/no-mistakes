@@ -518,7 +518,7 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 	defer func() {
 		client, err := ipc.Dial(p.Socket())
 		if err == nil {
-			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+			_ = client.Call(ipc.MethodShutdown, testShutdownParams(t, p), nil)
 			_ = client.Close()
 		}
 		select {

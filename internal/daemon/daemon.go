@@ -258,12 +258,14 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConf
 	if err != nil {
 		return fmt.Errorf("build pid file: %w", err)
 	}
+	pidRecord.Instance = mgr.runtimeInstance
 	if err := writeDaemonPIDFile(pidPath, pidRecord); err != nil {
 		return fmt.Errorf("write pid file: %w", err)
 	}
+	mgr.runtimeStartedAt = pidRecord.StartedAt
 	defer func() {
 		if pidData, err := os.ReadFile(pidPath); err == nil {
-			if current, readErr := readDaemonPIDFileData(pidData); readErr == nil && current.PID == pidRecord.PID && current.StartedAt.Equal(pidRecord.StartedAt) {
+			if current, readErr := readDaemonPIDFileData(pidData); readErr == nil && current.PID == pidRecord.PID && current.StartedAt.Equal(pidRecord.StartedAt) && current.Instance == pidRecord.Instance {
 				_ = os.Remove(pidPath)
 			}
 		}
@@ -359,7 +361,7 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConf
 	// Clean up socket file only if we still own the PID file.
 	// A new daemon may have already replaced the socket.
 	if pidData, err := os.ReadFile(pidPath); err == nil {
-		if current, readErr := readDaemonPIDFileData(pidData); readErr == nil && current.PID == pidRecord.PID && current.StartedAt.Equal(pidRecord.StartedAt) {
+		if current, readErr := readDaemonPIDFileData(pidData); readErr == nil && current.PID == pidRecord.PID && current.StartedAt.Equal(pidRecord.StartedAt) && current.Instance == pidRecord.Instance {
 			os.Remove(pidPath)
 			os.Remove(socketPath)
 		}
@@ -1238,12 +1240,22 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return &ipc.HealthResult{Status: "ok"}, nil
 	})
 
-	srv.Handle(ipc.MethodShutdown, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+	srv.Handle(ipc.MethodShutdown, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {
 			return nil, err
 		}
+		var expected ipc.ShutdownParams
+		if err := json.Unmarshal(params, &expected); err != nil {
+			return nil, fmt.Errorf("invalid shutdown request: %w", err)
+		}
+		bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		result, err := mgr.prepareControlledShutdown(bounded, expected)
+		if err != nil {
+			return nil, err
+		}
 		go shutdown()
-		return &ipc.ShutdownResult{OK: true}, nil
+		return result, nil
 	})
 
 	srv.Handle(ipc.MethodUpdateRunClosingIssueRefs, func(ctx context.Context, params json.RawMessage) (interface{}, error) {

@@ -60,6 +60,7 @@ type approvalResponse struct {
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
 type Executor struct {
+	runtimeInstance    string
 	db                 *db.DB
 	paths              *paths.Paths
 	config             *config.Config
@@ -602,11 +603,37 @@ func (e *Executor) roundsForFixValidation() ([]*db.StepRound, *RespondRefusal) {
 func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	e.workDir = workDir
 	ctx = e.runContext(ctx)
-	// Mark run as running. Route write failures through failRun so the
-	// in-memory lifecycle and subscriber stream still become terminal instead
-	// of leaving a silent pending run.
-	if err := e.db.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
-		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
+	var terminal bool
+	startErr := WithCommitStatusLock(context.Background(), func() error {
+		durable, err := e.db.GetRun(run.ID)
+		if err != nil {
+			return err
+		}
+		if durable == nil {
+			return fmt.Errorf("run unavailable at startup")
+		}
+		if durable.Status.Terminal() {
+			terminal = true
+			run.Status, run.Error, run.HeadSHA = durable.Status, durable.Error, durable.HeadSHA
+			return fmt.Errorf("run already terminal: %s", durable.Status)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		revoked, err := e.db.RawShutdownSuperseded(run.ID)
+		if err != nil {
+			return err
+		}
+		if revoked {
+			return fmt.Errorf("%s", db.RawShutdownReason)
+		}
+		return e.db.UpdateRunStatus(run.ID, types.RunRunning)
+	})
+	if terminal {
+		return startErr
+	}
+	if startErr != nil {
+		return e.failRun(run, repo, startErr, ctx)
 	}
 	if err := e.clearStorageFailure(run.ID); err != nil {
 		return e.failRun(run, repo, err)
@@ -653,7 +680,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	for i := 0; i < len(e.steps); i++ {
 		step := e.steps[i]
 		if ctx.Err() != nil {
-			return e.failRun(run, repo, context.Cause(ctx))
+			return e.failRun(run, repo, context.Cause(ctx), ctx)
 		}
 		restartIndex, err := e.checkPRContext(ctx, run, repo, workDir, step.Name(), i, false)
 		if err != nil {
@@ -738,6 +765,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, err, ctx)
 	}
 	if err := e.completeRun(ctx, run, repo); err != nil {
+		if run.Status.Terminal() {
+			return err
+		}
 		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
 	}
 	return nil
@@ -915,6 +945,34 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	ctx = e.runContext(ctx)
 	if repo == nil {
 		return fmt.Errorf("recovered run has no repository")
+	}
+	durable, err := e.db.GetRun(run.ID)
+	if err != nil {
+		return err
+	}
+	if durable == nil {
+		return fmt.Errorf("recovered run unavailable")
+	}
+	run.Status, run.Error, run.HeadSHA = durable.Status, durable.Error, durable.HeadSHA
+	if durable.Status.Terminal() {
+		return fmt.Errorf("recovered run already terminal")
+	}
+	if err := ValidateRecoveredRun(e.db, run, e.steps); err != nil {
+		return err
+	}
+	var obsolete bool
+	if err := WithCommitStatusLock(context.Background(), func() error {
+		var err error
+		obsolete, err = e.db.ReconcileRecoveredRun(run.ID, e.runtimeInstance)
+		return err
+	}); err != nil {
+		return err
+	}
+	if obsolete {
+		if err := e.ReportSettledRunFailure(context.Background(), run, repo); err != nil {
+			return err
+		}
+		return fmt.Errorf("unsettled shutdown from previous daemon runtime")
 	}
 	if err := e.RegisterRecoveredGate(run); err != nil {
 		if sqlitewrite.IsContention(err) {
@@ -1402,6 +1460,9 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 		return e.failRun(run, repo, err, ctx)
 	}
 	if err := e.completeRun(ctx, run, repo); err != nil {
+		if run.Status.Terminal() {
+			return err
+		}
 		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err), ctx)
 	}
 	return nil
@@ -1434,6 +1495,9 @@ func (e *Executor) skipRecoveredRemainder(ctx context.Context, run *db.Run, repo
 		return e.failRun(run, repo, err)
 	}
 	if err := e.completeRun(ctx, run, repo); err != nil {
+		if run.Status.Terminal() {
+			return err
+		}
 		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err))
 	}
 	return nil
@@ -1505,6 +1569,11 @@ func (e *Executor) autoFixLimit(stepName types.StepName) int {
 // and any execution error.
 func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult, run *db.Run, repo *db.Repo, workDir, logDir string, state stepExecutionState) (bool, types.StepName, error) {
 	defer e.activeAgentPID.Store(0)
+	if state.fixing && !state.skipFixExecution {
+		if err := e.db.InvalidateStatusValidation(run.ID); err != nil {
+			return false, "", err
+		}
+	}
 	stepName := step.Name()
 	logPath := filepath.Join(logDir, string(stepName)+".log")
 	finalExitCode := 0
@@ -1795,6 +1864,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var reviewApprovedHeadSHA string
 	var reviewComparisonGeneration int64
 	var restartFrom types.StepName
+	var statusProofHead, statusProofConfig string
+	var statusProofEpoch int64
+	var executionPassed bool
+	statusProofCore := stepName == types.StepReview || stepName == types.StepTest || stepName == types.StepDocument || stepName == types.StepLint
 
 	// Every comparison restart discards its selections. A charged rewind also
 	// starts a fresh repair budget, round history, and execution accounting.
@@ -1821,6 +1894,15 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// Execute with possible fix loop
 rounds:
 	for {
+		if statusProofCore {
+			statusProofHead, _ = git.HeadSHA(ctx, workDir)
+			statusProofConfig = StatusConfigDigest(e.config)
+			var proofErr error
+			statusProofEpoch, proofErr = e.db.StatusValidationEpoch(run.ID)
+			if proofErr != nil {
+				return false, "", proofErr
+			}
+		}
 		if stepName == types.StepReview && run.Shipping != nil {
 			sctx.ScopeFindings = scopeFindingsForReview(sctx, outstandingFindings)
 		}
@@ -1940,7 +2022,7 @@ rounds:
 				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redactedErr, &durationMS)
-			return false, "", fmt.Errorf("step %s failed: %s", stepName, redactedErr)
+			return false, "", &stepExecutionError{step: stepName, message: redactedErr, cause: err, watchOnly: stepName == types.StepCI && !sctx.Fixing}
 		}
 		restartFrom = outcome.RestartFrom
 
@@ -2046,7 +2128,7 @@ rounds:
 				fixCount := findingsCount(fixableFindings)
 				writeLog(fmt.Sprintf("auto-fix round %d/%d starting after round %d (%d %s)", autoFixAttempts, autoFixLimit, roundNum, fixCount, pluralize(fixCount, "finding", "findings")))
 				if dbErr := e.db.StartStepFixRound(sr.ID, autoFixLimit); dbErr != nil {
-					slog.Warn("failed to start step fix round in db", "step", stepName, "error", dbErr)
+					return false, "", fmt.Errorf("invalidate before fix round: %w", dbErr)
 				}
 				if currentRoundID != "" {
 					if idsJSON := findingIDsJSON(fixableFindings); idsJSON != "" {
@@ -2087,6 +2169,7 @@ rounds:
 			skipRemaining = outcome.SkipRemaining
 			stepSkipped = outcome.Skipped
 			skipReason = safeurl.RedactText(outcome.SkipReason)
+			executionPassed = true
 			break
 		}
 
@@ -2259,7 +2342,7 @@ rounds:
 				selectedCount := selectedFindingCount(effectiveFindings, response.findingIDs)
 				writeLog(fmt.Sprintf("user-fix round starting after round %d (%d %s selected)", roundNum, selectedCount, pluralize(selectedCount, "finding", "findings")))
 				if dbErr := e.db.StartStepFixRound(sr.ID, autoFixLimit); dbErr != nil {
-					slog.Warn("failed to start step fix round in db", "step", stepName, "error", dbErr)
+					return false, "", fmt.Errorf("invalidate before fix round: %w", dbErr)
 				}
 				sctx.Fixing = true
 				sctx.AutoFixRound = false
@@ -2384,6 +2467,14 @@ done:
 		}
 	} else if err := e.db.CompleteStepWithStatus(sr.ID, status, finalExitCode, durationMS, logPath); err != nil {
 		return false, "", fmt.Errorf("complete step %s: %w", stepName, err)
+	}
+	if statusProofCore && executionPassed && status == types.StepStatusCompleted && finalExitCode == 0 && statusProofHead != "" && statusProofConfig == StatusConfigDigest(e.config) {
+		observed, err := git.HeadSHA(ctx, workDir)
+		if err == nil && observed == statusProofHead {
+			if err := e.db.RecordStatusValidationStep(sr.ID, run.ID, observed, statusProofConfig, statusProofEpoch); err != nil {
+				return false, "", fmt.Errorf("record exact-head validation: %w", err)
+			}
+		}
 	}
 	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(status), "", "", &durationMS)
 	return skipRemaining, restartFrom, nil
@@ -2948,6 +3039,12 @@ func (e *Executor) ciMonitorInterruptedByShutdown(runID string, err error, ctxs 
 	if !shutdown {
 		return false
 	}
+	// A planned shutdown of a certified watcher takes the bounded cancellation
+	// exception instead: it terminalizes as cancelled and keeps its posted
+	// success, which ci_monitor_interrupted recovery would reconcile to failure.
+	if e.plannedShutdownOfCertifiedWatcher(runID, ctxs...) {
+		return false
+	}
 	monitoring, dbErr := e.db.IsActiveCIMonitorRun(runID)
 	if dbErr != nil {
 		slog.Warn("failed to check for an interrupted CI monitor at shutdown", "run", runID, "error", dbErr)
@@ -2957,6 +3054,27 @@ func (e *Executor) ciMonitorInterruptedByShutdown(runID string, err error, ctxs 
 		slog.Info("run left monitoring CI for restart recovery", "run", runID)
 	}
 	return monitoring
+}
+
+// plannedShutdownOfCertifiedWatcher reports whether this runtime's planned
+// shutdown, durably bound to the run, reached a run holding certified success.
+func (e *Executor) plannedShutdownOfCertifiedWatcher(runID string, ctxs ...context.Context) bool {
+	for _, ctx := range ctxs {
+		if ctx == nil {
+			continue
+		}
+		planned, ok := context.Cause(ctx).(*ControlledShutdownCause)
+		if !ok || planned.Instance == "" || planned.Instance != e.runtimeInstance {
+			continue
+		}
+		matches, err := e.db.ControlledShutdownMatches(runID, planned.Instance, planned.Lifecycle, planned.Error())
+		if err != nil || !matches {
+			return false
+		}
+		held, err := e.db.HasStatusPreservationProof(runID)
+		return err == nil && held
+	}
+	return false
 }
 
 // failRun marks a run as failed and returns the error.
@@ -2978,60 +3096,152 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	} else if sqlitewrite.RecordedContention(errMsg) {
 		errMsg = "pipeline execution failure: " + errMsg
 	}
+	explicitCancellation := false
+	var controlled *ControlledShutdownCause
 	for _, ctx := range ctxs {
 		if infrastructure {
 			break
 		}
-		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
+		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled && cancellationOnly(err, cause) {
 			errMsg = cause.Error()
+			explicitCancellation = cause.Error() == types.RunCancelReasonAbortedByUser
+			if planned, ok := cause.(*ControlledShutdownCause); ok && planned.Instance != "" && planned.Instance == e.runtimeInstance {
+				matches, matchErr := e.db.ControlledShutdownMatches(run.ID, planned.Instance, planned.Lifecycle, planned.Error())
+				if matchErr == nil && matches {
+					explicitCancellation = true
+					controlled = planned
+				}
+			}
 			break
 		}
 	}
 	runStatus := types.RunFailed
-	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded {
+	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded || controlled != nil {
 		runStatus = types.RunCancelled
 	}
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
-	var dbErr error
-	if infrastructure {
-		head := ""
-		if verified {
-			head = verifiedHead
+	executionErr := err
+	writeTerminal := func(allowProof bool) error {
+		if infrastructure {
+			// Revoke cancellation eligibility before settling the canonical storage
+			// outcome and active steps through the shared infrastructure path.
+			if revokeErr := e.db.InvalidateStatusValidation(run.ID); revokeErr != nil {
+				return revokeErr
+			}
+			head := ""
+			if verified {
+				head = verifiedHead
+			}
+			return e.db.FailRunInfrastructure(run.ID, errMsg, head)
 		}
-		dbErr = e.db.FailRunInfrastructure(run.ID, errMsg, head)
-	} else if verified {
-		dbErr = e.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, errMsg, runStatus, verifiedHead)
-	} else {
-		dbErr = e.db.UpdateRunErrorStatus(run.ID, errMsg, runStatus)
+		revoked, readErr := e.db.RawShutdownSuperseded(run.ID)
+		if readErr != nil {
+			return readErr
+		}
+		if revoked {
+			for _, ctx := range ctxs {
+				if cancellationOnly(executionErr, context.Cause(ctx)) {
+					errMsg = db.RawShutdownReason
+					runStatus = types.RunFailed
+					explicitCancellation = false
+					break
+				}
+			}
+		}
+
+		if allowProof && verified && explicitCancellation && watcherCancellation(executionErr) {
+			if prepareErr := e.terminalizeCertifiedWatcher(run, errMsg, runStatus, verifiedHead, controlled); prepareErr == nil {
+				return nil
+			} else {
+				slog.Warn("strict terminal proof unavailable; recording failure outcome", "run", run.ID, "error", prepareErr)
+				verifiedHead, verified = e.reconcileTerminalRunHead(run)
+			}
+		}
+		var head *string
+		if verified {
+			head = &verifiedHead
+		}
+		return e.db.RecordIneligibleTerminal(run.ID, errMsg, runStatus, head)
+	}
+	dbErr := WithCommitStatusLock(context.Background(), func() error { return writeTerminal(true) })
+	if dbErr != nil {
+		slog.Warn("settling ineligible terminal outcome", "run", run.ID, "error", dbErr)
+		err = errors.Join(err, dbErr)
+		dbErr = settleTerminalWrite(e.db, func() error { return writeTerminal(false) })
 	}
 	if dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
-	} else if verified {
-		run.HeadSHA = verifiedHead
+		return errors.Join(err, dbErr)
 	}
-	run.Status = runStatus
-	run.Error = &errMsg
+	durable, readErr := ReadSettledRun(e.db, run.ID)
+	if readErr != nil {
+		return errors.Join(err, readErr)
+	}
+	if durable == nil {
+		return errors.Join(err, fmt.Errorf("terminal run outcome unavailable"))
+	}
+	run.Status, run.Error, run.HeadSHA = durable.Status, durable.Error, durable.HeadSHA
 	e.ReportPublishedHeadFailure(context.Background(), run, repo)
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	return err
 }
 
 func (e *Executor) completeRun(ctx context.Context, run *db.Run, repo *db.Repo) error {
-	verifiedHead, err := e.verifyCompletionHead(run)
+	verifiedHead, preparationErr := e.verifyCompletionHead(run)
+	if preparationErr != nil {
+		preparationErr = &terminalPreparationError{cause: preparationErr}
+	}
+	committed := false
+	err := WithCommitStatusLock(context.Background(), func() error {
+		durable, err := e.db.GetRun(run.ID)
+		if err != nil {
+			return err
+		}
+		if durable == nil {
+			return fmt.Errorf("terminal run outcome unavailable")
+		}
+		if durable.Status.Terminal() {
+			return nil
+		}
+		if preparationErr != nil {
+			return preparationErr
+		}
+		revoked, err := e.db.RawShutdownSuperseded(run.ID)
+		if err != nil {
+			return err
+		}
+		if revoked {
+			err = e.db.RecordIneligibleTerminal(run.ID, db.RawShutdownReason, types.RunFailed, &verifiedHead)
+		} else {
+			err = e.db.UpdateRunStatusWithVerifiedHead(run.ID, types.RunCompleted, verifiedHead)
+		}
+		committed = err == nil
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	if err := e.db.UpdateRunStatusWithVerifiedHead(run.ID, types.RunCompleted, verifiedHead); err != nil {
+	durable, err := ReadSettledRun(e.db, run.ID)
+	if err != nil {
 		return err
 	}
-	run.HeadSHA = verifiedHead
-	run.Status = types.RunCompleted
-	e.reportPublishedHeadStatus(context.Background(), run, repo, "success")
-	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
-	if run.PRState != nil && *run.PRState == "merged" && e.onPRMerged != nil {
+	if durable == nil {
+		return fmt.Errorf("terminal run outcome unavailable")
+	}
+	run.Status, run.Error, run.HeadSHA = durable.Status, durable.Error, durable.HeadSHA
+	if committed {
+		e.reportPublishedHeadStatus(context.Background(), run, repo, "success")
+		e.emitRunEvent(ipc.EventRunCompleted, run, repo)
+	}
+	if run.Status != types.RunCompleted {
+		if run.Error != nil {
+			return errors.New(*run.Error)
+		}
+		return fmt.Errorf("run ended as %s", run.Status)
+	}
+	if committed && run.PRState != nil && *run.PRState == "merged" && e.onPRMerged != nil {
 		e.onPRMerged(ctx, run.ID)
 	}
-
 	return nil
 }
 

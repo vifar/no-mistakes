@@ -11,6 +11,18 @@ CREATE TABLE IF NOT EXISTS document_passes (
     carried_review_from TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS document_pass_pending ON document_passes(run_id) WHERE to_head_sha IS NULL;
+CREATE TABLE IF NOT EXISTS status_validation_epochs (
+ run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+ epoch INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS status_validation_steps (
+ step_id TEXT PRIMARY KEY REFERENCES step_results(id) ON DELETE CASCADE,
+ head_sha TEXT NOT NULL, epoch INTEGER NOT NULL, config_digest TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS controlled_shutdown_runs (
+ run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+ instance TEXT NOT NULL, lifecycle TEXT NOT NULL, reason TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS pipeline_commit_heads (
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     head_sha TEXT NOT NULL,
@@ -535,4 +547,6 @@ var migrationStatements = []string{
         AND r.review_approved_head_sha=local_head_sha)`,
 	// Separate observation: never replace the original qualification comparison.
 	`ALTER TABLE run_pr_contexts ADD COLUMN retained_target_sha TEXT`,
+	`ALTER TABLE commit_status_publications ADD COLUMN strict_certificate TEXT`,
+	`ALTER TABLE commit_status_publications ADD COLUMN preserve_success INTEGER`,
 }
