@@ -218,8 +218,8 @@ func TestRawShutdown_SupersessionIsAtomicAndPreservesCommittedDecision(t *testin
 		}
 	}
 	failed, err := d.GetRun(active.ID)
-	if err != nil || failed.Status != types.RunFailed || failed.Error == nil || *failed.Error != "daemon shutting down" {
-		t.Fatalf("raw batch failed to settle active run: %+v,%v", failed, err)
+	if err != nil || failed.Status != types.RunRunning || failed.Error != nil {
+		t.Fatalf("raw supersession preempted executor terminal authority: %+v,%v", failed, err)
 	}
 	matches, err = d.ControlledShutdownMatches(active.ID, binding.Instance, binding.Lifecycle, binding.Reason)
 	if err != nil || matches {
@@ -228,5 +228,52 @@ func TestRawShutdown_SupersessionIsAtomicAndPreservesCommittedDecision(t *testin
 	preserved, err := d.GetCommitStatusPublication(context.Background(), committed.ID, p)
 	if err != nil || preserved.StrictCertificate == nil || preserved.PreserveSuccess == nil || !*preserved.PreserveSuccess {
 		t.Fatalf("raw batch changed committed preservation: %+v,%v", preserved, err)
+	}
+}
+
+func TestRawShutdown_RevocationCannotRenewOrPreemptIndependentError(t *testing.T) {
+	d, run, p := certifiedStatusFixture(t)
+	if err := d.SupersedeUncommittedCancellations([]string{run.ID}, "runtime"); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := d.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunRunning || stored.Error != nil {
+		t.Fatalf("raw shutdown stole terminal authority: %+v,%v", stored, err)
+	}
+	if err := d.PrepareControlledShutdown([]string{run.ID}, "runtime", "retry", "planned"); err == nil {
+		t.Fatal("planned retry restored raw-superseded eligibility")
+	}
+	if err := d.InvalidateStatusValidation(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	epoch, err := d.StatusValidationEpoch(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range steps {
+		if err := d.RecordStatusValidationStep(step.ID, run.ID, "head", "config", epoch); err != nil {
+			t.Fatal(err)
+		}
+	}
+	certificate, err := d.BuildStatusCertificate(run.ID, "head", "config")
+	if err != nil || certificate != nil {
+		t.Fatalf("fresh bindings renewed superseded runtime eligibility: %v,%v", certificate, err)
+	}
+	for _, state := range []string{"pending", "success"} {
+		p.LastState = state
+		if err := d.PutCommitStatusPublication(run.ID, p); err == nil {
+			t.Errorf("late %s ledger crossed raw supersession", state)
+		}
+	}
+	if err := d.RecordIneligibleTerminal(run.ID, "independent provider failure", types.RunFailed, nil); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = d.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunFailed || stored.Error == nil || *stored.Error != "independent provider failure" {
+		t.Fatalf("real failure lost precedence: %+v,%v", stored, err)
 	}
 }

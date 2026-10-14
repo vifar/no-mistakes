@@ -758,6 +758,9 @@ func TestRecoveredFailure_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 			if err != nil || stored.Status != types.RunFailed {
 				t.Fatalf("reopened terminal failure: %+v,%v", stored, err)
 			}
+			if strings.HasPrefix(mode, "panic") && (stored.Error == nil || !strings.Contains(*stored.Error, "internal panic")) {
+				t.Fatalf("raw shutdown displaced actual recovered panic: %+v", stored)
+			}
 			pub, err := reopened.GetCommitStatusPublication(context.Background(), run.ID, publication)
 			if err != nil || pub.LastState != "failure" || pub.StrictCertificate != nil {
 				t.Fatalf("reopened failure publication: %+v,%v", pub, err)

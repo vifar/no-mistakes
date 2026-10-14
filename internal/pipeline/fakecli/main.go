@@ -52,6 +52,19 @@ func isFakeProviderPlugin(arg0 string) bool {
 
 func handleFakeCLI(mode string) {
 	args := os.Args[1:]
+	if filepath.Base(os.Args[0]) == "git" && os.Getenv("FAKE_CLI_TERMINAL_GIT_MARKER") != "" {
+		if _, err := os.Stat(os.Getenv("FAKE_CLI_TERMINAL_GIT_MARKER")); err == nil && fakeGitSubcommand(args) == "rev-parse" {
+			client := &http.Client{Timeout: 10 * time.Second}
+			response, err := client.Get(os.Getenv("FAKE_CLI_STATUS_API_URL") + "/terminal-head")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			response.Body.Close()
+		}
+		fakeGitForward(args, os.Getenv("FAKE_CLI_REAL_GIT"))
+		return
+	}
 	logFile := os.Getenv("FAKE_CLI_LOG")
 
 	if logFile != "" {
