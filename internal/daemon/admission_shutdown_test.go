@@ -2,9 +2,13 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -16,6 +20,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"modernc.org/sqlite"
 )
 
 func TestControlledShutdown_DrainsInflightAdmissionBeforeStopHandoff(t *testing.T) {
@@ -168,5 +173,134 @@ func TestControlledShutdown_DrainsInflightAdmissionBeforeStopHandoff(t *testing.
 				}
 			})
 		}
+	}
+}
+
+func TestControlledShutdown_PersistenceFailureCannotReopenRawAdmission(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, head := setupTestGitRepo(t, p, d, "raw-fence")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	function := "fail_prepare_" + strings.ReplaceAll(strings.ToLower(repo.ID), "-", "_")
+	if err := sqlite.RegisterScalarFunction(function, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
+		close(entered)
+		<-release
+		return nil, errors.New("injected preparation failure")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	d, err = db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	control, err := sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER fail_preparation BEFORE INSERT ON controlled_shutdown_runs BEGIN SELECT %s(); END`, function)); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NM_DEMO", "1")
+	setupEntered, setupRelease := make(chan struct{}), make(chan struct{})
+	var setupOnce sync.Once
+	settle := func() { setupOnce.Do(func() { close(setupRelease) }) }
+	defer settle()
+	var constructions atomic.Int32
+	mgr := NewRunManager(d, p, func() []pipeline.Step {
+		if constructions.Add(1) == 1 {
+			close(setupEntered)
+			<-setupRelease
+		}
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+	mgr.runtimeStartedAt = time.Now().UTC()
+	startDone := make(chan error, 1)
+	go func() {
+		_, err := mgr.startRun(context.Background(), repo, "main", head, head, "test", nil, "intent", "", false, "", nil)
+		startDone <- err
+	}()
+	select {
+	case <-setupEntered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("startup not admitted")
+	}
+	active, err := d.GetActiveRuns()
+	if err != nil || len(active) != 1 {
+		t.Fatalf("pending admission unavailable: %+v,%v", active, err)
+	}
+	run := active[0]
+	params := ipc.ShutdownParams{ExpectedPID: os.Getpid(), ExpectedStartedAt: mgr.runtimeStartedAt.Format(time.RFC3339Nano), ExpectedInstance: mgr.runtimeInstance}
+	prepareDone := make(chan error, 1)
+	go func() { _, err := mgr.prepareControlledShutdown(context.Background(), params); prepareDone <- err }()
+	select {
+	case <-entered:
+	case err := <-prepareDone:
+		t.Fatalf("preparation never reached persistence: %v", err)
+	case <-time.After(10 * time.Second):
+		t.Fatal("preparation not paused")
+	}
+	cancelled := make(chan struct{})
+	mgr.mu.Lock()
+	original := mgr.cancels[run.ID]
+	mgr.cancels[run.ID] = func(cause error) { original(cause); close(cancelled) }
+	mgr.mu.Unlock()
+	shutdownDone := make(chan struct{})
+	go func() { mgr.Shutdown(); close(shutdownDone) }()
+	select {
+	case <-cancelled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("raw shutdown not fenced")
+	}
+	unblock()
+	if err := <-prepareDone; err == nil {
+		t.Fatal("failed preparation acknowledged")
+	}
+	if !mgr.shuttingDown.Load() {
+		t.Error("failed persistence cleared raw shutdown fence")
+	}
+	if _, err := mgr.startRun(context.Background(), repo, "queued", head, head, "test", nil, "intent", "", false, "", nil); err == nil {
+		t.Error("queued admission escaped raw shutdown")
+	}
+	if mgr.shuttingDown.Load() {
+		mgr.resumeRecoveredRun(recoveredRunPlan{run: run, repo: repo, agent: recoveredRunTestAgent{}})
+		mgr.mu.Lock()
+		_, registered := mgr.executors[run.ID]
+		mgr.mu.Unlock()
+		if registered {
+			t.Error("recovered admission escaped raw shutdown")
+		}
+	}
+	settle()
+	if err := <-startDone; err == nil {
+		t.Error("cancelled setup registered executor")
+	}
+	select {
+	case <-shutdownDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("raw shutdown failed to settle")
+	}
+	reopened, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	stored, err := reopened.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunFailed {
+		t.Fatalf("admission not durably failed: %+v,%v", stored, err)
+	}
+	if _, err := mgr.prepareControlledShutdown(context.Background(), params); err == nil {
+		t.Error("raw shutdown authorized planned ACK")
 	}
 }
