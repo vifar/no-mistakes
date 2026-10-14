@@ -78,6 +78,13 @@ func (d *DB) putCommitStatusPublication(runID string, p CommitStatusPublication,
 			return true, tx.Commit()
 		}
 	}
+	revoked, err := rawShutdownSuperseded(tx, runID)
+	if err != nil {
+		return false, err
+	}
+	if revoked && (p.StrictCertificate != nil || (p.LastState != "" && p.LastState != "failure")) {
+		return false, fmt.Errorf("raw shutdown forbids status promotion")
+	}
 	if (status == types.RunFailed || status == types.RunCancelled) && p.LastState != "" && p.LastState != "failure" {
 		return false, fmt.Errorf("terminal outcome forbids %s status", p.LastState)
 	}

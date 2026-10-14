@@ -865,6 +865,10 @@ func TestPipeline_GitHubCommitStatuses(t *testing.T) {
 				repaired = gitCmd(t, dir, "rev-parse", "HEAD")
 			}
 			if scenario == "recovered failure" {
+				if err := sctx.DB.UpdateRunStatus(sctx.Run.ID, types.RunRunning); err != nil {
+					t.Fatal(err)
+				}
+				sctx.Run.Status = types.RunRunning
 				// A fresh executor has no in-memory reporter. Change its mutable head to
 				// prove the failure update still uses the persisted publication SHA.
 				sctx.Run.HeadSHA = base

@@ -378,11 +378,37 @@ func (e *Executor) roundsForFixValidation() ([]*db.StepRound, *RespondRefusal) {
 func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
 	e.workDir = workDir
 	ctx = e.runContext(ctx)
-	// Mark run as running. Route write failures through failRun so the
-	// in-memory lifecycle and subscriber stream still become terminal instead
-	// of leaving a silent pending run.
-	if err := e.db.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
-		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
+	var terminal bool
+	startErr := WithCommitStatusLock(context.Background(), func() error {
+		durable, err := e.db.GetRun(run.ID)
+		if err != nil {
+			return err
+		}
+		if durable == nil {
+			return fmt.Errorf("run unavailable at startup")
+		}
+		if durable.Status.Terminal() {
+			terminal = true
+			run.Status, run.Error, run.HeadSHA = durable.Status, durable.Error, durable.HeadSHA
+			return fmt.Errorf("run already terminal: %s", durable.Status)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		revoked, err := e.db.RawShutdownSuperseded(run.ID)
+		if err != nil {
+			return err
+		}
+		if revoked {
+			return fmt.Errorf("%s", db.RawShutdownReason)
+		}
+		return e.db.UpdateRunStatus(run.ID, types.RunRunning)
+	})
+	if terminal {
+		return startErr
+	}
+	if startErr != nil {
+		return e.failRun(run, repo, startErr, ctx)
 	}
 	run.Status = types.RunRunning
 	e.emitRunEvent(ipc.EventRunUpdated, run, repo)
@@ -593,6 +619,17 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	ctx = e.runContext(ctx)
 	if repo == nil {
 		return fmt.Errorf("recovered run has no repository")
+	}
+	durable, err := e.db.GetRun(run.ID)
+	if err != nil {
+		return err
+	}
+	if durable == nil {
+		return fmt.Errorf("recovered run unavailable")
+	}
+	run.Status, run.Error, run.HeadSHA = durable.Status, durable.Error, durable.HeadSHA
+	if durable.Status.Terminal() {
+		return fmt.Errorf("recovered run already terminal")
 	}
 	if err := ValidateRecoveredRun(e.db, run, e.steps); err != nil {
 		return err
@@ -2298,8 +2335,24 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		runStatus = types.RunCancelled
 	}
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
-	dbErr := WithCommitStatusLock(context.Background(), func() error {
-		if verified && explicitCancellation && watcherCancellation(err) {
+	executionErr := err
+	writeTerminal := func(allowProof bool) error {
+		revoked, readErr := e.db.RawShutdownSuperseded(run.ID)
+		if readErr != nil {
+			return readErr
+		}
+		if revoked {
+			for _, ctx := range ctxs {
+				if cancellationOnly(executionErr, context.Cause(ctx)) {
+					errMsg = db.RawShutdownReason
+					runStatus = types.RunFailed
+					explicitCancellation = false
+					break
+				}
+			}
+		}
+
+		if allowProof && verified && explicitCancellation && watcherCancellation(executionErr) {
 			if prepareErr := e.terminalizeCertifiedWatcher(run, errMsg, runStatus, verifiedHead, controlled); prepareErr == nil {
 				return nil
 			} else {
@@ -2312,11 +2365,12 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 			head = &verifiedHead
 		}
 		return e.db.RecordIneligibleTerminal(run.ID, errMsg, runStatus, head)
-	})
+	}
+	dbErr := WithCommitStatusLock(context.Background(), func() error { return writeTerminal(true) })
 	if dbErr != nil {
 		slog.Warn("settling ineligible terminal outcome", "run", run.ID, "error", dbErr)
 		err = errors.Join(err, dbErr)
-		dbErr = SettleIneligibleTerminal(e.db, run.ID, errMsg, runStatus)
+		dbErr = settleTerminalWrite(func() error { return writeTerminal(false) })
 	}
 	if dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
@@ -2344,6 +2398,13 @@ func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 		}
 		if durable == nil {
 			return fmt.Errorf("terminal run outcome unavailable")
+		}
+		revoked, err := e.db.RawShutdownSuperseded(run.ID)
+		if err != nil {
+			return err
+		}
+		if revoked && !durable.Status.Terminal() {
+			return e.db.RecordIneligibleTerminal(run.ID, db.RawShutdownReason, types.RunFailed, nil)
 		}
 		if durable.Status != types.RunRunning && durable.Status != types.RunPending {
 			return nil

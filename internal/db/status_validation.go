@@ -11,6 +11,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+const RawShutdownReason = "daemon shutting down"
+
 type StatusCertificate struct {
 	SHA            string `json:"sha"`
 	Epoch          int64  `json:"epoch"`
@@ -72,8 +74,22 @@ type statusStepProof struct {
 	CompletedAt *int64
 }
 
+func rawShutdownSuperseded(q statusQuery, runID string) (bool, error) {
+	var revoked bool
+	err := q.QueryRow(`SELECT EXISTS(SELECT 1 FROM controlled_shutdown_runs WHERE run_id=? AND reason=?)`, runID, RawShutdownReason).Scan(&revoked)
+	return revoked, err
+}
+
+func (d *DB) RawShutdownSuperseded(runID string) (bool, error) {
+	return rawShutdownSuperseded(d.sql, runID)
+}
+
 func buildStatusCertificate(q statusQuery, runID, head, configDigest string) (*string, error) {
-	if configDigest == "" {
+	revoked, err := rawShutdownSuperseded(q, runID)
+	if err != nil {
+		return nil, err
+	}
+	if revoked || configDigest == "" {
 		return nil, nil
 	}
 	run := &Run{}
@@ -217,8 +233,14 @@ func (d *DB) PrepareControlledShutdown(runIDs []string, instance, lifecycle, rea
 	}
 	defer tx.Rollback()
 	for _, runID := range runIDs {
-		if _, err := tx.Exec(`INSERT INTO controlled_shutdown_runs(run_id,instance,lifecycle,reason) VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET instance=excluded.instance,lifecycle=excluded.lifecycle,reason=excluded.reason`, runID, instance, lifecycle, reason); err != nil {
+		result, err := tx.Exec(`INSERT INTO controlled_shutdown_runs(run_id,instance,lifecycle,reason) VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET instance=excluded.instance,lifecycle=excluded.lifecycle,reason=excluded.reason WHERE controlled_shutdown_runs.reason!=?`, runID, instance, lifecycle, reason, RawShutdownReason)
+		if err != nil {
 			return err
+		}
+		if n, err := result.RowsAffected(); err != nil {
+			return err
+		} else if n != 1 {
+			return fmt.Errorf("controlled shutdown superseded")
 		}
 	}
 	return tx.Commit()
@@ -237,38 +259,17 @@ func (d *DB) RecordIneligibleTerminal(runID, message string, status types.RunSta
 		return err
 	}
 	defer tx.Rollback()
-	if err := recordIneligibleTerminal(tx, runID, message, status, head, nil); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func (d *DB) SupersedeUncommittedCancellations(runIDs []string, instance string) error {
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, runID := range runIDs {
-		if err := recordIneligibleTerminal(tx, runID, "daemon shutting down", types.RunFailed, nil, &instance); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
-}
-
-func recordIneligibleTerminal(tx *sql.Tx, runID, message string, status types.RunStatus, head *string, rawInstance *string) error {
-	var err error
 	var current types.RunStatus
 	if err := tx.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&current); err != nil {
 		return err
 	}
-	if current != types.RunRunning && current != types.RunPending {
-		return nil
-	}
-	if rawInstance != nil {
-		if _, err := tx.Exec(`DELETE FROM controlled_shutdown_runs WHERE run_id=? AND instance=?`, runID, *rawInstance); err != nil {
+	if current == types.RunCancelled {
+		var preserved bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM commit_status_publications WHERE run_id=? AND preserve_success=1 AND strict_certificate IS NOT NULL AND last_state='success')`, runID).Scan(&preserved); err != nil {
 			return err
+		}
+		if preserved {
+			return nil
 		}
 	}
 	if _, err := tx.Exec(`UPDATE commit_status_publications SET strict_certificate=NULL,preserve_success=NULL WHERE run_id=?`, runID); err != nil {
@@ -283,5 +284,38 @@ func recordIneligibleTerminal(tx *sql.Tx, runID, message string, status types.Ru
 	if err != nil {
 		return err
 	}
-	return nil
+	return tx.Commit()
+}
+
+func (d *DB) SupersedeUncommittedCancellations(runIDs []string, instance string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, runID := range runIDs {
+		var current types.RunStatus
+		if err := tx.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&current); err != nil {
+			return err
+		}
+		if current != types.RunRunning && current != types.RunPending {
+			continue
+		}
+		if instance == "" {
+			return fmt.Errorf("missing raw shutdown runtime identity")
+		}
+		result, err := tx.Exec(`INSERT INTO controlled_shutdown_runs(run_id,instance,lifecycle,reason) VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET reason=excluded.reason WHERE controlled_shutdown_runs.instance=excluded.instance`, runID, instance, instance, RawShutdownReason)
+		if err != nil {
+			return err
+		}
+		if n, err := result.RowsAffected(); err != nil {
+			return err
+		} else if n != 1 {
+			return fmt.Errorf("raw shutdown runtime identity mismatch")
+		}
+		if err := invalidateStatusValidation(tx, runID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }

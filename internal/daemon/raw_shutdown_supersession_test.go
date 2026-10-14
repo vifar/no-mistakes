@@ -5,12 +5,14 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +25,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"modernc.org/sqlite"
 )
@@ -57,9 +60,25 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("FAKE_CLI_MODE", "gh")
-	for _, causeKind := range []string{"planned", "user"} {
+	realGit, err := testgit.RealGit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_CLI_REAL_GIT", realGit)
+	if err := os.Link(filepath.Join(bin, "gh"), filepath.Join(bin, "git")); err != nil {
+		t.Fatal(err)
+	}
+	for _, causeKind := range []string{"planned", "user", "provider", "joined"} {
 		for _, first := range []string{"raw", "preservation"} {
 			t.Run(causeKind+"/"+first, func(t *testing.T) {
+				independent := errors.New("independent provider failure https://operator:secret@forge.example/repo")
+				gitMarker := filepath.Join(t.TempDir(), "terminal-preparation")
+				t.Setenv("FAKE_CLI_TERMINAL_GIT_MARKER", gitMarker)
+				gitEntered, gitRelease := make(chan struct{}), make(chan struct{})
+				var gitOnce, gitReleaseOnce sync.Once
+				releaseGit := func() { gitReleaseOnce.Do(func() { close(gitRelease) }) }
+				defer releaseGit()
+				independentFailure := causeKind == "provider" || causeKind == "joined"
 				p := paths.WithRoot(t.TempDir())
 				if err := p.EnsureDirs(); err != nil {
 					t.Fatal(err)
@@ -104,7 +123,7 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer control.Close()
-				if first == "preservation" {
+				if first == "preservation" && !independentFailure {
 					if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER pause_preservation BEFORE UPDATE ON commit_status_publications WHEN NEW.run_id=%q AND NEW.preserve_success=1 AND OLD.preserve_success IS NULL BEGIN SELECT %s(); END`, run.ID, function)); err != nil {
 						t.Fatal(err)
 					}
@@ -112,6 +131,11 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 				var mu sync.Mutex
 				var states []string
 				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/terminal-head" {
+						gitOnce.Do(func() { close(gitEntered) })
+						<-gitRelease
+						return
+					}
 					var payload struct{ State string }
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Error(err)
@@ -121,7 +145,7 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 					mu.Unlock()
 					w.WriteHeader(201)
 				}))
-				defer server.Close()
+				defer func() { releaseGit(); server.Close() }()
 				t.Setenv("FAKE_CLI_STATUS_API_URL", server.URL)
 				ctx, cancel := context.WithCancelCause(context.Background())
 				defer cancel(nil)
@@ -139,6 +163,17 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 					<-sc.Ctx.Done()
 					cancelled <- context.Cause(sc.Ctx)
 					<-watchRelease
+					if independentFailure && first == "raw" {
+						if err := os.WriteFile(gitMarker, []byte("armed"), 0600); err != nil {
+							return nil, err
+						}
+					}
+					if causeKind == "provider" {
+						return nil, independent
+					}
+					if causeKind == "joined" {
+						return nil, errors.Join(independent, sc.Ctx.Err())
+					}
 					return nil, sc.Ctx.Err()
 				}}
 				core := []pipeline.Step{strictShutdownPass{types.StepReview}, strictShutdownPass{types.StepTest}, strictShutdownPass{types.StepDocument}, strictShutdownPass{types.StepLint}, watcher, &steps.PushStep{}}
@@ -196,10 +231,12 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 				defer subscription.Close()
 				if first == "preservation" {
 					releaseWatch()
-					select {
-					case <-terminalEntered:
-					case <-time.After(time.Second):
-						t.Fatal("terminal transaction did not pause")
+					if !independentFailure {
+						select {
+						case <-terminalEntered:
+						case <-time.After(time.Second):
+							t.Fatal("terminal transaction did not pause")
+						}
 					}
 				}
 				if first == "preservation" {
@@ -211,12 +248,39 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 						t.Fatal("preservation did not commit")
 					}
 				}
+				if independentFailure && first == "raw" {
+					releaseWatch()
+					select {
+					case <-gitEntered:
+					case <-time.After(5 * time.Second):
+						t.Fatal("independent failure did not reach terminal Git preparation")
+					}
+				}
 				rawDone := make(chan struct{})
 				go func() { mgr.Shutdown(); close(rawDone) }()
 				select {
 				case <-rawDispatched:
 				case <-time.After(time.Second):
 					t.Fatal("raw shutdown did not reach captured cancellation")
+				}
+				if independentFailure && first == "raw" {
+					if err := pipeline.WithCommitStatusLock(context.Background(), func() error {
+						revoked, err := d.RawShutdownSuperseded(run.ID)
+						if err != nil {
+							return err
+						}
+						if !revoked {
+							return fmt.Errorf("raw supersession not committed")
+						}
+						return nil
+					}); err != nil {
+						t.Fatal(err)
+					}
+					sc := &pipeline.StepContext{Ctx: context.Background(), DB: d, Run: run, Repo: repo, Config: cfg, WorkDir: repo.WorkingPath, ForgeContext: &forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"}}
+					for _, state := range []string{"pending", "success", "failure"} {
+						(&steps.PushStep{}).ReportPublishedHeadStatus(sc, state, head)
+					}
+					releaseGit()
 				}
 				if context.Cause(ctx) != firstCause {
 					t.Fatal("raw shutdown replaced immutable first cause")
@@ -225,6 +289,9 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 				releaseWatch()
 				select {
 				case err := <-finished:
+					if independentFailure && !errors.Is(err, independent) {
+						t.Errorf("independent error identity lost: %v", err)
+					}
 					if err == nil {
 						t.Fatal("cancelled watcher completed successfully")
 					}
@@ -256,17 +323,20 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 				}
 				expectedStatus := types.RunFailed
 				expectedStates := "[success failure]"
-				if first == "preservation" {
+				if first == "preservation" && !independentFailure {
 					expectedStatus = types.RunCancelled
 					expectedStates = "[success]"
 				}
 				if stored.Status != expectedStatus {
 					t.Errorf("terminal status=%s,want %s", stored.Status, expectedStatus)
 				}
-				if first == "raw" && (stored.Error == nil || *stored.Error != "daemon shutting down" || pub.StrictCertificate != nil || (pub.PreserveSuccess != nil && *pub.PreserveSuccess)) {
+				if independentFailure && (stored.Error == nil || (!strings.Contains(*stored.Error, "independent provider failure") || strings.Contains(*stored.Error, "secret"))) {
+					t.Errorf("real failure replaced: %+v", stored)
+				}
+				if first == "raw" && !independentFailure && (stored.Error == nil || *stored.Error != "daemon shutting down" || pub.StrictCertificate != nil || (pub.PreserveSuccess != nil && *pub.PreserveSuccess)) {
 					t.Errorf("raw shutdown retained eligibility or planned reason: %+v,%+v", stored, pub)
 				}
-				if first == "preservation" && (pub.StrictCertificate == nil || pub.PreserveSuccess == nil || !*pub.PreserveSuccess) {
+				if first == "preservation" && !independentFailure && (pub.StrictCertificate == nil || pub.PreserveSuccess == nil || !*pub.PreserveSuccess) {
 					t.Errorf("committed preservation changed: %+v", pub)
 				}
 				eventCtx, stop := context.WithTimeout(context.Background(), time.Second)

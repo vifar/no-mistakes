@@ -192,6 +192,14 @@ func commitStatusReporter(sctx *pipeline.StepContext, publication *db.CommitStat
 				state = "failure"
 			}
 		}
+		revoked, err := sctx.DB.RawShutdownSuperseded(sctx.Run.ID)
+		if err != nil {
+			statusWarning(log, "read shutdown eligibility", err)
+			return
+		}
+		if revoked {
+			state = "failure"
+		}
 		if state == "success" && publication.CIEligible && validatedSHA == publication.SHA && !publication.Validated {
 			publication.Validated = true
 			if err := sctx.DB.PutCommitStatusPublication(sctx.Run.ID, *publication); err != nil {

@@ -97,3 +97,34 @@ func TestTerminalSettlement_CompletionCannotOverwriteCommittedFailure(t *testing
 		t.Fatalf("completion replaced raw terminal decision: %+v,%v", stored, err)
 	}
 }
+
+func TestTerminalSettlement_StartupCannotResurrectTerminalRun(t *testing.T) {
+	d, p, run, repo := setupTest(t)
+	if err := RecordRunFailure(context.Background(), d, run.ID, "independent failure", nil); err != nil {
+		t.Fatal(err)
+	}
+	executor := NewExecutor(d, p, nil, nil, nil, nil)
+	_ = executor.Execute(context.Background(), run, repo, t.TempDir())
+	stored, err := d.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunFailed || stored.Error == nil || *stored.Error != "independent failure" {
+		t.Fatalf("startup resurrected committed failure: %+v,%v", stored, err)
+	}
+}
+
+func TestTerminalSettlement_RegisteredStartupAfterRawSupersession(t *testing.T) {
+	d, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	initGitRepo(t, workDir)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	if err := RecordRawShutdown(context.Background(), d, []string{run.ID}, "runtime", func() { cancel(errors.New(db.RawShutdownReason)) }); err != nil {
+		t.Fatal(err)
+	}
+	step := newPassStep(types.StepCI)
+	executor := NewExecutor(d, p, nil, nil, []Step{step}, nil)
+	_ = executor.Execute(ctx, run, repo, workDir)
+	stored, err := d.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunFailed || stored.Error == nil || *stored.Error != db.RawShutdownReason || step.callCount() != 0 {
+		t.Fatalf("registered executor escaped raw supersession: %+v,%v,calls=%d", stored, err, step.callCount())
+	}
+}

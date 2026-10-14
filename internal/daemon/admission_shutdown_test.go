@@ -209,7 +209,7 @@ func TestControlledShutdown_PersistenceFailureCannotReopenRawAdmission(t *testin
 		t.Fatal(err)
 	}
 	defer control.Close()
-	if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER fail_preparation BEFORE INSERT ON controlled_shutdown_runs BEGIN SELECT %s(); END`, function)); err != nil {
+	if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER fail_preparation BEFORE INSERT ON controlled_shutdown_runs WHEN NEW.reason='cancelled: planned daemon shutdown' BEGIN SELECT %s(); END`, function)); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("NM_DEMO", "1")
