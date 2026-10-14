@@ -1495,6 +1495,30 @@ func (d *DB) recoverStaleRunsExceptWriteAttempt(writeCtx context.Context, errMsg
 
 	placeholders, args := recoveryExclusionClause(preserved)
 
+	rows, err := tx.Query(`SELECT id FROM runs WHERE status IN ('pending','running')`+placeholders, args...)
+	if err != nil {
+		return 0, err
+	}
+	var invalidated []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		invalidated = append(invalidated, id)
+	}
+	readErr := rows.Err()
+	rows.Close()
+	if readErr != nil {
+		return 0, readErr
+	}
+	for _, id := range invalidated {
+		if err := invalidateStatusValidation(context.Background(), tx, id); err != nil {
+			return 0, err
+		}
+	}
+
 	// A daemon restart during the long-lived CI monitor should not turn an
 	// already-pushed PR into a failed run. Recover those runs before the broad
 	// failure update below so the hard-fail path keeps handling mid-pipeline

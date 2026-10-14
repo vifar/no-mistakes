@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
 )
 
@@ -80,6 +83,16 @@ func handleFakeCLI(mode string) {
 	}
 
 	switch mode {
+	case "raw-shutdown-process-loss":
+		d, err := db.Open(os.Getenv("FAKE_CLI_DB_PATH"))
+		if err != nil {
+			os.Exit(1)
+		}
+		err = pipeline.RecordRawShutdown(context.Background(), d, []string{os.Getenv("FAKE_CLI_RAW_RUN")}, "old-runtime", func() {})
+		if err == nil || !strings.Contains(err.Error(), "raw write rolled back") {
+			os.Exit(1)
+		}
+		os.Exit(0)
 	case "git-status-confirmation-pipe-child":
 		time.Sleep(time.Hour)
 		return

@@ -555,7 +555,7 @@ func reportRecoveredCommitStatuses(parent context.Context, d *db.DB, p *paths.Pa
 			return
 		}
 		run, err := d.GetRun(stale.ID)
-		if err != nil || run == nil || (run.Status != types.RunFailed && run.Status != types.RunCancelled && run.Status != types.RunCompleted) {
+		if err != nil || run == nil || (run.Status != types.RunFailed && run.Status != types.RunCancelled && run.Status != types.RunCompleted && run.Status != types.RunCIMonitorInterrupted) {
 			continue
 		}
 		repo, err := d.GetRepo(run.RepoID)

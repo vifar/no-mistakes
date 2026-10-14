@@ -226,3 +226,50 @@ func stepNamesEqual(a, b []types.StepName) bool {
 	}
 	return true
 }
+
+func TestPrepareRecoveredRun_ObsoleteShutdownCannotAuthorizeOrFence(t *testing.T) {
+	for _, reason := range []string{"planned", "daemon shutting down"} {
+		t.Run(reason, func(t *testing.T) {
+			m, run, _ := gatePinFixture(t, oneGateYAML, nil)
+			prior := m.runtimeInstance
+			if reason == "planned" {
+				if err := m.db.PrepareControlledShutdown([]string{run.ID}, prior, "prior-lifecycle", reason); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := m.db.SupersedeUncommittedCancellations([]string{run.ID}, prior); err != nil {
+					t.Fatal(err)
+				}
+			}
+			m.db.Close()
+			reopened, err := db.Open(m.paths.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			m = NewRunManager(reopened, m.paths, m.steps)
+			run, err = reopened.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m.runtimeInstance == prior {
+				t.Fatal("recovery did not use a new runtime")
+			}
+			if plan, err := m.prepareRecoveredRun(context.Background(), run); err == nil {
+				plan.agent.Close()
+				t.Error("unsettled prior-runtime intent admitted")
+			}
+			stored, err := m.db.GetRun(run.ID)
+			if err != nil || stored.Status != types.RunFailed {
+				t.Fatalf("prior-runtime intent not durably failed: %+v,%v", stored, err)
+			}
+			second, err := m.db.InsertRun(run.RepoID, "other", run.HeadSHA, run.BaseSHA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := m.db.SupersedeUncommittedCancellations([]string{run.ID, second.ID}, m.runtimeInstance); err != nil {
+				t.Fatalf("obsolete authority permanently fenced captured batch: %v", err)
+			}
+		})
+	}
+}

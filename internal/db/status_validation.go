@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -34,13 +35,13 @@ func statusEpoch(q statusQuery, runID string) (int64, error) {
 
 func (d *DB) StatusValidationEpoch(runID string) (int64, error) { return statusEpoch(d.sql, runID) }
 
-func invalidateStatusValidation(tx *sql.Tx, runID string) error {
+func invalidateStatusValidation(ctx context.Context, tx *sql.Tx, runID string) error {
 	for _, query := range []string{
 		`INSERT INTO status_validation_epochs(run_id,epoch) VALUES(?,1) ON CONFLICT(run_id) DO UPDATE SET epoch=epoch+1`,
 		`UPDATE commit_status_publications SET strict_certificate=NULL,preserve_success=NULL WHERE run_id=?`,
 		`DELETE FROM status_validation_steps WHERE step_id IN (SELECT id FROM step_results WHERE run_id=?)`,
 	} {
-		if _, err := tx.Exec(query, runID); err != nil {
+		if _, err := tx.ExecContext(ctx, query, runID); err != nil {
 			return err
 		}
 	}
@@ -53,7 +54,7 @@ func (d *DB) InvalidateStatusValidation(runID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if err := invalidateStatusValidation(tx, runID); err != nil {
+	if err := invalidateStatusValidation(context.Background(), tx, runID); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -288,14 +289,16 @@ func (d *DB) RecordIneligibleTerminal(runID, message string, status types.RunSta
 }
 
 func (d *DB) SupersedeUncommittedCancellations(runIDs []string, instance string) error {
-	tx, err := d.sql.Begin()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := d.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	for _, runID := range runIDs {
 		var current types.RunStatus
-		if err := tx.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&current); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM runs WHERE id=?`, runID).Scan(&current); err != nil {
 			return err
 		}
 		if current != types.RunRunning && current != types.RunPending {
@@ -304,18 +307,48 @@ func (d *DB) SupersedeUncommittedCancellations(runIDs []string, instance string)
 		if instance == "" {
 			return fmt.Errorf("missing raw shutdown runtime identity")
 		}
-		result, err := tx.Exec(`INSERT INTO controlled_shutdown_runs(run_id,instance,lifecycle,reason) VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET reason=excluded.reason WHERE controlled_shutdown_runs.instance=excluded.instance`, runID, instance, instance, RawShutdownReason)
+		_, err := tx.ExecContext(ctx, `INSERT INTO controlled_shutdown_runs(run_id,instance,lifecycle,reason) VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET instance=excluded.instance,lifecycle=excluded.lifecycle,reason=excluded.reason`, runID, instance, instance, RawShutdownReason)
 		if err != nil {
 			return err
 		}
-		if n, err := result.RowsAffected(); err != nil {
-			return err
-		} else if n != 1 {
-			return fmt.Errorf("raw shutdown runtime identity mismatch")
-		}
-		if err := invalidateStatusValidation(tx, runID); err != nil {
+		if err := invalidateStatusValidation(ctx, tx, runID); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+func (d *DB) ReconcileRecoveredRun(runID, instance string) (bool, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var status types.RunStatus
+	if err := tx.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&status); err != nil {
+		return false, err
+	}
+	if status.Terminal() {
+		return false, tx.Commit()
+	}
+	var obsolete bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM controlled_shutdown_runs WHERE run_id=? AND instance<>?)`, runID, instance).Scan(&obsolete); err != nil {
+		return false, err
+	}
+	if err := invalidateStatusValidation(context.Background(), tx, runID); err != nil {
+		return false, err
+	}
+	if obsolete {
+		if _, err := tx.Exec(`DELETE FROM controlled_shutdown_runs WHERE run_id=? AND instance<>?`, runID, instance); err != nil {
+			return false, err
+		}
+		ts := now()
+		if _, err := tx.Exec(`UPDATE runs SET status=?,error=?,push_active=0,terminal_head_verified_at=NULL,awaiting_agent_since=NULL,updated_at=? WHERE id=?`, types.RunFailed, "daemon crashed during execution", ts, runID); err != nil {
+			return false, err
+		}
+		if _, err := tx.Exec(`UPDATE step_results SET status=?,error=?,completed_at=? WHERE run_id=? AND status IN ('running','awaiting_approval','fixing','fix_review')`, types.StepStatusFailed, "daemon crashed during execution", ts, runID); err != nil {
+			return false, err
+		}
+	}
+	return obsolete, tx.Commit()
 }

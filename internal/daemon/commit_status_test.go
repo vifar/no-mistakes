@@ -137,7 +137,7 @@ func TestDaemonPanic_SerializesPausedSuccessAndRecoversFailure(t *testing.T) {
 }
 
 func TestRecoverOnStartup_ReplacesPublishedSuccessWithFailure(t *testing.T) {
-	for _, scenario := range []string{"active", "terminal failed", "terminal missing clone", "terminal cancelled", "CI interrupted", "terminal uncertified", "terminal certified", "plugin"} {
+	for _, scenario := range []string{"active", "terminal failed", "terminal missing clone", "terminal cancelled", "CI interrupted", "CI crash", "CI planned crash", "CI raw rollback crash", "terminal uncertified", "terminal certified", "plugin"} {
 		for _, profileOnly := range []bool{false, true} {
 			if scenario == "plugin" && profileOnly {
 				continue
@@ -152,18 +152,26 @@ func TestRecoverOnStartup_ReplacesPublishedSuccessWithFailure(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer d.Close()
-				repo, err := d.InsertRepoWithID("status-recovery", t.TempDir(), "https://github.com/test/repo", "main")
-				if err != nil {
-					t.Fatal(err)
+				var repo *db.Repo
+				pushed := "pushed-head"
+				mutable := "mutable-head"
+				if strings.Contains(scenario, "crash") {
+					repo, mutable = setupTestGitRepo(t, p, d, "status-recovery")
+					pushed = mutable
+				} else {
+					repo, err = d.InsertRepoWithID("status-recovery", t.TempDir(), "https://github.com/test/repo", "main")
+					if err != nil {
+						t.Fatal(err)
+					}
 				}
-				run, err := d.InsertRun(repo.ID, "feature", "mutable-head", "base")
+				run, err := d.InsertRun(repo.ID, "feature", mutable, "base")
 				if err != nil {
 					t.Fatal(err)
 				}
 				if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 					t.Fatal(err)
 				}
-				if err := d.PutCommitStatusPublication(run.ID, db.CommitStatusPublication{SHA: "pushed-head", Host: "github.com", Repo: "test/repo", Validated: true}); err != nil {
+				if err := d.PutCommitStatusPublication(run.ID, db.CommitStatusPublication{SHA: pushed, Host: "github.com", Repo: "test/repo", Validated: true}); err != nil {
 					t.Fatal(err)
 				}
 				binDir := t.TempDir()
@@ -180,7 +188,7 @@ func TestRecoverOnStartup_ReplacesPublishedSuccessWithFailure(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Error(err)
 					}
-					if r.Method != "POST" || r.URL.Path != "/repos/test/repo/statuses/pushed-head" || payload.Context != "no-mistakes" {
+					if r.Method != "POST" || r.URL.Path != "/repos/test/repo/statuses/"+pushed || payload.Context != "no-mistakes" {
 						t.Errorf("request = %s %s %+v", r.Method, r.URL.Path, payload)
 					}
 					mu.Lock()
@@ -214,13 +222,53 @@ func TestRecoverOnStartup_ReplacesPublishedSuccessWithFailure(t *testing.T) {
 					}
 				}
 				(&steps.PushStep{}).ReportPublishedHeadStatus(&pipeline.StepContext{Ctx: context.Background(), DB: d, Run: run, Repo: repo, ForgeContext: forge}, "success", "")
-				publication, err := d.GetCommitStatusPublication(context.Background(), run.ID, db.CommitStatusPublication{SHA: "pushed-head", Host: "github.com", Repo: "test/repo"})
+				publication, err := d.GetCommitStatusPublication(context.Background(), run.ID, db.CommitStatusPublication{SHA: pushed, Host: "github.com", Repo: "test/repo"})
 				if err != nil || publication.LastState != "success" {
 					t.Fatalf("initial publication = %+v, %v", publication, err)
+				}
+				if strings.Contains(scenario, "crash") {
+					if err := d.UpdateRunPRURL(run.ID, "https://github.com/test/repo/pull/1"); err != nil {
+						t.Fatal(err)
+					}
+					ci, err := d.InsertStepResult(run.ID, types.StepCI)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := d.StartStep(ci.ID); err != nil {
+						t.Fatal(err)
+					}
+					if scenario == "CI planned crash" {
+						if err := d.PrepareControlledShutdown([]string{run.ID}, "old-runtime", "old-lifecycle", "planned"); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if scenario == "CI raw rollback crash" {
+						control, err := sql.Open("sqlite", p.DB())
+						if err != nil {
+							t.Fatal(err)
+						}
+						if _, err := control.Exec(`CREATE TRIGGER crash_raw BEFORE INSERT ON controlled_shutdown_runs BEGIN SELECT RAISE(ABORT,'raw write rolled back'); END`); err != nil {
+							t.Fatal(err)
+						}
+						child := exec.Command(filepath.Join(binDir, "gh"))
+						child.Env = append(os.Environ(), "FAKE_CLI_MODE=raw-shutdown-process-loss", "FAKE_CLI_DB_PATH="+p.DB(), "FAKE_CLI_RAW_RUN="+run.ID)
+						if out, err := child.CombinedOutput(); err != nil {
+							t.Fatalf("owned raw continuation process-loss fixture: %v,%s", err, out)
+						}
+						control.Close()
+					}
+					d.Close()
+					d, err = db.Open(p.DB())
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer d.Close()
 				}
 				wantStates := []string{"success", "failure"}
 				wantStatus := types.RunFailed
 				switch scenario {
+				case "CI crash", "CI planned crash", "CI raw rollback crash":
+					wantStatus = types.RunCIMonitorInterrupted
 				case "terminal failed", "terminal missing clone":
 					if scenario == "terminal missing clone" {
 						if err := os.Remove(repo.WorkingPath); err != nil {
@@ -234,7 +282,7 @@ func TestRecoverOnStartup_ReplacesPublishedSuccessWithFailure(t *testing.T) {
 					wantStatus = types.RunCancelled
 					if scenario == "CI interrupted" {
 						wantStatus = types.RunCIMonitorInterrupted
-						wantStates = []string{"success"}
+						wantStates = []string{"success", "failure"}
 					}
 					if err := d.UpdateRunStatus(run.ID, wantStatus); err != nil {
 						t.Fatal(err)
@@ -273,6 +321,20 @@ func TestRecoverOnStartup_ReplacesPublishedSuccessWithFailure(t *testing.T) {
 				recovered, err := d.GetRun(run.ID)
 				if err != nil || recovered.Status != wantStatus {
 					t.Fatalf("recovered run = %+v, %v", recovered, err)
+				}
+				if strings.Contains(scenario, "crash") {
+					reopened, err := db.Open(p.DB())
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer reopened.Close()
+					persisted, err := reopened.GetRun(run.ID)
+					if err != nil || persisted.Status != types.RunCIMonitorInterrupted {
+						t.Fatalf("process-loss display changed: %+v,%v", persisted, err)
+					}
+					for _, state := range []string{"pending", "success", "failure"} {
+						(&steps.PushStep{}).ReportPublishedHeadStatus(&pipeline.StepContext{Ctx: context.Background(), DB: reopened, Run: persisted, Repo: repo, ForgeContext: forge}, state, pushed)
+					}
 				}
 				mu.Lock()
 				defer mu.Unlock()

@@ -33,6 +33,33 @@ type rawPublicationSettlement struct {
 
 var rawPublicationSettlements []*rawPublicationSettlement
 
+var rawRecoveryRunning bool
+
+func startRawRecoveryLocked() {
+	if rawRecoveryRunning {
+		return
+	}
+	rawRecoveryRunning = true
+	go func() {
+		for {
+			timer := time.NewTimer(time.Second)
+			<-timer.C
+			ctx, cancel := context.WithTimeout(context.Background(), commitStatusTimeout)
+			if err := AcquireCommitStatusLock(ctx); err == nil {
+				ReleaseCommitStatusLock()
+			}
+			cancel()
+			terminalSettlementMu.Lock()
+			if len(rawPublicationSettlements) == 0 {
+				rawRecoveryRunning = false
+				terminalSettlementMu.Unlock()
+				return
+			}
+			terminalSettlementMu.Unlock()
+		}
+	}()
+}
+
 func drainPublicationSettlements() error {
 	for {
 		terminalSettlementMu.Lock()
@@ -42,6 +69,7 @@ func drainPublicationSettlements() error {
 			err := pending.write()
 			terminalSettlementMu.Lock()
 			if err != nil {
+				startRawRecoveryLocked()
 				for _, owned := range rawPublicationSettlements {
 					select {
 					case owned.done <- err:
