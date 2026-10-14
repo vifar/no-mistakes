@@ -84,11 +84,19 @@ func durationFromEnv(name string, fallback time.Duration) time.Duration {
 // what lets users pick up env-var changes (see #143 for the PATH fix) with
 // a plain `daemon start` instead of a manual stop + start.
 func Start(p *paths.Paths) error {
+	return StartGuarded(p, nil)
+}
+
+// StartGuarded is Start, except that when a running daemon must be restarted
+// to pick up a changed service definition, beforeRestart runs first; an error
+// from it aborts the start before the definition is rewritten or the daemon
+// is stopped.
+func StartGuarded(p *paths.Paths, beforeRestart func() error) error {
 	if err := p.EnsureDirs(); err != nil {
 		return err
 	}
 	if alive, _ := daemonHealthCheck(p); alive {
-		reloaded, err := reinstallManagedServiceIfChanged(p)
+		reloaded, err := reinstallManagedServiceIfChanged(p, beforeRestart)
 		if err != nil {
 			return err
 		}
@@ -147,7 +155,7 @@ func Start(p *paths.Paths) error {
 // a binary upgrade re-applies the new service definition without forcing
 // users to run `daemon restart` explicitly. No-op on Windows and when the
 // service manager is bypassed (i.e., under `go test`).
-func reinstallManagedServiceIfChanged(p *paths.Paths) (bool, error) {
+func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() error) (bool, error) {
 	if serviceManagerBypassed() {
 		return false, nil
 	}
@@ -209,6 +217,11 @@ func reinstallManagedServiceIfChanged(p *paths.Paths) (bool, error) {
 		return false, nil
 	case readErr != nil && !os.IsNotExist(readErr):
 		return false, fmt.Errorf("read managed service definition: %w", readErr)
+	}
+	if beforeRestart != nil {
+		if err := beforeRestart(); err != nil {
+			return false, err
+		}
 	}
 	restoreMode := os.FileMode(0o644)
 	if info, err := os.Stat(installPath); err == nil {

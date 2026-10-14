@@ -443,6 +443,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		startedAt := time.Now()
 		defer m.wg.Done()
 		defer close(done)
+		parkedAtShutdown := false
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				errMsg := fmt.Sprintf("internal panic: %v", recovered)
@@ -458,12 +459,14 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			cancel(nil)
 			_ = plan.agent.Close()
 			m.closeSubscribers(plan.run.ID)
-			m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
-			// A recovered run is a finished run too. This is the second of the
-			// two completion boundaries, and leaving it out is what let a run
-			// resumed after a daemon restart keep its empty evidence directory
-			// until some later run or restart happened to sweep it.
-			m.cleanupRunEvidence(plan.cfg, plan.run.ID)
+			if !parkedAtShutdown {
+				m.removeRunWorktree(plan.repo.ID, plan.run.ID, plan.gateDir, plan.workDir, "resumed_run_finished")
+				// A recovered run is a finished run too. This is the second of the
+				// two completion boundaries, and leaving it out is what let a run
+				// resumed after a daemon restart keep its empty evidence directory
+				// until some later run or restart happened to sweep it.
+				m.cleanupRunEvidence(plan.cfg, plan.run.ID)
+			}
 			m.mu.Lock()
 			delete(m.executors, plan.run.ID)
 			delete(m.cancels, plan.run.ID)
@@ -471,7 +474,11 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			m.mu.Unlock()
 		}()
 
-		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
+		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); errors.Is(err, pipeline.ErrParkedAtShutdown) {
+			parkedAtShutdown = true
+			slog.Info("recovered run left parked for resume after daemon restart", "run_id", plan.run.ID)
+			return
+		} else if err != nil {
 			if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
 				plan.run.Status = types.RunFailed
@@ -715,18 +722,41 @@ func (m *RunManager) closeSubscribers(runID string) {
 // own root, admitting or validating a foreign repository's push against local
 // state. The --gate value arrives absolute and symlink-resolved from git
 // rev-parse while the owned path is built from NM_HOME exactly as spelled, so
-// compare through canonicalRoot - this package's one definition of "same root",
-// which reconciles relative against absolute, symlinked against real
-// (/var -> /private/var on macOS), and case on Windows - rather than textually.
+// compare through sameGateDir - canonicalRoot's "same root" (relative against
+// absolute, symlinked against real, /var -> /private/var on macOS, case on
+// Windows) plus a filesystem identity check for spellings that differ only in
+// letter case on a case-insensitive volume - rather than textually.
 func ownedGateRepoID(p *paths.Paths, gate string) (string, error) {
 	repoID, err := repoIDFromGatePath(gate)
 	if err != nil {
 		return "", err
 	}
-	if owned := p.RepoDir(repoID); canonicalRoot(gate) != canonicalRoot(owned) {
+	if owned := p.RepoDir(repoID); !sameGateDir(gate, owned) {
 		return "", fmt.Errorf("gate %q does not belong to this daemon's home (this root owns %q)", gate, owned)
 	}
 	return repoID, nil
+}
+
+// sameGateDir reports whether two paths name the same gate directory. The
+// canonical spellings are compared first; when they differ, the two directories
+// must be the same on-disk object (os.SameFile). That follows the filesystem's
+// own case rule: a macOS home registered as /Users/Name but stored as
+// /Users/name resolves to one directory, while on a case-sensitive volume the
+// same two spellings are different directories and stay refused. A path that
+// cannot be stat'ed is never the same, so the guard stays fail-closed.
+func sameGateDir(a, b string) bool {
+	if canonicalRoot(a) == canonicalRoot(b) {
+		return true
+	}
+	infoA, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	infoB, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(infoA, infoB)
 }
 
 // repoIDFromGatePath extracts the repo ID from a gate bare repo path.
@@ -1848,6 +1878,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		startedAt := time.Now()
 		defer m.wg.Done()
 		defer close(done)
+		parkedAtShutdown := false
 		defer func() {
 			if r := recover(); r != nil {
 				errMsg := fmt.Sprintf("internal panic: %v", r)
@@ -1887,8 +1918,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			ag.Close()
 			// Close subscriber channels for this run.
 			m.closeSubscribers(run.ID)
-			m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_finished")
-			m.cleanupRunEvidence(cfg, run.ID)
+			if !parkedAtShutdown {
+				m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_finished")
+				m.cleanupRunEvidence(cfg, run.ID)
+			}
 			// Remove tracking.
 			m.mu.Lock()
 			delete(m.executors, run.ID)
@@ -1897,7 +1930,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			m.mu.Unlock()
 		}()
 
-		if err := executor.Execute(runCtx, run, repo, wtDir); err != nil {
+		if err := executor.Execute(runCtx, run, repo, wtDir); errors.Is(err, pipeline.ErrParkedAtShutdown) {
+			parkedAtShutdown = true
+			slog.Info("run left parked for resume after daemon restart", "run_id", run.ID)
+			return
+		} else if err != nil {
 			fields := telemetry.Fields{
 				"action":      "finished",
 				"trigger":     trigger,
@@ -2347,7 +2384,7 @@ func (m *RunManager) Shutdown() {
 	m.mu.Unlock()
 
 	for id, cancel := range cancels {
-		cancel(fmt.Errorf("daemon shutting down"))
+		cancel(pipeline.ErrDaemonShutdown)
 		slog.Info("cancelled run on shutdown", "run_id", id)
 	}
 

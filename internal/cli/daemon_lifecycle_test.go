@@ -105,6 +105,54 @@ func TestDaemonRestartRefusesWithActiveRuns(t *testing.T) {
 	}
 }
 
+// TestDaemonStartRefusesToRestartForDriftWithActiveRuns covers #1425: a
+// running daemon whose service definition drifted is restarted by
+// `daemon start`, so that restart must pass the same active-run guard.
+func TestDaemonStartRefusesToRestartForDriftWithActiveRuns(t *testing.T) {
+	nmHome := makeSocketSafeTempDir(t)
+	t.Setenv("NM_HOME", nmHome)
+	createLifecycleGuardRuns(t, paths.WithRoot(nmHome))
+
+	restarted := false
+	prevStart := daemonStartGuardedFn
+	daemonStartGuardedFn = func(_ *paths.Paths, beforeRestart func() error) error {
+		if err := beforeRestart(); err != nil {
+			return err
+		}
+		restarted = true
+		return nil
+	}
+	t.Cleanup(func() { daemonStartGuardedFn = prevStart })
+
+	out, err := executeCmd("daemon", "start")
+	if err == nil {
+		t.Fatal("daemon start should refuse to restart while active runs exist")
+	}
+	if restarted {
+		t.Fatal("daemon start should not restart the daemon after refusing")
+	}
+	for _, want := range []string{"refusing daemon start", "2 active pipeline runs", "feature-a", "feature-b", "--force"} {
+		if !strings.Contains(out+err.Error(), want) {
+			t.Fatalf("daemon start refusal should contain %q, got output %q error %v", want, out, err)
+		}
+	}
+
+	out, err = executeCmd("daemon", "start", "--force")
+	if err != nil {
+		t.Fatalf("daemon start --force failed: %v\n%s", err, out)
+	}
+	if !restarted {
+		t.Fatal("daemon start --force should restart the daemon")
+	}
+	if !strings.Contains(out, "FORCE: daemon start") {
+		t.Fatalf("force output should be loud, got %q", out)
+	}
+	data, err := os.ReadFile(filepath.Join(nmHome, "logs", "cli.log"))
+	if err != nil || !strings.Contains(string(data), "lifecycle FORCE command=daemon.start") {
+		t.Fatalf("cli.log should record the forced restart, got %q (err %v)", data, err)
+	}
+}
+
 func TestLifecycleCommandsWriteCallerAttributionToCLILog(t *testing.T) {
 	nmHome := makeSocketSafeTempDir(t)
 	t.Setenv("NM_HOME", nmHome)

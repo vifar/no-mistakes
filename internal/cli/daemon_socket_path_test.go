@@ -116,9 +116,15 @@ func TestDaemonStartRestartAndStatusReportSocketPathTooLong(t *testing.T) {
 	root := makeLongRoot(t)
 	t.Setenv("NM_HOME", root)
 
-	originalStart, originalStop, originalRunning := daemonStartFn, daemonStopFn, daemonIsRunningFn
-	t.Cleanup(func() { daemonStartFn, daemonStopFn, daemonIsRunningFn = originalStart, originalStop, originalRunning })
+	originalStart, originalStartGuarded, originalStop, originalRunning := daemonStartFn, daemonStartGuardedFn, daemonStopFn, daemonIsRunningFn
+	t.Cleanup(func() {
+		daemonStartFn, daemonStartGuardedFn, daemonStopFn, daemonIsRunningFn = originalStart, originalStartGuarded, originalStop, originalRunning
+	})
 	daemonStartFn = func(*paths.Paths) error {
+		t.Fatal("daemon restart went past the socket path check")
+		return nil
+	}
+	daemonStartGuardedFn = func(*paths.Paths, func() error) error {
 		t.Fatal("daemon start went past the socket path check")
 		return nil
 	}

@@ -61,7 +61,7 @@ func TestReinstallSystemdServiceInheritsProxyFromExistingUnitWhenEnvUnset(t *tes
 	}
 	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return true, nil }
 
-	changed, err := reinstallManagedServiceIfChanged(p)
+	changed, err := reinstallManagedServiceIfChanged(p, nil)
 	if err != nil {
 		t.Fatalf("reinstallManagedServiceIfChanged: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestReinstallLaunchAgentInheritsProxyFromExistingPlistWhenEnvUnset(t *testi
 	}
 	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return true, nil }
 
-	changed, err := reinstallManagedServiceIfChanged(p)
+	changed, err := reinstallManagedServiceIfChanged(p, nil)
 	if err != nil {
 		t.Fatalf("reinstallManagedServiceIfChanged: %v", err)
 	}
