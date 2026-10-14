@@ -254,11 +254,7 @@ func (i Inspector) registeredManagedCommonDir(commonDir string) (string, bool, e
 	if repo == nil || !sameCanonicalPath(common, i.Paths.RepoDir(repo.ID)) {
 		return "", false, nil
 	}
-	head, err := gitHeadPresent(common)
-	if err != nil {
-		return "", false, fmt.Errorf("gate execution context: verify managed gate HEAD: %w", err)
-	}
-	if !git.LooksLikeBareRepository(common) || !head {
+	if !git.LooksLikeBareRepository(common) {
 		return "", false, fmt.Errorf("gate execution context: registered gate has invalid bare structure")
 	}
 	return repo.ID, true, nil
@@ -288,6 +284,22 @@ func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
 	}
 	if !matched {
 		return "", fmt.Errorf("gate execution context: Git discovery skipped repository metadata")
+	}
+	head, err := gitHeadPresent(dirs[0])
+	if err != nil {
+		return "", fmt.Errorf("gate execution context: verify Git common HEAD: %w", err)
+	}
+	if !head {
+		return "", fmt.Errorf("gate execution context: Git common directory has invalid HEAD")
+	}
+	for _, entry := range []string{"objects", "refs"} {
+		info, err := os.Stat(filepath.Join(dirs[0], entry))
+		if err != nil {
+			return "", fmt.Errorf("gate execution context: verify Git common structure: %w", err)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("gate execution context: Git common directory has invalid %s", entry)
+		}
 	}
 	return dirs[0], nil
 }
