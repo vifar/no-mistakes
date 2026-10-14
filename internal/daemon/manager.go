@@ -450,10 +450,11 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				errMsg := fmt.Sprintf("internal panic: %v", recovered)
-				plan.run.Status = types.RunFailed
-				plan.run.Error = &errMsg
 				if err := pipeline.RecordRunFailure(context.Background(), m.db, plan.run.ID, errMsg, nil); err != nil {
 					slog.Error("failed to update recovered run after panic", "run_id", plan.run.ID, "error", err)
+				} else {
+					plan.run.Status = types.RunFailed
+					plan.run.Error = &errMsg
 				}
 			}
 			if plan.run.Status == types.RunFailed || plan.run.Status == types.RunCancelled {
@@ -478,10 +479,11 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
 			if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
-				plan.run.Status = types.RunFailed
-				plan.run.Error = &errMsg
 				if dbErr := pipeline.RecordRunFailure(context.Background(), m.db, plan.run.ID, errMsg, nil); dbErr != nil {
 					slog.Error("failed to mark recovered run failed", "run_id", plan.run.ID, "error", dbErr)
+				} else {
+					plan.run.Status = types.RunFailed
+					plan.run.Error = &errMsg
 				}
 			}
 			slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", err)
@@ -1853,8 +1855,19 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			if r := recover(); r != nil {
 				errMsg := fmt.Sprintf("internal panic: %v", r)
 				slog.Error("panic in pipeline goroutine", "run_id", run.ID, "panic", r)
-				run.Status = types.RunFailed
-				run.Error = &errMsg
+				verifiedHead, verified := preserveRunHead(m.db, wtDir, run)
+				var dbErr error
+				if verified {
+					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, &verifiedHead)
+				} else {
+					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, nil)
+				}
+				if dbErr != nil {
+					slog.Error("failed to update run after panic", "run_id", run.ID, "error", dbErr)
+				} else {
+					run.Status = types.RunFailed
+					run.Error = &errMsg
+				}
 				fields := telemetry.Fields{
 					"action":      "finished",
 					"trigger":     trigger,
@@ -1870,16 +1883,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 				}
 				addRunPerformanceSummary(m.db, run.ID, fields)
 				telemetry.Track("run", fields)
-				verifiedHead, verified := preserveRunHead(m.db, wtDir, run)
-				var dbErr error
-				if verified {
-					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, &verifiedHead)
-				} else {
-					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, nil)
-				}
-				if dbErr != nil {
-					slog.Error("failed to update run after panic", "run_id", run.ID, "error", dbErr)
-				}
 			}
 			if run.Status == types.RunFailed || run.Status == types.RunCancelled {
 				executor.ReportPublishedHeadFailure(context.Background(), run, repo)

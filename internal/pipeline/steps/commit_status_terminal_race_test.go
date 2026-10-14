@@ -347,3 +347,101 @@ func TestCommitStatus_PRFinalizationSerializesPausedSuccess(t *testing.T) {
 		}
 	}
 }
+
+func TestCommitStatus_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
+	sc, path, publication := strictStatusContext(t)
+	entered, release, callbackDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	var mu sync.Mutex
+	var states []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct{ State string }
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		if payload.State == "success" {
+			close(entered)
+			<-release
+		}
+		mu.Lock()
+		states = append(states, payload.State)
+		mu.Unlock()
+		w.WriteHeader(201)
+	}))
+	defer func() { unblock(); server.Close() }()
+	env, _ := fakeGH(t, "")
+	env = append(env, "FAKE_CLI_STATUS_API_URL="+server.URL, "FAKE_CLI_STATUS_PIPE_CHILD=1")
+	for key, value := range environmentEntries(t, env) {
+		t.Setenv(key, value)
+	}
+	failing := make(chan struct{})
+	terminal := make(chan struct{}, 1)
+	ci := &transitionStep{name: types.StepCI, execute: func(ctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+		go func() { defer close(callbackDone); ctx.PublishedHeadValidated(publication.SHA) }()
+		<-entered
+		close(failing)
+		return nil, errors.New("ordinary failure during status publication")
+	}}
+	app := paths.WithRoot(t.TempDir())
+	if err := app.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	executor := pipeline.NewExecutor(sc.DB, app, sc.Config, sc.Agent, []pipeline.Step{&PushStep{}, ci}, func(event ipc.Event) {
+		if event.Type == ipc.EventRunCompleted {
+			terminal <- struct{}{}
+		}
+	})
+	executor.SetSkippedSteps([]types.StepName{types.StepPush})
+	executor.SetForgeContext(&forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"})
+	done := make(chan error, 1)
+	go func() { done <- executor.Execute(context.Background(), sc.Run, sc.Repo, "") }()
+	select {
+	case <-failing:
+	case <-time.After(10 * time.Second):
+		t.Fatal("failure did not start")
+	}
+	time.Sleep(16 * time.Second)
+	run, err := sc.DB.GetRun(sc.Run.ID)
+	if err != nil || run.Status != types.RunRunning {
+		t.Errorf("terminal commit crossed outstanding POST after deadline: %+v,%v", run, err)
+	}
+	select {
+	case <-terminal:
+		t.Error("unsettled terminal event emitted")
+	default:
+	}
+	unblock()
+	<-callbackDone
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("ordinary failure lost")
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("failure settlement did not finish")
+	}
+	reopened, err := db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	run, err = reopened.GetRun(sc.Run.ID)
+	if err != nil || run.Status != types.RunFailed {
+		t.Fatalf("durable terminal settlement: %+v,%v", run, err)
+	}
+	stored, err := reopened.GetCommitStatusPublication(context.Background(), sc.Run.ID, publication)
+	if err != nil || stored.LastState != "failure" || stored.StrictCertificate != nil {
+		t.Fatalf("durable failure publication: %+v,%v", stored, err)
+	}
+	sc.DB = reopened
+	for _, state := range []string{"pending", "success", "failure"} {
+		(&PushStep{}).ReportPublishedHeadStatus(sc, state, publication.SHA)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fmt.Sprint(states) != "[success failure]" {
+		t.Fatalf("HTTP ordering = %v", states)
+	}
+}

@@ -1213,6 +1213,17 @@ func forwardCommitStatus(args []string) bool {
 			}
 		}
 	}
+	if os.Getenv("FAKE_CLI_STATUS_PIPE_CHILD") == "1" && body["state"] == "success" {
+		child := exec.Command(os.Args[0], os.Args[1:]...)
+		child.Env = append(os.Environ(), "FAKE_CLI_STATUS_PIPE_CHILD=0")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		if err := child.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return true
+	}
+	http.DefaultClient.Timeout = 25 * time.Second
 	data, _ := json.Marshal(body)
 	req, err := http.NewRequest(method, base+"/"+endpoint, strings.NewReader(string(data)))
 	if err != nil {

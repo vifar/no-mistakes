@@ -2314,13 +2314,14 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		return e.db.RecordIneligibleTerminal(run.ID, errMsg, runStatus, head)
 	})
 	if dbErr != nil {
-		// Preparation/lock failures must still terminalize a usable database.
-		// No failed preparation can retain the success exception.
+		slog.Warn("settling ineligible terminal outcome", "run", run.ID, "error", dbErr)
+		err = errors.Join(err, dbErr)
 		verified = false
-		dbErr = e.db.RecordIneligibleTerminal(run.ID, errMsg, runStatus, nil)
+		dbErr = WithCommitStatusLock(context.Background(), func() error { return e.db.RecordIneligibleTerminal(run.ID, errMsg, runStatus, nil) })
 	}
 	if dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
+		return errors.Join(err, dbErr)
 	} else if verified {
 		run.HeadSHA = verifiedHead
 	}

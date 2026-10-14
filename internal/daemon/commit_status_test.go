@@ -507,3 +507,257 @@ func TestRecoverCommitStatusPushAttempt(t *testing.T) {
 		})
 	}
 }
+
+func TestDaemonPanic_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
+	bin := t.TempDir()
+	if out, err := exec.Command("go", "build", "-o", filepath.Join(bin, "gh"), "../pipeline/fakecli").CombinedOutput(); err != nil {
+		t.Fatalf("fake gh: %v: %s", err, out)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_CLI_MODE", "gh")
+	t.Setenv("FAKE_CLI_STATUS_PIPE_CHILD", "1")
+	entered, release, panicking, callbackDone := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	var mu sync.Mutex
+	var states []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct{ State string }
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		if payload.State == "success" {
+			close(entered)
+			<-release
+		}
+		mu.Lock()
+		states = append(states, payload.State)
+		mu.Unlock()
+		w.WriteHeader(201)
+	}))
+	defer server.Close()
+	defer unblock()
+	t.Setenv("FAKE_CLI_STATUS_API_URL", server.URL)
+	step := &publishedPanicStep{execute: func(sc *pipeline.StepContext) {
+		if err := sc.DB.PutCommitStatusPublication(sc.Run.ID, db.CommitStatusPublication{SHA: sc.Run.HeadSHA, Host: "github.com", Repo: "test/repo", Validated: true, CIEligible: true}); err != nil {
+			panic(err)
+		}
+		go func() { defer close(callbackDone); (&steps.PushStep{}).ReportPublishedHeadStatus(sc, "success", "") }()
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			panic("success never reached endpoint")
+		}
+		close(panicking)
+		panic("published CI panic")
+	}}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{step, &steps.PushStep{}} })
+	_, head := setupTestGitRepo(t, p, d, "panic-status")
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var result ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir("panic-status"), Ref: "refs/heads/main", Old: "0000000000000000000000000000000000000000", New: head}, &result); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-panicking:
+	case <-time.After(10 * time.Second):
+		t.Fatal("daemon did not reach actual panic")
+	}
+	time.Sleep(16 * time.Second)
+	run, err := d.GetRun(result.RunID)
+	if err != nil || run.Status != types.RunRunning {
+		t.Errorf("panic terminal write bypassed paused reporter after deadline: %+v,%v", run, err)
+	}
+	unblock()
+	<-callbackDone
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		publication, err := d.GetCommitStatusPublication(context.Background(), result.RunID, db.CommitStatusPublication{SHA: head, Host: "github.com", Repo: "test/repo"})
+		if err == nil && publication != nil && publication.LastState == "failure" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	shutdownTestDaemonAndWaitForCleanup(t, p)
+	reopened, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	run, err = reopened.GetRun(result.RunID)
+	if err != nil || run.Status != types.RunFailed || run.Error == nil {
+		t.Fatalf("recovered panic outcome: %+v,%v", run, err)
+	}
+	publication, err := reopened.GetCommitStatusPublication(context.Background(), result.RunID, db.CommitStatusPublication{SHA: head, Host: "github.com", Repo: "test/repo"})
+	if err != nil || publication == nil || publication.LastState != "failure" || publication.StrictCertificate != nil {
+		t.Fatalf("recovered panic publication: %+v,%v", publication, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fmt.Sprint(states) != "[success failure]" {
+		t.Fatalf("panic HTTP outcome = %v", states)
+	}
+}
+
+type recoveredNamePanicStep struct{}
+
+func (recoveredNamePanicStep) Name() types.StepName { panic("recovered pipeline panic") }
+func (recoveredNamePanicStep) Execute(*pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	return nil, nil
+}
+
+func TestRecoveredFailure_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
+	bin := t.TempDir()
+	if out, err := exec.Command("go", "build", "-o", filepath.Join(bin, "gh"), "../pipeline/fakecli").CombinedOutput(); err != nil {
+		t.Fatalf("fake gh: %v: %s", err, out)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_CLI_MODE", "gh")
+	t.Setenv("FAKE_CLI_STATUS_PIPE_CHILD", "1")
+	for _, mode := range []string{"panic", "fallback"} {
+		t.Run(mode, func(t *testing.T) {
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			d, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			repo, head := setupTestGitRepo(t, p, d, "recovered-lock")
+			run, err := d.InsertRun(repo.ID, "main", head, head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{})
+			recoveredSteps := []pipeline.Step{&steps.PushStep{}}
+			if mode == "panic" {
+				if _, err := d.InsertStepResult(run.ID, types.StepReview); err != nil {
+					t.Fatal(err)
+				}
+				if err := d.SetRunAwaitingAgent(run.ID); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := d.InsertStepResult(run.ID, types.StepPush); err != nil {
+					t.Fatal(err)
+				}
+				recoveredSteps = []pipeline.Step{recoveredNamePanicStep{}, &steps.PushStep{}}
+			}
+			run, err = d.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			publication := db.CommitStatusPublication{SHA: head, Host: "github.com", Repo: "test/repo", Validated: true}
+			if err := d.PutCommitStatusPublication(run.ID, publication); err != nil {
+				t.Fatal(err)
+			}
+			entered, release := make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			unblock := func() { once.Do(func() { close(release) }) }
+			defer unblock()
+			var mu sync.Mutex
+			var states []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var payload struct{ State string }
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Error(err)
+				}
+				if payload.State == "success" {
+					close(entered)
+					<-release
+				}
+				mu.Lock()
+				states = append(states, payload.State)
+				mu.Unlock()
+				w.WriteHeader(201)
+			}))
+			defer func() { unblock(); server.Close() }()
+			t.Setenv("FAKE_CLI_STATUS_API_URL", server.URL)
+			callbackDone := make(chan struct{})
+			sc := &pipeline.StepContext{Ctx: context.Background(), DB: d, Run: run, Repo: repo, Config: cfg, WorkDir: repo.WorkingPath}
+			go func() { defer close(callbackDone); (&steps.PushStep{}).ReportPublishedHeadStatus(sc, "success", "") }()
+			select {
+			case <-entered:
+			case <-time.After(10 * time.Second):
+				t.Fatal("success did not reach endpoint")
+			}
+			mgr := NewRunManager(d, p, nil)
+			mgr.resumeRecoveredRun(recoveredRunPlan{run: run, repo: repo, workDir: t.TempDir(), gateDir: p.RepoDir(repo.ID), cfg: cfg, agent: recoveredRunTestAgent{}, steps: recoveredSteps})
+			time.Sleep(16 * time.Second)
+			stored, err := d.GetRun(run.ID)
+			if err != nil || stored.Status != types.RunRunning {
+				t.Errorf("recovered terminal write crossed outstanding POST: %+v,%v", stored, err)
+			}
+			unblock()
+			<-callbackDone
+			done := make(chan struct{})
+			go func() { mgr.wg.Wait(); close(done) }()
+			select {
+			case <-done:
+			case <-time.After(20 * time.Second):
+				t.Fatal("recovered failure did not settle")
+			}
+			reopened, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			stored, err = reopened.GetRun(run.ID)
+			if err != nil || stored.Status != types.RunFailed {
+				t.Fatalf("reopened terminal failure: %+v,%v", stored, err)
+			}
+			pub, err := reopened.GetCommitStatusPublication(context.Background(), run.ID, publication)
+			if err != nil || pub.LastState != "failure" || pub.StrictCertificate != nil {
+				t.Fatalf("reopened failure publication: %+v,%v", pub, err)
+			}
+			sc.DB = reopened
+			for _, state := range []string{"pending", "success", "failure"} {
+				(&steps.PushStep{}).ReportPublishedHeadStatus(sc, state, "")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if fmt.Sprint(states) != "[success failure]" {
+				t.Fatalf("HTTP ordering = %v", states)
+			}
+		})
+	}
+}
+
+func TestRecoveredFailure_StorageErrorDoesNotClaimTerminalState(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := d.InsertRepo(t.TempDir(), "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.Status = types.RunRunning
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewRunManager(d, p, nil)
+
+	mgr.resumeRecoveredRun(recoveredRunPlan{run: run, repo: repo, workDir: t.TempDir(), gateDir: t.TempDir(), cfg: config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{}), agent: recoveredRunTestAgent{}})
+	mgr.wg.Wait()
+	if run.Status != types.RunRunning {
+		t.Fatalf("failed storage claimed committed recovered terminal: status=%s", run.Status)
+	}
+}
