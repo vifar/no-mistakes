@@ -26,20 +26,66 @@ var CommitStatusLock = make(chan struct{}, 1)
 var terminalSettlementMu sync.Mutex
 var terminalSettlements []func()
 
-func ReleaseCommitStatusLock() {
+type rawPublicationSettlement struct {
+	write func() error
+	done  chan error
+}
+
+var rawPublicationSettlements []*rawPublicationSettlement
+
+func drainPublicationSettlements() error {
 	for {
 		terminalSettlementMu.Lock()
+		if len(rawPublicationSettlements) > 0 {
+			pending := rawPublicationSettlements[0]
+			terminalSettlementMu.Unlock()
+			err := pending.write()
+			terminalSettlementMu.Lock()
+			if err != nil {
+				for _, owned := range rawPublicationSettlements {
+					select {
+					case owned.done <- err:
+					default:
+					}
+				}
+				terminalSettlementMu.Unlock()
+				return err
+			}
+			rawPublicationSettlements = rawPublicationSettlements[1:]
+			select {
+			case pending.done <- nil:
+			default:
+			}
+			terminalSettlementMu.Unlock()
+			continue
+		}
 		pending := terminalSettlements
 		terminalSettlements = nil
+		terminalSettlementMu.Unlock()
 		if len(pending) == 0 {
+			return nil
+		}
+		for _, settle := range pending {
+			settle()
+		}
+	}
+}
+
+func ReleaseCommitStatusLock() {
+	for {
+		if err := drainPublicationSettlements(); err != nil {
+			terminalSettlementMu.Lock()
+			<-CommitStatusLock
+			terminalSettlementMu.Unlock()
+			return
+		}
+		terminalSettlementMu.Lock()
+		if len(terminalSettlements) == 0 && len(rawPublicationSettlements) == 0 {
 			<-CommitStatusLock
 			terminalSettlementMu.Unlock()
 			return
 		}
 		terminalSettlementMu.Unlock()
-		for _, settle := range pending {
-			settle()
-		}
 	}
 }
 
@@ -63,6 +109,12 @@ func settleTerminalWrite(write func() error) error {
 func AcquireCommitStatusLock(ctx context.Context) error {
 	select {
 	case CommitStatusLock <- struct{}{}:
+		if err := drainPublicationSettlements(); err != nil {
+			terminalSettlementMu.Lock()
+			<-CommitStatusLock
+			terminalSettlementMu.Unlock()
+			return err
+		}
 		if err := ctx.Err(); err != nil {
 			ReleaseCommitStatusLock()
 			return err
@@ -235,12 +287,20 @@ func RecordRawShutdown(ctx context.Context, d *db.DB, runIDs []string, instance 
 		cancelOnce.Do(cancelRuns)
 		return d.SupersedeUncommittedCancellations(runIDs, instance)
 	}
-	if err := WithCommitStatusLock(ctx, write); err != nil {
+	pending := &rawPublicationSettlement{write: write, done: make(chan error, 1)}
+	terminalSettlementMu.Lock()
+	rawPublicationSettlements = append(rawPublicationSettlements, pending)
+	terminalSettlementMu.Unlock()
+	bounded, cancel := context.WithTimeout(ctx, commitStatusTimeout)
+	defer cancel()
+	if err := AcquireCommitStatusLock(bounded); err != nil {
 		slog.Warn("raw shutdown terminal outcome unsettled", "error", err)
-		if settlementErr := settleTerminalWrite(write); settlementErr != nil {
-			return errors.Join(err, settlementErr)
-		}
-		return nil
+		return err
+	}
+	ReleaseCommitStatusLock()
+	if err := <-pending.done; err != nil {
+		slog.Warn("raw shutdown terminal outcome unsettled", "error", err)
+		return err
 	}
 	return nil
 }

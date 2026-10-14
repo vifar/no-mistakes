@@ -2,8 +2,13 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"modernc.org/sqlite"
+	"sync/atomic"
 
 	"net/http"
 	"net/http/httptest"
@@ -631,7 +636,7 @@ func TestRecoveredFailure_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 	t.Setenv("FAKE_CLI_STATUS_PIPE_CHILD", "1")
 	t.Setenv("FAKE_CLI_STATUS_HTTP_TIMEOUT", "60s")
 	t.Setenv("FAKE_CLI_STATUS_PIPE_IGNORE_TERM", "1")
-	for _, mode := range []string{"panic", "fallback", "panic raw"} {
+	for _, mode := range []string{"panic", "fallback", "panic raw", "panic raw rollback"} {
 		t.Run(mode, func(t *testing.T) {
 			p := paths.WithRoot(t.TempDir())
 			if err := p.EnsureDirs(); err != nil {
@@ -640,6 +645,31 @@ func TestRecoveredFailure_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 			d, err := db.Open(p.DB())
 			if err != nil {
 				t.Fatal(err)
+			}
+			if mode == "panic raw rollback" {
+				var attempts atomic.Int32
+				function := "recovered_raw_" + newShutdownToken()
+				if err := sqlite.RegisterScalarFunction(function, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
+					if attempts.Add(1) == 1 {
+						return nil, errors.New("recovered raw storage rollback")
+					}
+					return int64(1), nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				d.Close()
+				d, err = db.Open(p.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				control, err := sql.Open("sqlite", p.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer control.Close()
+				if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER recovered_raw BEFORE INSERT ON controlled_shutdown_runs WHEN NEW.reason='daemon shutting down' BEGIN SELECT %s(); END`, function)); err != nil {
+					t.Fatal(err)
+				}
 			}
 			defer d.Close()
 			repo, head := setupTestGitRepo(t, p, d, "recovered-lock")
@@ -713,7 +743,7 @@ func TestRecoveredFailure_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 			time.Sleep(16 * time.Second)
 			params := ipc.ShutdownParams{ExpectedPID: os.Getpid(), ExpectedStartedAt: mgr.runtimeStartedAt.Format(time.RFC3339Nano), ExpectedInstance: mgr.runtimeInstance}
 			rawDone := make(chan struct{})
-			if mode == "panic raw" {
+			if strings.HasPrefix(mode, "panic raw") {
 				go func() { mgr.Shutdown(); close(rawDone) }()
 				select {
 				case <-rawDone:
@@ -774,7 +804,7 @@ func TestRecoveredFailure_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 			if event.Type != ipc.EventStreamGap && (event.Type != ipc.EventRunCompleted || event.Status == nil || *event.Status != string(types.RunFailed)) {
 				t.Fatalf("settled public outcome: %+v,%v", event, ok)
 			}
-			if mode != "panic raw" {
+			if !strings.HasPrefix(mode, "panic raw") {
 				if ack, err := mgr.prepareControlledShutdown(context.Background(), params); err != nil || ack == nil || !ack.OK {
 					t.Fatalf("settled shutdown retry: %+v,%v", ack, err)
 				}
