@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -34,9 +33,6 @@ func (e *stepExecutionError) Unwrap() error { return e.cause }
 func cancellationOnly(err, cause error) bool {
 	if err == nil || cause == nil {
 		return false
-	}
-	if cancelled, ok := err.(*git.CommandCancellationError); ok {
-		return errors.Is(cancelled, context.Canceled)
 	}
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
 		children := joined.Unwrap()

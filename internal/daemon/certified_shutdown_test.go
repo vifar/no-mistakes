@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -321,5 +322,110 @@ func TestControlledShutdown_RejectsIncompleteOrChangedRuntimeIdentity(t *testing
 				t.Fatalf("unverified identity prepared shutdown: result=%+v,err=%v,shutdown=%v", result, err, mgr.shuttingDown.Load())
 			}
 		})
+	}
+}
+
+func TestControlledShutdown_ConcurrentRetriesShareTheOriginalLifecycle(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	repo, err := d.InsertRepo(t.TempDir(), "https://example.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	mgr := NewRunManager(d, p, nil)
+	mgr.runtimeStartedAt = time.Now().UTC()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	mgr.cancels[run.ID] = cancel
+	mgr.wg.Add(1)
+	observed := make(chan *pipeline.ControlledShutdownCause, 1)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	go func() {
+		defer mgr.wg.Done()
+		<-ctx.Done()
+		cause, ok := context.Cause(ctx).(*pipeline.ControlledShutdownCause)
+		if !ok {
+			t.Error("planned cause missing")
+			return
+		}
+		observed <- cause
+		<-release
+		if err := d.RecordIneligibleTerminal(run.ID, cause.Error(), types.RunCancelled, nil); err != nil {
+			t.Error(err)
+		}
+	}()
+	request := ipc.ShutdownParams{ExpectedPID: os.Getpid(), ExpectedStartedAt: mgr.runtimeStartedAt.Format(time.RFC3339Nano), ExpectedInstance: mgr.runtimeInstance}
+	first, stopFirst := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer stopFirst()
+	if ack, err := mgr.prepareControlledShutdown(first, request); err == nil || ack != nil {
+		t.Fatalf("unsettled preparation acknowledged: %+v,%v", ack, err)
+	}
+	var cause *pipeline.ControlledShutdownCause
+	select {
+	case cause = <-observed:
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not reach registered run")
+	}
+	stale := request
+	stale.ExpectedInstance = "successor"
+	if ack, err := mgr.prepareControlledShutdown(context.Background(), stale); err == nil || ack != nil {
+		t.Fatal("stale capture joined lifecycle")
+	}
+	type result struct {
+		ack *ipc.ShutdownResult
+		err error
+	}
+	results := make(chan result, 3)
+	for i := 0; i < 3; i++ {
+		go func() {
+			bounded, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			ack, err := mgr.prepareControlledShutdown(bounded, request)
+			results <- result{ack, err}
+		}()
+	}
+	select {
+	case result := <-results:
+		t.Fatalf("retry escaped unsettled drain: %+v", result)
+	case <-time.After(20 * time.Millisecond):
+	}
+	unblock()
+	for i := 0; i < 3; i++ {
+		select {
+		case result := <-results:
+			if result.err != nil || result.ack == nil || !result.ack.OK || result.ack.Instance != cause.Instance || result.ack.Lifecycle != cause.Lifecycle {
+				t.Errorf("retry rebound lifecycle: %+v,%v", result.ack, result.err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("matching retry did not finish")
+		}
+	}
+	repeated, err := mgr.prepareControlledShutdown(context.Background(), request)
+	if err != nil || repeated == nil || repeated.Lifecycle != cause.Lifecycle {
+		t.Errorf("repeated settled ACK = %+v,%v", repeated, err)
+	}
+	matches, err := d.ControlledShutdownMatches(run.ID, cause.Instance, cause.Lifecycle, cause.Error())
+	if err != nil || !matches {
+		t.Errorf("durable lifecycle changed: %v,%v", matches, err)
+	}
+	if !mgr.shuttingDown.Load() {
+		t.Error("retry reopened admission")
 	}
 }
