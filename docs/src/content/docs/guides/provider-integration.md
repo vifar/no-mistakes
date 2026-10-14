@@ -6,15 +6,18 @@ description: Set up GitHub, GitLab, Forgejo, Bitbucket Cloud, Azure DevOps, Gite
 The PR and CI steps need to talk to your git host. Six hosts are supported:
 GitHub, GitLab, Forgejo, Bitbucket Cloud (`bitbucket.org`), Azure DevOps
 (`dev.azure.com` and legacy `*.visualstudio.com`), and Gitea (almost always
-self-hosted). Any other host can be wired up on your machine with a
-[provider plugin](#custom-hosts-with-provider-plugins); without one, the PR and
-CI steps short-circuit with `skipped`.
+self-hosted). Custom-host operations use a
+[provider plugin](#custom-hosts-with-provider-plugins), subject to the current
+PR-facts limitation below. Network remotes fail closed before core steps unless
+the provider supplies complete PR facts; the
+[pipeline scope rules](/no-mistakes/reference/pipeline-steps/) own that prerequisite.
 
-Provider integration is optional for the local gate. You only need it for the
-steps that happen after validation: opening or updating the PR, watching hosted
-CI, and fixing remote-only failures.
+Provider integration is needed for PR-context resolution, opening or updating
+the PR, watching hosted CI, and fixing remote-only failures. A local-only target
+can use the local gate without a forge provider.
 
-Without any provider setup, `no-mistakes` still gives you the local gate:
+For a local-only target without provider setup, `no-mistakes` still gives you
+the local gate:
 
 - rebase
 - review
@@ -34,8 +37,12 @@ What you do not get is PR automation and CI monitoring.
 | **Merge conflict auto-fix** | `gh` CLI | `glab` CLI | `forgejo-axi` | not supported | `az` CLI | not supported | supported when plugin declares `mergeable_state` |
 | **Mergeability polling** | `gh` CLI | `glab` CLI | `forgejo-axi` | not supported | `az` CLI | not supported | supported when plugin declares `mergeable_state` |
 | **Failed check log fetching** | `gh` CLI | `glab` CLI | `forgejo-axi` when runtime routes are available | supported | not yet | supported | supported when plugin declares `failed_check_logs` |
-| **Review-bot findings and comments at the CI gate** | GitHub via `gh` CLI | not supported | not supported | not supported | not supported | not supported | not supported |
+| **Review-bot findings and comments at the CI gate** | GitHub via `gh` CLI (check identity by app slug, comments from review threads) | GitLab via `glab` CLI (comments from unresolved discussion notes, matched by the bot's login; no check identity) | not supported | not supported | not supported | not supported | not supported |
+| **[Explicit issue closure](/no-mistakes/reference/cli/#closing-issues)** (`axi run --closes`) | `gh` CLI | `glab` CLI | not supported | not supported | not supported | not supported | not supported |
 | **[Transient-check rerun](/no-mistakes/reference/repo-config/#cirerun_transient)** (cancellations and pre-run infra failures) | `gh` CLI | not supported | not supported | not supported | not supported | not supported | not supported |
+
+The plugin column describes protocol operations; it does not establish the
+[PR-facts prerequisite](#custom-hosts-with-provider-plugins) for a core run.
 
 ## What changes when provider wiring is present
 
@@ -99,7 +106,7 @@ The GitHub PR step opens PRs with a fork-qualified head such as `your-user:featu
 Re-running `no-mistakes init` later preserves the stored fork URL unless you pass a new `--fork-url`.
 
 Fork routing currently requires both `origin` and `--fork-url` to be GitHub remotes with owner/repo paths.
-GitLab, Forgejo, Bitbucket, Azure DevOps, Gitea, and provider plugins do not implement fork MR/PR routing yet; if a legacy or manually edited repo record has `fork_url` set for those providers, PR creation skips instead of opening an unsafe self PR.
+GitLab, Forgejo, Bitbucket, Azure DevOps, Gitea, and provider plugins do not implement fork MR/PR routing yet. If a legacy or manually edited repo record has `fork_url` set for those providers, host construction refuses the routing and an ordinary guarded run fails at PR-context resolution before Rebase. The PR and CI delivery adapters can record a skip if reached directly; that adapter behavior does not bypass the comparison guard or open a PR from the upstream repository to itself.
 
 #### Workflow-file changes require the `workflow` scope
 
@@ -126,6 +133,8 @@ glab auth login
 - CI pipeline status polling until the merge request is merged, closed, or the configured `ci_timeout` idle window elapses
 - Failed job trace fetching (`glab ci trace`) for the CI auto-fix step
 - Merge-conflict polling and auto-fix, same as GitHub
+- A supported review bot's unresolved merge request discussion notes as `ask-user` CI findings under [`ci.review_bot_comments: always`](/no-mistakes/reference/repo-config/#cireview_bot_comments) (see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for the identity and filtering rules)
+- Explicit issue closure through `axi run --closes`; the reference is rendered as a `Closes` line in the merge request description and verified on the live merge request. A cross-project reference may nest under subgroups (`group/subgroup/project#95`), and the same nested form is refused on a provider that would read it as a different repository's reference
 
 When no-mistakes updates an existing merge request, it reads the live title and preserves any GitLab draft marker. If `glab mr view` fails or returns an empty title, the update stops instead of risking a change from draft to ready.
 
@@ -133,7 +142,7 @@ When no-mistakes updates an existing merge request, it reads the live title and 
 
 Install [`forgejo-axi`](https://github.com/escidmore/forgejo-axi) and make it available on `PATH`. It currently installs from source with Node.js 20 or newer; set [`forgejo_axi_path`](/no-mistakes/reference/global-config/#forgejo_axi_path) when the executable lives elsewhere.
 
-Give the daemon a Forgejo token through either the generic `FORGEJO_TOKEN` variable or forgejo-axi's host-scoped token variable. Configure `FORGEJO_BASE_URL` for SSH origins and unrecognized self-hosted HTTPS hostnames. The [environment reference](/no-mistakes/reference/environment/#forgejo_base_url) owns the exact base-URL and host-key rules.
+Give the daemon a Forgejo token through either the generic `FORGEJO_TOKEN` variable or forgejo-axi's host-scoped token variable. Configure `FORGEJO_BASE_URL` for SSH origins and unrecognized self-hosted HTTPS hostnames. When the instance serves SSH from another hostname - its own `SSH_DOMAIN` setting, for example `ssh.forgejo.example` beside a web host of `forgejo.example` - also set [`FORGEJO_SSH_DOMAIN`](/no-mistakes/reference/environment/#forgejo_ssh_domain) to that hostname, or the SSH origin cannot be matched to the configured instance. The [environment reference](/no-mistakes/reference/environment/#forgejo_base_url) owns the exact base-URL and host-key rules.
 
 Verify without mutating a deployed Forgejo instance:
 
@@ -145,7 +154,7 @@ FORGEJO_BASE_URL=https://forgejo.example forgejo-axi status --json
 
 Failed-log retrieval uses forgejo-axi's stable `run view --log-failed --json` command only when the runtime probe advertises commit statuses, Actions runs, run jobs, and job logs. `no-mistakes` accepts only a failing status's canonical native Actions target, verifies the exact run and freshly polled PR head, validates every returned job's run identity, and returns non-empty failed-job logs in deterministic order under the aggregate 1 MiB ceiling. Live testing against Forgejo 16.0.1 proves identity-matched retrieval through those routes. On Forgejo 15.0.5, commit-status gating, mergeability checks, and merged-state proof remain available when job and log routes are unavailable.
 
-Fork PR routing is not implemented for Forgejo; a configured `fork_url` makes the PR step skip rather than opening a self PR.
+Fork PR routing is not implemented for Forgejo. A configured `fork_url` makes host construction refuse the routing, so an ordinary guarded run fails at PR-context resolution before Rebase. See the [fork-routing contract](#github-fork-contributions) above.
 
 ## Bitbucket Cloud
 
@@ -213,6 +222,15 @@ well as their SSH forms (`git@ssh.dev.azure.com:v3/...`).
   status checks) are read via `az repos pr policy list` until the PR is
   completed, abandoned, or the configured `ci_timeout` idle window elapses
 - Merge-conflict polling and auto-fix from the PR's `mergeStatus`
+
+Azure CI readiness requires a native commit association. Build policies resolve
+the evaluation's exact build ID and verify its definition, project, repository,
+and PR merge ref. The build revision must match the live PR merge commit, and
+the PR source revision must match the live source branch. Status policies match
+the configured name, genre, and authorized account, then read the newest
+matching status's iteration source commit. A status without an iteration does
+not prove which code was checked. Missing or ambiguous association keeps CI
+unready; failed native lookups surface a provider error.
 
 **What you don't get (yet):**
 
@@ -310,37 +328,35 @@ JSON document on stdout (PR bodies arrive in a private `--body-file`). Six
 subcommands are required (`status`, `pr find`, `pr create`, `pr update`,
 `pr view`, `pr checks`); mergeability, failed-log fetching, merged proof, and
 PR retargeting are optional capabilities the plugin declares in `status`.
-
-**What you get:**
-
-- PR creation and update, including [`pr.template`](/no-mistakes/reference/repo-config/#prtemplate) and pre-push attestation
-- CI check polling until the PR is merged or closed, or the configured `ci_timeout` idle window elapses
-- Failed-check log fetching, mergeability polling, merge-conflict auto-fix, and merged-at-head proof, when the plugin declares them
+The adapter supports repository-scoped PR comparison facts when `pr view` and
+`pr find` provide `head_branch`, `base_branch`, and a full lowercase 40-character
+`head_sha`. `pr find` must reject ambiguous open source-branch candidates, and
+the returned view must prove the exact same open source branch in the requested
+repository. Cross-repository fork PRs are unsupported. Missing or old heads
+fail readiness safely. The
+[protocol reference](/no-mistakes/reference/provider-plugin-protocol/) owns
+the wire and operation contracts.
 
 **What you don't get:**
 
-- Fork PR routing, review-bot findings, transient-check reruns, and `--closes`
+- Fork PR routing, review-bot findings, transient-check reruns, and `--closes` (a plugin declares neither the review-comment nor the closing-reference capability)
 
-no-mistakes validates every plugin answer - PR identity, URL shape, check
-buckets, and merged-proof head - and fails closed on anything malformed, on a
-protocol version mismatch, and on a timeout, so a buggy plugin cannot open a
-duplicate PR, certify the wrong commit, or turn a broken integration into a
-skipped step. A plugin that reports it cannot serve the repository (for
-example, not authenticated) skips the PR and CI steps with its message, like
-a built-in provider whose CLI is logged out. The
+The [protocol's failure rules](/no-mistakes/reference/provider-plugin-protocol/#failing-closed)
+distinguish availability failures from malformed answers and define timeout
+handling. The
 [global config reference](/no-mistakes/reference/global-config/#provider_plugins)
 owns host matching, precedence, and the trust boundary: plugins are global-only
 and a repository can never configure one.
 
 ## Unsupported hosts
 
-If your upstream isn't GitHub, GitLab, Forgejo, Bitbucket Cloud, Azure DevOps, or Gitea, and no provider plugin claims its host:
-
-- The **push** step still runs - `no-mistakes` pushes through git to the configured target like any other remote.
-- The **PR** step marks itself as `skipped`.
-- The **CI** step marks itself as `skipped`.
-
-Everything before push (rebase, review, test, document, lint) still works regardless of host. To add PR and CI support, write a [provider plugin](#custom-hosts-with-provider-plugins).
+An unsupported network host fails at PR-context resolution before Rebase;
+skipping PR and CI does not enable pre-push Review or Test. See the
+[pipeline scope rules](/no-mistakes/reference/pipeline-steps/) for the exact
+local-only exception. Eligible local-only targets still run the local gate
+and Push through Git, while PR and CI skip. A configured plugin can enable a
+network-host run when it supplies the required comparison facts; see
+[#custom-hosts-with-provider-plugins](#custom-hosts-with-provider-plugins).
 
 ## Checking what's wired up
 

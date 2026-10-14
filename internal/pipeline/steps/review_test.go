@@ -17,6 +17,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -586,8 +587,8 @@ func TestReviewStep_MissingPRBaseFetchFailsClosed(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected review to fail closed when the PR base cannot be fetched")
 	}
-	if !strings.Contains(err.Error(), "fetch review base origin/missing-integration") {
-		t.Fatalf("error = %q, want a fetch failure for the configured PR base", err)
+	if !strings.Contains(err.Error(), "fetch default branch \"missing-integration\" to resolve branch base") {
+		t.Fatalf("error = %q, want the named default branch fetch diagnostic", err)
 	}
 	if len(ag.calls) != 0 {
 		t.Fatalf("review agent ran %d time(s) despite an unresolved PR base", len(ag.calls))
@@ -678,6 +679,7 @@ func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 	}
 
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	testgit.BindRunComparison(t, sctx.DB, sctx.Run, dir, "main", "", "", "")
 	sctx.Config.ReviewAgentTimeout = timeout
 	sctx.Config.AutoFix.Review = 2
 

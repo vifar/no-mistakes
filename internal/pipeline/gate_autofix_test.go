@@ -57,7 +57,7 @@ func TestExecutor_GateAutoFixBudget(t *testing.T) {
 			}}
 			cfg := &config.Config{AutoFix: config.AutoFix{Gates: map[string]int{"mutation": tc.budget}}}
 			exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
-			done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+			done, _ := startExecutor(t, exec, run, repo, completionFixture(t, database, run))
 			waitForStepStatus(t, database, run.ID, name, tc.wantStatus)
 			if calls != tc.wantCalls {
 				t.Errorf("calls=%d, want %d", calls, tc.wantCalls)

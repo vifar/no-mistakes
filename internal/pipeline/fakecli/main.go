@@ -214,10 +214,26 @@ func fakeRecordSuccessHandler() {
 }
 
 func fakeGHHandler(args []string) {
+	fakeCIGHFactsListAPI(args)
 	fakeGHHandlePRContentCommands(args, strings.Join(args, " "))
 	prURL := os.Getenv("FAKE_CLI_PR_URL")
 	prBase := os.Getenv("FAKE_CLI_PR_BASE")
 	prListJSON, hasPRListJSON := os.LookupEnv("FAKE_CLI_PR_LIST_JSON")
+	if len(args) > 0 && args[0] == "api" && strings.Contains(args[len(args)-1], "/pulls/") {
+		factsURL := os.Getenv("FAKE_CLI_PR_FACTS_URL")
+		if factsURL == "" {
+			factsURL = prURL
+		}
+		factsBase := os.Getenv("FAKE_CLI_PR_FACTS_BASE")
+		if factsBase == "" {
+			factsBase = prBase
+			if factsBase == "" {
+				factsBase = "main"
+			}
+		}
+		fmt.Printf(`{"number":%d,"html_url":%q,"state":"open","merged":false,"head":{"ref":"feature","sha":%q,"repo":{"full_name":"test/repo"}},"base":{"ref":%q}}`, extractTrailingNumber(factsURL), factsURL, fakePRHeadSHA(), factsBase)
+		os.Exit(0)
+	}
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
 	}
@@ -502,16 +518,71 @@ func fakeGlabHandler(args []string) {
 			fmt.Println(mrViewJSON)
 			os.Exit(0)
 		}
+		if state, ok := fakeGlabMRState(); ok {
+			fmt.Println(state)
+			os.Exit(0)
+		}
 		os.Exit(1)
 	}
 	if len(args) >= 2 && args[0] == "mr" && args[1] == "update" {
+		fakeGlabRecordMR(args, 0)
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "mr" && args[1] == "create" {
+		fakeGlabRecordMR(args, 99)
 		fmt.Println("https://gitlab.com/test/repo/-/merge_requests/99")
 		os.Exit(0)
 	}
 	os.Exit(1)
+}
+
+// fakeGlabRecordMR keeps a created or updated merge request's title and
+// description in FAKE_CLI_MR_STATE_FILE, so a later `glab mr view` - which the
+// PR step uses to verify the body it published - reads back what was published.
+// A flag the update omits keeps the recorded value, mirroring GitLab's
+// partial-update semantics. State is only kept when the variable is set;
+// without it the handler answers statically from FAKE_CLI_MR_VIEW_JSON.
+func fakeGlabRecordMR(args []string, iid int) {
+	path := os.Getenv("FAKE_CLI_MR_STATE_FILE")
+	if path == "" {
+		return
+	}
+	record := map[string]any{}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &record)
+	}
+	if value, ok := fakeCLIFlagValue(args, "--title"); ok {
+		record["title"] = value
+	}
+	if value, ok := fakeCLIFlagValue(args, "--description"); ok {
+		record["description"] = value
+	}
+	if iid != 0 {
+		record["iid"] = iid
+	}
+	record["web_url"] = fmt.Sprintf("https://gitlab.com/test/repo/-/merge_requests/%v", record["iid"])
+	data, err := json.Marshal(record)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+// fakeGlabMRState renders the recorded merge request as `glab mr view` would.
+func fakeGlabMRState() (string, bool) {
+	path := os.Getenv("FAKE_CLI_MR_STATE_FILE")
+	if path == "" {
+		return "", false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) == 0 {
+		return "", false
+	}
+	return string(data), true
 }
 
 func fakeCLIFlagValue(args []string, flag string) (string, bool) {
@@ -539,16 +610,73 @@ func extractTrailingNumber(rawURL string) int {
 	return number
 }
 
+func fakeCIGHFactsListAPI(args []string) {
+	if len(args) > 0 && args[0] == "api" && strings.Contains(strings.Join(args, " "), "repos/test/repo/pulls ") {
+		if facts := os.Getenv("FAKE_CLI_PR_FACTS_LIST_JSON"); facts != "" {
+			fmt.Print(facts)
+			os.Exit(0)
+		}
+	}
+}
+
+func fakeCIGHFactsAPI(args []string) {
+	fakeCIGHFactsListAPI(args)
+	if len(args) == 0 || args[0] != "api" || !strings.HasPrefix(args[len(args)-1], "repos/test/repo/pulls/") {
+		return
+	}
+	number, err := strconv.Atoi(strings.TrimPrefix(args[len(args)-1], "repos/test/repo/pulls/"))
+	if err != nil || number <= 0 {
+		return
+	}
+	if factsFile := os.Getenv("FAKE_CLI_PR_FACTS_FILE"); factsFile != "" {
+		facts, err := os.ReadFile(factsFile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Print(string(facts))
+		os.Exit(0)
+	}
+	if facts := os.Getenv("FAKE_CLI_PR_FACTS_JSON"); facts != "" {
+		fmt.Print(facts)
+		os.Exit(0)
+	}
+	fmt.Printf(`{"number":%d,"html_url":"https://github.com/test/repo/pull/%d","state":"open","merged":false,"head":{"ref":"feature","sha":%q,"repo":{"full_name":"test/repo"}},"base":{"ref":"main"}}`, number, number, fakePRHeadSHA())
+	os.Exit(0)
+}
+
 func fakeCIGHReconcileHandler(args []string) {
+	fakeCIGHFactsAPI(args)
 	joined := strings.Join(args, " ")
+	createdPath := os.Getenv("FAKE_CLI_CREATED_PATH")
+	_, createdErr := os.Stat(createdPath)
+	created := createdPath != "" && createdErr == nil
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
 	}
+	if strings.Contains(joined, "api --method GET repos/test/repo/pulls ") {
+		if created {
+			fmt.Printf(`[[{"number":42,"html_url":"https://github.com/test/repo/pull/42","state":"open","merged":false,"head":{"ref":"feature","sha":%q,"repo":{"full_name":"test/repo"}},"base":{"ref":"main"}}]]`, fakePRHeadSHA())
+		} else {
+			fmt.Println("[[]]")
+		}
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "pr list") {
-		fmt.Println("[]")
+		if created {
+			fmt.Println(`[{"number":42,"url":"https://github.com/test/repo/pull/42","baseRefName":"main"}]`)
+		} else {
+			fmt.Println("[]")
+		}
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr create") {
+		if createdPath != "" {
+			if err := os.WriteFile(createdPath, []byte("created"), 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
 		fmt.Println("https://github.com/test/repo/pull/42")
 		os.Exit(0)
 	}
@@ -640,7 +768,22 @@ func fakeGHStorePRBody(args []string) {
 	}
 }
 
+func fakeCIPRListJSON() string {
+	if raw, ok := os.LookupEnv("FAKE_CLI_PR_LIST_JSON"); ok {
+		if raw == "" {
+			return "[]"
+		}
+		return raw
+	}
+	prURL := os.Getenv("FAKE_CLI_PR_URL")
+	if prURL == "" {
+		prURL = "https://github.com/test/repo/pull/42"
+	}
+	return fmt.Sprintf(`[{"number":%d,"url":%q,"baseRefName":"main"}]`, extractTrailingNumber(prURL), prURL)
+}
+
 func fakeCIGHHandler(args []string) {
+	fakeCIGHFactsAPI(args)
 	state := os.Getenv("FAKE_CLI_STATE")
 	stateErr := os.Getenv("FAKE_CLI_STATE_ERR")
 	checksJSON := os.Getenv("FAKE_CLI_CHECKS")
@@ -658,11 +801,7 @@ func fakeCIGHHandler(args []string) {
 	}
 	fakeGHHandlePRContentCommands(args, joined)
 	if strings.Contains(joined, "pr list") {
-		if prListJSON := os.Getenv("FAKE_CLI_PR_LIST_JSON"); prListJSON != "" {
-			fmt.Print(prListJSON)
-		} else {
-			fmt.Println("[]")
-		}
+		fmt.Print(fakeCIPRListJSON())
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json baseRefName") {
@@ -741,6 +880,7 @@ func fakeCIGHRerun() {
 }
 
 func fakeCIGHSequenceHandler(args []string) {
+	fakeCIGHFactsAPI(args)
 	state := os.Getenv("FAKE_CLI_STATE")
 	checksPath := os.Getenv("FAKE_CLI_CHECKS_PATH")
 	indexPath := os.Getenv("FAKE_CLI_CHECKS_INDEX_PATH")
@@ -752,6 +892,10 @@ func fakeCIGHSequenceHandler(args []string) {
 		os.Exit(0)
 	}
 	fakeGHHandlePRContentCommands(args, joined)
+	if strings.Contains(joined, "pr list") {
+		fmt.Print(fakeCIPRListJSON())
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json mergeable") {
 		if mergeableErr != "" {
 			fmt.Fprintln(os.Stderr, mergeableErr)
@@ -845,6 +989,7 @@ func fakeCIGHSequenceHandler(args []string) {
 }
 
 func fakeCIGlabHandler(args []string) {
+	fakeCIGlabFactsAPI(args)
 	state := os.Getenv("FAKE_CLI_STATE")
 	if state == "" {
 		state = "opened"
@@ -870,17 +1015,26 @@ func fakeCIGlabHandler(args []string) {
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
 	}
-	if strings.Contains(joined, "mr view") {
-		fmt.Printf(`{"iid":42,"web_url":"https://gitlab.com/test/repo/-/merge_requests/42","state":%q,"has_conflicts":%s,"detailed_merge_status":%q,"head_pipeline":{"id":7}}`,
-			state, conflicts, mergeStatus)
-		fmt.Println()
+	if strings.Contains(joined, "mr list") {
+		if state == "opened" {
+			fmt.Println(`[{"iid":42,"web_url":"https://gitlab.com/test/repo/-/merge_requests/42","target_branch":"main"}]`)
+		} else {
+			fmt.Println("[]")
+		}
 		os.Exit(0)
+	}
+	if strings.Contains(joined, "mr view") {
+		fakeCIGlabServeMRView(state, conflicts, mergeStatus)
 	}
 	if strings.Contains(joined, "mr create") {
 		fmt.Println("https://gitlab.com/test/repo/-/merge_requests/99")
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "mr update") {
+		os.Exit(0)
+	}
+	if fakeCIGlabIsPipelineJobsRead(joined) {
+		fmt.Println(checksJSON)
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "ci status") {
@@ -895,10 +1049,95 @@ func fakeCIGlabHandler(args []string) {
 		fmt.Println(traceOutput)
 		os.Exit(0)
 	}
+	// The review-comment read asks for the merge request's discussion notes.
+	// FAKE_CLI_REVIEW_DISCUSSIONS is the raw array the discussions endpoint
+	// returns; an unset value answers an MR with no discussions.
+	if strings.Contains(joined, "/discussions") {
+		discussions := os.Getenv("FAKE_CLI_REVIEW_DISCUSSIONS")
+		if discussions == "" {
+			discussions = "[]"
+		}
+		fmt.Println(discussions)
+		os.Exit(0)
+	}
 	os.Exit(1)
 }
 
+// fakeCIGlabServeMRView answers `glab mr view` for the CI fakes.
+// FAKE_CLI_MR_VIEW_ERR makes the read fail like a provider or CLI failure;
+// otherwise the fakes' scripted merge request is printed.
+func fakeCIGlabServeMRView(state, conflicts, mergeStatus string) {
+	if os.Getenv("FAKE_CLI_MR_VIEW_ERR") == "1" {
+		fmt.Fprintln(os.Stderr, "merge request read failed")
+		os.Exit(1)
+	}
+	fmt.Println(fakeCIGlabMRViewJSON(state, conflicts, mergeStatus))
+	os.Exit(0)
+}
+
+// fakeCIGlabMRViewJSON renders the merge request the CI fakes serve. The source
+// revision it reports comes from FAKE_CLI_MR_HEAD_SHA, and the head pipeline
+// (id 7) ran at FAKE_CLI_PIPELINE_SHA (the source revision by default) for
+// FAKE_CLI_PIPELINE_REF. The CI step names the run's head on every poll, so a
+// GitLab check read is bound to it: a fake merge request that cannot name the
+// revision the run is delivering is refused by design, and a test that wants a
+// stale pipeline sets FAKE_CLI_PIPELINE_SHA to a different commit.
+func fakeCIGlabMRViewJSON(state, conflicts, mergeStatus string) string {
+	sourceSHA := os.Getenv("FAKE_CLI_MR_HEAD_SHA")
+	pipelineSHA := os.Getenv("FAKE_CLI_PIPELINE_SHA")
+	pipelineRef := os.Getenv("FAKE_CLI_PIPELINE_REF")
+	if pipelineSHA == "" {
+		pipelineSHA = sourceSHA
+	}
+	if pipelineRef == "" {
+		pipelineRef = "refs/heads/feature"
+	}
+	pipeline := `{"id":7}`
+	if pipelineSHA != "" {
+		pipeline = fmt.Sprintf(`{"id":7,"sha":%q,"ref":%q}`, pipelineSHA, pipelineRef)
+	}
+	return fmt.Sprintf(`{"iid":42,"web_url":"https://gitlab.com/test/repo/-/merge_requests/42","sha":%q,"state":%q,"has_conflicts":%s,"detailed_merge_status":%q,"head_pipeline":%s}`,
+		sourceSHA, state, conflicts, mergeStatus, pipeline)
+}
+
+// fakeCIGlabIsPipelineJobsRead reports whether the invocation is the REST jobs
+// read the adapter uses when a project path is known: a pipeline's job list is
+// read through `glab api --paginate projects/<path>/pipelines/<id>/jobs`.
+func fakeCIGlabIsPipelineJobsRead(joined string) bool {
+	return strings.HasPrefix(joined, "api ") && strings.Contains(joined, "/pipelines/") && strings.HasSuffix(joined, "/jobs")
+}
+
+// fakeCIGlabSequenceChecks returns the next entry of the checks sequence the
+// ci-glab-seq fake serves and advances the index, so a test can script a
+// pending job followed by a passing one. The index sticks at the last entry.
+func fakeCIGlabSequenceChecks() (string, bool) {
+	data, err := os.ReadFile(os.Getenv("FAKE_CLI_CHECKS_PATH"))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return "", false
+	}
+	entries := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(entries) == 0 || entries[0] == "" {
+		return "[]", true
+	}
+	index := 0
+	if rawIndex, err := os.ReadFile(os.Getenv("FAKE_CLI_CHECKS_INDEX_PATH")); err == nil {
+		if parsed, err := strconv.Atoi(strings.TrimSpace(string(rawIndex))); err == nil {
+			index = parsed
+		}
+	}
+	if index >= len(entries) {
+		index = len(entries) - 1
+	}
+	if err := os.WriteFile(os.Getenv("FAKE_CLI_CHECKS_INDEX_PATH"), []byte(strconv.Itoa(index+1)), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return "", false
+	}
+	return entries[index], true
+}
+
 func fakeCIGlabSequenceHandler(args []string) {
+	fakeCIGlabFactsAPI(args)
 	state := os.Getenv("FAKE_CLI_STATE")
 	if state == "" {
 		state = "opened"
@@ -911,44 +1150,28 @@ func fakeCIGlabSequenceHandler(args []string) {
 	if mergeStatus == "" {
 		mergeStatus = "mergeable"
 	}
-	checksPath := os.Getenv("FAKE_CLI_CHECKS_PATH")
-	indexPath := os.Getenv("FAKE_CLI_CHECKS_INDEX_PATH")
 	joined := strings.Join(args, " ")
 
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
 	}
-	if strings.Contains(joined, "mr view") {
-		fmt.Printf(`{"iid":42,"web_url":"https://gitlab.com/test/repo/-/merge_requests/42","state":%q,"has_conflicts":%s,"detailed_merge_status":%q,"head_pipeline":{"id":7}}`,
-			state, conflicts, mergeStatus)
-		fmt.Println()
+	if strings.Contains(joined, "mr list") {
+		if state == "opened" {
+			fmt.Println(`[{"iid":42,"web_url":"https://gitlab.com/test/repo/-/merge_requests/42","target_branch":"main"}]`)
+		} else {
+			fmt.Println("[]")
+		}
 		os.Exit(0)
 	}
-	if strings.Contains(joined, "ci status") || strings.Contains(joined, "ci get") {
-		data, err := os.ReadFile(checksPath)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
+	if strings.Contains(joined, "mr view") {
+		fakeCIGlabServeMRView(state, conflicts, mergeStatus)
+	}
+	if fakeCIGlabIsPipelineJobsRead(joined) || strings.Contains(joined, "ci status") || strings.Contains(joined, "ci get") {
+		entry, ok := fakeCIGlabSequenceChecks()
+		if !ok {
 			os.Exit(1)
 		}
-		entries := strings.Split(strings.TrimSpace(string(data)), "\n")
-		if len(entries) == 0 || entries[0] == "" {
-			fmt.Println("[]")
-			os.Exit(0)
-		}
-		index := 0
-		if rawIndex, err := os.ReadFile(indexPath); err == nil {
-			if parsed, err := strconv.Atoi(strings.TrimSpace(string(rawIndex))); err == nil {
-				index = parsed
-			}
-		}
-		if index >= len(entries) {
-			index = len(entries) - 1
-		}
-		if err := os.WriteFile(indexPath, []byte(strconv.Itoa(index+1)), 0o644); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
-		}
-		fmt.Println(entries[index])
+		fmt.Println(entry)
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "ci trace") {
@@ -956,6 +1179,23 @@ func fakeCIGlabSequenceHandler(args []string) {
 		os.Exit(0)
 	}
 	os.Exit(1)
+}
+
+func fakeCIGlabFactsAPI(args []string) {
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "api ") {
+		return
+	}
+	for _, arg := range args {
+		if arg == "projects/test%2Frepo/merge_requests/42" {
+			fmt.Printf(`{"iid":42,"web_url":"https://gitlab.com/test/repo/-/merge_requests/42","state":"opened","source_project_id":1,"target_project_id":1,"source_branch":"feature","target_branch":"main","sha":%q}`, fakePRHeadSHA())
+			os.Exit(0)
+		}
+	}
+	if strings.Contains(joined, "projects/1") {
+		fmt.Print(`{"id":1,"path_with_namespace":"test/repo"}`)
+		os.Exit(0)
+	}
 }
 
 func fakeCIGHNoChecksHandler(args []string) {

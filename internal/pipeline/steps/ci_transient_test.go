@@ -181,6 +181,7 @@ func TestCIUnresolvedCancelledOutcomePreservesPreRunFailureCause(t *testing.T) {
 	t.Parallel()
 
 	outcome := ciObservationOutcome(ciObservationFindings(ciIssues{
+		provider:            scm.ProviderGitHub,
 		checks:              []scm.Check{{Name: "build", Bucket: scm.CheckBucketCancel, State: "FAILURE", PreRunFailure: true}},
 		unresolvedCancelled: []string{"build"},
 		reruns:              func(string) int { return 1 },
@@ -224,6 +225,7 @@ func TestCIUnresolvedCancelledOutcomeKeepsSameNamedCausesPositional(t *testing.T
 	t.Parallel()
 
 	outcome := ciObservationOutcome(ciObservationFindings(ciIssues{
+		provider: scm.ProviderGitHub,
 		checks: []scm.Check{
 			{Name: "build", ProviderID: "github-check-run:41", Bucket: scm.CheckBucketCancel, State: "FAILURE", PreRunFailure: true},
 			{Name: "build", ProviderID: "github-check-run:42", Bucket: scm.CheckBucketCancel, State: "CANCELLED"},

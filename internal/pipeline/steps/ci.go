@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -160,16 +161,15 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		if err := verifyShippingMergedProof(sctx, host, &scm.PR{Number: prNumber, URL: prURL}); err != nil {
 			return false, err
 		}
-		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
+		if err := observeCIState(sctx, "merged"); err != nil {
 			return false, err
 		}
-		notifyPRMerged(sctx)
 		if sctx.Log != nil {
 			sctx.Log("PR has been merged; clearing stale CI approval gate")
 		}
 		return true, nil
 	case scm.PRStateClosed:
-		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed"); err != nil {
+		if err := observeCIState(sctx, "closed"); err != nil {
 			return false, err
 		}
 		if sctx.Log != nil {
@@ -177,7 +177,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		}
 		return true, nil
 	case scm.PRStateOpen:
-		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
+		if err := observeCIState(sctx, "open"); err != nil {
 			return false, err
 		}
 		return false, nil
@@ -225,18 +225,31 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
 	pr := &scm.PR{Number: prNumber, URL: prURL}
-	if reviewBotCommentsAlways(sctx) {
-		// Review-bot identity (scm.Check.App) comes from the head commit's
-		// rollup, which is read only when the head is named, exactly as the
-		// polling loop names it. Without it no check is a review bot, so a
-		// green bot's comments would be attributed to no check.
-		pr.HeadSHA = sctx.Run.HeadSHA
-	}
+	// The delivered commit is named on every read, not only when review-bot
+	// identity needs the head's rollup: a host that binds its reads to the
+	// named commit refuses one that is not evidence for it (GitLab's head
+	// pipeline can still point at an older commit), and an operator override
+	// must never be recorded from another commit's checks. Review-bot identity
+	// comes from that same head read, exactly as the polling loop names it.
+	pr.HeadSHA = sctx.Run.HeadSHA
 	checks, err := host.GetChecks(ctx, pr)
+	if err == nil {
+		err = scm.ValidateCheckHeads(checks, pr.HeadSHA)
+	}
 	if err != nil {
+		if errors.Is(err, scm.ErrHeadChanged) {
+			// The provider answered; nothing it offered is evidence for the
+			// commit this run delivered. That is not a broken tool and not a
+			// clean pass: record it as an override naming the mismatch, the
+			// same refusal the polling loop waits on.
+			return fmt.Sprintf("live checks for %s are not for the commit being delivered: %v", prURL, err), nil
+		}
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
 	if allChecksPassed(checks) {
+		if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
+			return fmt.Sprintf("could not verify live CI comparison: %v", err), nil
+		}
 		// A green head can still carry a green review bot's unresolved
 		// comments under ci.review_bot_comments: always; approving over
 		// them is an override, not a clean pass.
@@ -277,6 +290,61 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, expectedH
 		return fmt.Errorf("verify merged PR proof: %w: expected %s, got %s", scm.ErrHeadChanged, expectedHead, proof.HeadSHA)
 	}
 	return nil
+}
+
+// observeCIState records PR truth without completing CI or the run. The same
+// observation is available to the executor's post-CI comparison guard.
+func observeCIState(sctx *pipeline.StepContext, state string) error {
+	if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, state); err != nil {
+		return err
+	}
+	// Keep the in-memory observation monotonic like its durable counterpart.
+	if sctx.Run.PRState != nil && (*sctx.Run.PRState == "merged" ||
+		(*sctx.Run.PRState == "closed" && state != "merged")) {
+		return nil
+	}
+	sctx.Run.PRState = &state
+	return nil
+}
+
+func terminalCIOutcome(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, state scm.PRState) (*pipeline.StepOutcome, bool, error) {
+	if sctx.Run.Shipping != nil && (state == scm.PRStateMerged || state == scm.PRStateClosed) {
+		if state == scm.PRStateMerged {
+			if err := verifyMergedProof(sctx.Ctx, host, pr, sctx.Run.HeadSHA); err != nil {
+				return nil, true, err
+			}
+			if err := verifyShippingMergedProof(sctx, host, pr); err != nil {
+				return nil, true, err
+			}
+		}
+		if err := observeCIState(sctx, strings.ToLower(string(state))); err != nil {
+			return nil, true, err
+		}
+		if state == scm.PRStateMerged {
+			return &pipeline.StepOutcome{MergedHeadSHA: sctx.Run.HeadSHA}, true, nil
+		}
+		return &pipeline.StepOutcome{}, true, nil
+	}
+
+	switch state {
+	case scm.PRStateMerged:
+		if err := verifyMergedProof(sctx.Ctx, host, pr, sctx.Run.HeadSHA); err != nil {
+			return nil, true, err
+		}
+		if err := observeCIState(sctx, "merged"); err != nil {
+			return nil, true, err
+		}
+		sctx.Log("PR has been merged!")
+		return &pipeline.StepOutcome{}, true, nil
+	case scm.PRStateClosed:
+		if err := observeCIState(sctx, "closed"); err != nil {
+			return nil, true, err
+		}
+		sctx.Log("PR has been closed")
+		return &pipeline.StepOutcome{}, true, nil
+	default:
+		return nil, false, nil
+	}
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, err error) {
@@ -395,6 +463,23 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			baseBranch = strings.TrimSpace(pr.BaseBranch)
 		}
 	}
+	defer func() {
+		if err != nil || outcome == nil || outcome.Skipped || outcome.RestartFrom != "" {
+			return
+		}
+		results, resolveErr := resolveCIReviewSupport(sctx, host, pr)
+		if resolveErr != nil {
+			if errors.Is(resolveErr, errReviewSupportHeadAdvanced) {
+				outcome, err = &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
+				return
+			}
+			outcome, err = nil, fmt.Errorf("resolve Review CI support: %w", resolveErr)
+			return
+		}
+		if appendErr := appendOwnerSupportResults(outcome, results); appendErr != nil {
+			outcome, err = nil, fmt.Errorf("record Review CI support: %w", appendErr)
+		}
+	}()
 	if retryRefusal {
 		if err := setCIMonitorReadiness(sctx, false, false); err != nil {
 			return nil, err
@@ -408,6 +493,20 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
 		}
 	}
+	// A PR can close while CI is waiting. Observe that lifecycle before asking
+	// for an open PR's target branch, which is no longer available after close.
+	if state, stateErr := host.GetPRState(ctx, pr); stateErr == nil {
+		if terminal, done, terminalErr := terminalCIOutcome(sctx, host, pr, state); done || terminalErr != nil {
+			return terminal, terminalErr
+		}
+	}
+	if sctx.Run.Shipping == nil {
+		baseBranch, err = currentPRTargetBranch(sctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	pr.BaseBranch = baseBranch
 	if repairRequested {
 		repairOutcome, err := s.repairFromFindings(sctx, host, pr)
 		if err != nil {
@@ -546,27 +645,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if err != nil {
 			sctx.Log(fmt.Sprintf("warning: could not check PR state: %v", err))
 			prStateKnown = false
-		} else if state == scm.PRStateMerged {
-			if err := verifyMergedProof(ctx, host, pr, sctx.Run.HeadSHA); err != nil {
-				return nil, err
-			}
-			if err := verifyShippingMergedProof(sctx, host, pr); err != nil {
-				return nil, err
-			}
-			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
-				return nil, err
-			}
-			notifyPRMerged(sctx)
-			sctx.Log("PR has been merged!")
-			return &pipeline.StepOutcome{MergedHeadSHA: sctx.Run.HeadSHA}, nil
-		} else if state == scm.PRStateClosed {
-			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed"); err != nil {
-				return nil, err
-			}
-			sctx.Log("PR has been closed")
-			return &pipeline.StepOutcome{}, nil
+		} else if terminal, done, terminalErr := terminalCIOutcome(sctx, host, pr, state); done || terminalErr != nil {
+			return terminal, terminalErr
 		} else if state == scm.PRStateOpen {
-			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
+			if err := observeCIState(sctx, "open"); err != nil {
 				return nil, err
 			}
 		}
@@ -623,22 +705,42 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		// Check CI status - wait for all checks to complete before escalating
 		pr.HeadSHA = sctx.Run.HeadSHA
 		checks, err := host.GetChecks(ctx, pr)
+		if err == nil {
+			err = scm.ValidateCheckHeads(checks, pr.HeadSHA)
+		}
 		if err != nil && pluginPollFailsStep(err) {
 			clearCIMonitorReady(sctx)
 			return nil, err
 		}
 		if err != nil {
-			clearCIMonitorReady(sctx)
-			lastMonitorLog = ""
-			sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
-			consecutiveCheckErrs++
-			// A provider read that keeps failing (e.g. gh < v2.50 rejecting
-			// `gh pr checks --json`) must become an actionable stop, not an
-			// invisible spin to ci_timeout. The PR state check above returned
-			// already for merged/closed, so reaching here means the PR is open.
-			if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
-				sctx.Log(fmt.Sprintf("CI checks could not be read %d consecutive times, parking for a decision", consecutiveCheckErrs))
-				return ciTerminalRepairOutcome(ciCheckReadFailureOutcome(err), Findings{}, sctx.DeferredFindings), nil
+			if errors.Is(err, scm.ErrHeadChanged) {
+				timeoutFailingChecks = nil
+				timeoutMergeConflict = false
+				// The provider answered, but nothing it offered is evidence for
+				// the commit this run is delivering: no pipeline has registered
+				// for that commit yet, and the pipeline the merge request still
+				// points at belongs to an older one. That state resolves when
+				// the provider creates the pipeline, so it is a wait, not a
+				// read failure - counting it toward the consecutive-error limit
+				// would park the run after a few minutes telling the operator to
+				// check a CLI that answered fine. The idle timeout still bounds
+				// the wait, and the readiness signal is cleared because the
+				// previous observation was for a different head.
+				consecutiveCheckErrs = 0
+				lastMonitorLog = logCIMonitorStatus(sctx, fmt.Sprintf("%s%v", cimonitor.ChecksHeadWaitingPrefix, err), lastMonitorLog)
+			} else {
+				clearCIMonitorReady(sctx)
+				lastMonitorLog = ""
+				sctx.Log(fmt.Sprintf("warning: could not check CI: %v", err))
+				consecutiveCheckErrs++
+				// A provider read that keeps failing (e.g. gh < v2.50 rejecting
+				// `gh pr checks --json`) must become an actionable stop, not an
+				// invisible spin to ci_timeout. The PR state check above returned
+				// already for merged/closed, so reaching here means the PR is open.
+				if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
+					sctx.Log(fmt.Sprintf("CI checks could not be read %d consecutive times, parking for a decision", consecutiveCheckErrs))
+					return ciTerminalRepairOutcome(ciCheckReadFailureOutcome(err), Findings{}, sctx.DeferredFindings), nil
+				}
 			}
 		} else {
 			consecutiveCheckErrs = 0
@@ -785,6 +887,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					sctx.DeferredFindings = ""
 					s.observedCompletedAt = terminalFailureCompletionTimes(checks)
 					findings := ciObservationFindings(ciIssues{
+						provider:            host.Provider(),
 						checks:              checks,
 						failing:             failing,
 						unresolvedCancelled: unresolvedCancelled,
@@ -861,10 +964,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					if len(checks) == 0 {
 						passedMsg = ciNoChecksPassedMsg
 					}
-					if sctx.PublishedHeadValidated != nil {
+					lastMonitorLog = logVerifiedCIMonitorStatus(sctx, host, checks, passedMsg, lastMonitorLog)
+					if lastMonitorLog == passedMsg && sctx.PublishedHeadValidated != nil {
 						sctx.PublishedHeadValidated(pr.HeadSHA)
 					}
-					lastMonitorLog = logCIMonitorStatus(sctx, passedMsg, lastMonitorLog)
 				default:
 					clearCIMonitorReady(sctx)
 					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
@@ -905,6 +1008,55 @@ func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) st
 	return message
 }
 
+func logVerifiedCIMonitorStatus(sctx *pipeline.StepContext, host scm.Host, checks []scm.Check, message, previous string) string {
+	if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
+		clearCIMonitorReady(sctx)
+		sctx.Log(fmt.Sprintf("warning: CI readiness comparison could not be verified: %v", err))
+		return ""
+	}
+	return logCIMonitorStatus(sctx, message, previous)
+}
+
+func verifyCIMonitorComparison(sctx *pipeline.StepContext, host scm.Host, checks []scm.Check) error {
+	if sctx != nil && sctx.Run != nil && sctx.Run.Shipping != nil {
+		return nil
+	}
+	if sctx == nil || sctx.Run == nil || sctx.DB == nil || host == nil {
+		return fmt.Errorf("CI readiness lacks a run or comparison reader")
+	}
+	receipt, err := sctx.DB.GetRunPRContext(sctx.Run.ID)
+	if err != nil {
+		return err
+	}
+	if receipt == nil || receipt.PRURL == "" || sctx.Run.HeadSHA != receipt.LocalHeadSHA {
+		return fmt.Errorf("CI readiness lacks a current PR comparison receipt")
+	}
+	durable, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		return err
+	}
+	if durable == nil || durable.HeadSHA != receipt.LocalHeadSHA {
+		return fmt.Errorf("durable run head differs from CI readiness comparison")
+	}
+	if err := scm.ValidateCheckHeads(checks, receipt.LocalHeadSHA); err != nil {
+		return err
+	}
+	reader, ok := host.(scm.PRFactsReader)
+	if !ok {
+		return fmt.Errorf("provider cannot read complete PR facts for CI readiness")
+	}
+	facts, err := reader.ReadPRFacts(sctx.Ctx, prFromOwnedURL(receipt.PRURL))
+	if err != nil {
+		return err
+	}
+	if facts.State != scm.PRStateOpen {
+		return fmt.Errorf("PR is no longer open for CI readiness")
+	}
+	selection := pipeline.PRTargetSelection{PRURL: facts.PR.URL, State: facts.State, SourceRepo: facts.SourceRepository,
+		SourceBranch: facts.SourceBranch, ForgeHeadSHA: facts.HeadSHA, TargetBranch: facts.BaseBranch}
+	return verifyCurrentPRComparison(sctx, host, selection, receipt, &facts)
+}
+
 func clearCIMonitorReady(sctx *pipeline.StepContext) {
 	if err := setCIMonitorReadiness(sctx, false, false); err != nil {
 		sctx.Log(fmt.Sprintf("warning: could not clear CI readiness: %v", err))
@@ -934,7 +1086,7 @@ func verifyShippingMergedProof(sctx *pipeline.StepContext, host scm.Host, pr *sc
 	if sctx.Run.Shipping == nil {
 		return nil
 	}
-	reader, ok := host.(scm.PRFactsReader)
+	reader, ok := host.(scm.ShippingPRFactsReader)
 	if !ok {
 		return fmt.Errorf("strict shipping requires exact merged PR facts")
 	}

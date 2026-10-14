@@ -425,18 +425,6 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 		"failed", gateStats.Failed,
 	)
 
-	terminalPRStarted := time.Now()
-	terminalPRCount, err := d.ReconcileTerminalPRRuns()
-	if err != nil {
-		slog.Error("failed to reconcile terminal PR runs", "error", err)
-		logStartupPhase("terminal_pr_runs", terminalPRStarted, "failed", true)
-	} else {
-		if terminalPRCount > 0 {
-			slog.Info("reconciled terminal PR runs", "count", terminalPRCount)
-		}
-		logStartupPhase("terminal_pr_runs", terminalPRStarted, "reconciled", terminalPRCount)
-	}
-
 	parkedStarted := time.Now()
 	plans := mgr.recoverableParkedRuns(context.Background())
 	preserved := make(map[string]struct{}, len(plans))
@@ -1390,19 +1378,18 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err != nil {
 			return nil, err
 		}
-		existing, err := d.GetRunByLaunchNonce(p.RepoID, p.Branch, p.LaunchNonce)
-		if err != nil {
-			return nil, err
+		if p.Shipping != nil && p.ExternalCIOwner != "" {
+			return nil, fmt.Errorf("strict shipping cannot be combined with external CI ownership")
 		}
-		if existing != nil && !existing.Shipping.Matches(p.Shipping) {
-			return nil, fmt.Errorf("conflicting launch_nonce: shipping pin differs")
-		}
-		run, claimed, err := d.ClaimLaunchReceipt(p.RepoID, p.Branch, p.LaunchNonce, p.SubmittedHeadSHA, p.ValidationGeneration, p.IntentDigest, prBaseBranch, p.OmitIntent, p.Shipping, p.PiProfile)
+		run, claimed, err := d.ClaimLaunchReceiptWithAllOptions(p.RepoID, p.Branch, p.LaunchNonce, p.SubmittedHeadSHA, p.ValidationGeneration, p.IntentDigest, prBaseBranch, p.OmitIntent, p.Shipping, p.ExternalCIOwner, p.PiProfile)
 		if err != nil {
 			return nil, fmt.Errorf("claim launch receipt: %w", err)
 		}
 		if run == nil {
 			return &ipc.ClaimLaunchReceiptResult{}, nil
+		}
+		if !run.Shipping.Matches(p.Shipping) {
+			return nil, fmt.Errorf("conflicting launch_nonce: shipping pin differs")
 		}
 		if !run.PiProfile.Matches(p.PiProfile) {
 			return nil, fmt.Errorf("conflicting launch_nonce: Pi profile differs from run pin")
@@ -1412,6 +1399,9 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		}
 		if p.OmitIntent && !run.OmitIntent {
 			return nil, conflictingLaunchOmitIntent(p.LaunchNonce)
+		}
+		if run.ExternalCIOwner != p.ExternalCIOwner {
+			return nil, fmt.Errorf("conflicting launch_nonce: external CI owner differs from run")
 		}
 
 		receipt, err := receiptForRun(run, claimed)
@@ -1430,6 +1420,9 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 	})
 	srv.Handle(ipc.MethodProbeOmitIntent, func(context.Context, json.RawMessage) (interface{}, error) {
 		return &ipc.ProbeOmitIntentResult{OK: true}, nil
+	})
+	srv.Handle(ipc.MethodProbeExternalCIOwner, func(context.Context, json.RawMessage) (interface{}, error) {
+		return &ipc.ProbeExternalCIOwnerResult{OK: true}, nil
 	})
 
 	srv.Handle(ipc.MethodCaptureVerificationPlan, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
@@ -1508,7 +1501,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		runID, err := mgr.HandleRerun(ctx, p.RepoID, p.Branch, p.PreviousRunID, p.SkipSteps, p.Intent, p.PRBaseBranch, p.OmitIntent, p.CallerHeadSHA, p.VerificationPlanID, p.ClosingIssueRefs, p.PiProfile)
+		runID, err := mgr.HandleRerun(ctx, p.RepoID, p.Branch, p.PreviousRunID, p.SkipSteps, p.Intent, p.PRBaseBranch, p.OmitIntent, p.ExternalCIOwner, p.CallerHeadSHA, p.VerificationPlanID, p.ClosingIssueRefs, p.PiProfile)
 		if err != nil {
 			return nil, err
 		}
@@ -1667,6 +1660,7 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		CIReadyNoCI:        r.CIReadyNoCI,
 		PRBaseBranch:       r.PRBaseBranch,
 		OmitIntent:         r.OmitIntent,
+		ExternalCIOwner:    r.ExternalCIOwner,
 		PiProfile:          r.PiProfile,
 		VerificationPlan:   r.VerificationPlan,
 		AwaitingAgent:      r.AwaitingAgentSince != nil,
@@ -1682,6 +1676,16 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 			info.TargetBranch = c.TargetBranch
 			info.TargetSHA = c.TargetSHA
 		}
+	}
+	if r.Shipping == nil {
+		if context, err := d.GetRunPRContext(r.ID); err == nil && context != nil {
+			info.ReviewGeneration = context.Generation
+		}
+	}
+	if pending, err := d.PendingExternalCISupport(r); err == nil {
+		info.PendingCISupport = pending
+	} else {
+		info.PendingCISupportError = err.Error()
 	}
 	if len(steps) > 0 {
 		info.Steps = make([]ipc.StepResultInfo, 0, len(steps))

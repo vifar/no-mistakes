@@ -35,13 +35,13 @@ func TestReviewSchemaRetryExhaustionJourney(t *testing.T) {
     structured_raw: '{"findings":[],"risk_level":"low","risk_rationale":"r","risk_scope":"everything"}'
   - match: "findings[3] missing required field"
     text: "same-field attempt 3"
-    structured_raw: '{"findings":[{"severity":"info","description":"d","action":"no-op","review_scope":"source"},{"severity":"info","description":"d","action":"no-op","review_scope":"bogus"}],"risk_level":"low","risk_rationale":"r","risk_scope":"source-or-external"}'
+    structured_raw: '{"findings":[{"severity":"info","description":"d","action":"no-op","review_scope":"source","support":{"claim_type":"test","test":{"command":"test.command"}}},{"severity":"info","description":"d","action":"no-op","review_scope":"bogus","support":{"claim_type":"test","test":{"command":"test.command"}}}],"risk_level":"low","risk_rationale":"r","risk_scope":"source-or-external"}'
   - match: "findings[2].review_scope must match"
     text: "same-field attempt 2"
-    structured_raw: '{"findings":[{"severity":"info","description":"d","action":"no-op","review_scope":"source"},{"severity":"info","description":"d","action":"no-op","review_scope":"source"},{"severity":"info","description":"d","action":"no-op","review_scope":"source"},{"severity":"info","description":"d","action":"no-op"}],"risk_level":"low","risk_rationale":"r","risk_scope":"source-or-external"}'
+    structured_raw: '{"findings":[{"severity":"info","description":"d","action":"no-op","review_scope":"source","support":{"claim_type":"test","test":{"command":"test.command"}}},{"severity":"info","description":"d","action":"no-op","review_scope":"source","support":{"claim_type":"test","test":{"command":"test.command"}}},{"severity":"info","description":"d","action":"no-op","review_scope":"source","support":{"claim_type":"test","test":{"command":"test.command"}}},{"severity":"info","description":"d","action":"no-op","support":{"claim_type":"test","test":{"command":"test.command"}}}],"risk_level":"low","risk_rationale":"r","risk_scope":"source-or-external"}'
   - match: "branch: schema-same-field"
     text: "same-field attempt 1"
-    structured_raw: '{"findings":[{"severity":"info","description":"d","action":"no-op","review_scope":"source"},{"severity":"info","description":"d","action":"no-op","review_scope":"source"},{"severity":"info","description":"d","action":"no-op","review_scope":"bogus"}],"risk_level":"low","risk_rationale":"r","risk_scope":"source-or-external"}'
+    structured_raw: '{"findings":[{"severity":"info","description":"d","action":"no-op","review_scope":"source","support":{"claim_type":"test","test":{"command":"test.command"}}},{"severity":"info","description":"d","action":"no-op","review_scope":"source","support":{"claim_type":"test","test":{"command":"test.command"}}},{"severity":"info","description":"d","action":"no-op","review_scope":"bogus","support":{"claim_type":"test","test":{"command":"test.command"}}}],"risk_level":"low","risk_rationale":"r","risk_scope":"source-or-external"}'
   - match: "output findings must be array"
     text: "non-field attempt 3"
     structured_raw: '"again just a string"'

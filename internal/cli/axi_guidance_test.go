@@ -18,16 +18,14 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// canonicalStaleMonitorPhrases are the load-bearing claims of the corrected
-// "PR fell behind / conflicted after checks pass" guidance: the live CI monitor
-// auto-rebases and re-pushes such a PR, so the agent runs no command and never
-// hand-rebases, and `no-mistakes rerun` is only the dead-monitor recovery,
-// subject to its clean caller-head check.
 var canonicalStaleMonitorPhrases = []string{
+	"with green checks and no merge conflict",
+	"CI clears readiness and keeps monitoring, withholding checks-passed",
+	"It may wait until ci_timeout, or indefinitely when unlimited",
+	"When CI returns, including with findings, the boundary guard rejects the changed comparison and terminates the run",
+	"does not automatically repair or revalidate that changed comparison",
+	"After termination, restart from the current target and head",
 	"never hand-rebase",
-	"revalidates from Review",
-	"cannot prove continuity with the reviewed head",
-	"re-pushes",
 	"no-mistakes rerun",
 }
 

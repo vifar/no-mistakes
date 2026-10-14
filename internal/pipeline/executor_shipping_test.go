@@ -2,14 +2,17 @@ package pipeline
 
 import (
 	"context"
-	"github.com/kunchenguid/no-mistakes/internal/config"
-	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/ipc"
-	"github.com/kunchenguid/no-mistakes/internal/types"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // A clean findings list cannot waive a Review coverage gate in strict mode.
@@ -116,11 +119,25 @@ func TestShippingReviewRestartInsideFixRoundIsHonored(t *testing.T) {
 		{name: "one finding declined", selected: []string{"review-1"}, parkedOn: "review-2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			database, p, _, repo := setupTest(t)
-			run, err := database.InsertRunWithShipping(repo.ID, "feature", strings.Repeat("a", 40), strings.Repeat("c", 40), nil, "", "", "", "main", false, nil, &types.ShippingOptions{Mode: types.ShippingFull})
+			database, p, baseRun, repo := setupTest(t)
+			workDir := completionFixture(t, database, baseRun)
+			run, err := database.InsertRunWithShipping(repo.ID, "feature", baseRun.HeadSHA, baseRun.HeadSHA, nil, "", "", "", "main", false, nil, &types.ShippingOptions{Mode: types.ShippingFull})
 			if err != nil {
 				t.Fatal(err)
 			}
+			bindCompletionFixture(t, database, run, workDir)
+			for _, path := range []string{"a.go", "b.go"} {
+				if err := os.WriteFile(workDir+"/"+path, []byte("package fixture\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := git.Run(context.Background(), workDir, "add", "a.go", "b.go"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := git.Run(context.Background(), workDir, "commit", "-m", "add review fixtures"); err != nil {
+				t.Fatal(err)
+			}
+			advanceCompletionFixture(t, database, run, workDir)
 			const findings = `{"findings":[` +
 				`{"id":"review-1","severity":"error","file":"a.go","line":1,"description":"first defect","action":"ask-user"},` +
 				`{"id":"review-2","severity":"error","file":"b.go","line":2,"description":"second defect","action":"ask-user"}],` +
@@ -144,15 +161,23 @@ func TestShippingReviewRestartInsideFixRoundIsHonored(t *testing.T) {
 					if sctx.Fixing || sctx.PreviousFindings != "" {
 						t.Errorf("restarted review is not a fresh complete review: fixing=%v previous=%q", sctx.Fixing, sctx.PreviousFindings)
 					}
-					comparison, err := database.CaptureReviewComparison(run.ID, db.ReviewComparison{SourceRepo: "owner/project", SourceBranch: "feature", TargetBranch: "main", TargetSHA: run.BaseSHA, HeadSHA: run.HeadSHA, MergeBaseSHA: run.BaseSHA, DiffDigest: strings.Repeat("b", 64)})
+					comparison, err := database.GetRunPRContext(run.ID)
 					if err != nil {
 						return nil, err
 					}
-					return &StepOutcome{Findings: `{"findings":[],"summary":"clean"}`, ReviewedPaths: []string{"a.go", "b.go"}, ReviewablePaths: []string{"a.go", "b.go"}, ReviewApprovedHeadSHA: run.HeadSHA, ReviewComparisonGeneration: comparison.Generation}, nil
+					reviewComparison, err := database.CaptureReviewComparison(run.ID, db.ReviewComparison{
+						SourceRepo: "test/repo", SourceBranch: run.Branch, TargetBranch: comparison.TargetBranch,
+						TargetSHA: comparison.TargetSHA, HeadSHA: comparison.LocalHeadSHA,
+						MergeBaseSHA: comparison.MergeBaseSHA, DiffDigest: comparison.DiffDigest,
+					})
+					if err != nil {
+						return nil, err
+					}
+					return &StepOutcome{Findings: `{"findings":[],"summary":"clean"}`, ReviewedPaths: []string{"a.go", "b.go"}, ReviewablePaths: []string{"a.go", "b.go"}, ReviewApprovedHeadSHA: run.HeadSHA, ReviewComparisonGeneration: reviewComparison.Generation}, nil
 				}
 			}}
 			exec := NewExecutor(database, p, &config.Config{}, nil, []Step{rebase, review}, nil)
-			done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+			done, _ := startExecutor(t, exec, run, repo, workDir)
 
 			waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 			if err := respondFixPartial(t, exec, types.StepReview, tc.selected...); err != nil {

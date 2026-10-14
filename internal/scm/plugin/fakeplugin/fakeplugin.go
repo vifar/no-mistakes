@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -27,8 +28,9 @@ const ExecutableName = "nm-fake-provider-plugin"
 
 // Environment variables the fake reads.
 const (
-	EnvState = "FAKE_PROVIDER_PLUGIN_STATE"
-	EnvLog   = "FAKE_PROVIDER_PLUGIN_LOG"
+	EnvState    = "FAKE_PROVIDER_PLUGIN_STATE"
+	EnvLog      = "FAKE_PROVIDER_PLUGIN_LOG"
+	EnvUpstream = "FAKEAGENT_PR_UPSTREAM"
 )
 
 // State is the fake forge. Tests seed it and read it back.
@@ -43,11 +45,14 @@ type State struct {
 	// HangOn makes the named subcommand (for example "pr view") sleep far
 	// past any test timeout, so the adapter's per-call deadline fires.
 	HangOn string `json:"hang_on,omitempty"`
+	// MalformedOn returns a deliberately invalid success document for a command.
+	MalformedOn string `json:"malformed_on,omitempty"`
 	// Checks are reported for every PR.
 	Checks []Check `json:"checks"`
-	// MergeWhenChecksPass marks a PR merged at the head the CI step asked
-	// about once a "pr checks" call sees every check passing.
+	// MergeWhenChecksPass marks a PR merged at its observed published head
+	// once a "pr checks" call sees every check passing.
 	MergeWhenChecksPass bool   `json:"merge_when_checks_pass,omitempty"`
+	MergeSHA            string `json:"merge_sha,omitempty"`
 	FailedLogs          string `json:"failed_logs,omitempty"`
 	NextNumber          int    `json:"next_number,omitempty"`
 	PRs                 []PR   `json:"prs"`
@@ -63,15 +68,17 @@ type PR struct {
 	Title      string `json:"title"`
 	Body       string `json:"body"`
 	State      string `json:"state"`
+	MergeSHA   string `json:"merge_sha,omitempty"`
 	Draft      bool   `json:"draft,omitempty"`
 }
 
 // Check is one fake CI check.
 type Check struct {
-	Name   string `json:"name"`
-	Bucket string `json:"bucket"`
-	State  string `json:"state,omitempty"`
-	Link   string `json:"link,omitempty"`
+	Name    string `json:"name"`
+	HeadSHA string `json:"head_sha,omitempty"`
+	Bucket  string `json:"bucket"`
+	State   string `json:"state,omitempty"`
+	Link    string `json:"link,omitempty"`
 }
 
 // Call is one parsed invocation, as recorded in the request log.
@@ -294,10 +301,19 @@ func serve(state *State, call Call, body string) (any, bool, error) {
 		}, false, nil
 	case "pr find":
 		head, base := call.Flag("head"), call.Flag("base")
-		for _, pr := range state.PRs {
+		var found *PR
+		for i := range state.PRs {
+			pr := &state.PRs[i]
 			if pr.State == "open" && pr.HeadBranch == head && (base == "" || pr.BaseBranch == base) {
-				return map[string]any{"pr": wire(pr)}, false, nil
+				if found != nil {
+					return nil, false, fmt.Errorf("ambiguous open PRs for %s", head)
+				}
+				found = pr
 			}
+		}
+		if found != nil {
+			changed, err := observeHead(found)
+			return map[string]any{"pr": wire(*found)}, changed, err
 		}
 		return map[string]any{"pr": nil}, false, nil
 	case "pr create":
@@ -314,6 +330,9 @@ func serve(state *State, call Call, body string) (any, bool, error) {
 		state.NextNumber++
 		base := "https://" + call.Flag("host") + "/" + strings.Trim(call.Flag("repo"), "/")
 		pr := PR{Number: number, URL: base + "/pulls/" + number, HeadBranch: head, BaseBranch: call.Flag("base"), Title: call.Flag("title"), Body: body, State: "open", Draft: call.Switch("draft")}
+		if err := observeNewPR(&pr); err != nil {
+			return nil, false, err
+		}
 		state.PRs = append(state.PRs, pr)
 		return map[string]any{"pr": wire(pr)}, true, nil
 	}
@@ -331,27 +350,45 @@ func serve(state *State, call Call, body string) (any, bool, error) {
 }
 
 func servePR(state *State, pr *PR, call Call, body string) (any, bool, error) {
+	observedChanged, err := observeHead(pr)
+	if err != nil {
+		return nil, false, err
+	}
 	switch call.Command {
 	case "pr update":
+		if state.MalformedOn == call.Command {
+			return map[string]any{"unexpected": true}, false, nil
+		}
 		if title, ok := call.Flags["title"]; ok {
 			pr.Title = title[0]
 		}
 		pr.Body = body
 		return map[string]any{"pr": wire(*pr)}, true, nil
 	case "pr view":
-		return map[string]any{"pr": wire(*pr), "state": pr.State, "title": pr.Title, "body": pr.Body}, false, nil
+		return map[string]any{"pr": wire(*pr), "state": pr.State, "title": pr.Title, "body": pr.Body}, observedChanged, nil
 	case "pr checks":
 		checks := state.Checks
 		if checks == nil {
 			checks = []Check{}
 		}
-		changed := false
-		if head := call.Flag("head-sha"); head != "" && pr.HeadSHA != head {
-			pr.HeadSHA = head
-			changed = true
+		changed := observedChanged
+		for i := range checks {
+			if checks[i].HeadSHA == "" {
+				checks[i].HeadSHA = pr.HeadSHA
+			}
 		}
 		if state.MergeWhenChecksPass && pr.State == "open" && allPass(checks) {
-			pr.State = "merged"
+			mergeSHA, mergeErr := mergeUpstream(pr)
+			if mergeErr != nil {
+				return nil, false, mergeErr
+			}
+			if mergeSHA == "" && !isFullSHA(state.MergeSHA) {
+				return nil, false, fmt.Errorf("state-only merge requires an explicit full merge SHA")
+			}
+			if mergeSHA == "" {
+				mergeSHA = state.MergeSHA
+			}
+			pr.MergeSHA, state.MergeSHA, pr.State = mergeSHA, mergeSHA, "merged"
 			changed = true
 		}
 		return map[string]any{"checks": checks}, changed, nil
@@ -362,7 +399,14 @@ func servePR(state *State, pr *PR, call Call, body string) (any, bool, error) {
 	case "pr merged":
 		proof := map[string]any{"merged": pr.State == "merged", "number": pr.Number, "url": pr.URL, "head_sha": pr.HeadSHA}
 		if pr.State == "merged" {
-			proof["merge_commit_sha"] = "fakemergecommit"
+			mergeSHA := pr.MergeSHA
+			if mergeSHA == "" {
+				mergeSHA = state.MergeSHA
+			}
+			if !isFullSHA(mergeSHA) {
+				return nil, false, fmt.Errorf("merged PR has no merge SHA")
+			}
+			proof["merge_commit_sha"] = mergeSHA
 			proof["merged_at"] = time.Now().UTC().Format(time.RFC3339)
 			proof["merged_by"] = "fake-maintainer"
 		}
@@ -372,6 +416,108 @@ func servePR(state *State, pr *PR, call Call, body string) (any, bool, error) {
 		return map[string]any{"pr": wire(*pr)}, true, nil
 	}
 	return nil, false, fmt.Errorf("unsupported subcommand %q", call.Command)
+}
+
+func isFullSHA(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if !(r >= '0' && r <= '9') && !(r >= 'a' && r <= 'f') && !(r >= 'A' && r <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+func observeNewPR(pr *PR) error { _, err := observeHead(pr); return err }
+
+// observeHead uses the published local bare upstream when the harness enables it.
+// State-only tests keep an explicitly seeded head SHA.
+func observeHead(pr *PR) (bool, error) {
+	upstream := os.Getenv(EnvUpstream)
+	if upstream == "" {
+		return false, nil
+	}
+	if !filepath.IsAbs(upstream) {
+		return false, fmt.Errorf("upstream must be an absolute path")
+	}
+	info, err := os.Stat(upstream)
+	if err != nil || !info.IsDir() {
+		return false, fmt.Errorf("upstream must be a local bare repository")
+	}
+	tempRoot, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		return false, fmt.Errorf("resolve temporary directory: %w", err)
+	}
+	realUpstream, err := filepath.EvalSymlinks(upstream)
+	if err != nil {
+		return false, fmt.Errorf("resolve upstream directory: %w", err)
+	}
+	rel, err := filepath.Rel(tempRoot, realUpstream)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false, fmt.Errorf("upstream must be inside the temporary directory")
+	}
+	git := func(args ...string) (string, error) {
+		b, e := exec.Command("git", append([]string{"--git-dir", upstream}, args...)...).CombinedOutput()
+		if e != nil {
+			return "", fmt.Errorf("upstream git %v: %w: %s", args, e, strings.TrimSpace(string(b)))
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	bare, err := git("rev-parse", "--is-bare-repository")
+	if err != nil || bare != "true" {
+		return false, fmt.Errorf("upstream must be a bare repository")
+	}
+	ref := "refs/heads/" + pr.HeadBranch
+	if _, err = git("check-ref-format", ref); err != nil {
+		return false, fmt.Errorf("invalid PR head branch: %w", err)
+	}
+	head, err := git("rev-parse", "--verify", ref)
+	if err != nil {
+		return false, fmt.Errorf("published PR head %s is missing: %w", ref, err)
+	}
+	changed := pr.HeadSHA != head
+	pr.HeadSHA = head
+	return changed, nil
+}
+
+func mergeUpstream(pr *PR) (string, error) {
+	upstream := os.Getenv(EnvUpstream)
+	if upstream == "" {
+		return "", nil
+	}
+	if _, err := observeHead(pr); err != nil {
+		return "", err
+	}
+	git := func(args ...string) (string, error) {
+		b, e := exec.Command("git", append([]string{"--git-dir", upstream}, args...)...).CombinedOutput()
+		if e != nil {
+			return "", fmt.Errorf("upstream git %v: %w: %s", args, e, strings.TrimSpace(string(b)))
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	baseRef := "refs/heads/" + pr.BaseBranch
+	if _, err := git("check-ref-format", baseRef); err != nil {
+		return "", err
+	}
+	base, err := git("rev-parse", "--verify", baseRef)
+	if err != nil {
+		return "", fmt.Errorf("published PR base is missing: %w", err)
+	}
+	tree, err := git("merge-tree", "--write-tree", base, pr.HeadSHA)
+	if err != nil {
+		return "", err
+	}
+	commit, err := exec.Command("git", "-c", "user.name=Fake provider", "-c", "user.email=fake-provider@example.invalid", "--git-dir", upstream, "commit-tree", tree, "-p", base, "-p", pr.HeadSHA, "-m", "Merge fixture PR").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("create merge commit: %w: %s", err, strings.TrimSpace(string(commit)))
+	}
+	mergeSHA := strings.TrimSpace(string(commit))
+	if _, err := git("update-ref", baseRef, mergeSHA, base); err != nil {
+		return "", fmt.Errorf("base changed while merging PR: %w", err)
+	}
+	return mergeSHA, nil
 }
 
 func allPass(checks []Check) bool {

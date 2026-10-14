@@ -270,7 +270,9 @@ That protects the gate hook if a tool such as Husky wrote `core.hookspath` into 
 
 ## PR step is skipped
 
-Symptom: pipeline completes but the PR step shows `skipped`.
+Symptom: a run fails while resolving its PR context, or the PR step shows `skipped`.
+
+Ordinary guarded network runs require an available provider before Rebase and at later comparison boundaries. Missing tools, credentials, host detection, or plugin availability fail those checks, even when PR and CI are skipped. The PR adapter itself can record an availability skip if reached, but a later boundary check still fails if the provider remains unavailable. A skipped PR step does not establish that the run completed.
 
 Check the [Provider Integration](/no-mistakes/guides/provider-integration/) requirements. Most common causes:
 
@@ -282,7 +284,9 @@ Check the [Provider Integration](/no-mistakes/guides/provider-integration/) requ
 - Self-hosted GitHub Enterprise on a hostname that is not `github.com` isn't detected because `gh` isn't configured for the host; run `gh auth login --hostname your-ghe.example.com` so detection finds it. Once detection succeeds, the availability check is host-scoped (`gh auth status --hostname your-ghe.example.com`), so a stale token on `github.com` or any other configured gh host can no longer falsely mark the GHE repo as unauthenticated.
 - Self-hosted GitLab on a hostname with no `gitlab` marker isn't detected because `glab` isn't configured for the host; run `glab auth login --hostname your-gitlab.example.com` so detection finds it. Once detection succeeds, the availability check is host-scoped (`glab auth status --hostname your-gitlab.example.com`), so a stale token on `gitlab.com` or any other configured glab host can no longer falsely mark the self-hosted repo as unauthenticated.
 - Self-hosted Gitea isn't detected because `tea` has no login configured for the host; run `tea logins add --url https://your-gitea.example.com --token <token> --name <name>` so detection finds it. See [Self-hosted Gitea](/no-mistakes/guides/provider-integration/#self-hosted-gitea).
-- A non-GitHub repo record has a fork URL set; fork MR/PR routing is currently GitHub-only
+- Self-hosted Forgejo reached over an SSH origin isn't detected until `FORGEJO_BASE_URL` is set in the daemon's environment; when the instance serves SSH from a hostname other than its web host (Forgejo's `SSH_DOMAIN` setting), also set `FORGEJO_SSH_DOMAIN`, or the origin still fails to match the instance. See [Forgejo](/no-mistakes/guides/provider-integration/#forgejo).
+- `FORGEJO_SSH_DOMAIN` is set, but a `tea` login for the same host, such as one left from an earlier split-host workaround, is matched first and routes the repository to Gitea; with `tea` not installed or not logged in, ordinary guarded network runs fail at PR-context resolution with `tea CLI is not installed` or `tea CLI is not authenticated`. Remove the login with `tea logins delete <name>`. See [`FORGEJO_SSH_DOMAIN`](/no-mistakes/reference/environment/#forgejo_ssh_domain).
+- A non-GitHub repo record has a fork URL set; host construction refuses this unsupported route, so an ordinary guarded run fails before Rebase. Fork MR/PR routing is currently GitHub-only
 - You pushed the effective PR base branch (see the [PR step's skip rules](/no-mistakes/reference/pipeline-steps/#pr))
 
 ## CI step stuck or timed out
@@ -298,7 +302,7 @@ Older config files may still contain an explicit `ci_timeout: "4h"` value; updat
 If the PR is still open at the timeout, the step pauses for approval with findings for the open monitoring state or any known unresolved failures.
 You can approve, fix, or skip from the TUI or `no-mistakes axi respond`.
 
-A park that happens **before** the timeout, with a finding that CI checks could not be read from the provider, means the check read itself is failing (after 6 consecutive failed polls, the step stops waiting instead of spinning to `ci_timeout`). The finding is provider-neutral and the step log shows the underlying provider error; for GitHub, a `gh` older than 2.50 rejects the `gh pr checks --json` call and needs upgrading. The same park on GitLab, Forgejo, Bitbucket Cloud, Azure DevOps, Gitea, or a provider plugin points at that provider's CLI, credentials, or plugin instead.
+A park that happens **before** the timeout, with a finding that CI checks could not be read from the provider, means the check read itself is failing (after 6 consecutive failed polls, the step stops waiting instead of spinning to `ci_timeout`). The finding is provider-neutral and the step log shows the underlying provider error; for GitHub, a `gh` older than 2.50 rejects the `gh pr checks --json` call and needs upgrading. The same park on GitLab, Forgejo, Bitbucket Cloud, Azure DevOps, Gitea, or a provider plugin points at that provider's CLI, credentials, or plugin instead. For GitLab's "waiting for the delivered commit's own checks" message, see [CI source-commit binding](/no-mistakes/reference/pipeline-steps/#ci).
 Use `no-mistakes axi abort` only when you mean to cancel the whole active run.
 
 ## Step looks quiet or wedged

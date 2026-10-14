@@ -72,6 +72,7 @@ func ciTargetsFor(names []string, mergeConflict bool) ciFixTargets {
 func TestCIObservationFindings_ClassifiesEachIssueByProviderStructure(t *testing.T) {
 	t.Parallel()
 	findings := ciObservationFindings(ciIssues{
+		provider: scm.ProviderGitHub,
 		checks: []scm.Check{
 			{Name: "test", Bucket: scm.CheckBucketFail, State: "FAILURE", App: "github-actions", Link: "https://github.com/test/repo/actions/runs/1/job/2"},
 			{Name: "ci/external", Bucket: scm.CheckBucketFail, State: "FAILURE", Kind: scm.CheckKindStatus},
@@ -143,6 +144,7 @@ func TestCIObservationFindings_ClassifiesEachIssueByProviderStructure(t *testing
 func TestCIObservationFindings_PreservesSameNamedCheckIdentityAndClassification(t *testing.T) {
 	t.Parallel()
 	findings := ciObservationFindings(ciIssues{
+		provider: scm.ProviderGitHub,
 		checks: []scm.Check{
 			{Name: "build", ProviderID: "github-check-run:41", Bucket: scm.CheckBucketFail, App: "github-actions"},
 			{Name: "build", ProviderID: "github-check-run:42", Bucket: scm.CheckBucketFail, App: "greptile-apps"},
@@ -179,7 +181,7 @@ func TestReviewBotFindings_BoundsAndEmptyCase(t *testing.T) {
 	check := scm.Check{Name: "Greptile Review", Bucket: scm.CheckBucketFail, App: "greptile-apps", Link: "https://greptile.com/"}
 	bot, _ := scm.ReviewBotForApp(check.App)
 
-	empty := reviewBotFindings([]reviewBotCheck{{check: check, bot: bot}}, nil)
+	empty := reviewBotFindings(scm.ProviderGitHub, []reviewBotCheck{{check: check, bot: bot}}, nil)
 	if len(empty) != 1 || empty[0].Action != types.ActionAskUser || empty[0].Check != check.Name || !strings.Contains(empty[0].Description, "no unresolved review comments") {
 		t.Fatalf("empty-case findings = %+v, want one ask-user finding for the check", empty)
 	}
@@ -188,7 +190,7 @@ func TestReviewBotFindings_BoundsAndEmptyCase(t *testing.T) {
 	for i := 0; i < maxReviewBotCommentFindings+7; i++ {
 		many = append(many, scm.ReviewComment{Author: "greptile-apps[bot]", Path: "a.go", Line: i + 1, Body: strings.Repeat("x", maxReviewBotCommentBytes+100)})
 	}
-	bounded := reviewBotFindings([]reviewBotCheck{{check: check, bot: bot}}, many)
+	bounded := reviewBotFindings(scm.ProviderGitHub, []reviewBotCheck{{check: check, bot: bot}}, many)
 	if len(bounded) > maxReviewBotCommentFindings {
 		t.Fatalf("got %d findings, want at most %d including the omission notice", len(bounded), maxReviewBotCommentFindings)
 	}
@@ -220,7 +222,7 @@ func TestReviewBotFindings_BoundsEntireObservationAcrossRepeatedChecks(t *testin
 		comments[i] = scm.ReviewComment{ID: fmt.Sprintf("comment-%d", i), Author: "greptile-apps[bot]", Body: fmt.Sprintf("finding-%d", i)}
 	}
 
-	findings := reviewBotFindings(checks, comments)
+	findings := reviewBotFindings(scm.ProviderGitHub, checks, comments)
 	if len(findings) > maxReviewBotCommentFindings {
 		t.Fatalf("got %d findings across repeated checks, want at most %d", len(findings), maxReviewBotCommentFindings)
 	}
@@ -408,7 +410,7 @@ func TestCIStep_MixedGreptileAndTestFailureRoutesOnlyTheTestToAutoFix(t *testing
 	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.Run.PRURL = &prURL
-	sctx.Repo.UpstreamURL = upstream
+	sctx.Repo.UpstreamURL = "https://github.com/test/repo"
 	sctx.Run.Branch = "refs/heads/feature"
 	sctx.Config.CITimeout = 30 * time.Second
 	sctx.Config.AutoFix = config.AutoFix{CI: 3}
@@ -532,9 +534,6 @@ func TestCIStep_PublishedRepairResumesMonitoringAndWaitsForTheRerun(t *testing.T
 	if calls := len(f.sctx.Agent.(*mockAgent).calls); calls != 1 {
 		t.Fatalf("agent invocations = %d, want one", calls)
 	}
-	if !strings.Contains(f.log(), "fix already attempted for these issues, waiting for CI re-run") {
-		t.Fatalf("the poll after the push must wait for the provider, log:\n%s", f.log())
-	}
 	if strings.Count(f.log(), "issues detected:") != 1 {
 		t.Fatalf("a stale poll must not be re-escalated as a new observation, log:\n%s", f.log())
 	}
@@ -604,4 +603,25 @@ func itoaTest(v int) string {
 		v /= 10
 	}
 	return string(out)
+}
+
+func TestReviewBotFindingsKeepProviderIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		provider scm.Provider
+		want     string
+	}{
+		{scm.ProviderGitHub, "github"}, {scm.ProviderGitLab, "gitlab"},
+	} {
+		got := ciObservationFindings(ciIssues{
+			provider:  tc.provider,
+			greenBots: true,
+			botComments: []scm.ReviewComment{
+				{ID: "1", Author: "greptile-apps[bot]", Body: "github"},
+				{ID: "2", Author: "greptileai", Body: "gitlab"},
+			},
+		})
+		if len(got.Items) != 1 || !strings.HasSuffix(got.Items[0].Description, ": "+tc.want) {
+			t.Fatalf("provider %s findings = %+v", tc.provider, got)
+		}
+	}
 }

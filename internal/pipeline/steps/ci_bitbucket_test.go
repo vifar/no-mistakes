@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,10 +18,10 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func TestCIStep_BitbucketPassesWhenStatusesPass(t *testing.T) {
+func TestCIStep_BitbucketWithholdsReadinessWithoutComparison(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","state":"SUCCESSFUL"}]}`)
+	api := newFakeBitbucketCIAPI(t, "OPEN", fmt.Sprintf(`{"values":[{"name":"build","state":"SUCCESSFUL","links":{"commit":{"href":"https://api.bitbucket.org/2.0/repositories/test/repo/commit/%s"}}}]}`, headSHA), headSHA)
 
 	prURL := "https://bitbucket.org/test/repo/pull-requests/42"
 	ag := &mockAgent{name: "test"}
@@ -53,23 +54,23 @@ func TestCIStep_BitbucketPassesWhenStatusesPass(t *testing.T) {
 	if api.statusesCalls == 0 {
 		t.Fatal("expected Bitbucket statuses endpoint to be called")
 	}
-	foundPassed := false
+	foundRefusal := false
 	for _, line := range logs {
 		if strings.Contains(line, "ready to merge") {
 			t.Fatalf("expected Bitbucket CI logs not to imply mergeability, got %v", logs)
 		}
-		if strings.Contains(line, "all CI checks passed - still monitoring until merged or closed") {
-			foundPassed = true
+		if strings.Contains(line, "CI readiness lacks a current PR comparison receipt") {
+			foundRefusal = true
 		}
 	}
-	if !foundPassed {
-		t.Fatalf("expected successful Bitbucket CI logs, got %v", logs)
+	if !foundRefusal {
+		t.Fatalf("missing comparison was treated as CI readiness: %v", logs)
 	}
 }
 
 func TestCIStep_BitbucketUsesProcessEnvWhenStepEnvIsNil(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","state":"SUCCESSFUL"}]}`)
+	api := newFakeBitbucketCIAPI(t, "OPEN", fmt.Sprintf(`{"values":[{"name":"build","state":"SUCCESSFUL","links":{"commit":{"href":"https://api.bitbucket.org/2.0/repositories/test/repo/commit/%s"}}}]}`, headSHA), headSHA)
 	t.Setenv("NO_MISTAKES_BITBUCKET_EMAIL", "test@example.com")
 	t.Setenv("NO_MISTAKES_BITBUCKET_API_TOKEN", "test-token")
 	t.Setenv("NO_MISTAKES_BITBUCKET_API_BASE_URL", api.server.URL)
@@ -103,7 +104,7 @@ func TestCIStep_BitbucketUsesProcessEnvWhenStepEnvIsNil(t *testing.T) {
 func TestCIStep_BitbucketFailureNeedsApproval(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","key":"build-linux","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/1"}]}`)
+	api := newFakeBitbucketCIAPI(t, "OPEN", fmt.Sprintf(`{"values":[{"name":"build","key":"build-linux","state":"FAILED","links":{"commit":{"href":"https://api.bitbucket.org/2.0/repositories/test/repo/commit/%s"}},"url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/1"}]}`, headSHA), headSHA)
 
 	prURL := "https://bitbucket.org/test/repo/pull-requests/42"
 	ag := &mockAgent{name: "test"}
@@ -114,7 +115,10 @@ func TestCIStep_BitbucketFailureNeedsApproval(t *testing.T) {
 	sctx.Config.CITimeout = 30 * time.Second
 	sctx.Config.AutoFix = config.AutoFix{CI: 0}
 
-	step := &CIStep{}
+	step := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error {
+		t.Fatal("current failed Bitbucket check must produce findings on its first poll")
+		return nil
+	}}
 	outcome, err := driveCI(t, step, sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -146,7 +150,7 @@ func TestCIStep_BitbucketFailureNeedsApproval(t *testing.T) {
 func TestCIStep_BitbucketStoppedCheckParksForADecision(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","state":"STOPPED"}]}`)
+	api := newFakeBitbucketCIAPI(t, "OPEN", fmt.Sprintf(`{"values":[{"name":"build","state":"STOPPED","links":{"commit":{"href":"https://api.bitbucket.org/2.0/repositories/test/repo/commit/%s"}}}]}`, headSHA), headSHA)
 
 	prURL := "https://bitbucket.org/test/repo/pull-requests/42"
 	ag := &mockAgent{name: "test"}
@@ -217,7 +221,7 @@ func TestCIStep_BitbucketAutoFixIncludesPipelineLogs(t *testing.T) {
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", "origin", "feature")
 
-	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"test","key":"test","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/1"}]}`)
+	api := newFakeBitbucketCIAPI(t, "OPEN", fmt.Sprintf(`{"values":[{"name":"test","key":"test","state":"FAILED","links":{"commit":{"href":"https://api.bitbucket.org/2.0/repositories/test/repo/commit/%s"}},"url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/1"}]}`, headSHA), headSHA)
 	api.pipelinesJSON = `{"values":[{"uuid":"{pipeline-1}","build_number":1}]}`
 	api.stepsJSON = `{"values":[{"uuid":"{step-1}","state":{"name":"COMPLETED","result":{"name":"FAILED"}}}]}`
 	api.stepLog = "error log output"
@@ -265,85 +269,26 @@ func TestCIStep_BitbucketAutoFixIncludesPipelineLogs(t *testing.T) {
 	}
 }
 
-func TestCIStep_BitbucketAutoFixUsesLivePRHeadSHAForLogs(t *testing.T) {
+// The log API resolves the live PR source even when its caller supplies an
+// older head. That fallback does not authorize a repair of stale checks.
+func TestCIStep_BitbucketLogsUseLivePRHeadSHA(t *testing.T) {
 	t.Parallel()
-	upstream := t.TempDir()
-	gitCmd(t, upstream, "init", "--bare")
-
-	dir := t.TempDir()
-	gitCmd(t, dir, "init")
-	gitCmd(t, dir, "config", "user.name", "test")
-	gitCmd(t, dir, "config", "user.email", "test@test.com")
-	gitCmd(t, dir, "checkout", "-b", "main")
-	if err := os.WriteFile(filepath.Join(dir, "init.txt"), []byte("init"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "initial")
-	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-	gitCmd(t, dir, "remote", "add", "origin", upstream)
-	gitCmd(t, dir, "push", "origin", "main")
-
-	gitCmd(t, dir, "checkout", "-b", "feature")
-	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "feature")
-	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-	gitCmd(t, dir, "push", "origin", "feature")
-
-	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"test","key":"test","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/1"}]}`)
+	_, baseSHA, headSHA := setupGitRepo(t)
+	api := newFakeBitbucketCIAPI(t, "OPEN", fmt.Sprintf(`{"values":[{"name":"test","key":"test","state":"FAILED","links":{"commit":{"href":"https://api.bitbucket.org/2.0/repositories/test/repo/commit/%s"}},"url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/1"}]}`, headSHA), headSHA)
 	api.pipelinesJSON = `{"values":[{"uuid":"{pipeline-1}","build_number":1}]}`
 	api.stepsJSON = `{"values":[{"uuid":"{step-1}","state":{"name":"COMPLETED","result":{"name":"FAILED"}}}]}`
 	api.stepLog = "error log output"
-	api.prSourceSHA = headSHA
-
-	// Keep the recorded head stale enough to prove CI uses the live PR source,
-	// but on the valid pipeline lineage so the post-review entry guard permits it.
-	staleHeadSHA := baseSHA
-	var capturedPrompt string
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			capturedPrompt = opts.Prompt
-			if err := os.WriteFile(filepath.Join(opts.CWD, "ci-fix.txt"), []byte("fixed"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			return &agent.Result{}, nil
-		},
+	client, err := bitbucket.NewClientFromEnv(fakeBitbucketEnv(api.server.URL))
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	prURL := "https://bitbucket.org/test/repo/pull-requests/42"
-	sctx := newTestContext(t, ag, dir, baseSHA, staleHeadSHA, config.Commands{})
-	sctx.Env = fakeBitbucketEnv(api.server.URL)
-	sctx.Run.PRURL = &prURL
-	sctx.Repo.UpstreamURL = upstream
-	sctx.Run.Branch = "refs/heads/feature"
-	sctx.Config.CITimeout = 30 * time.Second
-	sctx.Config.AutoFix = config.AutoFix{CI: 1}
-	sctx.Config.CI.RevalidateRepairs = true
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sctx.Ctx = ctx
-
-	step := &CIStep{
-		waitForNextPoll: func(ctx context.Context, interval time.Duration) error {
-			cancel()
-			return ctx.Err()
-		},
-	}
-	outcome, err := driveCI(t, step, sctx)
-	assertCIRestartsValidation(t, outcome, err)
-	if capturedPrompt == "" {
-		t.Fatal("expected Bitbucket auto-fix to call the agent")
+	host := bitbucket.NewHost(client, bitbucket.RepoRef{Workspace: "test", RepoSlug: "repo"}, false)
+	logs, err := host.FetchFailedCheckLogs(context.Background(), &scm.PR{Number: "42"}, "feature", baseSHA, []string{"test"})
+	if err != nil || !strings.Contains(logs, api.stepLog) {
+		t.Fatalf("live-head logs = %q, %v", logs, err)
 	}
 	if api.lastPipelineQ != headSHA {
 		t.Fatalf("pipeline commit SHA = %q, want live PR source commit %q", api.lastPipelineQ, headSHA)
-	}
-	if api.lastPipelineQ == staleHeadSHA {
-		t.Fatalf("pipeline lookup used stale run head SHA %q", staleHeadSHA)
 	}
 }
 
@@ -375,7 +320,7 @@ func TestCIStep_BitbucketAutoFixAggregatesSelectedPipelineLogs(t *testing.T) {
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", "origin", "feature")
 
-	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"name":"build","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/1"},{"name":"test","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/2"}]}`)
+	api := newFakeBitbucketCIAPI(t, "OPEN", fmt.Sprintf(`{"values":[{"name":"build","state":"FAILED","links":{"commit":{"href":"https://api.bitbucket.org/2.0/repositories/test/repo/commit/%s"}},"url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/1"},{"name":"test","state":"FAILED","links":{"commit":{"href":"https://api.bitbucket.org/2.0/repositories/test/repo/commit/%s"}},"url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/2"}]}`, headSHA, headSHA), headSHA)
 	api.pipelinesJSON = `{"values":[{"uuid":"{pipeline-1}","build_number":1},{"uuid":"{pipeline-2}","build_number":2}]}`
 	api.stepsByPath = map[string]string{
 		"/2.0/repositories/test/repo/pipelines/{pipeline-1}/steps": `{"values":[{"uuid":"{step-1}","state":{"name":"COMPLETED","result":{"name":"FAILED"}}}]}`,
@@ -502,7 +447,7 @@ func TestLatestBitbucketStatusesDeduplicatesByKeyBeforeName(t *testing.T) {
 func TestCIStep_GetCIChecksBitbucketFallsBackToKeyWhenNameMissing(t *testing.T) {
 	t.Parallel()
 
-	api := newFakeBitbucketCIAPI(t, "OPEN", `{"values":[{"key":"build","state":"FAILED","url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/42"}]}`)
+	api := newFakeBitbucketCIAPI(t, "OPEN", fmt.Sprintf(`{"values":[{"key":"build","state":"FAILED","links":{"commit":{"href":"https://api.bitbucket.org/2.0/repositories/test/repo/commit/%s"}},"url":"https://bitbucket.org/test/repo/addon/pipelines/home#!/results/42"}]}`, strings.Repeat("a", 40)), strings.Repeat("a", 40))
 	client, err := bitbucket.NewClientFromEnv(fakeBitbucketEnv(api.server.URL))
 	if err != nil {
 		t.Fatalf("new bitbucket client: %v", err)

@@ -46,6 +46,51 @@ func (inv *Inventory) ReapAll() ReapResult {
 	return result
 }
 
+// ReapOwned stops and removes entries owned by exactly ownerPID. Invalid owner
+// PIDs are never treated as ownership claims.
+func (inv *Inventory) ReapOwned(ownerPID int) ReapResult {
+	if ownerPID <= 0 {
+		return ReapResult{}
+	}
+	return inv.reapSelected(func(e Entry) bool { return e.OwnerPID == ownerPID })
+}
+
+// ReapStale stops and removes entries only when their positive owner PID is
+// confirmed dead. Inconclusive liveness checks retain the entry.
+func (inv *Inventory) ReapStale() ReapResult {
+	return inv.reapSelected(func(e Entry) bool {
+		if e.OwnerPID <= 0 {
+			return false
+		}
+		alive, err := processAlive(e.OwnerPID)
+		return err == nil && !alive
+	})
+}
+
+func (inv *Inventory) reapSelected(selectEntry func(Entry) bool) ReapResult {
+	var result ReapResult
+	if inv == nil {
+		result.Errors = append(result.Errors, "nil inventory")
+		return result
+	}
+	entries, err := inv.List()
+	if err != nil {
+		result.Errors = append(result.Errors, err.Error())
+		return result
+	}
+	for _, e := range entries {
+		if !selectEntry(e) {
+			result.Skipped++
+			continue
+		}
+		result.Entries++
+		if err := inv.reapEntry(e, &result); err != nil {
+			result.Errors = append(result.Errors, fmt.Sprintf("%s: %v", e.ID, err))
+		}
+	}
+	return result
+}
+
 func (inv *Inventory) reapEntry(e Entry, result *ReapResult) error {
 	if !isAllowedTempRoot(e.NMHome) {
 		result.Skipped++

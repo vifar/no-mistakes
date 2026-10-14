@@ -5,10 +5,16 @@ description: The AXI-shaped CLI contract a provider plugin implements to give no
 
 A provider plugin is an executable you configure under global
 [`provider_plugins`](/no-mistakes/reference/global-config/#provider_plugins). It
-lets the PR and CI steps work against any forge - a company-internal host,
+defines PR and CI operations for a custom forge - a company-internal host,
 Google Cloud Secure Source Manager, or anything else with an API - without that
 forge's code living in no-mistakes. This page is the contract the executable
-implements.
+implements, with the current pipeline limitation below.
+
+Protocol v1 supports repository-scoped PR comparison facts through `pr view`
+and `pr find`. A plugin-backed network run can proceed when these operations
+return the full branch and head identity described below. Fork PRs across
+repositories are not supported. Missing or old head information fails
+readiness safely; the adapter never invents comparison evidence.
 
 The plugin is an **AXI-shaped CLI**: subcommands such as `pr find` and
 `pr checks`, each printing one JSON document when called with `--json`. It is
@@ -80,7 +86,7 @@ Every invocation carries all five, mirroring `forgejo-axi`'s `--repo`:
 *is* the result; there is no wrapper:
 
 ```json
-{ "pr": { "number": 7, "url": "https://host/owner/repo/pulls/7", "head_branch": "feature", "base_branch": "main" } }
+{ "pr": { "number": 7, "url": "https://host/owner/repo/pulls/7", "head_branch": "feature", "base_branch": "main", "head_sha": "0123456789abcdef0123456789abcdef01234567" } }
 ```
 
 **Failure:** exit non-zero. Stdout may carry one failure document:
@@ -116,11 +122,13 @@ no-mistakes treats two kinds of failure differently:
 
 - **The plugin cannot serve the repository.** `status` exits non-zero (not
   authenticated, wrong account, repository unknown), or the configured command
-  does not resolve. The PR and CI steps skip with the plugin's message, exactly
-  like a built-in provider whose CLI is not logged in. The skip is not silent:
-  it is recorded as the step's skip reason and `axi` reports the run as
-  `passed-with-skips` with the reason under `run.automatic_skips`. Make the
-  message actionable (for example "run `gcloud auth login`").
+  does not resolve. At PR-context resolution this stops the run before Rebase.
+  Ordinary guarded network runs also fail if availability is lost at a later
+  comparison boundary. The PR and CI adapters can record an availability
+  skip under `run.automatic_skips` if reached, but that does not bypass a later
+  boundary check or satisfy pending Review support. Make the message actionable (for example
+  "run `gcloud auth login`"). This does not bypass the comparison-facts
+  requirements above.
 - **The plugin broke this contract.** Unreadable output, a `protocol_version`
   other than `1`, a timeout, oversized output, a missing required key, an
   unknown enum value, a PR identity that does not match the request, or an
@@ -146,26 +154,27 @@ a built-in provider's failure does; it is never read as an empty answer.
 ### PR
 
 ```json
-{ "number": 7, "url": "https://host/owner/repo/pulls/7", "head_branch": "feature", "base_branch": "main", "head_sha": "abc123" }
+{ "number": 7, "url": "https://host/owner/repo/pulls/7", "head_branch": "feature", "base_branch": "main", "head_sha": "0123456789abcdef0123456789abcdef01234567" }
 ```
 
 | Field | Rules |
 | --- | --- |
 | `number` | Positive base-10 integer, as a JSON number or string (`7` or `"7"`, never `"07"`). |
 | `url` | `http` or `https`, no user info, and **must end with the PR number** (`.../pulls/7`, `.../merge_requests/7`). Runs persist only the URL, and later steps recover the number from it. Its path must contain the `--repo` path as whole segments (case-insensitive, so `https://web.example.com/my-project/my-repo/pulls/7` names `my-project/my-repo`); the host is not compared, because a forge's web host may differ from its git host. Once a run holds a PR's URL, every `pr view`, `pr update`, `pr retarget`, and `pr merged` answer must return exactly that URL. |
-| `head_branch` | The PR's source branch. Required where identity is checked (`pr find`, `pr create`). |
-| `base_branch` | The PR's target branch. Required where identity is checked and for base reads. |
-| `head_sha` | Optional current head commit. |
+| `head_branch` | The PR's source branch. Required where identity is checked (`pr find`, `pr create`) and for comparison facts. |
+| `base_branch` | The PR's target branch. Required where identity is checked, for base reads, and for comparison facts. |
+| `head_sha` | Optional on the wire for compatibility, but required for comparison facts as exactly 40 lowercase hexadecimal characters. Missing, abbreviated, or otherwise invalid values fail comparison readiness safely. |
 
 ### Check
 
 ```json
-{ "name": "build", "id": "run-42", "bucket": "fail", "state": "FAILURE", "link": "https://ci/run/42", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T03:09:00Z", "execution_id": "42" }
+{ "name": "build", "id": "run-42", "head_sha": "0123456789abcdef0123456789abcdef01234567", "bucket": "fail", "state": "FAILURE", "link": "https://ci/run/42", "started_at": "2026-01-02T03:04:05Z", "completed_at": "2026-01-02T03:09:00Z", "execution_id": "42" }
 ```
 
 | Field | Rules |
 | --- | --- |
 | `name` | Required, non-empty. Shown in findings and passed back to `pr check-logs`. |
+| `head_sha` | The head commit observed by the provider for this check. Report the check's own head; copying the caller's `--head-sha` into the response is forbidden as evidence. Missing or stale check heads do not prove readiness. |
 | `bucket` | Required: `pass`, `fail`, `pending`, `cancel`, or `skipping`. Map your forge's states onto these; anything else fails the call. |
 | `id`, `state`, `link`, `execution_id` | Optional provider identifiers and raw state, surfaced for diagnostics. |
 | `started_at`, `completed_at` | Optional RFC 3339 timestamps. |
@@ -210,7 +219,11 @@ given), or `null`.
 The `pr` key is required: only an explicit `null` means there is no open PR,
 and a response without the key fails the call. The returned `head_branch`
 (and `base_branch`, when `--base` was given) must match, or the call fails.
-This is what prevents duplicate PRs.
+The plugin must reject ambiguous open PR candidates for the source branch; it
+must not choose one arbitrarily. A discovered PR is read back with `pr view`,
+which must prove that it is open and has the exact requested source branch in
+the same repository as `--repo`. Cross-repository fork PRs are unsupported.
+This is what prevents duplicate PRs and incorrect comparisons.
 
 ### pr create (required)
 
@@ -248,7 +261,9 @@ The `checks` key is required. An empty list means "nothing registered yet";
 a missing key is an unreadable response and is never treated as empty. If the
 repository has no CI at all, declare
 [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) instead of returning an
-empty list forever.
+empty list forever. Each returned check must report its own observed `head_sha`;
+do not copy the requested `--head-sha` into the result. Missing or stale check
+heads cannot establish readiness.
 
 ### pr mergeability (capability `mergeable_state`)
 
@@ -276,13 +291,15 @@ Prove that the PR merged at the commit no-mistakes validated.
 - **result:**
 
 ```json
-{ "merged": true, "number": 7, "url": "https://.../pulls/7", "head_sha": "abc123", "merge_commit_sha": "def456", "merged_at": "2026-01-02T03:04:05Z", "merged_by": "alice" }
+{ "merged": true, "number": 7, "url": "https://.../pulls/7", "head_sha": "0123456789abcdef0123456789abcdef01234567", "merge_commit_sha": "89abcdef0123456789abcdef0123456789abcdef", "merged_at": "2026-01-02T03:04:05Z", "merged_by": "alice" }
 ```
 
 `number` and `url` must identify the requested PR (the same URL you returned
 for it), `head_sha` must equal `--expected-head` (or fail with code
 `head_changed`), and a merged proof must include `merge_commit_sha` and
-`merged_at`.
+`merged_at`. The merge commit SHA must be exactly 40 lowercase hexadecimal
+characters. Merged comparison facts require the `merged_proof` capability and
+a full merge commit SHA.
 
 ### pr retarget (capability `set_pr_base_branch`)
 
@@ -297,16 +314,17 @@ PR.
 
 ## What plugins do not cover
 
-These are built-in-provider features with no plugin subcommand in protocol
-version 1; with a plugin they behave as they do for providers that lack them:
+These built-in-provider features have no plugin subcommand:
 
-- Fork PR routing: a repository with a fork URL skips the PR and CI steps
-  with the reason `fork PR routing for provider plugin "<name>" is not
-  implemented`, reported under `run.automatic_skips` like every non-GitHub
-  provider. It never opens a PR from the upstream repository to itself.
+- Fork PR routing: the adapter refuses a repository with a fork URL with the
+  reason `fork PR routing for provider plugin "<name>" is not implemented`.
+  Ordinary guarded runs fail at PR-context resolution before Rebase on that
+  refusal. Only the PR and CI delivery adapters record a skip if reached;
+  that skip does not bypass the comparison guard. It never opens a PR from
+  the upstream repository to itself.
 - Review-bot findings and transient-check reruns at the CI gate.
-- `axi run --closes` closing references (refused, as on every non-GitHub
-  provider) and GitHub media attachments.
+- `axi run --closes` closing references (refused, as on every provider that does
+  not declare the closing-reference capability) and GitHub media attachments.
 
 PR bodies use the same GitHub-flavored Markdown (with `<details>` blocks) as
 GitHub, GitLab, and Gitea.

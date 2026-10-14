@@ -320,21 +320,17 @@ The CI step deliberately keeps watching the PR after checks pass, so
 blocking on the human merge. Never poll or re-run waiting for the merge yourself.
 Never treat "no CI checks reported" alone as green.
 
-Because that monitor stays live, a PR that falls behind the default branch or
-hits a merge conflict after checks pass - commonly because another PR merged
-first - needs **no command from you**: never hand-rebase. When the CI monitor
-sees an actual conflict it **rebases onto the base, resolves it, revalidates from Review
-because rebasing cannot prove continuity with the reviewed head, and re-pushes
-the branch through Push**; a PR that is merely behind but still clean needs nothing
-either, since the platform merges it. The one exception is when that monitor is
-no longer running - the PR was closed, the run was aborted or superseded, it
-idle-timed-out, or its auto-fix attempts were exhausted - in which case recover
-with `no-mistakes rerun`, subject to the clean-head check above. An accepted
-rerun cancels the stale monitor and re-runs the full pipeline including a
-deterministic rebase step. Do **not** reach for
-`no-mistakes axi run` to refresh a still-active PR: after `checks-passed` it
-reattaches to the running monitor (HEAD unchanged) and returns its output
-without rebasing.
+For ordinary runs, when the live target commit advances with green checks and no merge conflict, CI clears readiness and keeps monitoring, withholding checks-passed.
+It may wait until ci_timeout, or indefinitely when unlimited.
+When CI returns, including with findings, the boundary guard rejects the changed comparison and terminates the run.
+The monitor does not automatically repair or revalidate that changed comparison.
+After termination, restart from the current target and head; never hand-rebase.
+After the run stops, recover with `no-mistakes rerun`, subject to the
+clean-head and custody checks above. An accepted rerun validates the selected
+gate or preserved head through the full pipeline, including Rebase.
+Do **not** reach for `no-mistakes axi run` to refresh a still-active PR:
+after `checks-passed` it reattaches to the running monitor (HEAD unchanged)
+and returns its output without rebasing.
 
 On a successful outcome (`checks-passed` or `passed`), close the loop with the
 user: summarize what happened during the pipeline in a concise, easily readable

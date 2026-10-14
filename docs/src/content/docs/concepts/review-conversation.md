@@ -80,7 +80,7 @@ the run's test evidence and never the conversation. The only published copy is
 the bounded rendering in the PR body, which goes through the home-path redaction
 every published body does. Publishing the raw files instead would put the full
 question text, the full answer text and who answered on an orphan branch
-verbatim and permanently, with neither of those protections.
+permanently and unbounded.
 
 ### questions.ndjson
 

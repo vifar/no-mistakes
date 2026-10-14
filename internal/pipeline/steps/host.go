@@ -54,6 +54,19 @@ func resolvedProvider(sctx *pipeline.StepContext) scm.Provider {
 	return provider
 }
 
+// resolvedProviderForBody is resolvedProvider for the PR-body composition
+// helpers. They are also reachable from embeddings that assemble a body without
+// a repository or run record, where resolvedProvider would dereference a nil
+// field. A body with no repository has no detected provider and keeps GitHub's
+// closing grammar, which is what every body rendered under before GitLab's
+// grammar existed.
+func resolvedProviderForBody(sctx *pipeline.StepContext) scm.Provider {
+	if sctx == nil || sctx.Repo == nil || sctx.Run == nil {
+		return scm.ProviderUnknown
+	}
+	return resolvedProvider(sctx)
+}
+
 // providerPluginForStep returns the configured provider plugin that claims
 // the run's upstream remote, falling back to the recorded PR URL like
 // built-in detection does during recovery.
@@ -208,7 +221,7 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 		if strings.TrimSpace(remote) == "" && sctx.Run.PRURL != nil {
 			remote = *sctx.Run.PRURL
 		}
-		resolvedBase, repo, err := forgejo.ResolveRemote(remote, baseURL, scm.ResolveHost(sctx.Ctx, remote))
+		resolvedBase, repo, err := forgejo.ResolveRemoteWithSSHDomain(remote, baseURL, scm.ResolveHost(sctx.Ctx, remote), forgejoSSHDomainForStep(sctx))
 		if err != nil {
 			return nil, fmt.Sprintf("could not resolve Forgejo host and repository: %v", err)
 		}
@@ -300,11 +313,23 @@ func buildPluginHost(sctx *pipeline.StepContext, name string, cmdFactory plugin.
 }
 
 func detectProviderForStep(sctx *pipeline.StepContext, remoteURL string) scm.Provider {
-	return scm.DetectProviderContextWithForgejoBaseURL(sctx.Ctx, remoteURL, forgejoBaseURLForStep(sctx))
+	return scm.DetectProviderContextWithForgejo(sctx.Ctx, remoteURL, scm.ForgejoEnvironment{
+		BaseURL:   forgejoBaseURLForStep(sctx),
+		SSHDomain: forgejoSSHDomainForStep(sctx),
+	})
 }
 
 func forgejoBaseURLForStep(sctx *pipeline.StepContext) string {
 	if value, ok := effectiveStepEnvValue(sctx, "FORGEJO_BASE_URL"); ok {
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+// forgejoSSHDomainForStep reads the SSH hostname an instance publishes in clone
+// URLs when it differs from its web host, mirroring Forgejo's SSH_DOMAIN.
+func forgejoSSHDomainForStep(sctx *pipeline.StepContext) string {
+	if value, ok := effectiveStepEnvValue(sctx, "FORGEJO_SSH_DOMAIN"); ok {
 		return strings.TrimSpace(value)
 	}
 	return ""

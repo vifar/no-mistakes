@@ -18,11 +18,11 @@ import (
 // wrapper itself via the on-disk inventory.
 func TestMain(m *testing.M) {
 	if inv, err := e2edaemon.Open(); err == nil {
-		_ = inv.ReapAll()
+		_ = inv.ReapStale()
 	}
 	code := m.Run()
 	if inv, err := e2edaemon.Open(); err == nil {
-		_ = inv.ReapAll()
+		_ = inv.ReapOwned(os.Getpid())
 	}
 	os.Exit(code)
 }

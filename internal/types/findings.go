@@ -117,6 +117,12 @@ const FindingCategoryReviewQuestion = "review-question"
 // recorded as an override rather than a silent green completion.
 const FindingCategoryTestCommand = "test-command"
 
+// FindingCategoryTestVerdict marks the finding the Test step derives from its
+// evidence turn's verdict. A completed evidence turn replaces an earlier
+// verdict finding; a budget-cut park can retain the last completed turn's
+// verdict finding because the cut supplies no new verdict.
+const FindingCategoryTestVerdict = "test-verdict"
+
 // FindingIDTestAgentTimeout is the Test-step park when an evidence or repair
 // invocation burned its wall-clock budget. It is a budget/provider-slowness
 // cut, not a product defect; TestOverrideReason treats an approval of this
@@ -207,6 +213,8 @@ type Finding struct {
 	// every non-CI finding.
 	Check   string `json:"check,omitempty"`
 	CheckID string `json:"check_id,omitempty"`
+	// Support is a typed, untrusted reference for later evidence validation.
+	Support *FindingSupport `json:"support,omitempty"`
 }
 
 // TestScenario is one named end-to-end scenario the test step derived from the
@@ -265,19 +273,20 @@ type TestArtifact struct {
 }
 
 type findingWire struct {
-	ID                  string `json:"id,omitempty"`
-	Severity            string `json:"severity"`
-	File                string `json:"file,omitempty"`
-	Line                int    `json:"line,omitempty"`
-	Description         string `json:"description"`
-	Action              string `json:"action"`
-	Source              string `json:"source,omitempty"`
-	UserInstructions    string `json:"user_instructions,omitempty"`
-	ReviewScope         string `json:"review_scope,omitempty"`
-	Category            string `json:"category,omitempty"`
-	Check               string `json:"check,omitempty"`
-	CheckID             string `json:"check_id,omitempty"`
-	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
+	ID                  string          `json:"id,omitempty"`
+	Severity            string          `json:"severity"`
+	File                string          `json:"file,omitempty"`
+	Line                int             `json:"line,omitempty"`
+	Description         string          `json:"description"`
+	Action              string          `json:"action"`
+	Source              string          `json:"source,omitempty"`
+	UserInstructions    string          `json:"user_instructions,omitempty"`
+	ReviewScope         string          `json:"review_scope,omitempty"`
+	Category            string          `json:"category,omitempty"`
+	Check               string          `json:"check,omitempty"`
+	CheckID             string          `json:"check_id,omitempty"`
+	Support             *FindingSupport `json:"support,omitempty"`
+	RequiresHumanReview *bool           `json:"requires_human_review,omitempty"`
 }
 
 // WithdrawnFinding is one carried finding an answer round retracted, naming
@@ -386,18 +395,34 @@ func FindingsMetadata(findings Findings) Findings {
 	return findings
 }
 
-// NormalizeFindings assigns deterministic IDs to findings that do not have one
-// yet, and trims the ones they arrive with. Surrounding whitespace is never
-// part of a finding's identity: the gate shows the ID and a response names it,
-// and the response side trims what it is given, so a padded gate ID used to
-// have no spelling that could select or decline it.
+// NormalizeFindings trims IDs and makes them unique within the findings set.
+// The first occurrence of an explicit ID keeps it; missing IDs and later
+// duplicates receive deterministic prefix-N IDs that skip every reserved ID,
+// including explicit IDs later in the set. Selecting one finding must never
+// select or discard an unrelated finding with the same ID.
+// Surrounding whitespace is never part of a finding's identity: the gate shows
+// the ID and a response names it, and the response side trims what it is given,
+// so a padded gate ID used to have no spelling that could select or decline it.
 func NormalizeFindings(findings Findings, prefix string) Findings {
+	used := make(map[string]bool, len(findings.Items))
 	for i := range findings.Items {
 		findings.Items[i].ID = strings.TrimSpace(findings.Items[i].ID)
+		if used[findings.Items[i].ID] {
+			findings.Items[i].ID = ""
+			continue
+		}
+		used[findings.Items[i].ID] = true
+	}
+	for i := range findings.Items {
 		if findings.Items[i].ID != "" {
 			continue
 		}
-		findings.Items[i].ID = prefix + "-" + itoa(i+1)
+		id := prefix + "-" + itoa(i+1)
+		for next := i + 2; used[id]; next++ {
+			id = prefix + "-" + itoa(next)
+		}
+		findings.Items[i].ID = id
+		used[id] = true
 	}
 	return findings
 }
@@ -631,6 +656,7 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.Category = wire.Category
 	f.Check = wire.Check
 	f.CheckID = wire.CheckID
+	f.Support = wire.Support
 	if f.Action == "" && wire.RequiresHumanReview != nil {
 		if *wire.RequiresHumanReview {
 			f.Action = ActionAskUser

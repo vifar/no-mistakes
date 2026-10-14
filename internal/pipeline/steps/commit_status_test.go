@@ -152,7 +152,9 @@ func TestPushCommitStatusRecordingErrorsOnlyWarn(t *testing.T) {
 			}
 			sc.Repo.URLsVerified = true
 			sc.Env, _ = fakeGH(t, "")
+			sc.Env = append(sc.Env, "FAKE_CLI_PR_FACTS_LIST_JSON=[[]]")
 			sc.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"}
+			testgit.BindRunComparison(t, database, sc.Run, dir, "main", "", "test/repo", "feature")
 			if err := database.UpdateRunReviewApprovedHeadSHA(sc.Run.ID, head); err != nil {
 				t.Fatal(err)
 			}
@@ -615,7 +617,7 @@ func TestPipeline_GitHubCommitStatuses(t *testing.T) {
 			}))
 			defer server.Close()
 			env, ghLog := fakeGH(t, "")
-			env = append(env, "FAKE_CLI_STATUS_API_URL="+server.URL)
+			env = append(env, "FAKE_CLI_STATUS_API_URL="+server.URL, "FAKE_CLI_PR_FACTS_LIST_JSON=[[]]")
 			for key, value := range environmentEntries(t, env) {
 				t.Setenv(key, value)
 			}
@@ -775,6 +777,17 @@ func TestPipeline_GitHubCommitStatuses(t *testing.T) {
 				}
 			})
 			exec.SetForgeContext(&forgecontext.Context{Provider: provider, Host: "github.com"})
+			// The synthetic Review/CI steps above model validation and repair,
+			// not forge discovery. Supply their comparison receipts from real
+			// Git heads at the executor's existing comparison boundary.
+			exec.SetPRContextGuard(func(sc *pipeline.StepContext, _ types.StepName) (pipeline.PRContextDecision, error) {
+				candidate, err := testgit.RunComparisonCandidate(sc.Run, dir, "main", base, "", scm.RepoPath(sc.Repo.PushURL()), "feature")
+				if err != nil {
+					return pipeline.PRContextDecision{}, err
+				}
+				_, err = sc.DB.AdvanceRunPRContext(sc.Run.ID, candidate)
+				return pipeline.PRContextDecision{Target: pipeline.PRTargetSelection{SourceRepo: candidate.SourceRepo, SourceBranch: candidate.SourceBranch, TargetBranch: "main"}}, err
+			})
 			var err error
 			if strings.HasPrefix(scenario, "Test ") {
 				// Gate readiness is an event contract, not a timing assertion. The

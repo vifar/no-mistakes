@@ -444,12 +444,66 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if headSHA == headBeforeCommit {
 		sctx.Log("no staged agent changes to commit")
 	} else {
+		if err := recordPipelineHeadRange(sctx, headBeforeCommit, headSHA); err != nil {
+			return false, err
+		}
 		sctx.Log(fmt.Sprintf("committed agent fixes: %s", commitMessage))
 	}
 	if err := recordAgentFixHead(sctx, stepName, headSHA); err != nil {
 		return false, err
 	}
 	return headSHA != headBeforeCommit, nil
+}
+
+func runPipelineCorrectionAgent(sctx *pipeline.StepContext, invoke func() (*agent.Result, error)) (*agent.Result, error) {
+	if sctx.Run.ExternalCIOwner == "" {
+		return invoke()
+	}
+	before, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	result, err := invoke()
+	if err != nil {
+		return result, err
+	}
+	after, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	if err := recordPipelineHeadRange(sctx, before, after); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func recordPipelineHeadRange(sctx *pipeline.StepContext, before, after string) error {
+	if sctx.Run.ExternalCIOwner == "" || before == after {
+		return nil
+	}
+	history, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-list", "--first-parent", "--parents", after, "^"+before)
+	if err != nil {
+		return err
+	}
+	var edges [][2]string
+	current := after
+	for _, line := range strings.Split(strings.TrimSpace(history), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != current {
+			return fmt.Errorf("pipeline invocation rewrote its starting head")
+		}
+		edges = append(edges, [2]string{fields[0], fields[1]})
+		current = fields[1]
+	}
+	if current != before {
+		return fmt.Errorf("pipeline invocation did not preserve its starting head as a first-parent ancestor")
+	}
+	for _, edge := range edges {
+		if err := sctx.DB.RecordPipelineCommitHead(sctx.Run.ID, edge[1], edge[0]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func recordAgentFixHead(sctx *pipeline.StepContext, stepName types.StepName, headSHA string) error {
@@ -526,11 +580,12 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	}
 	var result *agent.Result
 	var err error
-	if opts.RunAgent != nil {
-		result, err = opts.RunAgent(runOpts)
-	} else {
-		result, err = sctx.RunAgentSessionContext(sctx.Ctx, opts.SessionRole, runOpts)
-	}
+	result, err = runPipelineCorrectionAgent(sctx, func() (*agent.Result, error) {
+		if opts.RunAgent != nil {
+			return opts.RunAgent(runOpts)
+		}
+		return sctx.RunAgentSessionContext(sctx.Ctx, opts.SessionRole, runOpts)
+	})
 	if err != nil {
 		if opts.ErrorPrefix == "" {
 			return "", err

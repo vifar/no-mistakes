@@ -86,6 +86,10 @@ type Run struct {
 	// It is set by the operator (axi run --base-branch) and takes precedence
 	// over pr.base_branch in repo config for this run only.
 	PRBaseBranch *string
+	// PRBaseBranchRequested records a fresh --base-branch request on this run.
+	// An inherited PRBaseBranch does not set it. The guarded retarget path
+	// clears this one-time authority after verifying the forge target.
+	PRBaseBranchRequested bool
 	// OmitIntent records the caller-side, tighten-only decision to keep the
 	// generated Intent section out of the PR body for this run. It is the
 	// OR of the per-run flag and the operator's global intent.publish_intent
@@ -93,6 +97,9 @@ type Run struct {
 	// the repository's trusted pr.publish_intent is enforced independently
 	// by the PR step.
 	OmitIntent bool
+	// ExternalCIOwner is a caller's explicit request to own CI verification
+	// after this run. It is never inferred from skipped steps or a prior run.
+	ExternalCIOwner string
 	// PiProfile is immutable launch selection; nil retains legacy live config.
 	PiProfile        *agentcfg.PiProfile
 	VerificationPlan *verificationplan.Snapshot
@@ -106,7 +113,7 @@ type Run struct {
 	UpdatedAt                int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, COALESCE(omit_intent, 0), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, shipping_options, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, COALESCE(pr_base_branch_requested, 0), COALESCE(omit_intent, 0), COALESCE(external_ci_owner, ''), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, shipping_options, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -120,7 +127,7 @@ func scanRun(row interface {
 		&r.CustodyReturnedAt, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
 		&r.LaunchNonce, &r.LaunchValidationGeneration, &r.LaunchIntentDigest, &r.LaunchReceiptClaimedAt,
-		&r.PRBaseBranch, &r.OmitIntent, &r.PiProfile, &r.VerificationPlan,
+		&r.PRBaseBranch, &r.PRBaseBranchRequested, &r.OmitIntent, &r.ExternalCIOwner, &r.PiProfile, &r.VerificationPlan,
 		&storedClosingIssues, &r.ClosingIssueRefsLockedAt, &r.Shipping,
 		&r.CreatedAt, &r.UpdatedAt,
 	)
@@ -158,16 +165,42 @@ func (d *DB) InsertRunWithIntent(repoID, branch, headSHA, baseSHA string, intent
 // duplicate defense across daemon processes; callers additionally serialize
 // selection under their branch lock.
 func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, profiles ...*agentcfg.PiProfile) (*Run, error) {
-	return d.InsertRunWithOptions(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, omitIntent, plan, agentcfg.OptionalPiProfile(profiles), nil)
+	return d.InsertRunWithIntentAndLaunchNonceRequested(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, strings.TrimSpace(prBaseBranch) != "", omitIntent, plan, profiles...)
+}
+
+// InsertRunWithIntentAndLaunchNonceRequested separates the effective base from
+// a fresh request. Reruns pass an inherited base with requested=false.
+func (d *DB) InsertRunWithIntentAndLaunchNonceRequested(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, requested, omitIntent bool, plan *verificationplan.Snapshot, profiles ...*agentcfg.PiProfile) (*Run, error) {
+	return d.InsertRunWithExternalCIOwner(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, requested, omitIntent, "", plan, profiles...)
+}
+
+// InsertRunWithExternalCIOwner stamps the explicit external owner atomically
+// with creation, before an executor can observe the run.
+func (d *DB) InsertRunWithExternalCIOwner(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, requested, omitIntent bool, externalCIOwner string, plan *verificationplan.Snapshot, profiles ...*agentcfg.PiProfile) (*Run, error) {
+	return d.InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, requested, omitIntent, externalCIOwner, plan, agentcfg.OptionalPiProfile(profiles), nil)
+}
+
+// InsertRunWithOptions persists the mainline's shipping options while inferring
+// whether the effective PR base was freshly requested.
+func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, pin *agentcfg.PiProfile, shipping *types.ShippingOptions) (*Run, error) {
+	return d.InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, strings.TrimSpace(prBaseBranch) != "", omitIntent, "", plan, pin, shipping)
 }
 
 func (d *DB) InsertRunWithShipping(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, pin *agentcfg.PiProfile, shipping *types.ShippingOptions) (*Run, error) {
 	return d.InsertRunWithOptions(repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, omitIntent, nil, pin, shipping)
 }
 
-func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, plan *verificationplan.Snapshot, pin *agentcfg.PiProfile, shipping *types.ShippingOptions) (*Run, error) {
+// InsertRunWithAllOptions is the shared insertion path for shipping, PR-base,
+// external CI ownership, intent, launch, and profile options.
+func (d *DB) InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, requested, omitIntent bool, externalCIOwner string, plan *verificationplan.Snapshot, pin *agentcfg.PiProfile, shipping *types.ShippingOptions) (*Run, error) {
 	if err := shipping.Validate(); err != nil {
 		return nil, err
+	}
+	if shipping != nil && externalCIOwner != "" {
+		return nil, fmt.Errorf("shipping options and external CI owner are mutually exclusive")
+	}
+	if externalCIOwner != "" && externalCIOwner != "controller-ship-pr" {
+		return nil, fmt.Errorf("unsupported external CI owner %q", externalCIOwner)
 	}
 	if err := pin.Validate(); err != nil {
 		return nil, err
@@ -209,15 +242,35 @@ func (d *DB) InsertRunWithOptions(repoID, branch, headSHA, baseSHA string, inten
 	if prBaseBranch != "" {
 		r.PRBaseBranch = &prBaseBranch
 	}
+	if requested && prBaseBranch == "" {
+		return nil, fmt.Errorf("PR base branch request requires a target branch")
+	}
+	r.PRBaseBranchRequested = requested
 	r.OmitIntent = omitIntent
+	r.ExternalCIOwner = externalCIOwner
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, omit_intent, pi_profile, verification_plan, shipping_options, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.PRBaseBranch, r.OmitIntent, r.PiProfile, r.VerificationPlan, r.Shipping, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, pr_base_branch_requested, omit_intent, external_ci_owner, pi_profile, verification_plan, shipping_options, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.PRBaseBranch, r.PRBaseBranchRequested, r.OmitIntent, r.ExternalCIOwner, r.PiProfile, r.VerificationPlan, r.Shipping, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
 	}
 	return r, nil
+}
+
+// ConsumePRBaseBranchRequest durably ends this run's one-time retarget
+// authority after the caller has verified the forge target.
+func (d *DB) ConsumePRBaseBranchRequest(runID string) error {
+	result, err := d.sql.Exec(`UPDATE runs SET pr_base_branch_requested = 0, updated_at = ? WHERE id = ?`, now(), runID)
+	if err != nil {
+		return fmt.Errorf("consume PR base branch request: %w", err)
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("consume PR base branch request: %w", err)
+	} else if count == 0 {
+		return fmt.Errorf("consume PR base branch request: run %s does not exist", runID)
+	}
+	return nil
 }
 
 // RunWorktree is one run's recorded worktree placement, identified by the run
@@ -376,7 +429,27 @@ func (d *DB) GetRunByLaunchNonce(repoID, branch, launchNonce string) (*Run, erro
 // including an explicit PR base branch, is part of the UPDATE predicate, so a
 // conflicting observer cannot consume `created`.
 func (d *DB) ClaimLaunchReceipt(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, shipping *types.ShippingOptions, profiles ...*agentcfg.PiProfile) (*Run, bool, error) {
-	request := agentcfg.OptionalPiProfile(profiles)
+	return d.ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, omitIntent, shipping, "", agentcfg.OptionalPiProfile(profiles))
+}
+
+// ClaimLaunchReceiptWithExternalOwner refuses a mismatched owner before the
+// first-observer marker can be consumed by an incompatible proof request.
+func (d *DB) ClaimLaunchReceiptWithExternalOwner(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, externalCIOwner string, profiles ...*agentcfg.PiProfile) (*Run, bool, error) {
+	return d.ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, omitIntent, nil, externalCIOwner, agentcfg.OptionalPiProfile(profiles))
+}
+
+// ClaimLaunchReceiptWithAllOptions validates the complete immutable launch
+// binding before consuming its first-observer marker.
+func (d *DB) ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, shipping *types.ShippingOptions, externalCIOwner string, request *agentcfg.PiProfile) (*Run, bool, error) {
+	if err := shipping.Validate(); err != nil {
+		return nil, false, err
+	}
+	if shipping != nil && externalCIOwner != "" {
+		return nil, false, fmt.Errorf("shipping options and external CI owner are mutually exclusive")
+	}
+	if externalCIOwner != "" && externalCIOwner != "controller-ship-pr" {
+		return nil, false, fmt.Errorf("unsupported external CI owner %q", externalCIOwner)
+	}
 	if err := request.ValidateRequest(); err != nil {
 		return nil, false, err
 	}
@@ -410,11 +483,12 @@ func (d *DB) ClaimLaunchReceipt(repoID, branch, launchNonce, submittedHeadSHA, v
 			   AND (? = 0 OR omit_intent = ?)
 			   AND (? = '' OR json_extract(shipping_options, '$.mode') = ?)
 			   AND (? IS NULL OR json_extract(shipping_options, '$.draft') = ?)
+			   AND external_ci_owner = ?
 			   AND (? = '' OR json_extract(pi_profile, '$.model') = ?)
 			   AND (? = '' OR json_extract(pi_profile, '$.effort') = ?)
 			   AND launch_receipt_claimed_at IS NULL
 			 RETURNING `+runColumns,
-			now(), repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, prBaseBranch, omitIntent, omitIntent, shippingMode, shippingMode, shippingDraft, shippingDraft, model, model, effort, effort,
+			now(), repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, prBaseBranch, omitIntent, omitIntent, shippingMode, shippingMode, shippingDraft, shippingDraft, externalCIOwner, model, model, effort, effort,
 		), r)
 		if err == nil {
 			return r, true, nil
@@ -426,7 +500,7 @@ func (d *DB) ClaimLaunchReceipt(repoID, branch, launchNonce, submittedHeadSHA, v
 		if err != nil {
 			return nil, false, err
 		}
-		if r == nil || !r.Shipping.Matches(shipping) || !r.PiProfile.Matches(request) || r.LaunchReceiptClaimedAt != nil ||
+		if r == nil || !r.Shipping.Matches(shipping) || !r.PiProfile.Matches(request) || r.ExternalCIOwner != externalCIOwner || r.LaunchReceiptClaimedAt != nil ||
 			r.SubmittedHeadSHA == nil || *r.SubmittedHeadSHA != submittedHeadSHA ||
 			r.LaunchValidationGeneration == nil || *r.LaunchValidationGeneration != validationGeneration ||
 			r.LaunchIntentDigest == nil || *r.LaunchIntentDigest != intentDigest ||
@@ -681,11 +755,9 @@ func (d *DB) SetRunPushActive(id string, active bool) error {
 	return nil
 }
 
-// UpdateRunPRState persists normalized lifecycle truth independently of logs.
-// A merged or closed PR is also the terminal outcome of the final CI monitor
-// step, so the PR observation and active-run finalization are committed in one
-// transaction. This makes the database authoritative even if execution stops
-// before the executor's ordinary follow-up completion write.
+// UpdateRunPRState records normalized lifecycle observations independently of
+// logs. A terminal PR observation does not authorize pipeline completion: the
+// executor must first validate current owner support and the live comparison.
 func (d *DB) UpdateRunPRState(id, state string) error {
 	state = strings.ToLower(strings.TrimSpace(state))
 	ts := now()
@@ -706,58 +778,10 @@ func (d *DB) UpdateRunPRState(id, state string) error {
 	if _, err := tx.Exec(`UPDATE runs SET pr_state = ?, pr_state_observed_at = ?, updated_at = ? WHERE id = ?`, state, ts, ts, id); err != nil {
 		return fmt.Errorf("update run PR state: %w", err)
 	}
-	if terminalPRState(state) {
-		if err := finalizeTerminalPRRun(tx, id, ts); err != nil {
-			return fmt.Errorf("update run PR state: %w", err)
-		}
-	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("update run PR state: commit: %w", err)
 	}
 	return nil
-}
-
-// ReconcileTerminalPRRuns repairs active rows written by an older or
-// interrupted daemon after terminal PR truth became durable but before the
-// separate run completion write. It is called during exclusive daemon startup
-// before parked-run planning and generic crash recovery.
-func (d *DB) ReconcileTerminalPRRuns() (int, error) {
-	ts := now()
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return 0, fmt.Errorf("reconcile terminal PR runs: begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	rows, err := tx.Query(`SELECT id FROM runs WHERE status IN (?, ?) AND pr_state IN ('merged', 'closed')`, types.RunPending, types.RunRunning)
-	if err != nil {
-		return 0, fmt.Errorf("reconcile terminal PR runs: list runs: %w", err)
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return 0, fmt.Errorf("reconcile terminal PR runs: scan run: %w", err)
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Close(); err != nil {
-		return 0, fmt.Errorf("reconcile terminal PR runs: close rows: %w", err)
-	}
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("reconcile terminal PR runs: list runs: %w", err)
-	}
-
-	for _, id := range ids {
-		if err := finalizeTerminalPRRun(tx, id, ts); err != nil {
-			return 0, fmt.Errorf("reconcile terminal PR runs: %w", err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("reconcile terminal PR runs: commit: %w", err)
-	}
-	return len(ids), nil
 }
 
 func monotonicPRState(current, observed string) string {
@@ -773,38 +797,6 @@ func monotonicPRState(current, observed string) string {
 	default:
 		return observed
 	}
-}
-
-func terminalPRState(state string) bool {
-	return state == "merged" || state == "closed"
-}
-
-func finalizeTerminalPRRun(tx *sql.Tx, id string, ts int64) error {
-	if _, err := tx.Exec(
-		`UPDATE step_results SET status = ?, exit_code = COALESCE(exit_code, 0), completed_at = COALESCE(completed_at, ?),
-			last_activity_at = ?, last_activity = ?, agent_pid = NULL
-		 WHERE run_id = ? AND step_name = ? AND status IN (?, ?, ?, ?)
-		   AND EXISTS (SELECT 1 FROM runs WHERE id = ? AND status IN (?, ?))`,
-		types.StepStatusCompleted, ts, ts, "status: completed", id, types.StepCI,
-		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview,
-		id, types.RunPending, types.RunRunning,
-	); err != nil {
-		return fmt.Errorf("complete terminal CI step: %w", err)
-	}
-	if _, err := tx.Exec(
-		`UPDATE runs SET
-			status = CASE WHEN status IN (?, ?) THEN ? ELSE status END,
-			push_active = 0,
-			parked_ms = COALESCE(parked_ms, 0) + CASE
-				WHEN awaiting_agent_since IS NOT NULL AND ? > awaiting_agent_since
-				THEN (? - awaiting_agent_since) * 1000 ELSE 0 END,
-			awaiting_agent_since = NULL, updated_at = ?
-		 WHERE id = ?`,
-		types.RunPending, types.RunRunning, types.RunCompleted, ts, ts, ts, id,
-	); err != nil {
-		return fmt.Errorf("finalize terminal PR run: %w", err)
-	}
-	return nil
 }
 
 // SetRunCIReady persists checks-passed readiness so fresh TUI and AXI attaches
