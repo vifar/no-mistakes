@@ -1104,3 +1104,90 @@ func TestPublishRunHead_RefusesAgentCommittedScratch(t *testing.T) {
 		t.Errorf("remote moved to %s despite refusal", got)
 	}
 }
+
+func TestStagePipelineChanges_UnmergedIndexRefusesBeforeMutation(t *testing.T) {
+	t.Parallel()
+	for _, limit := range []int64{100, 0} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Config.MaxFileSizeBytes = limit
+			one := gitCmd(t, dir, "rev-parse", "HEAD:base.txt")
+			two := gitCmd(t, dir, "rev-parse", "HEAD:feature.txt")
+			input := fmt.Sprintf("0 %s\tbase.txt\n100644 %s 1\tbase.txt\n100644 %s 2\tbase.txt\n100644 %s 3\tbase.txt\n", strings.Repeat("0", 40), one, one, two)
+			if _, err := stepGitRunInput(sctx, input, "update-index", "--index-info"); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, dir, "base.txt", "resolved locally")
+			writeTestFile(t, dir, "feature.txt", "unstaged edit")
+			writeTestFile(t, dir, "huge.dat", strings.Repeat("x", 500))
+			writeTestFile(t, dir, "small.txt", "already staged")
+			gitCmd(t, dir, "add", "small.txt")
+			beforeIndex := gitCmd(t, dir, "ls-files", "--stage", "-z")
+			beforeStatus := gitCmd(t, dir, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+			err := stagePipelineChanges(sctx)
+			if err == nil || !strings.Contains(err.Error(), "cannot snapshot index") {
+				t.Fatalf("expected snapshot refusal, got %v", err)
+			}
+			if got := gitCmd(t, dir, "ls-files", "--stage", "-z"); got != beforeIndex {
+				t.Fatalf("refusal changed staged entries or conflict stages: %q", got)
+			}
+			if got := gitCmd(t, dir, "status", "--porcelain=v1", "-z", "--untracked-files=all"); got != beforeStatus {
+				t.Fatalf("refusal changed worktree status: %q", got)
+			}
+			for name, want := range map[string]string{"base.txt": "resolved locally", "feature.txt": "unstaged edit", "huge.dat": strings.Repeat("x", 500), "small.txt": "already staged"} {
+				got, err := os.ReadFile(filepath.Join(dir, name))
+				if err != nil || string(got) != want {
+					t.Fatalf("refusal changed %s: %q, %v", name, got, err)
+				}
+			}
+		})
+	}
+}
+
+func TestAssertPublishedRangeClean_RejectsIntermediateHistory(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, path, content string
+		exclude             []string
+	}{
+		{name: "oversized addition", path: "huge.dat", content: strings.Repeat("x", 600)},
+		{name: "oversized modification", path: "feature.txt", content: strings.Repeat("x", 600)},
+		{name: "hidden scratch", path: ".cache/blob", content: "scratch"},
+		{name: "nested scratch", path: "pkg/.cache/blob", content: "scratch"},
+		{name: "dependencies", path: "node_modules/dep/index.js", content: "scratch"},
+		{name: "excluded path", path: "out/dump.bin", content: "scratch", exclude: []string{"*.bin"}},
+	} {
+		for _, ending := range []string{"delete", "replace", "merge deleted side branch"} {
+			t.Run(tc.name+"/"+ending, func(t *testing.T) {
+				t.Parallel()
+				dir, baseSHA, headSHA := setupGitRepo(t)
+				sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+				sctx.Config.MaxFileSizeBytes = 500
+				sctx.Config.StagingExclude = tc.exclude
+				if ending == "merge deleted side branch" {
+					gitCmd(t, dir, "checkout", "-b", "side")
+				}
+				scratchGuardCommit(t, dir, map[string]string{tc.path: tc.content})
+				if ending == "replace" {
+					writeTestFile(t, dir, tc.path, "small")
+				} else if err := os.Remove(filepath.Join(dir, tc.path)); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, dir, "add", "-A")
+				gitCmd(t, dir, "commit", "-m", "remove offending content")
+				if ending == "merge deleted side branch" {
+					gitCmd(t, dir, "checkout", "feature")
+					scratchGuardCommit(t, dir, map[string]string{"ordinary.txt": "normal"})
+					gitCmd(t, dir, "merge", "--no-ff", "side", "-m", "merge side history")
+				}
+				head := gitCmd(t, dir, "rev-parse", "HEAD")
+				err := assertPublishedRangeClean(sctx, head)
+				if err == nil || !strings.Contains(err.Error(), tc.path) || !strings.Contains(err.Error(), "rewriting or dropping") {
+					t.Fatalf("expected historical content refusal naming %s and history remediation, got %v", tc.path, err)
+				}
+			})
+		}
+	}
+}

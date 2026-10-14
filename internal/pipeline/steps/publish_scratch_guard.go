@@ -38,15 +38,39 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 		sctx.Log("warning: no usable base to scan the published range for oversized files and tool scratch; skipping the check")
 		return nil
 	}
-	raw, err := stepGitRunRaw(sctx, "diff-tree", "-r", "-z", "--no-abbrev", "--no-renames", base, head)
+	commits, err := stepGitRun(sctx, "rev-list", "--reverse", "--parents", base+".."+head)
 	if err != nil {
-		return fmt.Errorf("scan published range for oversized files and tool scratch: %w", err)
+		return fmt.Errorf("scan published commits: %w", err)
 	}
-	entries, err := parseRawDiff(raw)
-	if err != nil {
-		return fmt.Errorf("scan published range: %w", err)
+	var entries, introduced []rawDiffEntry
+	seen := map[string]bool{}
+	for _, line := range strings.Split(commits, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		args := []string{"diff-tree", "-r", "-z", "--root", "--no-commit-id", "--no-abbrev", "--no-renames"}
+		if len(fields) > 1 {
+			args = append(args, fields[1])
+		}
+		args = append(args, fields[0])
+		raw, err := stepGitRunRaw(sctx, args...)
+		if err != nil {
+			return fmt.Errorf("scan published commit %s: %w", fields[0], err)
+		}
+		changes, err := parseRawDiff(raw)
+		if err != nil {
+			return fmt.Errorf("scan published commit %s: %w", fields[0], err)
+		}
+		entries = append(entries, changes...)
+		for _, entry := range addedOrModified(changes) {
+			key := entry.path + "\x00" + entry.newSHA
+			if !seen[key] {
+				seen[key] = true
+				introduced = append(introduced, entry)
+			}
+		}
 	}
-	introduced := addedOrModified(entries)
 
 	var scratch []string
 	baseDirs := map[string]bool{}
@@ -66,7 +90,7 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 			continue
 		}
 		if pattern, excluded := matchesStagingExclude(sctx, entry.path); excluded {
-			scratch = append(scratch, fmt.Sprintf("%s (matches staging_exclude %q)", entry.path, pattern))
+			scratch = appendUnique(scratch, fmt.Sprintf("%s (matches staging_exclude %q)", entry.path, pattern))
 			continue
 		}
 		// Walk scratch components shallow to deep; the first one the base tree
@@ -82,7 +106,7 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 				return fmt.Errorf("scan published range: %w", err)
 			}
 			if !exists {
-				scratch = append(scratch, fmt.Sprintf("%s (new directory %s/)", entry.path, dir))
+				scratch = appendUnique(scratch, fmt.Sprintf("%s (new directory %s/)", entry.path, dir))
 				break
 			}
 		}
@@ -102,7 +126,7 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 		problems = append(problems, fmt.Sprintf("%d path(s) look like tool scratch: %s", len(scratch), strings.Join(capList(scratch), ", ")))
 	}
 	return fmt.Errorf("refusing to publish %s: the branch adds %s. "+
-		"Remove the files from the branch history (amend or rebase them out) or add them to .gitignore, then push again; "+
+		"Remove the content from branch history by rewriting or dropping the offending commits, then retry publication; adding .gitignore alone cannot remove committed content. "+
 		"to publish a hidden directory deliberately, commit it before the run so it exists in the base",
 		shortSHA(head), strings.Join(problems, "; "))
 }

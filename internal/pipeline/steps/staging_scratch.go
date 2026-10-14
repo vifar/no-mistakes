@@ -301,15 +301,7 @@ func refuseOversizedStaged(sctx *pipeline.StepContext, snapshot string) error {
 	if len(over) == 0 {
 		return nil
 	}
-	if snapshot != "" {
-		_, err = stepGitRun(sctx, "read-tree", snapshot)
-	} else {
-		args := []string{"--literal-pathspecs", "reset", "-q", "--"}
-		for _, f := range over {
-			args = append(args, f.path)
-		}
-		_, err = stepGitRun(sctx, args...)
-	}
+	_, err = stepGitRun(sctx, "read-tree", snapshot)
 	if err != nil {
 		return fmt.Errorf("restore index after oversized file refusal: %w", err)
 	}

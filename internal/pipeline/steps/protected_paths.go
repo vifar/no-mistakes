@@ -36,10 +36,10 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 			}
 		}
 	}
-	// Snapshot the index so an oversized-file refusal can restore it exactly.
-	// An empty snapshot (unmerged entries, for example) falls back to resetting
-	// only the refused paths.
-	snapshot, _ := stepGitRun(sctx, "write-tree")
+	snapshot, err := stepGitRun(sctx, "write-tree")
+	if err != nil {
+		return fmt.Errorf("refusing automatic staging: cannot snapshot index; resolve unmerged entries before retrying: %w", err)
+	}
 	// Tracked modifications and deletions first; untracked paths are staged
 	// selectively so tool scratch never rides into an automatic commit.
 	if _, err := stepGitRun(sctx, "add", "-u"); err != nil {
