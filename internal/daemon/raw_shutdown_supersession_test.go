@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -29,6 +32,19 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"modernc.org/sqlite"
 )
+
+type rawFailureLogPause struct {
+	slog.Handler
+	once             sync.Once
+	entered, release chan struct{}
+}
+
+func (h *rawFailureLogPause) Handle(ctx context.Context, r slog.Record) error {
+	if r.Message == "raw shutdown terminal outcome unsettled" {
+		h.once.Do(func() { close(h.entered); <-h.release })
+	}
+	return h.Handler.Handle(ctx, r)
+}
 
 type strictShutdownPass struct{ name types.StepName }
 
@@ -69,8 +85,24 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, causeKind := range []string{"planned", "user", "provider", "joined"} {
-		for _, first := range []string{"raw", "preservation"} {
+		for _, first := range []string{"raw", "preservation", "raw rollback", "raw persistent"} {
 			t.Run(causeKind+"/"+first, func(t *testing.T) {
+				rawFirst := first != "preservation"
+				failedRaw := first == "raw rollback" || first == "raw persistent"
+				persistentRaw := first == "raw persistent"
+				var storageHealthy atomic.Bool
+				repeatedFailure := make(chan struct{})
+				var repeatOnce sync.Once
+				logEntered, logRelease := make(chan struct{}), make(chan struct{})
+				var logOnce sync.Once
+				releaseLog := func() { logOnce.Do(func() { close(logRelease) }) }
+				defer releaseLog()
+				if failedRaw {
+					previous := slog.Default()
+					slog.SetDefault(slog.New(&rawFailureLogPause{Handler: slog.NewTextHandler(io.Discard, nil), entered: logEntered, release: logRelease}))
+					defer slog.SetDefault(previous)
+				}
+				var rawAttempts atomic.Int32
 				independent := errors.New("independent provider failure https://operator:secret@forge.example/repo")
 				gitMarker := filepath.Join(t.TempDir(), "terminal-preparation")
 				t.Setenv("FAKE_CLI_TERMINAL_GIT_MARKER", gitMarker)
@@ -112,6 +144,21 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
+				faultFunction := "raw_fault_" + newShutdownToken()
+				if failedRaw {
+					if err := sqlite.RegisterScalarFunction(faultFunction, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
+						attempt := rawAttempts.Add(1)
+						if attempt == 1 || (persistentRaw && !storageHealthy.Load()) {
+							if attempt >= 3 {
+								repeatOnce.Do(func() { close(repeatedFailure) })
+							}
+							return nil, errors.New("raw write storage failure")
+						}
+						return int64(1), nil
+					}); err != nil {
+						t.Fatal(err)
+					}
+				}
 				d.Close()
 				d, err = db.Open(p.DB())
 				if err != nil {
@@ -123,6 +170,11 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 					t.Fatal(err)
 				}
 				defer control.Close()
+				if failedRaw {
+					if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER fail_raw BEFORE INSERT ON controlled_shutdown_runs WHEN NEW.reason='daemon shutting down' BEGIN SELECT %s(); END`, faultFunction)); err != nil {
+						t.Fatal(err)
+					}
+				}
 				if first == "preservation" && !independentFailure {
 					if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER pause_preservation BEFORE UPDATE ON commit_status_publications WHEN NEW.run_id=%q AND NEW.preserve_success=1 AND OLD.preserve_success IS NULL BEGIN SELECT %s(); END`, run.ID, function)); err != nil {
 						t.Fatal(err)
@@ -163,7 +215,7 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 					<-sc.Ctx.Done()
 					cancelled <- context.Cause(sc.Ctx)
 					<-watchRelease
-					if independentFailure && first == "raw" {
+					if (independentFailure || failedRaw) && rawFirst {
 						if err := os.WriteFile(gitMarker, []byte("armed"), 0600); err != nil {
 							return nil, err
 						}
@@ -192,6 +244,16 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 				mgr.wg.Add(1)
 				finished := make(chan error, 1)
 				go func() { defer mgr.wg.Done(); finished <- executor.Execute(ctx, run, repo, repo.WorkingPath) }()
+				defer func() {
+					storageHealthy.Store(true)
+					releaseGit()
+					releaseWatch()
+					releaseTerminal()
+					releaseLog()
+					if failedRaw {
+						_ = pipeline.WithCommitStatusLock(context.Background(), func() error { return nil })
+					}
+				}()
 				select {
 				case <-ready:
 				case err := <-finished:
@@ -248,7 +310,7 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 						t.Fatal("preservation did not commit")
 					}
 				}
-				if independentFailure && first == "raw" {
+				if (independentFailure || failedRaw) && rawFirst {
 					releaseWatch()
 					select {
 					case <-gitEntered:
@@ -263,7 +325,45 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 				case <-time.After(time.Second):
 					t.Fatal("raw shutdown did not reach captured cancellation")
 				}
-				if independentFailure && first == "raw" {
+				if failedRaw {
+					select {
+					case <-logEntered:
+					case <-time.After(5 * time.Second):
+						t.Fatal("raw rollback did not reach owned handoff")
+					}
+					releaseGit()
+					if persistentRaw {
+						select {
+						case <-repeatedFailure:
+						case <-time.After(5 * time.Second):
+							t.Fatal("owned raw fence did not survive repeated storage failure")
+						}
+						stored, err := d.GetRun(run.ID)
+						if err != nil || stored.Status != types.RunRunning {
+							t.Fatalf("unsettled storage fabricated terminal truth: %+v,%v", stored, err)
+						}
+						select {
+						case err := <-finished:
+							t.Fatalf("executor relinquished unsettled custody: %v", err)
+						default:
+						}
+						if ack, err := mgr.prepareControlledShutdown(context.Background(), request); err == nil || ack != nil {
+							t.Fatalf("persistent raw storage failure acknowledged planned shutdown: %+v,%v", ack, err)
+						}
+						storageHealthy.Store(true)
+						if err := pipeline.WithCommitStatusLock(context.Background(), func() error { return nil }); err != nil {
+							t.Fatal(err)
+						}
+					}
+					select {
+					case err := <-finished:
+						finished <- err
+					case <-time.After(10 * time.Second):
+						t.Fatal("candidate did not settle behind failed raw write")
+					}
+					releaseLog()
+				}
+				if independentFailure && rawFirst {
 					if err := pipeline.WithCommitStatusLock(context.Background(), func() error {
 						revoked, err := d.RawShutdownSuperseded(run.ID)
 						if err != nil {
@@ -304,7 +404,7 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 					t.Fatal("raw shutdown did not drain")
 				}
 				if causeKind == "planned" {
-					if err := <-plannedDone; err == nil && first == "raw" {
+					if err := <-plannedDone; err == nil && rawFirst {
 						t.Error("raw supersession produced planned ACK")
 					}
 				}
@@ -333,7 +433,7 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 				if independentFailure && (stored.Error == nil || (!strings.Contains(*stored.Error, "independent provider failure") || strings.Contains(*stored.Error, "secret"))) {
 					t.Errorf("real failure replaced: %+v", stored)
 				}
-				if first == "raw" && !independentFailure && (stored.Error == nil || *stored.Error != "daemon shutting down" || pub.StrictCertificate != nil || (pub.PreserveSuccess != nil && *pub.PreserveSuccess)) {
+				if rawFirst && !independentFailure && (stored.Error == nil || *stored.Error != "daemon shutting down" || pub.StrictCertificate != nil || (pub.PreserveSuccess != nil && *pub.PreserveSuccess)) {
 					t.Errorf("raw shutdown retained eligibility or planned reason: %+v,%+v", stored, pub)
 				}
 				if first == "preservation" && !independentFailure && (pub.StrictCertificate == nil || pub.PreserveSuccess == nil || !*pub.PreserveSuccess) {
