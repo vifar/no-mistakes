@@ -2,6 +2,7 @@ package steps
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -147,6 +148,46 @@ func stageUntrackedChanges(sctx *pipeline.StepContext) error {
 	return nil
 }
 
+// unstageIndexedScratch removes scratch an agent already staged itself (for
+// example with `git add -A`) before the pipeline commits. An added index entry
+// is scratch under the same rules as an untracked one: it sits under a hidden or
+// node_modules directory HEAD's tree lacks, or matches staging_exclude. Only the
+// index changes; the worktree file stays, now untracked.
+func unstageIndexedScratch(sctx *pipeline.StepContext) error {
+	added, err := stepGitRunRaw(sctx, "diff", "--cached", "--diff-filter=A", "--no-renames", "--name-only", "-z", "HEAD")
+	if err != nil {
+		return fmt.Errorf("check staged scratch: %w", err)
+	}
+	var unstage, skipped []string
+	skippedSeen := map[string]bool{}
+	headDirs := map[string]bool{}
+	for _, file := range nulFields(added) {
+		scratch, err := firstNewScratchComponent(sctx, headDirs, file, false)
+		if err != nil {
+			return fmt.Errorf("check staged scratch: %w", err)
+		}
+		if scratch == "" {
+			if _, excluded := matchesStagingExclude(sctx, file); excluded {
+				scratch = file
+			}
+		}
+		if scratch != "" {
+			unstage = append(unstage, file)
+			skipped = appendUnique(skipped, skippedSeen, scratch)
+		}
+	}
+	for _, batch := range pathBatches(unstage) {
+		args := append([]string{"--literal-pathspecs", "reset", "-q", "--"}, batch...)
+		if _, err := stepGitRun(sctx, args...); err != nil {
+			return fmt.Errorf("unstage scratch: %w", err)
+		}
+	}
+	if len(skipped) > 0 {
+		sctx.Log(fmt.Sprintf("staging skipped tool scratch already in the index: %s (add a .gitignore entry or commit them deliberately)", strings.Join(capList(skipped), ", ")))
+	}
+	return nil
+}
+
 func nulFields(raw string) []string {
 	var fields []string
 	for _, field := range strings.Split(raw, "\x00") {
@@ -264,13 +305,26 @@ func oversizedBlobs(sctx *pipeline.StepContext, entries []rawDiffEntry, limit in
 	if err != nil {
 		return nil, fmt.Errorf("measure blob sizes: %w", err)
 	}
-	sizes := map[string]int64{}
-	for _, line := range strings.Split(out, "\n") {
-		var sha, kind string
-		var size int64
-		if n, _ := fmt.Sscanf(line, "%s %s %d", &sha, &kind, &size); n == 3 && kind == "blob" {
-			sizes[sha] = size
+	// Fail closed: every requested object must come back as exactly one
+	// well-formed blob record. A missing object, another type, or garbled
+	// output means the size is unknown, which must not read as "small".
+	sizes := make(map[string]int64, len(seen))
+	for _, line := range strings.Split(strings.TrimSuffix(out, "\n"), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 || fields[1] != "blob" || !seen[fields[0]] {
+			return nil, fmt.Errorf("measure blob sizes: unexpected cat-file record %q", line)
 		}
+		size, err := strconv.ParseInt(fields[2], 10, 64)
+		if err != nil || size < 0 {
+			return nil, fmt.Errorf("measure blob sizes: malformed size in cat-file record %q", line)
+		}
+		if _, dup := sizes[fields[0]]; dup {
+			return nil, fmt.Errorf("measure blob sizes: duplicate cat-file record for %s", fields[0])
+		}
+		sizes[fields[0]] = size
+	}
+	if len(sizes) != len(seen) {
+		return nil, fmt.Errorf("measure blob sizes: cat-file returned %d records for %d objects", len(sizes), len(seen))
 	}
 	var over []oversizedFile
 	for _, entry := range entries {

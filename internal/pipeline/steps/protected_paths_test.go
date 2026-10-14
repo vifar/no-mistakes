@@ -14,6 +14,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -1478,5 +1479,176 @@ func TestCommitAgentFixes_TrackedScratchDirectoryReplacement(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// publicationBaseFixture builds a feature branch whose origin is a bare repo
+// holding main, then lets the "agent" commit content and move every ref the
+// publication guard might have trusted onto the new head.
+func publicationBaseFixture(t *testing.T, baseForRun string, files map[string]string) (*pipeline.StepContext, string, string) {
+	t.Helper()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	if baseForRun == "base" {
+		baseForRun = baseSHA
+	}
+	sctx := newTestContext(t, &mockAgent{}, dir, baseForRun, headSHA, config.Commands{})
+	head := scratchGuardCommit(t, dir, files)
+	gitCmd(t, dir, "update-ref", "refs/remotes/origin/main", head)
+	gitCmd(t, dir, "branch", "-f", "main", head)
+	return sctx, dir, head
+}
+
+func TestResolvePublicationBase_IgnoresAgentMovedRefs(t *testing.T) {
+	t.Parallel()
+	zero := strings.Repeat("0", 40)
+	files := map[string]string{".cache/pnpm/blob": "scratch"}
+
+	t.Run("fresh fetch beats a moved tracking ref", func(t *testing.T) {
+		t.Parallel()
+		sctx, _, head := publicationBaseFixture(t, zero, files)
+		err := assertPublishedRangeClean(sctx, head)
+		if err == nil || !strings.Contains(err.Error(), ".cache/pnpm/blob") {
+			t.Fatalf("moved refs emptied the scanned range: %v", err)
+		}
+	})
+	t.Run("pinned base survives a failed fetch", func(t *testing.T) {
+		t.Parallel()
+		sctx, dir, head := publicationBaseFixture(t, "base", files)
+		gitCmd(t, dir, "remote", "set-url", "origin", filepath.Join(dir, "missing-remote"))
+		err := assertPublishedRangeClean(sctx, head)
+		if err == nil || !strings.Contains(err.Error(), ".cache/pnpm/blob") {
+			t.Fatalf("moved refs emptied the scanned range: %v", err)
+		}
+	})
+	t.Run("no trustworthy base fails closed", func(t *testing.T) {
+		t.Parallel()
+		sctx, dir, head := publicationBaseFixture(t, zero, files)
+		gitCmd(t, dir, "remote", "set-url", "origin", filepath.Join(dir, "missing-remote"))
+		err := assertPublishedRangeClean(sctx, head)
+		if err == nil || !strings.Contains(err.Error(), "trustworthy base") {
+			t.Fatalf("expected fail-closed error, got %v", err)
+		}
+	})
+	t.Run("recorded base that is not an ancestor is not trusted", func(t *testing.T) {
+		t.Parallel()
+		sctx, dir, head := publicationBaseFixture(t, zero, files)
+		// A commit on an unrelated line of history: it exists but is not reachable from head.
+		gitCmd(t, dir, "checkout", "-q", "--orphan", "other")
+		writeTestFile(t, dir, "other.txt", "x")
+		gitCmd(t, dir, "add", "other.txt")
+		gitCmd(t, dir, "commit", "-m", "unrelated")
+		sctx.Run.BaseSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+		gitCmd(t, dir, "remote", "set-url", "origin", filepath.Join(dir, "missing-remote"))
+		err := assertPublishedRangeClean(sctx, head)
+		if err == nil || !strings.Contains(err.Error(), "trustworthy base") {
+			t.Fatalf("non-ancestor BaseSHA was used as the scan base: %v", err)
+		}
+	})
+	t.Run("pinned receipt merge-base", func(t *testing.T) {
+		t.Parallel()
+		sctx, dir, head := publicationBaseFixture(t, zero, files)
+		gitCmd(t, dir, "remote", "set-url", "origin", filepath.Join(dir, "missing-remote"))
+		sctx.PRContext = &db.PRContext{PRContextCandidate: db.PRContextCandidate{MergeBaseSHA: gitCmd(t, dir, "rev-parse", "HEAD~1")}}
+		err := assertPublishedRangeClean(sctx, head)
+		if err == nil || !strings.Contains(err.Error(), ".cache/pnpm/blob") {
+			t.Fatalf("receipt merge-base was not used: %v", err)
+		}
+	})
+}
+
+func TestStagePipelineChanges_UnstagesScratchAlreadyInIndex(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.StagingExclude = []string{"*.bin"}
+	logs := captureLogs(sctx)
+	writeTestFile(t, dir, ".cache/big/file", "scratch")
+	writeTestFile(t, dir, "pkg/.deps/x", "scratch")
+	writeTestFile(t, dir, "node_modules/dep/i.js", "scratch")
+	writeTestFile(t, dir, "out/dump.bin", "scratch")
+	writeTestFile(t, dir, "pkg/new_test.go", "package pkg\n")
+	writeTestFile(t, dir, ".github/workflows/ci.yml", "name: ci\n")
+	gitCmd(t, dir, "add", "-A", "-f")
+
+	if err := stagePipelineChanges(sctx); err != nil {
+		t.Fatal(err)
+	}
+	got := stagedNames(t, dir)
+	for _, want := range []string{"pkg/new_test.go", ".github/workflows/ci.yml"} {
+		if !containsString(got, want) {
+			t.Errorf("%s was unstaged: %q", want, got)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("staged = %q, scratch must be unstaged", got)
+	}
+	joined := strings.Join(*logs, "\n")
+	for _, want := range []string{"already in the index", ".cache/", "pkg/.deps/", "node_modules/", "out/dump.bin"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("log missing %q: %s", want, joined)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".cache/big/file")); err != nil {
+		t.Errorf("worktree file was removed: %v", err)
+	}
+}
+
+func TestAssertPublishedRangeClean_AddedGitlinkStillCheckedAsScratch(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		path    string
+		exclude []string
+		want    string
+	}{
+		{path: ".cache/sub", want: ".cache/sub"},
+		{path: "tools/pinned", exclude: []string{"tools/pinned"}, want: "staging_exclude"},
+		{path: "vendor/lib", want: ""},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Config.MaxFileSizeBytes = 500
+			sctx.Config.StagingExclude = tc.exclude
+			gitCmd(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+headSHA+","+tc.path)
+			gitCmd(t, dir, "commit", "-m", "add gitlink")
+			head := gitCmd(t, dir, "rev-parse", "HEAD")
+			err := assertPublishedRangeClean(sctx, head)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("ordinary gitlink refused: %v", err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Fatalf("gitlink bypassed the path rules: %v", err)
+			}
+		})
+	}
+}
+
+func TestOversizedBlobs_FailsClosedOnUnmeasurableObjects(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	blob := gitCmd(t, dir, "rev-parse", "HEAD:feature.txt")
+	tree := gitCmd(t, dir, "rev-parse", "HEAD^{tree}")
+	missing := strings.Repeat("ab", 20)
+	for _, tc := range []struct {
+		name    string
+		entries []rawDiffEntry
+		wantErr bool
+	}{
+		{"valid blob", []rawDiffEntry{{newSHA: blob, path: "feature.txt"}}, false},
+		{"missing object", []rawDiffEntry{{newSHA: blob, path: "a"}, {newSHA: missing, path: "b"}}, true},
+		{"non-blob object", []rawDiffEntry{{newSHA: tree, path: "dir"}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := oversizedBlobs(sctx, tc.entries, 1)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
 	}
 }

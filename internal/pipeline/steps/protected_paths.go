@@ -83,6 +83,9 @@ func stagePipelineChanges(sctx *pipeline.StepContext) (retErr error) {
 	if err := stageUntrackedChanges(sctx); err != nil {
 		return err
 	}
+	if err := unstageIndexedScratch(sctx); err != nil {
+		return err
+	}
 	if err := unstageSubmodulePointerMoves(sctx); err != nil {
 		return err
 	}

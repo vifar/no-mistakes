@@ -8,22 +8,70 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
-// publicationScanBase picks the commit a publication guard diffs against: the
-// merge-base with the local copy of the PR target (no network), else the run's
-// recorded base. It returns "" when neither is usable.
-func publicationScanBase(sctx *pipeline.StepContext, head string) string {
+// isAncestorCommit reports whether ancestor names a commit reachable from
+// descendant (or equal to it).
+func isAncestorCommit(sctx *pipeline.StepContext, ancestor, descendant string) bool {
+	if ancestor == "" || git.IsZeroSHA(ancestor) {
+		return false
+	}
+	if _, err := stepGitRun(sctx, "cat-file", "-e", ancestor+"^{commit}"); err != nil {
+		return false
+	}
+	_, err := stepGitRun(sctx, "merge-base", "--is-ancestor", ancestor, descendant)
+	return err == nil
+}
+
+// resolvePublicationBase is the single place the publication guard chooses the
+// commit it scans from. Branch refs and remote-tracking refs live in the
+// worktree an agent can write, so none of them is trusted by itself:
+//
+//   - Pinned evidence is what the run recorded outside the worktree: the PR
+//     comparison receipt's merge-base, else the run's BaseSHA. It counts only
+//     when it is an ancestor of the head being published.
+//   - The merge-base with the PR target is derived from a fresh fetch of the
+//     target into a private ref, never from refs/remotes/origin/* or a local
+//     branch, so a moved ref cannot shrink the range. It narrows the pinned base
+//     (it may be newer, after the target advanced) but must itself contain it.
+//
+// When neither source yields a base it returns an error: scanning nothing and
+// calling the range clean would defeat the guard.
+func resolvePublicationBase(sctx *pipeline.StepContext, head string) (string, error) {
+	pinned := ""
+	if rc := sctx.PRContext; rc != nil && isAncestorCommit(sctx, rc.MergeBaseSHA, head) {
+		pinned = rc.MergeBaseSHA
+	} else if isAncestorCommit(sctx, strings.TrimSpace(sctx.Run.BaseSHA), head) {
+		pinned = strings.TrimSpace(sctx.Run.BaseSHA)
+	}
+
 	target := effectivePRBaseBranch(sctx)
-	for _, ref := range []string{"origin/" + target, target} {
-		if mb, err := stepGitRun(sctx, "merge-base", head, ref); err == nil && mb != "" {
-			return mb
+	var fetchErr error
+	if sctx.EvalReplay {
+		// Eval replay pins origin/<base> in an isolated worktree with no upstream.
+		if mb, err := stepGitRun(sctx, "merge-base", head, "origin/"+target); err == nil && mb != "" {
+			if pinned == "" || isAncestorCommit(sctx, pinned, mb) {
+				return mb, nil
+			}
+		}
+	} else {
+		private := "refs/no-mistakes/publication-base/" + sctx.Run.ID
+		fetchErr = git.FetchRemoteBranchToPrivateRef(sctx.Ctx, sctx.WorkDir, resolveUpstreamURL(sctx), target, private)
+		if fetchErr == nil {
+			defer func() { _, _ = stepGitRun(sctx, "update-ref", "--no-deref", "-d", private) }()
+			if mb, err := stepGitRun(sctx, "merge-base", head, private); err == nil && mb != "" {
+				if pinned == "" || isAncestorCommit(sctx, pinned, mb) {
+					return mb, nil
+				}
+			}
 		}
 	}
-	if base := strings.TrimSpace(sctx.Run.BaseSHA); base != "" && !git.IsZeroSHA(base) {
-		if _, err := stepGitRun(sctx, "cat-file", "-e", base+"^{commit}"); err == nil {
-			return base
-		}
+	if pinned != "" {
+		return pinned, nil
 	}
-	return ""
+	detail := "no recorded base is an ancestor of the head"
+	if fetchErr != nil {
+		detail += fmt.Sprintf(" and fetching %q failed: %v", target, fetchErr)
+	}
+	return "", fmt.Errorf("refusing to publish %s: cannot establish a trustworthy base to scan for oversized files and tool scratch (%s)", shortSHA(head), detail)
 }
 
 // assertPublishedRangeClean refuses to publish a range that adds or modifies a
@@ -34,10 +82,9 @@ func publicationScanBase(sctx *pipeline.StepContext, head string) string {
 // machine rather than at a forge's push limit.
 func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 	limit := sctx.Config.MaxFileSizeBytes
-	base := publicationScanBase(sctx, head)
-	if base == "" {
-		sctx.Log("warning: no usable base to scan the published range for oversized files and tool scratch; skipping the check")
-		return nil
+	base, err := resolvePublicationBase(sctx, head)
+	if err != nil {
+		return err
 	}
 	commits, err := stepGitRun(sctx, "rev-list", "--reverse", "--parents", base+".."+head)
 	if err != nil {
@@ -88,7 +135,9 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 		return exists, nil
 	}
 	for _, entry := range entries {
-		if entry.status != "A" || entry.newMode == "160000" || addedPathsSeen[entry.path] {
+		// Gitlinks are exempt from blob measurement only; their paths still
+		// count as scratch.
+		if entry.status != "A" || addedPathsSeen[entry.path] {
 			continue
 		}
 		addedPathsSeen[entry.path] = true
