@@ -4,9 +4,7 @@
 
 Remove an unnecessary Git subprocess from ordinary-clone classification and fail closed when repository identity cannot be checked. The caller must retain normal enrollment and authenticated process-ancestry checks.
 
-Observed repository-directory classification can exceed the client's 30-second reply budget while health remains responsive. Other snapshots, including concurrent ordinary-clone and nonrepository requests from one authenticated peer, complete within one second. The earlier slow syscall is unproven. This change removes a proven unnecessary dependency and contains Git execution; it must not be described as a confirmed diagnosis of every prior timeout or as a deadline for the complete classifier.
-
-The implementation baseline is the installed revision d4036f9b2ad865119c49f97b7041affaad696c9e. Baseline `go test ./internal/gatecontext ./internal/git ./internal/shellenv ./internal/ipc` passed. Do not fold unrelated default-branch changes into a dedicated-runtime build.
+Repository identity checks can exceed a caller's reply budget when a Git subprocess stalls. Ordinary-clone classification currently performs a worktree-root query that is not needed to establish managed identity. This change removes that unnecessary dependency and bounds identity Git execution. It does not diagnose every possible timeout or impose a deadline on the complete classifier.
 
 ## Scope
 
@@ -55,12 +53,8 @@ No enrollment rewrite, marker exception, empty-directory control request, raw mu
 
 Run the package owners first, then `make lint`, `go test -race ./...`, the applicable E2E suite through `scripts/e2e.sh` with its 2400-second package deadline, and a pinned build. Cross-platform compile/vet must cover the structured-error and classifier changes. Any broad baseline failure must be reproduced on the unchanged pin and reported; it does not permit weakening or deleting the failed assertion. Do not call a focused pass full-suite validation.
 
-## Rollout and recovery
+## Validation limits
 
-Independent plan review required two corrections: absence needs filesystem corroboration, and simultaneous exit/drain errors must remain visible. Both are incorporated above. The second item changes only error composition at the existing lifecycle owner; process cleanup and grace policy remain unchanged. Implementation must supply red-first evidence for both corrected contracts before proceeding.
+Repository absence requires filesystem corroboration, and simultaneous command-exit and output-drain errors must remain visible. Error composition changes only at the existing lifecycle owner; process cleanup and grace policy remain unchanged. Supply red-first evidence for both contracts.
 
-Prepare an exact-revision binary, verification receipt and backup before installation. Preserve existing shipping features and the dedicated root/executable pair. Do not run `make install`, which targets the generic executable and stops its daemon.
-
-Re-read all active dedicated-root runs before a daemon replacement. A quiet point belongs to all owners, not one peer. Forced shutdown terminalizes tracked runs; it cannot preserve executing agents in place. Do not force a restart while owners are progressing. If an interruption is necessary, preserve consistent database/evidence/recovery refs and notify affected owners before the already-authorized supported lifecycle action.
-
-Verify the new process owner and identity, responsive classification from an actual enrolled clone, and ordinary/managed/descendant refusal behavior through isolated integration evidence. The blocked owner resubmits only if no matching run exists. A healthy snapshot or an existing admitted run is not proof that the intermittent incident is permanently fixed.
+Behavioral validation must prove ordinary-clone classification, positive managed identity, and authenticated-descendant refusal through isolated fixtures. Successful classification in one snapshot does not prove that every intermittent timeout is resolved. Installation and daemon lifecycle changes are outside this source change.
