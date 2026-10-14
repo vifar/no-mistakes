@@ -285,7 +285,7 @@ func TestStopDetachedDaemonFallsBackToPIDWhenSocketIsBroken(t *testing.T) {
 	}
 	const pid = 424242
 	startedAt := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
-	writeDaemonPIDRecord(t, p.PIDFile(), daemonPIDFile{PID: pid, StartedAt: startedAt})
+	writeDaemonPIDRecord(t, p.PIDFile(), daemonPIDFile{PID: pid, StartedAt: startedAt, Instance: "captured-runtime"})
 	ln, err := net.Listen("unix", p.Socket())
 	if err != nil {
 		t.Fatal(err)
@@ -301,12 +301,13 @@ func TestStopDetachedDaemonFallsBackToPIDWhenSocketIsBroken(t *testing.T) {
 	}()
 	originalProcessRunning := daemonProcessRunning
 	runningChecks := 0
+	killed := false
 	daemonProcessRunning = func(checkPID int) (bool, error) {
 		if checkPID != pid {
 			t.Fatalf("processRunning pid = %d, want %d", checkPID, pid)
 		}
 		runningChecks++
-		return runningChecks == 1, nil
+		return !killed, nil
 	}
 	defer func() {
 		daemonProcessRunning = originalProcessRunning
@@ -325,14 +326,16 @@ func TestStopDetachedDaemonFallsBackToPIDWhenSocketIsBroken(t *testing.T) {
 	killedPID := 0
 	daemonKillPID = func(killPID int) error {
 		killedPID = killPID
+		killed = true
 		return nil
 	}
 	defer func() {
 		daemonKillPID = originalKillPID
 	}()
 
-	if err := stopDetachedDaemon(p); err != nil {
-		t.Fatalf("expected stopDetachedDaemon to stop live pid when IPC dial fails, got %v", err)
+	t.Setenv("NM_TEST_DAEMON_STOP_TIMEOUT", "20ms")
+	if err := stopDetachedDaemon(p); err == nil || !strings.Contains(err.Error(), "transient ipc failure") {
+		t.Fatalf("lost preparation must stay visible after verified PID cleanup: %v", err)
 	}
 	if killedPID != pid {
 		t.Fatalf("expected pid fallback to kill pid %d, got %d", pid, killedPID)

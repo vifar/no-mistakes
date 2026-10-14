@@ -293,8 +293,12 @@ type AdmitPushParams struct {
 // HealthParams has no fields but exists for consistency.
 type HealthParams struct{}
 
-// ShutdownParams has no fields but exists for consistency.
-type ShutdownParams struct{}
+// ShutdownParams binds planned shutdown to the caller's captured runtime.
+type ShutdownParams struct {
+	ExpectedInstance  string `json:"expected_instance,omitempty"`
+	ExpectedPID       int    `json:"expected_pid,omitempty"`
+	ExpectedStartedAt string `json:"expected_started_at,omitempty"`
+}
 
 // UpdateRunClosingIssueRefsParams updates the closing issue references on an existing run.
 type UpdateRunClosingIssueRefsParams struct {
@@ -461,7 +465,11 @@ type HealthResult struct {
 
 // ShutdownResult confirms shutdown was initiated.
 type ShutdownResult struct {
-	OK bool `json:"ok"`
+	PID       int    `json:"pid,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+	OK        bool   `json:"ok"`
+	Instance  string `json:"instance,omitempty"`
+	Lifecycle string `json:"lifecycle,omitempty"`
 }
 
 // --- Wire types ---

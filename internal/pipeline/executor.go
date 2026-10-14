@@ -54,13 +54,14 @@ type approvalResponse struct {
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
 type Executor struct {
-	db     *db.DB
-	paths  *paths.Paths
-	config *config.Config
-	forge  *forgecontext.Context
-	agent  agent.Agent
-	steps  []Step
-	skips  map[types.StepName]bool
+	runtimeInstance string
+	db              *db.DB
+	paths           *paths.Paths
+	config          *config.Config
+	forge           *forgecontext.Context
+	agent           agent.Agent
+	steps           []Step
+	skips           map[types.StepName]bool
 
 	onEvent EventFunc
 
@@ -414,7 +415,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	for i := 0; i < len(e.steps); i++ {
 		step := e.steps[i]
 		if ctx.Err() != nil {
-			return e.failRun(run, repo, context.Cause(ctx))
+			return e.failRun(run, repo, context.Cause(ctx), ctx)
 		}
 
 		sr := stepRecords[step.Name()]
@@ -1041,6 +1042,11 @@ func (e *Executor) autoFixLimit(stepName types.StepName) int {
 // Returns whether to skip the remainder, an optional earlier restart step,
 // and any execution error.
 func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult, run *db.Run, repo *db.Repo, workDir, logDir string, state stepExecutionState) (bool, types.StepName, error) {
+	if state.fixing && !state.skipFixExecution {
+		if err := e.db.InvalidateStatusValidation(run.ID); err != nil {
+			return false, "", err
+		}
+	}
 	stepName := step.Name()
 	logPath := filepath.Join(logDir, string(stepName)+".log")
 	finalExitCode := 0
@@ -1325,10 +1331,22 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var reviewApprovedHeadSHA string
 	var reviewComparisonGeneration int64
 	var restartFrom types.StepName
+	var statusProofHead, statusProofConfig string
+	var statusProofEpoch int64
+	statusProofCore := stepName == types.StepReview || stepName == types.StepTest || stepName == types.StepDocument || stepName == types.StepLint
 
 	// Execute with possible fix loop
 rounds:
 	for {
+		if statusProofCore {
+			statusProofHead, _ = git.HeadSHA(ctx, workDir)
+			statusProofConfig = StatusConfigDigest(e.config)
+			var proofErr error
+			statusProofEpoch, proofErr = e.db.StatusValidationEpoch(run.ID)
+			if proofErr != nil {
+				return false, "", proofErr
+			}
+		}
 		if stepName == types.StepReview && run.Shipping != nil {
 			sctx.ScopeFindings = scopeFindingsForReview(sctx, outstandingFindings)
 		}
@@ -1375,7 +1393,7 @@ rounds:
 				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redactedErr, &durationMS)
-			return false, "", fmt.Errorf("step %s failed: %s", stepName, redactedErr)
+			return false, "", &stepExecutionError{step: stepName, message: redactedErr, cause: err, watchOnly: stepName == types.StepCI && !sctx.Fixing}
 		}
 		restartFrom = outcome.RestartFrom
 
@@ -1518,7 +1536,7 @@ rounds:
 				fixCount := findingsCount(fixableFindings)
 				writeLog(fmt.Sprintf("auto-fix round %d/%d starting after round %d (%d %s)", autoFixAttempts, autoFixLimit, roundNum, fixCount, pluralize(fixCount, "finding", "findings")))
 				if dbErr := e.db.StartStepFixRound(sr.ID, autoFixLimit); dbErr != nil {
-					slog.Warn("failed to start step fix round in db", "step", stepName, "error", dbErr)
+					return false, "", fmt.Errorf("invalidate before fix round: %w", dbErr)
 				}
 				if currentRoundID != "" {
 					if idsJSON := findingIDsJSON(fixableFindings); idsJSON != "" {
@@ -1673,7 +1691,7 @@ rounds:
 				selectedCount := selectedFindingCount(effectiveFindings, response.findingIDs)
 				writeLog(fmt.Sprintf("user-fix round starting after round %d (%d %s selected)", roundNum, selectedCount, pluralize(selectedCount, "finding", "findings")))
 				if dbErr := e.db.StartStepFixRound(sr.ID, autoFixLimit); dbErr != nil {
-					slog.Warn("failed to start step fix round in db", "step", stepName, "error", dbErr)
+					return false, "", fmt.Errorf("invalidate before fix round: %w", dbErr)
 				}
 				sctx.Fixing = true
 				// A genuine fix round always executes its fixer, even when the
@@ -1780,6 +1798,14 @@ done:
 		}
 	} else if err := e.db.CompleteStepWithStatus(sr.ID, status, finalExitCode, durationMS, logPath); err != nil {
 		return false, "", fmt.Errorf("complete step %s: %w", stepName, err)
+	}
+	if statusProofCore && status == types.StepStatusCompleted && statusProofHead != "" && statusProofConfig == StatusConfigDigest(e.config) {
+		observed, err := git.HeadSHA(ctx, workDir)
+		if err == nil && observed == statusProofHead {
+			if err := e.db.RecordStatusValidationStep(sr.ID, run.ID, observed, statusProofConfig, statusProofEpoch); err != nil {
+				return false, "", fmt.Errorf("record exact-head validation: %w", err)
+			}
+		}
 	}
 	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(status), "", "", &durationMS)
 	return skipRemaining, restartFrom, nil
@@ -2249,22 +2275,47 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 // the cause message is used as the run's error (more informative than "context canceled").
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
 	errMsg := err.Error()
+	explicitCancellation := false
+	var controlled *ControlledShutdownCause
 	for _, ctx := range ctxs {
-		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
+		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled && cancellationOnly(err, cause) {
 			errMsg = cause.Error()
+			explicitCancellation = cause.Error() == types.RunCancelReasonAbortedByUser
+			if planned, ok := cause.(*ControlledShutdownCause); ok && planned.Instance != "" && planned.Instance == e.runtimeInstance {
+				matches, matchErr := e.db.ControlledShutdownMatches(run.ID, planned.Instance, planned.Lifecycle, planned.Error())
+				if matchErr == nil && matches {
+					explicitCancellation = true
+					controlled = planned
+				}
+			}
 			break
 		}
 	}
 	runStatus := types.RunFailed
-	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded {
+	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded || controlled != nil {
 		runStatus = types.RunCancelled
 	}
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
-	var dbErr error
-	if verified {
-		dbErr = e.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, errMsg, runStatus, verifiedHead)
-	} else {
-		dbErr = e.db.UpdateRunErrorStatus(run.ID, errMsg, runStatus)
+	dbErr := WithCommitStatusLock(context.Background(), func() error {
+		if verified && explicitCancellation && watcherCancellation(err) {
+			if prepareErr := e.terminalizeCertifiedWatcher(run, errMsg, runStatus, verifiedHead, controlled); prepareErr == nil {
+				return nil
+			} else {
+				slog.Warn("strict terminal proof unavailable; recording failure outcome", "run", run.ID, "error", prepareErr)
+				verifiedHead, verified = e.reconcileTerminalRunHead(run)
+			}
+		}
+		var head *string
+		if verified {
+			head = &verifiedHead
+		}
+		return e.db.RecordIneligibleTerminal(run.ID, errMsg, runStatus, head)
+	})
+	if dbErr != nil {
+		// Preparation/lock failures must still terminalize a usable database.
+		// No failed preparation can retain the success exception.
+		verified = false
+		dbErr = e.db.RecordIneligibleTerminal(run.ID, errMsg, runStatus, nil)
 	}
 	if dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
@@ -2280,12 +2331,12 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 
 func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
-	var err error
-	if verified {
-		err = e.db.UpdateRunStatusWithVerifiedHead(run.ID, types.RunCompleted, verifiedHead)
-	} else {
-		err = e.db.UpdateRunStatus(run.ID, types.RunCompleted)
-	}
+	err := WithCommitStatusLock(context.Background(), func() error {
+		if verified {
+			return e.db.UpdateRunStatusWithVerifiedHead(run.ID, types.RunCompleted, verifiedHead)
+		}
+		return e.db.UpdateRunStatus(run.ID, types.RunCompleted)
+	})
 	if err != nil {
 		return err
 	}

@@ -280,6 +280,11 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, expectedH
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, err error) {
+	if sctx.Fixing && !sctx.SkipFixExecution {
+		if err := sctx.DB.InvalidateStatusValidation(sctx.Run.ID); err != nil {
+			return nil, err
+		}
+	}
 	refusalFindings := ""
 	if sctx.StepResultID != "" {
 		stepResult, err := sctx.DB.GetStepResult(sctx.StepResultID)

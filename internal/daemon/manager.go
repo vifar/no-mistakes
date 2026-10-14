@@ -47,15 +47,17 @@ var fetchRecoveredDefaultBranchSHA = fetchTrustedDefaultBranchSHA
 
 // RunManager tracks active pipeline executors and manages run lifecycle.
 type RunManager struct {
-	mu           sync.Mutex
-	executors    map[string]*pipeline.Executor      // runID → executor
-	cancels      map[string]context.CancelCauseFunc // runID → cancel function with cause
-	dones        map[string]chan struct{}           // runID → closed when goroutine exits
-	wg           sync.WaitGroup                     // tracks background run goroutines
-	shuttingDown atomic.Bool                        // prevents new runs during shutdown
-	db           *db.DB
-	paths        *paths.Paths
-	steps        StepFactory
+	runtimeInstance  string
+	runtimeStartedAt time.Time
+	mu               sync.Mutex
+	executors        map[string]*pipeline.Executor      // runID → executor
+	cancels          map[string]context.CancelCauseFunc // runID → cancel function with cause
+	dones            map[string]chan struct{}           // runID → closed when goroutine exits
+	wg               sync.WaitGroup                     // tracks background run goroutines
+	shuttingDown     atomic.Bool                        // prevents new runs during shutdown
+	db               *db.DB
+	paths            *paths.Paths
+	steps            StepFactory
 
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
@@ -89,15 +91,16 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		stepFactory = func() []pipeline.Step { return steps.AllSteps() }
 	}
 	return &RunManager{
-		executors:     make(map[string]*pipeline.Executor),
-		cancels:       make(map[string]context.CancelCauseFunc),
-		dones:         make(map[string]chan struct{}),
-		db:            database,
-		paths:         p,
-		steps:         stepFactory,
-		subscribers:   make(map[string][]*eventMailbox),
-		stateRevs:     make(map[string]int64),
-		completedRuns: make(map[string]bool),
+		runtimeInstance: newShutdownToken(),
+		executors:       make(map[string]*pipeline.Executor),
+		cancels:         make(map[string]context.CancelCauseFunc),
+		dones:           make(map[string]chan struct{}),
+		db:              database,
+		paths:           p,
+		steps:           stepFactory,
+		subscribers:     make(map[string][]*eventMailbox),
+		stateRevs:       make(map[string]int64),
+		completedRuns:   make(map[string]bool),
 	}
 }
 
@@ -411,6 +414,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
+	executor.SetRuntimeInstance(m.runtimeInstance)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -421,12 +425,21 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	executor.SetForgeContext(plan.forge)
 	done := make(chan struct{})
 	m.mu.Lock()
+	if m.shuttingDown.Load() {
+		m.mu.Unlock()
+		cancel(fmt.Errorf("daemon shutting down"))
+		_ = plan.agent.Close()
+		_ = pipeline.RecordRunFailure(context.Background(), m.db, plan.run.ID, "daemon shutting down", nil)
+		plan.run.Status = types.RunFailed
+		executor.ReportPublishedHeadFailure(context.Background(), plan.run, plan.repo)
+		return
+	}
+	m.wg.Add(1)
 	m.executors[plan.run.ID] = executor
 	m.cancels[plan.run.ID] = cancel
 	m.dones[plan.run.ID] = done
 	m.mu.Unlock()
 
-	m.wg.Add(1)
 	go func() {
 		startedAt := time.Now()
 		defer m.wg.Done()
@@ -436,7 +449,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				errMsg := fmt.Sprintf("internal panic: %v", recovered)
 				plan.run.Status = types.RunFailed
 				plan.run.Error = &errMsg
-				if err := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, types.RunFailed); err != nil {
+				if err := pipeline.RecordRunFailure(context.Background(), m.db, plan.run.ID, errMsg, nil); err != nil {
 					slog.Error("failed to update recovered run after panic", "run_id", plan.run.ID, "error", err)
 				}
 			}
@@ -464,7 +477,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				errMsg := err.Error()
 				plan.run.Status = types.RunFailed
 				plan.run.Error = &errMsg
-				if dbErr := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, types.RunFailed); dbErr != nil {
+				if dbErr := pipeline.RecordRunFailure(context.Background(), m.db, plan.run.ID, errMsg, nil); dbErr != nil {
 					slog.Error("failed to mark recovered run failed", "run_id", plan.run.ID, "error", dbErr)
 				}
 			}
@@ -1765,6 +1778,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// Create executor with event broadcast.
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	executor.SetRuntimeInstance(m.runtimeInstance)
 	executor.SetForgeContext(forgeCtx)
 	executor.SetSkippedSteps(skipSteps)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
@@ -1778,6 +1792,13 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// Track executor.
 	done := make(chan struct{})
 	m.mu.Lock()
+	if m.shuttingDown.Load() {
+		m.mu.Unlock()
+		cancel(fmt.Errorf("daemon shutting down"))
+		_ = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, "daemon shutting down", nil)
+		return "", fmt.Errorf("daemon shutting down")
+	}
+	m.wg.Add(1)
 	m.executors[run.ID] = executor
 	m.cancels[run.ID] = cancel
 	m.dones[run.ID] = done
@@ -1787,7 +1808,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	bgOwnsWorktree = true
 
 	// Launch pipeline in background.
-	m.wg.Add(1)
 	go func() {
 		startedAt := time.Now()
 		defer m.wg.Done()
@@ -1816,9 +1836,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 				verifiedHead, verified := preserveRunHead(m.db, wtDir, run)
 				var dbErr error
 				if verified {
-					dbErr = m.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, errMsg, types.RunFailed, verifiedHead)
+					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, &verifiedHead)
 				} else {
-					dbErr = m.db.UpdateRunErrorStatus(run.ID, errMsg, types.RunFailed)
+					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, nil)
 				}
 				if dbErr != nil {
 					slog.Error("failed to update run after panic", "run_id", run.ID, "error", dbErr)

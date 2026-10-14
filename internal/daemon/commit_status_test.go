@@ -25,6 +25,111 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/worktrees"
 )
 
+type publishedPanicStep struct{ execute func(*pipeline.StepContext) }
+
+func (*publishedPanicStep) Name() types.StepName { return types.StepReview }
+func (s *publishedPanicStep) Execute(ctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	s.execute(ctx)
+	return nil, nil
+}
+
+func TestDaemonPanic_SerializesPausedSuccessAndRecoversFailure(t *testing.T) {
+	bin := t.TempDir()
+	if out, err := exec.Command("go", "build", "-o", filepath.Join(bin, "gh"), "../pipeline/fakecli").CombinedOutput(); err != nil {
+		t.Fatalf("fake gh: %v: %s", err, out)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_CLI_MODE", "gh")
+	entered, release, panicking, callbackDone := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	var mu sync.Mutex
+	var states []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct{ State string }
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		if payload.State == "success" {
+			close(entered)
+			<-release
+		}
+		mu.Lock()
+		states = append(states, payload.State)
+		mu.Unlock()
+		w.WriteHeader(201)
+	}))
+	defer server.Close()
+	defer unblock()
+	t.Setenv("FAKE_CLI_STATUS_API_URL", server.URL)
+	step := &publishedPanicStep{execute: func(sc *pipeline.StepContext) {
+		if err := sc.DB.PutCommitStatusPublication(sc.Run.ID, db.CommitStatusPublication{SHA: sc.Run.HeadSHA, Host: "github.com", Repo: "test/repo", Validated: true, CIEligible: true}); err != nil {
+			panic(err)
+		}
+		go func() { defer close(callbackDone); (&steps.PushStep{}).ReportPublishedHeadStatus(sc, "success", "") }()
+		select {
+		case <-entered:
+		case <-time.After(10 * time.Second):
+			panic("success never reached endpoint")
+		}
+		close(panicking)
+		panic("published CI panic")
+	}}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{step, &steps.PushStep{}} })
+	_, head := setupTestGitRepo(t, p, d, "panic-status")
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var result ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir("panic-status"), Ref: "refs/heads/main", Old: "0000000000000000000000000000000000000000", New: head}, &result); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-panicking:
+	case <-time.After(10 * time.Second):
+		t.Fatal("daemon did not reach actual panic")
+	}
+	// The callback is still blocked in the real HTTP endpoint. Panic recovery
+	// must wait for its publication lock before changing the terminal outcome.
+	time.Sleep(250 * time.Millisecond)
+	run, err := d.GetRun(result.RunID)
+	if err != nil || run.Status != types.RunRunning {
+		t.Fatalf("panic terminal write bypassed paused reporter: %+v,%v", run, err)
+	}
+	unblock()
+	<-callbackDone
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		publication, err := d.GetCommitStatusPublication(context.Background(), result.RunID, db.CommitStatusPublication{SHA: head, Host: "github.com", Repo: "test/repo"})
+		if err == nil && publication != nil && publication.LastState == "failure" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	shutdownTestDaemonAndWaitForCleanup(t, p)
+	reopened, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	run, err = reopened.GetRun(result.RunID)
+	if err != nil || run.Status != types.RunFailed || run.Error == nil {
+		t.Fatalf("recovered panic outcome: %+v,%v", run, err)
+	}
+	publication, err := reopened.GetCommitStatusPublication(context.Background(), result.RunID, db.CommitStatusPublication{SHA: head, Host: "github.com", Repo: "test/repo"})
+	if err != nil || publication == nil || publication.LastState != "failure" || publication.StrictCertificate != nil {
+		t.Fatalf("recovered panic publication: %+v,%v", publication, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fmt.Sprint(states) != "[success failure]" {
+		t.Fatalf("panic HTTP outcome = %v", states)
+	}
+}
+
 func TestRecoverOnStartup_ReplacesPublishedSuccessWithFailure(t *testing.T) {
 	for _, scenario := range []string{"active", "terminal failed", "terminal missing clone", "terminal cancelled", "CI interrupted", "terminal uncertified", "terminal certified", "plugin"} {
 		for _, profileOnly := range []bool{false, true} {
@@ -130,12 +235,12 @@ func TestRecoverOnStartup_ReplacesPublishedSuccessWithFailure(t *testing.T) {
 					}
 				case "terminal uncertified", "terminal certified":
 					wantStatus = types.RunCompleted
-					if err := d.UpdateRunStatus(run.ID, wantStatus); err != nil {
-						t.Fatal(err)
-					}
 					publication.Validated = scenario == "terminal certified"
 					publication.LastState = "pending"
 					if err := d.PutCommitStatusPublication(run.ID, *publication); err != nil {
+						t.Fatal(err)
+					}
+					if err := d.UpdateRunStatus(run.ID, wantStatus); err != nil {
 						t.Fatal(err)
 					}
 					if publication.Validated {
@@ -258,7 +363,7 @@ func TestStatusRecoveryBounds(t *testing.T) {
 				go func() { exited <- RunWithResources(p, d) }()
 				t.Cleanup(func() {
 					if client, err := ipc.Dial(p.Socket()); err == nil {
-						_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+						_ = client.Call(ipc.MethodShutdown, testShutdownParams(t, p), nil)
 						client.Close()
 					}
 				})
@@ -276,7 +381,7 @@ func TestStatusRecoveryBounds(t *testing.T) {
 				if err := client.CallWithTimeout(ipc.MethodHealth, &ipc.HealthParams{}, &health, time.Second); err != nil {
 					t.Fatal(err)
 				}
-				if err := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil); err != nil {
+				if err := client.Call(ipc.MethodShutdown, testShutdownParams(t, p), nil); err != nil {
 					t.Fatal(err)
 				}
 				client.Close()
@@ -385,7 +490,7 @@ func TestRecoverCommitStatusPushAttempt(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			if scenario == "pushed" {
-				if fmt.Sprint(states) != "[pending failure]" {
+				if fmt.Sprint(states) != "[failure]" {
 					t.Fatalf("states = %v", states)
 				}
 				attempt, err := d.GetCommitStatusAttempt(run.ID)
