@@ -247,3 +247,103 @@ func TestCommitStatus_TerminalPreparationFailureIsDurable(t *testing.T) {
 		})
 	}
 }
+
+func TestCommitStatus_PRFinalizationSerializesPausedSuccess(t *testing.T) {
+	for _, parked := range []bool{false, true} {
+		for _, observed := range []string{"MERGED", "CLOSED", "OPEN"} {
+			t.Run(fmt.Sprintf("parked_%v/%s", parked, observed), func(t *testing.T) {
+				sc, path, publication := strictStatusContext(t)
+				prURL := "https://github.com/test/repo/pull/42"
+				sc.Run.PRURL = &prURL
+				if observed == "OPEN" {
+					if err := sc.DB.UpdateRunPRState(sc.Run.ID, "merged"); err != nil {
+						t.Fatal(err)
+					}
+					if err := sc.DB.UpdateRunStatus(sc.Run.ID, types.RunRunning); err != nil {
+						t.Fatal(err)
+					}
+				}
+				entered, release := make(chan struct{}), make(chan struct{})
+				var once sync.Once
+				unblock := func() { once.Do(func() { close(release) }) }
+				defer unblock()
+				server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					var payload struct{ State string }
+					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil || payload.State != "success" {
+						t.Errorf("unexpected HTTP status: %+v, %v", payload, err)
+					}
+					close(entered)
+					<-release
+					run, err := sc.DB.GetRun(sc.Run.ID)
+					if err != nil || run.Status != types.RunRunning {
+						t.Errorf("PR completion crossed pending HTTP publication: %+v, %v", run, err)
+					}
+					w.WriteHeader(201)
+				}))
+				defer server.Close()
+				env, _ := fakeGHWithBase(t, prURL, "main")
+				env = append(env, "FAKE_CLI_STATUS_API_URL="+server.URL, "FAKE_CLI_PR_STATE="+observed,
+					"FAKE_CLI_PR_FACTS_JSON="+fmt.Sprintf(`{"merged":true,"state":"closed","head":{"sha":%q},"merge_commit_sha":%q}`, sc.Run.HeadSHA, sc.Run.HeadSHA))
+				sc.Env = env
+				for key, value := range environmentEntries(t, env) {
+					t.Setenv(key, value)
+				}
+				reporterDone := make(chan struct{})
+				go func() {
+					defer close(reporterDone)
+					(&PushStep{}).ReportPublishedHeadStatus(sc, "success", sc.Run.HeadSHA)
+				}()
+				select {
+				case <-entered:
+				case <-time.After(10 * time.Second):
+					t.Fatal("reporter did not reach HTTP")
+				}
+				ciDone := make(chan error, 1)
+				stopPolling := errors.New("observation complete")
+				ci := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error { return stopPolling })
+				go func() {
+					var err error
+					if parked {
+						_, err = ci.ReconcileApprovalGate(sc)
+					} else {
+						_, err = ci.Execute(sc)
+					}
+					ciDone <- err
+				}()
+				select {
+				case err := <-ciDone:
+					ciDone <- err
+					t.Errorf("CI bypassed publication boundary: %v", err)
+				case <-time.After(300 * time.Millisecond):
+				}
+				unblock()
+				select {
+				case <-reporterDone:
+				case <-time.After(10 * time.Second):
+					t.Fatal("reporter stuck")
+				}
+				select {
+				case err := <-ciDone:
+					if err != nil && !errors.Is(err, stopPolling) {
+						t.Fatal(err)
+					}
+				case <-time.After(10 * time.Second):
+					t.Fatal("CI completion stuck")
+				}
+				reopened, err := db.Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reopened.Close()
+				run, err := reopened.GetRun(sc.Run.ID)
+				stored, saveErr := reopened.GetCommitStatusPublication(context.Background(), sc.Run.ID, publication)
+				if saveErr != nil || stored.LastState != "success" {
+					t.Fatalf("successful HTTP publication did not save before completion: %+v, %v", stored, saveErr)
+				}
+				if err != nil || run.Status != types.RunCompleted {
+					t.Fatalf("terminal PR outcome not durable: %+v, %v", run, err)
+				}
+			})
+		}
+	}
+}

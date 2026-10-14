@@ -44,6 +44,10 @@ func WithCommitStatusLock(ctx context.Context, write func() error) error {
 	return write()
 }
 
+func UpdateRunPRState(ctx context.Context, d *db.DB, runID, state string) error {
+	return WithCommitStatusLock(ctx, func() error { return d.UpdateRunPRState(runID, state) })
+}
+
 // RecordRunFailure is shared by daemon panic and recovery fallbacks.
 func RecordRunFailure(ctx context.Context, d *db.DB, runID, message string, head *string) error {
 	err := WithCommitStatusLock(ctx, func() error { return d.RecordIneligibleTerminal(runID, message, types.RunFailed, head) })

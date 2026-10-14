@@ -43,6 +43,10 @@ func (m *RunManager) prepareControlledShutdown(ctx context.Context, expected ipc
 		return nil, fmt.Errorf("daemon runtime identity is unavailable")
 	}
 	m.mu.Lock()
+	if m.rawShutdown {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("raw daemon shutdown already started")
+	}
 	preparation := m.shutdownPreparation
 	if preparation == nil {
 		if m.shuttingDown.Load() {
@@ -72,14 +76,20 @@ func (m *RunManager) prepareControlledShutdown(ctx context.Context, expected ipc
 			preparation.err = fmt.Errorf("record planned shutdown: %w", err)
 			m.mu.Lock()
 			m.shutdownPreparation = nil
-			m.shuttingDown.Store(false)
+			if !m.rawShutdown {
+				m.shuttingDown.Store(false)
+			}
 			m.mu.Unlock()
 			close(preparation.done)
 			return nil, preparation.err
 		}
-		for _, cancel := range cancels {
-			cancel(preparation.cause)
+		m.mu.Lock()
+		if !m.rawShutdown {
+			for _, cancel := range cancels {
+				cancel(preparation.cause)
+			}
 		}
+		m.mu.Unlock()
 		go func() { m.wg.Wait(); close(preparation.done) }()
 	} else {
 		m.mu.Unlock()
@@ -94,6 +104,12 @@ func (m *RunManager) prepareControlledShutdown(ctx context.Context, expected ipc
 			if err != nil || run == nil || (run.Status != "completed" && run.Status != "failed" && run.Status != "cancelled") {
 				return nil, fmt.Errorf("planned shutdown terminal outcome unavailable for run %s: %v", id, err)
 			}
+		}
+		m.mu.Lock()
+		raw := m.rawShutdown
+		m.mu.Unlock()
+		if raw {
+			return nil, fmt.Errorf("raw daemon shutdown already started")
 		}
 		return &ipc.ShutdownResult{PID: os.Getpid(), StartedAt: m.runtimeStartedAt.UTC().Format(time.RFC3339Nano), OK: true, Instance: preparation.cause.Instance, Lifecycle: preparation.cause.Lifecycle}, nil
 	case <-ctx.Done():

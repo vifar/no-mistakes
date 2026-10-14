@@ -160,7 +160,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		if err := verifyShippingMergedProof(sctx, host, &scm.PR{Number: prNumber, URL: prURL}); err != nil {
 			return false, err
 		}
-		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
+		if err := pipeline.UpdateRunPRState(sctx.Ctx, sctx.DB, sctx.Run.ID, "merged"); err != nil {
 			return false, err
 		}
 		notifyPRMerged(sctx)
@@ -169,7 +169,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		}
 		return true, nil
 	case scm.PRStateClosed:
-		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed"); err != nil {
+		if err := pipeline.UpdateRunPRState(sctx.Ctx, sctx.DB, sctx.Run.ID, "closed"); err != nil {
 			return false, err
 		}
 		if sctx.Log != nil {
@@ -177,7 +177,7 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		}
 		return true, nil
 	case scm.PRStateOpen:
-		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
+		if err := pipeline.UpdateRunPRState(sctx.Ctx, sctx.DB, sctx.Run.ID, "open"); err != nil {
 			return false, err
 		}
 		return false, nil
@@ -558,20 +558,20 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			if err := verifyShippingMergedProof(sctx, host, pr); err != nil {
 				return nil, err
 			}
-			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "merged"); err != nil {
+			if err := pipeline.UpdateRunPRState(sctx.Ctx, sctx.DB, sctx.Run.ID, "merged"); err != nil {
 				return nil, err
 			}
 			notifyPRMerged(sctx)
 			sctx.Log("PR has been merged!")
 			return &pipeline.StepOutcome{MergedHeadSHA: sctx.Run.HeadSHA}, nil
 		} else if state == scm.PRStateClosed {
-			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "closed"); err != nil {
+			if err := pipeline.UpdateRunPRState(sctx.Ctx, sctx.DB, sctx.Run.ID, "closed"); err != nil {
 				return nil, err
 			}
 			sctx.Log("PR has been closed")
 			return &pipeline.StepOutcome{}, nil
 		} else if state == scm.PRStateOpen {
-			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
+			if err := pipeline.UpdateRunPRState(sctx.Ctx, sctx.DB, sctx.Run.ID, "open"); err != nil {
 				return nil, err
 			}
 		}

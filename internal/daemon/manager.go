@@ -60,6 +60,7 @@ type RunManager struct {
 	steps            StepFactory
 
 	shutdownPreparation *controlledShutdownPreparation
+	rawShutdown         bool
 
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
@@ -2314,9 +2315,9 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 // Shutdown cancels all active runs. Called during daemon shutdown to prevent
 // orphaned goroutines from continuing agent calls and git operations.
 func (m *RunManager) Shutdown() {
-	m.shuttingDown.Store(true)
-
 	m.mu.Lock()
+	m.rawShutdown = true
+	m.shuttingDown.Store(true)
 	cancels := make(map[string]context.CancelCauseFunc, len(m.cancels))
 	for id, cancel := range m.cancels {
 		cancels[id] = cancel
