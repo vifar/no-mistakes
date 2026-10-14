@@ -14,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -248,6 +249,11 @@ func TestTrustedConfigStartupRefusalLive(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				t.Cleanup(func() {
+					if err := pipeline.RecordRunFailure(context.Background(), d, active.ID, "test fixture finished", nil); err != nil {
+						t.Errorf("settle owned Pi refusal fixture: %v", err)
+					}
+				})
 				if err := d.UpdateRunStatus(active.ID, types.RunRunning); err != nil {
 					t.Fatal(err)
 				}
