@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -766,5 +767,340 @@ func TestProtectedPaths_UnreadableStatusFailsClosed(t *testing.T) {
 	sctx.Config.ProtectedPaths = []string{"*.lock"}
 	if err := stagePipelineChanges(sctx); err == nil || !strings.Contains(err.Error(), "check protected_paths") {
 		t.Fatalf("unreadable git status did not fail closed: %v", err)
+	}
+}
+
+func writeTestFile(t *testing.T, dir, rel, content string) {
+	t.Helper()
+	file := filepath.Join(dir, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func captureLogs(sctx *pipeline.StepContext) *[]string {
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+	return &logs
+}
+
+func stagedNames(t *testing.T, dir string) []string {
+	t.Helper()
+	out := gitCmd(t, dir, "diff", "--cached", "--name-only", "-z")
+	return nulFields(out)
+}
+
+func containsString(list []string, want string) bool {
+	for _, item := range list {
+		if item == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestStagePipelineChanges_SkipsUntrackedToolScratch(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	logs := captureLogs(sctx)
+	writeTestFile(t, dir, ".cache/big/file", "scratch")
+	writeTestFile(t, dir, ".test-fixture/a/b.txt", "scratch")
+	writeTestFile(t, dir, "pkg/.review-deps/x", "scratch")
+	writeTestFile(t, dir, "pkg/node_modules/dep/index.js", "scratch")
+	writeTestFile(t, dir, "pkg/new_test.go", "package pkg\n")
+
+	if err := stagePipelineChanges(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := stagedNames(t, dir); len(got) != 1 || got[0] != "pkg/new_test.go" {
+		t.Fatalf("staged = %q, want only pkg/new_test.go", got)
+	}
+	joined := strings.Join(*logs, "\n")
+	for _, want := range []string{"staging skipped untracked tool scratch", ".cache/", ".test-fixture/", "pkg/.review-deps/", "pkg/node_modules/"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("log missing %q: %s", want, joined)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".cache/big/file")); err != nil {
+		t.Errorf("scratch was removed from the worktree: %v", err)
+	}
+}
+
+func TestStagePipelineChanges_NestedHiddenDirUnderNewDirIsSkipped(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	writeTestFile(t, dir, "newpkg/code.go", "package newpkg\n")
+	writeTestFile(t, dir, "newpkg/.tmp/dump.bin", "scratch")
+	if err := stagePipelineChanges(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := stagedNames(t, dir); len(got) != 1 || got[0] != "newpkg/code.go" {
+		t.Fatalf("staged = %q, want only newpkg/code.go", got)
+	}
+}
+
+func TestStagePipelineChanges_StagesNewFilesInTrackedHiddenDirs(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := setupGitRepo(t)
+	writeTestFile(t, dir, ".github/ci.yml", "name: ci\n")
+	writeTestFile(t, dir, ".config/tool.toml", "a = 1\n")
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "add tracked hidden dirs")
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, gitCmd(t, dir, "rev-parse", "HEAD"), config.Commands{})
+	writeTestFile(t, dir, ".github/workflows/new.yml", "name: new\n")
+	writeTestFile(t, dir, ".github/extra.yml", "name: extra\n")
+	writeTestFile(t, dir, ".config/other.toml", "b = 2\n")
+	// A new project-configuration directory is not scratch either.
+	writeTestFile(t, dir, ".devcontainer/devcontainer.json", "{}\n")
+	if err := stagePipelineChanges(sctx); err != nil {
+		t.Fatal(err)
+	}
+	got := stagedNames(t, dir)
+	for _, want := range []string{".github/workflows/new.yml", ".github/extra.yml", ".config/other.toml", ".devcontainer/devcontainer.json"} {
+		if !containsString(got, want) {
+			t.Errorf("%s not staged: %q", want, got)
+		}
+	}
+}
+
+func TestStagePipelineChanges_StagingExclude(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.StagingExclude = []string{"*.bin", "generated/**", "docs/out/report.txt"}
+	logs := captureLogs(sctx)
+	writeTestFile(t, dir, "keep.go", "package x\n")
+	writeTestFile(t, dir, "dump.bin", "x")
+	writeTestFile(t, dir, "sub/deep/dump.bin", "x")
+	writeTestFile(t, dir, "generated/a.go", "x")
+	writeTestFile(t, dir, "docs/out/report.txt", "x")
+	writeTestFile(t, dir, "docs/out/keep.txt", "x")
+	if err := stagePipelineChanges(sctx); err != nil {
+		t.Fatal(err)
+	}
+	got := stagedNames(t, dir)
+	for _, want := range []string{"keep.go", "docs/out/keep.txt"} {
+		if !containsString(got, want) {
+			t.Errorf("%s not staged: %q", want, got)
+		}
+	}
+	if len(got) != 2 {
+		t.Errorf("staged = %q, want only keep.go and docs/out/keep.txt", got)
+	}
+	if joined := strings.Join(*logs, "\n"); !strings.Contains(joined, "dump.bin") || !strings.Contains(joined, "generated/") {
+		t.Errorf("skip log missing excluded entries: %s", joined)
+	}
+}
+
+func TestStagePipelineChanges_RefusesOversizedStagedFile(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.MaxFileSizeBytes = 100
+	writeTestFile(t, dir, "small.txt", "tiny")
+	writeTestFile(t, dir, "pkg/huge.dat", strings.Repeat("x", 500))
+	writeTestFile(t, dir, "feature.txt", strings.Repeat("y", 400))
+	gitCmd(t, dir, "add", "small.txt")
+	before := gitCmd(t, dir, "diff", "--cached")
+
+	err := stagePipelineChanges(sctx)
+	var refusal *pipeline.ProtectedPathError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("expected typed refusal, got %v", err)
+	}
+	for _, want := range []string{"pkg/huge.dat", "feature.txt", "max_file_size_bytes", ".gitignore"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
+	}
+	if got := gitCmd(t, dir, "diff", "--cached"); got != before {
+		t.Errorf("refusal altered the index: %q", got)
+	}
+	if got, readErr := os.ReadFile(filepath.Join(dir, "pkg/huge.dat")); readErr != nil || len(got) != 500 {
+		t.Errorf("refusal altered the worktree: %v", readErr)
+	}
+	if outcome := pipeline.ProtectedPathOutcome(err); outcome == nil || !outcome.NeedsApproval {
+		t.Errorf("refusal does not park at an explicit-response gate: %+v", outcome)
+	}
+
+	sctx.Config.MaxFileSizeBytes = 0
+	if err := stagePipelineChanges(sctx); err != nil {
+		t.Fatalf("size check should be disabled at 0: %v", err)
+	}
+}
+
+func TestStagePipelineChanges_StagesTrackedDeletions(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	if err := os.Remove(filepath.Join(dir, "feature.txt")); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, dir, "base.txt", "modified")
+	if err := stagePipelineChanges(sctx); err != nil {
+		t.Fatal(err)
+	}
+	got := gitCmd(t, dir, "diff", "--cached", "--name-status")
+	if !strings.Contains(got, "D\tfeature.txt") || !strings.Contains(got, "M\tbase.txt") {
+		t.Errorf("deletion/modification not staged: %q", got)
+	}
+}
+
+func TestStagePipelineChanges_LiteralNamesWithSpacesAndGlobs(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	names := []string{"dir/my file.txt", "dir/star*.txt", "dir/q?.txt", "dir/[br].txt", "new dir/ü.txt", "bang!.txt"}
+	for _, name := range names {
+		writeTestFile(t, dir, name, "content")
+	}
+	writeTestFile(t, dir, "dir/starX.txt", "should stay untracked? no, it is a normal file")
+	if err := stagePipelineChanges(sctx); err != nil {
+		t.Fatal(err)
+	}
+	got := stagedNames(t, dir)
+	for _, name := range append(names, "dir/starX.txt") {
+		if !containsString(got, name) {
+			t.Errorf("%q not staged: %q", name, got)
+		}
+	}
+	if len(got) != len(names)+1 {
+		t.Errorf("unexpected staged set: %q", got)
+	}
+}
+
+func TestStagePipelineChanges_OnlyScratchCommitsNothing(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	writeTestFile(t, dir, ".cache/pnpm/store", "scratch")
+	committed, err := commitAgentFixesWithResult(sctx, types.StepDocument, "update docs", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if committed {
+		t.Error("scratch-only worktree reported a commit")
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Errorf("HEAD advanced to %s", got)
+	}
+}
+
+func TestCommitAgentFixes_LeavesScratchOutOfCommit(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	logs := captureLogs(sctx)
+	writeTestFile(t, dir, ".cache/big/file", "scratch")
+	writeTestFile(t, dir, "pkg/new_test.go", "package pkg\n")
+	if err := commitAgentFixes(sctx, types.StepDocument, "update docs", ""); err != nil {
+		t.Fatal(err)
+	}
+	files := gitCmd(t, dir, "show", "--name-only", "--format=", "HEAD")
+	if strings.TrimSpace(files) != "pkg/new_test.go" {
+		t.Errorf("commit contains %q, want only pkg/new_test.go", files)
+	}
+	if !strings.Contains(strings.Join(*logs, "\n"), "staging skipped untracked tool scratch: .cache/") {
+		t.Errorf("skip was not logged: %q", *logs)
+	}
+}
+
+func scratchGuardCommit(t *testing.T, dir string, files map[string]string) string {
+	t.Helper()
+	for name, content := range files {
+		writeTestFile(t, dir, name, content)
+	}
+	gitCmd(t, dir, "add", "-A", "-f")
+	gitCmd(t, dir, "commit", "-m", "agent commit")
+	return gitCmd(t, dir, "rev-parse", "HEAD")
+}
+
+func TestAssertPublishedRangeClean(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		prep    func(t *testing.T, dir string)
+		files   map[string]string
+		exclude []string
+		want    string // substring of the refusal; empty means the range passes
+	}{
+		{name: "normal range", files: map[string]string{"pkg/a.go": "package pkg\n", "docs/readme.md": "x"}},
+		{name: "scratch dir", files: map[string]string{".cache/pnpm/blob": "x", "pkg/a.go": "x"}, want: ".cache/pnpm/blob"},
+		{name: "nested scratch dir", files: map[string]string{"pkg/.test-deps/x": "x"}, want: "pkg/.test-deps/x"},
+		{name: "node_modules", files: map[string]string{"node_modules/dep/i.js": "x"}, want: "node_modules/dep/i.js"},
+		{name: "oversized", files: map[string]string{"pkg/huge.bin": strings.Repeat("x", 600)}, want: "pkg/huge.bin"},
+		{name: "staging_exclude", exclude: []string{"*.bin"}, files: map[string]string{"out/a.bin": "x"}, want: "staging_exclude"},
+		{name: "new file in existing hidden dir", prep: func(t *testing.T, dir string) {
+			scratchGuardCommit(t, dir, map[string]string{".github/ci.yml": "x"})
+		}, files: map[string]string{".github/workflows/new.yml": "x"}},
+		{name: "known config dir", files: map[string]string{".github/ci.yml": "x"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "-q", "-b", "work", headSHA)
+			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Config.MaxFileSizeBytes = 500
+			sctx.Config.StagingExclude = tc.exclude
+			if tc.prep != nil {
+				tc.prep(t, dir)
+				// The prepared commit lands on the target, as an earlier merge would.
+				gitCmd(t, dir, "branch", "-f", "main", "HEAD")
+				gitCmd(t, dir, "checkout", "-q", "-b", "work2")
+			}
+			head := scratchGuardCommit(t, dir, tc.files)
+			err := assertPublishedRangeClean(sctx, head)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("unexpected refusal: %v", err)
+			case tc.want != "" && err == nil:
+				t.Fatal("expected refusal")
+			case tc.want != "" && !strings.Contains(err.Error(), tc.want):
+				t.Fatalf("refusal %q does not name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestAssertPublishedRangeClean_CapsListedPaths(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	files := map[string]string{}
+	for i := 0; i < 30; i++ {
+		files[fmt.Sprintf(".fixture/f%02d", i)] = "x"
+	}
+	head := scratchGuardCommit(t, dir, files)
+	err := assertPublishedRangeClean(sctx, head)
+	if err == nil || !strings.Contains(err.Error(), "30 path(s)") || !strings.Contains(err.Error(), "and 10 more") {
+		t.Fatalf("expected capped list with total count, got %v", err)
+	}
+}
+
+func TestPublishRunHead_RefusesAgentCommittedScratch(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+	dir, baseSHA, submittedHead := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+	head := scratchGuardCommit(t, dir, map[string]string{".live-history/day1.json": "x", "pkg/a.go": "package pkg\n"})
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, submittedHead, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	setupGateMirror(t, sctx)
+	recordReviewApproval(t, sctx, head)
+	err := publishRunHead(sctx, head, "", nil)
+	if err == nil || !strings.Contains(err.Error(), ".live-history/day1.json") {
+		t.Fatalf("expected scratch refusal, got %v", err)
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != submittedHead {
+		t.Errorf("remote moved to %s despite refusal", got)
 	}
 }
