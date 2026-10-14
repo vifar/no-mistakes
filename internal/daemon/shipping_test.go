@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -52,6 +53,11 @@ func TestShippingApprovalRejectsUnsupportedCommandException(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := pipeline.RecordRunFailure(context.Background(), d, run.ID, "test fixture finished", nil); err != nil {
+			t.Errorf("settle owned shipping fixture: %v", err)
+		}
+	})
 	sr, err := d.InsertStepResult(run.ID, types.StepTest)
 	if err != nil {
 		t.Fatal(err)
