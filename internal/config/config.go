@@ -373,8 +373,8 @@ type RepositoryPRRaw struct {
 type RepositoryOverrides map[string]RepositoryOverride
 
 // DefaultMaxFileSizeBytes is the largest blob an automatic commit may stage or
-// a published range may add when max_file_size_bytes is unset (10 MiB, under
-// GitHub's 100 MB hard push limit with room for the warning threshold).
+// a published range may add or modify when max_file_size_bytes is unset
+// (10 MiB, under GitHub's 100 MB hard push limit with room for the warning threshold).
 const DefaultMaxFileSizeBytes int64 = 10 * 1024 * 1024
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
@@ -389,10 +389,10 @@ type RepoConfig struct {
 	ProtectedPaths []string `yaml:"protected_paths"`
 	// StagingExclude lists untracked-path patterns that automatic staging
 	// leaves out of pipeline commits. MaxFileSizeBytes caps the size of any
-	// blob an automatic commit stages or a published range adds (0 disables the
-	// check; unset uses DefaultMaxFileSizeBytes). Both are trusted-only,
-	// regardless of allow_repo_commands, so a pushed branch cannot weaken the
-	// maintainer's scratch protection for its own run.
+	// blob an automatic commit stages or a published range adds or modifies
+	// (0 disables the check; unset uses DefaultMaxFileSizeBytes). Both are
+	// trusted-only, regardless of allow_repo_commands, so a pushed branch cannot
+	// weaken the maintainer's scratch protection for its own run.
 	StagingExclude   []string `yaml:"staging_exclude"`
 	MaxFileSizeBytes *int64   `yaml:"max_file_size_bytes"`
 	// AllowRepoCommands opts in to honoring the code-executing selection

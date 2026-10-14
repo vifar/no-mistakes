@@ -674,7 +674,7 @@ Patterns use the same syntax as [`ignore_patterns`](#ignore_patterns). Empty or 
 
 ### max_file_size_bytes
 
-Largest file an automatic commit may stage or a published branch may add.
+Largest file an automatic commit may stage or a published commit may add or modify.
 
 | | |
 | --- | --- |
@@ -688,12 +688,12 @@ Largest file an automatic commit may stage or a published branch may add.
 
 Every automatic commit (the Review, Test, Document, Lint, and CI repair commits, a repository gate repair, and the Push leftover commit) stages tracked modifications and deletions, then stages untracked files selectively, so tool scratch does not land in PR history:
 
-- A wholly untracked directory whose name starts with `.` (for example `.cache/` or `.test-fixture/`) or is `node_modules/` is skipped at any depth. A new file inside an already tracked hidden directory, such as a new `.github/workflows/new.yml`, is staged. New `.github`, `.gitlab`, `.circleci`, `.devcontainer`, `.vscode`, `.husky`, `.changeset`, and `.storybook` directories are treated as project configuration and staged.
+- Untracked files under a new directory whose name starts with `.` (for example `.cache/` or `.test-phase-driver/`) or is `node_modules/` are skipped at any depth. A directory is existing only when HEAD records it as a directory tree; a file, symlink, or submodule at that path does not count. New files inside an existing hidden or `node_modules` directory remain stageable even when all its old files are deleted or replaced. New `.github`, `.gitlab`, `.circleci`, `.devcontainer`, `.vscode`, `.husky`, `.changeset`, and `.storybook` directories are treated as project configuration and staged.
 - Untracked paths matching [`staging_exclude`](#staging_exclude) are skipped.
 - Skipped entries are logged once: add a `.gitignore` entry for them or commit them deliberately.
-- After staging, any added or modified file larger than [`max_file_size_bytes`](#max_file_size_bytes) refuses the whole commit, like a protected path: the index is restored, the worktree is untouched, the error names each file and size, and the step parks at the same explicit-response gate. Fix by ignoring or deleting the file, or raise the limit on the default branch, then use `no-mistakes axi respond --action fix`.
+- After staging, any added or modified file larger than [`max_file_size_bytes`](#max_file_size_bytes) refuses the whole commit, like a protected path: the index is restored byte for byte, including intent-to-add entries and conflict stages, and the worktree is untouched. The error names up to 20 files and their sizes, with an omitted count, and the step parks at the same explicit-response gate. If the index cannot be snapshotted, staging fails before mutation. Fix by ignoring an untracked file or deleting the file, or raise the limit on the default branch, then use `no-mistakes axi respond --action fix`.
 
-Before Push publishes, the same policy is checked against the commits that will be pushed (compared with the merge-base with the PR target, else the run's base), which covers commits an agent made itself. Publication is refused, with the offending paths (first 20 and a total) and remediation, when the range adds a file over the size limit, a path under a new hidden directory (other than the project-configuration directories above) or a new `node_modules/`, or a path matching `staging_exclude`. Every commit in the range is checked, including content deleted or replaced by a later commit. Rewrite or drop the offending commits to remove the content from branch history; adding `.gitignore` alone does not remove committed content. If the base cannot be resolved, the check is skipped with a log line.
+Before publication, including a CI repair push, the policy is checked against the commits that will be pushed (compared with the merge-base with the PR target, else the run's base), which covers commits an agent made itself. Publication is refused, with up to 20 entries per offending-path list and totals, when any commit adds or modifies a file over the size limit, or adds a path under a new hidden directory (other than the project-configuration directories above), a new `node_modules/`, or a path matching `staging_exclude`. Existing-directory identity is checked against the range's base tree using the same directory-tree requirement as staging. Every commit in the range is checked, including content deleted or replaced by a later commit and oversized file contents reused from the base. Rewrite or drop the offending commits to remove the content from branch history; adding `.gitignore` alone does not remove committed content. If the base cannot be resolved, the check is skipped with a log line.
 
 ### auto_fix
 

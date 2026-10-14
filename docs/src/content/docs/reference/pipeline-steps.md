@@ -265,7 +265,7 @@ Status posting uses the run's existing `gh` credentials, including its forge pro
 **Behavior:**
 
 - If `commands.format` is set, ensures [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) has succeeded once for the isolated worktree, then runs the formatter
-- Commits any uncommitted changes left by pipeline agents or the formatter with message `no-mistakes: apply agent fixes`
+- Commits eligible changes left by pipeline agents or the formatter with message `no-mistakes: apply agent fixes`, subject to the [automatic staging and publication policy](/no-mistakes/reference/repo-config/#scratch-safe-automatic-staging). When staging leaves nothing to commit and HEAD is unchanged, no new commit or validation restart is created.
 - Without fork routing, successful run-start validation selects the upstream URL from the working clone; when it matches the gate worktree's `origin`, the worktree URL is used so embedded credentials retained outside the database can authenticate. If validation fails, the run continues with its prior routing.
 - With GitHub fork routing, the push target is `repos.fork_url`
 - Immediately before remote mutation, reloads the durable review-approved commit and refuses to push when that binding is missing, malformed, or unreachable
@@ -285,7 +285,7 @@ A remote branch can move without being rejected when all remote commits are alre
 Any other out-of-band commit stops the push instead of being overwritten.
 Pre-skipping or later skipping Review leaves no approval binding, so Push fails closed unless Push is also skipped.
 
-This step never requires approval - it runs automatically after review, test, document, and lint pass.
+This step runs automatically after review, test, document, and lint pass. Staging refusals follow the [explicit-response rules](/no-mistakes/reference/repo-config/#scratch-safe-automatic-staging).
 
 ## PR
 

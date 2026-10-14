@@ -26,9 +26,10 @@ func publicationScanBase(sctx *pipeline.StepContext, head string) string {
 	return ""
 }
 
-// assertPublishedRangeClean refuses to publish a range that adds a blob over
-// max_file_size_bytes, a path under a new scratch directory, or a path matching
-// staging_exclude. It covers commits an agent made itself with `git add -A`,
+// assertPublishedRangeClean refuses to publish a range that adds or modifies a
+// blob over max_file_size_bytes, or adds a path under a new scratch directory
+// or matching staging_exclude. Each commit is checked, including blobs reused
+// from the base and content later deleted. It covers agent commits with `git add -A`,
 // which bypass scratch-safe staging, and fails before anything leaves the
 // machine rather than at a forge's push limit.
 func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
