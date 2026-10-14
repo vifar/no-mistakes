@@ -2,6 +2,7 @@ package steps
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -12,7 +13,7 @@ import (
 // including Push's leftover commit. Refusal preserves the index and worktree.
 // Staging is scratch-safe (see stageUntrackedChanges) and refuses blobs over
 // max_file_size_bytes (see refuseOversizedStaged).
-func stagePipelineChanges(sctx *pipeline.StepContext) error {
+func stagePipelineChanges(sctx *pipeline.StepContext) (retErr error) {
 	if len(sctx.Config.ProtectedPaths) > 0 {
 		// Disable renames so both source and destination are checked, and list
 		// individual untracked files so a protected path inside a new directory
@@ -36,10 +37,44 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 			}
 		}
 	}
-	snapshot, err := stepGitRun(sctx, "write-tree")
+	indexPath, err := stepGitRun(sctx, "rev-parse", "--git-path", "index")
 	if err != nil {
-		return fmt.Errorf("refusing automatic staging: cannot snapshot index; resolve unmerged entries before retrying: %w", err)
+		return fmt.Errorf("refusing automatic staging: cannot locate index: %w", err)
 	}
+	if !filepath.IsAbs(indexPath) {
+		indexPath = filepath.Join(sctx.WorkDir, indexPath)
+	}
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		return fmt.Errorf("refusing automatic staging: cannot snapshot index: %w", err)
+	}
+	info, err := os.Stat(indexPath)
+	if err != nil {
+		return fmt.Errorf("refusing automatic staging: cannot stat index: %w", err)
+	}
+	snapshot, err := os.CreateTemp(filepath.Dir(indexPath), ".no-mistakes-index-*")
+	if err != nil {
+		return fmt.Errorf("refusing automatic staging: cannot snapshot index: %w", err)
+	}
+	defer os.Remove(snapshot.Name())
+	if _, err := snapshot.Write(data); err != nil {
+		snapshot.Close()
+		return fmt.Errorf("refusing automatic staging: cannot snapshot index: %w", err)
+	}
+	if err := snapshot.Chmod(info.Mode().Perm()); err != nil {
+		snapshot.Close()
+		return fmt.Errorf("refusing automatic staging: cannot snapshot index: %w", err)
+	}
+	if err := snapshot.Close(); err != nil {
+		return fmt.Errorf("refusing automatic staging: cannot snapshot index: %w", err)
+	}
+	defer func() {
+		if retErr != nil {
+			if err := os.Rename(snapshot.Name(), indexPath); err != nil {
+				retErr = fmt.Errorf("%w; restore index after staging refusal: %v", retErr, err)
+			}
+		}
+	}()
 	// Tracked modifications and deletions first; untracked paths are staged
 	// selectively so tool scratch never rides into an automatic commit.
 	if _, err := stepGitRun(sctx, "add", "-u"); err != nil {
@@ -51,7 +86,7 @@ func stagePipelineChanges(sctx *pipeline.StepContext) error {
 	if err := unstageSubmodulePointerMoves(sctx); err != nil {
 		return err
 	}
-	return refuseOversizedStaged(sctx, snapshot)
+	return refuseOversizedStaged(sctx)
 }
 
 // unstageSubmodulePointerMoves keeps catch-all staging from recording a

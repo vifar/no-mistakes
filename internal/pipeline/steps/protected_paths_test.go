@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1105,7 +1106,7 @@ func TestPublishRunHead_RefusesAgentCommittedScratch(t *testing.T) {
 	}
 }
 
-func TestStagePipelineChanges_UnmergedIndexRefusesBeforeMutation(t *testing.T) {
+func TestStagePipelineChanges_UnmergedIndexPreservedOnOversizedRefusal(t *testing.T) {
 	t.Parallel()
 	for _, limit := range []int64{100, 0} {
 		t.Run(fmt.Sprint(limit), func(t *testing.T) {
@@ -1126,9 +1127,30 @@ func TestStagePipelineChanges_UnmergedIndexRefusesBeforeMutation(t *testing.T) {
 			gitCmd(t, dir, "add", "small.txt")
 			beforeIndex := gitCmd(t, dir, "ls-files", "--stage", "-z")
 			beforeStatus := gitCmd(t, dir, "status", "--porcelain=v1", "-z", "--untracked-files=all")
-			err := stagePipelineChanges(sctx)
-			if err == nil || !strings.Contains(err.Error(), "cannot snapshot index") {
-				t.Fatalf("expected snapshot refusal, got %v", err)
+			indexPath := gitCmd(t, dir, "rev-parse", "--git-path", "index")
+			if !filepath.IsAbs(indexPath) {
+				indexPath = filepath.Join(dir, indexPath)
+			}
+			beforeBytes, err := os.ReadFile(indexPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = stagePipelineChanges(sctx)
+			if limit == 0 {
+				if err != nil {
+					t.Fatalf("resolved content should stage with the size limit disabled: %v", err)
+				}
+				if got := gitCmd(t, dir, "ls-files", "--unmerged"); got != "" {
+					t.Fatalf("staging did not resolve conflict entries: %s", got)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), "max_file_size_bytes") {
+				t.Fatalf("expected oversized refusal, got %v", err)
+			}
+			afterBytes, err := os.ReadFile(indexPath)
+			if err != nil || !bytes.Equal(beforeBytes, afterBytes) {
+				t.Fatalf("refusal did not restore byte-exact index: %v", err)
 			}
 			if got := gitCmd(t, dir, "ls-files", "--stage", "-z"); got != beforeIndex {
 				t.Fatalf("refusal changed staged entries or conflict stages: %q", got)
@@ -1189,5 +1211,107 @@ func TestAssertPublishedRangeClean_RejectsIntermediateHistory(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestStagePipelineChanges_PreservesIntentToAddOnOversizedRefusal(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.MaxFileSizeBytes = 100
+	writeTestFile(t, dir, "intent.go", "package intent\n")
+	gitCmd(t, dir, "add", "-N", "intent.go")
+	writeTestFile(t, dir, "huge.dat", strings.Repeat("x", 500))
+	indexPath := gitCmd(t, dir, "rev-parse", "--git-path", "index")
+	if !filepath.IsAbs(indexPath) {
+		indexPath = filepath.Join(dir, indexPath)
+	}
+	before, err := os.ReadFile(indexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = stagePipelineChanges(sctx)
+	if err == nil || !strings.Contains(err.Error(), "max_file_size_bytes") {
+		t.Fatalf("expected oversized refusal, got %v", err)
+	}
+	after, err := os.ReadFile(indexPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("refusal changed index bytes, including intent-to-add flags: %v", err)
+	}
+	if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "" {
+		t.Fatalf("refusal materialized intent-to-add entry: %s", got)
+	}
+	if got := gitCmd(t, dir, "diff", "--name-only"); got != "intent.go" {
+		t.Fatalf("refusal lost intent-to-add entry: %s", got)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(filepath.Dir(indexPath), ".no-mistakes-index-*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("snapshot files were not removed: %v, %v", leftovers, err)
+	}
+}
+
+func TestStagePipelineChanges_IndexCopyFailureRefusesBeforeMutation(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	missing := filepath.Join(t.TempDir(), "missing-index")
+	sctx.Env = append(sctx.Env, "GIT_INDEX_FILE="+missing)
+	writeTestFile(t, dir, "feature.txt", "unstaged edit")
+	writeTestFile(t, dir, "new.go", "package new\n")
+	before := gitCmd(t, dir, "status", "--porcelain=v1", "-z")
+	err := stagePipelineChanges(sctx)
+	if err == nil || !strings.Contains(err.Error(), "cannot snapshot index") {
+		t.Fatalf("expected copy refusal, got %v", err)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("staging created missing index: %v", err)
+	}
+	if got := gitCmd(t, dir, "status", "--porcelain=v1", "-z"); got != before {
+		t.Fatalf("copy failure changed worktree or index: %q", got)
+	}
+}
+
+func TestAssertPublishedRangeClean_ExistingScratchComponentMustBeTree(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []string{"blob", "symlink", "gitlink", "tree"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			dir, _, headSHA := setupGitRepo(t)
+			switch kind {
+			case "blob":
+				writeTestFile(t, dir, ".cache", "tracked file")
+				gitCmd(t, dir, "add", ".cache")
+			case "symlink":
+				if err := os.Symlink("base.txt", filepath.Join(dir, ".cache")); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+				gitCmd(t, dir, "add", ".cache")
+			case "gitlink":
+				gitCmd(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+headSHA+",.cache")
+			case "tree":
+				writeTestFile(t, dir, ".cache/tracked.txt", "tracked content")
+				gitCmd(t, dir, "add", ".cache")
+			}
+			gitCmd(t, dir, "commit", "-m", "base scratch component")
+			base := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "branch", "-f", "main", base)
+			if kind == "blob" || kind == "symlink" {
+				if err := os.Remove(filepath.Join(dir, ".cache")); err != nil {
+					t.Fatal(err)
+				}
+			} else if kind == "gitlink" {
+				gitCmd(t, dir, "rm", "--cached", ".cache")
+			}
+			head := scratchGuardCommit(t, dir, map[string]string{".cache/blob": "new scratch"})
+			sctx := newTestContext(t, &mockAgent{}, dir, base, head, config.Commands{})
+			err := assertPublishedRangeClean(sctx, head)
+			if kind == "tree" {
+				if err != nil {
+					t.Fatalf("existing tree should permit new file: %v", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), ".cache/blob") {
+				t.Fatalf("base %s must not exempt new scratch directory: %v", kind, err)
+			}
+		})
 	}
 }

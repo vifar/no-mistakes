@@ -42,6 +42,14 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 	if err != nil {
 		return fmt.Errorf("scan published commits: %w", err)
 	}
+	objects, err := stepGitRun(sctx, "rev-list", "--objects", "--no-object-names", base+".."+head)
+	if err != nil {
+		return fmt.Errorf("scan published objects: %w", err)
+	}
+	publishedObjects := map[string]bool{}
+	for _, sha := range strings.Fields(objects) {
+		publishedObjects[sha] = true
+	}
 	var entries, introduced []rawDiffEntry
 	seen := map[string]bool{}
 	for _, line := range strings.Split(commits, "\n") {
@@ -65,7 +73,7 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 		entries = append(entries, changes...)
 		for _, entry := range addedOrModified(changes) {
 			key := entry.path + "\x00" + entry.newSHA
-			if !seen[key] {
+			if publishedObjects[entry.newSHA] && !seen[key] {
 				seen[key] = true
 				introduced = append(introduced, entry)
 			}
@@ -78,12 +86,14 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 		if known, ok := baseDirs[dir]; ok {
 			return known, nil
 		}
-		out, err := stepGitRun(sctx, "--literal-pathspecs", "ls-tree", "--name-only", base, "--", dir)
+		out, err := stepGitRun(sctx, "--literal-pathspecs", "ls-tree", "-z", base, "--", dir)
 		if err != nil {
 			return false, err
 		}
-		baseDirs[dir] = out != ""
-		return out != "", nil
+		fields := strings.Fields(strings.SplitN(out, "\t", 2)[0])
+		exists := len(fields) == 3 && fields[1] == "tree"
+		baseDirs[dir] = exists
+		return exists, nil
 	}
 	for _, entry := range entries {
 		if entry.status != "A" || entry.newMode == "160000" {
