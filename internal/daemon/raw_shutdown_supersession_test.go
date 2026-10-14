@@ -85,11 +85,12 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, causeKind := range []string{"planned", "user", "provider", "joined"} {
-		for _, first := range []string{"raw", "preservation", "raw rollback", "raw persistent"} {
+		for _, first := range []string{"raw", "preservation", "raw rollback", "raw persistent", "terminal persistent"} {
 			t.Run(causeKind+"/"+first, func(t *testing.T) {
 				rawFirst := first != "preservation"
 				failedRaw := first == "raw rollback" || first == "raw persistent"
 				persistentRaw := first == "raw persistent"
+				failedTerminal := first == "terminal persistent"
 				var storageHealthy atomic.Bool
 				repeatedFailure := make(chan struct{})
 				var repeatOnce sync.Once
@@ -145,10 +146,10 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 					t.Fatal(err)
 				}
 				faultFunction := "raw_fault_" + newShutdownToken()
-				if failedRaw {
+				if failedRaw || failedTerminal {
 					if err := sqlite.RegisterScalarFunction(faultFunction, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
 						attempt := rawAttempts.Add(1)
-						if attempt == 1 || (persistentRaw && !storageHealthy.Load()) {
+						if (failedRaw && attempt == 1) || ((persistentRaw || failedTerminal) && !storageHealthy.Load()) {
 							if attempt >= 3 {
 								repeatOnce.Do(func() { close(repeatedFailure) })
 							}
@@ -172,6 +173,11 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 				defer control.Close()
 				if failedRaw {
 					if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER fail_raw BEFORE INSERT ON controlled_shutdown_runs WHEN NEW.reason='daemon shutting down' BEGIN SELECT %s(); END`, faultFunction)); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if failedTerminal {
+					if _, err := control.Exec(fmt.Sprintf("CREATE TRIGGER fail_terminal BEFORE UPDATE OF status ON runs WHEN NEW.status='failed' BEGIN SELECT %s(); END", faultFunction)); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -385,6 +391,26 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 				}
 				releaseTerminal()
 				releaseWatch()
+				if failedTerminal {
+					select {
+					case <-repeatedFailure:
+					case <-time.After(5 * time.Second):
+						t.Fatal("terminal storage did not fail repeatedly")
+					}
+					stored, err := d.GetRun(run.ID)
+					if err != nil || stored.Status != types.RunRunning {
+						t.Fatalf("failed terminal storage fabricated outcome: %+v,%v", stored, err)
+					}
+					select {
+					case err := <-finished:
+						t.Fatalf("terminal owner exited before recovery: %v", err)
+					default:
+					}
+					if ack, err := mgr.prepareControlledShutdown(context.Background(), request); err == nil || ack != nil {
+						t.Fatalf("unsettled terminal storage acknowledged shutdown: %+v,%v", ack, err)
+					}
+					storageHealthy.Store(true)
+				}
 				select {
 				case err := <-finished:
 					if independentFailure && !errors.Is(err, independent) {

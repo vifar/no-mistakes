@@ -2392,7 +2392,7 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 }
 
 func (m *RunManager) terminalRunSettled(runID string) bool {
-	run, err := m.db.GetRun(runID)
+	run, err := pipeline.ReadSettledRun(m.db, runID)
 	if err != nil || run == nil || (run.Status != types.RunCompleted && run.Status != types.RunFailed && run.Status != types.RunCancelled) {
 		slog.Error("terminal outcome unsettled; retaining run custody", "run_id", runID, "error", err)
 		return false

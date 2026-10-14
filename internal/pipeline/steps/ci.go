@@ -295,7 +295,7 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, expectedH
 // observeCIState records PR truth without completing CI or the run. The same
 // observation is available to the executor's post-CI comparison guard.
 func observeCIState(sctx *pipeline.StepContext, state string) error {
-	if err := pipeline.UpdateRunPRState(sctx.Ctx, sctx.DB, sctx.Run.ID, state); err != nil {
+	if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, state); err != nil {
 		return err
 	}
 	// Keep the in-memory observation monotonic like its durable counterpart.

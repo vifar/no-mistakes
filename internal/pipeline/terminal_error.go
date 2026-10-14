@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -56,3 +57,8 @@ func watcherCancellation(err error) bool {
 	var stepErr *stepExecutionError
 	return errors.As(err, &stepErr) && stepErr.watchOnly
 }
+
+type terminalPreparationError struct{ cause error }
+
+func (e *terminalPreparationError) Error() string { return safeurl.RedactText(e.cause.Error()) }
+func (e *terminalPreparationError) Unwrap() error { return e.cause }

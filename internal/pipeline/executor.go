@@ -579,6 +579,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, err, ctx)
 	}
 	if err := e.completeRun(ctx, run, repo); err != nil {
+		if run.Status.Terminal() {
+			return err
+		}
 		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
 	}
 	return nil
@@ -1161,6 +1164,9 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 		return e.failRun(run, repo, err, ctx)
 	}
 	if err := e.completeRun(ctx, run, repo); err != nil {
+		if run.Status.Terminal() {
+			return err
+		}
 		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err), ctx)
 	}
 	return nil
@@ -1190,6 +1196,9 @@ func (e *Executor) skipRecoveredRemainder(ctx context.Context, run *db.Run, repo
 		return e.failRun(run, repo, err)
 	}
 	if err := e.completeRun(ctx, run, repo); err != nil {
+		if run.Status.Terminal() {
+			return err
+		}
 		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err))
 	}
 	return nil
@@ -2657,13 +2666,13 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if dbErr != nil {
 		slog.Warn("settling ineligible terminal outcome", "run", run.ID, "error", dbErr)
 		err = errors.Join(err, dbErr)
-		dbErr = settleTerminalWrite(func() error { return writeTerminal(false) })
+		dbErr = settleTerminalWrite(e.db, func() error { return writeTerminal(false) })
 	}
 	if dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
 		return errors.Join(err, dbErr)
 	}
-	durable, readErr := e.db.GetRun(run.ID)
+	durable, readErr := ReadSettledRun(e.db, run.ID)
 	if readErr != nil {
 		return errors.Join(err, readErr)
 	}
@@ -2678,6 +2687,10 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 
 func (e *Executor) completeRun(ctx context.Context, run *db.Run, repo *db.Repo) error {
 	verifiedHead, preparationErr := e.verifyCompletionHead(run)
+	if preparationErr != nil {
+		preparationErr = &terminalPreparationError{cause: preparationErr}
+	}
+	committed := false
 	err := WithCommitStatusLock(context.Background(), func() error {
 		durable, err := e.db.GetRun(run.ID)
 		if err != nil {
@@ -2686,29 +2699,28 @@ func (e *Executor) completeRun(ctx context.Context, run *db.Run, repo *db.Repo) 
 		if durable == nil {
 			return fmt.Errorf("terminal run outcome unavailable")
 		}
-		revoked, err := e.db.RawShutdownSuperseded(run.ID)
-		if err != nil {
-			return err
-		}
-		if revoked && !durable.Status.Terminal() {
-			return e.db.RecordIneligibleTerminal(run.ID, db.RawShutdownReason, types.RunFailed, nil)
-		}
-		if durable.Status != types.RunRunning && durable.Status != types.RunPending {
-			run.Status, run.Error, run.HeadSHA = durable.Status, durable.Error, durable.HeadSHA
-			if durable.Status != types.RunCompleted {
-				return fmt.Errorf("run terminalized as %s", durable.Status)
-			}
+		if durable.Status.Terminal() {
 			return nil
 		}
 		if preparationErr != nil {
 			return preparationErr
 		}
-		return e.db.UpdateRunStatusWithVerifiedHead(run.ID, types.RunCompleted, verifiedHead)
+		revoked, err := e.db.RawShutdownSuperseded(run.ID)
+		if err != nil {
+			return err
+		}
+		if revoked {
+			err = e.db.RecordIneligibleTerminal(run.ID, db.RawShutdownReason, types.RunFailed, &verifiedHead)
+		} else {
+			err = e.db.UpdateRunStatusWithVerifiedHead(run.ID, types.RunCompleted, verifiedHead)
+		}
+		committed = err == nil
+		return err
 	})
 	if err != nil {
 		return err
 	}
-	durable, err := e.db.GetRun(run.ID)
+	durable, err := ReadSettledRun(e.db, run.ID)
 	if err != nil {
 		return err
 	}
@@ -2716,12 +2728,17 @@ func (e *Executor) completeRun(ctx context.Context, run *db.Run, repo *db.Repo) 
 		return fmt.Errorf("terminal run outcome unavailable")
 	}
 	run.Status, run.Error, run.HeadSHA = durable.Status, durable.Error, durable.HeadSHA
-	e.reportPublishedHeadStatus(context.Background(), run, repo, "success")
-	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
-	if run.Status != types.RunCompleted {
-		return fmt.Errorf("run terminalized as %s", run.Status)
+	if committed {
+		e.reportPublishedHeadStatus(context.Background(), run, repo, "success")
+		e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	}
-	if run.PRState != nil && *run.PRState == "merged" && e.onPRMerged != nil {
+	if run.Status != types.RunCompleted {
+		if run.Error != nil {
+			return errors.New(*run.Error)
+		}
+		return fmt.Errorf("run ended as %s", run.Status)
+	}
+	if committed && run.PRState != nil && *run.PRState == "merged" && e.onPRMerged != nil {
 		e.onPRMerged(ctx, run.ID)
 	}
 	return nil

@@ -54,7 +54,7 @@ func TestPlannedStop_UnsettledAdmissionDoesNotStopSupervisor(t *testing.T) {
 			mgr.runtimeStartedAt = time.Now().UTC()
 			startDone := make(chan error, 1)
 			go func() {
-				_, err := mgr.startRun(context.Background(), repo, "main", head, head, "test", nil, "intent", "", false, "", nil)
+				_, err := mgr.startRun(context.Background(), repo, "main", head, head, "test", nil, "intent", "", false, "", "", nil)
 				startDone <- err
 			}()
 			select {
@@ -156,7 +156,7 @@ func TestPlannedStop_UnsettledAdmissionDoesNotStopSupervisor(t *testing.T) {
 			if !mgr.shuttingDown.Load() {
 				t.Error("failed preparation reopened admission")
 			}
-			if id, err := mgr.startRun(context.Background(), repo, "other", head, head, "test", nil, "intent", "", false, "", nil); err == nil || id != "" {
+			if id, err := mgr.startRun(context.Background(), repo, "other", head, head, "test", nil, "intent", "", false, "", "", nil); err == nil || id != "" {
 				t.Errorf("fenced admission = %q,%v", id, err)
 			}
 			if err := stop.call(p); err != nil {

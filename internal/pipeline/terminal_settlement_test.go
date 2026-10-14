@@ -6,12 +6,13 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
-	"github.com/kunchenguid/no-mistakes/internal/db"
-	"modernc.org/sqlite"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"modernc.org/sqlite"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -94,7 +95,7 @@ func TestTerminalSettlement_CompletionCannotOverwriteCommittedFailure(t *testing
 		t.Fatal(err)
 	}
 	executor := NewExecutor(d, p, nil, nil, nil, nil)
-	if err := executor.completeRun(run, repo); err == nil {
+	if err := executor.completeRun(context.Background(), run, repo); err == nil {
 		t.Error("completion claimed success after committed failure")
 	}
 	stored, err := d.GetRun(run.ID)
@@ -232,5 +233,187 @@ func TestTerminalSettlement_RawStorageRecoveryFencesCapturedBatch(t *testing.T) 
 		if err != nil || run.Status != types.RunFailed || run.Error == nil || *run.Error != "independent provider failure" {
 			t.Fatalf("reopened captured failure: %+v,%v", run, err)
 		}
+	}
+}
+
+func TestTerminalSettlement_TerminalStorageRecoversWithoutNudge(t *testing.T) {
+	d, p, run, repo := setupTest(t)
+	if err := RecordRawShutdown(context.Background(), d, []string{run.ID}, "runtime", func() {}); err != nil {
+		t.Fatal(err)
+	}
+	var healthy atomic.Bool
+	attempts := make(chan struct{}, 8)
+	function := "terminal_storage_" + run.ID
+	if err := sqlite.RegisterScalarFunction(function, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
+		if !healthy.Load() {
+			select {
+			case attempts <- struct{}{}:
+			default:
+			}
+			return nil, errors.New("terminal storage unavailable")
+		}
+		return int64(1), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	var err error
+	d, err = db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	control, err := sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	if _, err := control.Exec(fmt.Sprintf("CREATE TRIGGER terminal_storage BEFORE UPDATE OF status ON runs WHEN NEW.status='failed' BEGIN SELECT %s(); END", function)); err != nil {
+		t.Fatal(err)
+	}
+	defer healthy.Store(true)
+	events := make(chan ipc.Event, 8)
+	executor := NewExecutor(d, p, nil, nil, nil, func(event ipc.Event) {
+		if event.Type == ipc.EventRunCompleted {
+			events <- event
+		}
+	})
+	failure := errors.New("independent provider failure")
+	done := make(chan error, 1)
+	go func() { done <- executor.failRun(run, repo, failure) }()
+	for range 2 {
+		select {
+		case <-attempts:
+		case <-time.After(5 * time.Second):
+			t.Fatal("terminal storage did not fail repeatedly")
+		}
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("terminal owner abandoned failed storage: %v", err)
+	default:
+	}
+	healthy.Store(true)
+	select {
+	case err := <-done:
+		if !errors.Is(err, failure) {
+			t.Fatalf("original error lost: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("healthy storage did not resume owned terminal settlement")
+	}
+	select {
+	case <-events:
+	case <-time.After(time.Second):
+		t.Fatal("settlement event absent")
+	}
+	select {
+	case <-events:
+		t.Fatal("duplicate terminal event")
+	default:
+	}
+	reopened, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	stored, err := reopened.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunFailed || stored.Error == nil || *stored.Error != failure.Error() {
+		t.Fatalf("reopened terminal result: %+v,%v", stored, err)
+	}
+}
+
+func TestTerminalSettlement_CommittedReadbackRecoversWithoutRewriting(t *testing.T) {
+	d, p, run, repo := setupTest(t)
+	if err := RecordRunFailure(context.Background(), d, run.ID, "actual panic", nil); err != nil {
+		t.Fatal(err)
+	}
+	var healthy atomic.Bool
+	attempts := make(chan struct{}, 8)
+	function := "terminal_read_" + run.ID
+	if err := sqlite.RegisterScalarFunction(function, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
+		if !healthy.Load() {
+			select {
+			case attempts <- struct{}{}:
+			default:
+			}
+			return nil, errors.New("readback unavailable")
+		}
+		return int64(1), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	var err error
+	d, err = db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	control, err := sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	if _, err := control.Exec("ALTER TABLE runs RENAME TO settled_runs"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.Exec(fmt.Sprintf("CREATE VIEW runs AS SELECT * FROM settled_runs WHERE %s()=1", function)); err != nil {
+		t.Fatal(err)
+	}
+	defer healthy.Store(true)
+	events := make(chan ipc.Event, 2)
+	executor := NewExecutor(d, p, nil, nil, nil, func(event ipc.Event) {
+		if event.Type == ipc.EventRunCompleted {
+			events <- event
+		}
+	})
+	done := make(chan error, 1)
+	go func() { done <- executor.ReportSettledRunFailure(context.Background(), run, repo) }()
+	for range 2 {
+		select {
+		case <-attempts:
+		case <-time.After(5 * time.Second):
+			t.Fatal("readback fault not reached")
+		}
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("readback owner exited: %v", err)
+	default:
+	}
+	healthy.Store(true)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("readback continuation stalled")
+	}
+	select {
+	case <-events:
+	case <-time.After(time.Second):
+		t.Fatal("missing terminal event")
+	}
+	select {
+	case <-events:
+		t.Fatal("duplicate terminal event")
+	default:
+	}
+	if _, err := control.Exec("DROP VIEW runs"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.Exec("ALTER TABLE settled_runs RENAME TO runs"); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	stored, err := reopened.GetRun(run.ID)
+	if err != nil || stored.Error == nil || *stored.Error != "actual panic" {
+		t.Fatalf("readback changed terminal reason: %+v,%v", stored, err)
 	}
 }

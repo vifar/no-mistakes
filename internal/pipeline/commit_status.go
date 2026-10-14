@@ -24,22 +24,23 @@ const commitStatusTimeout = 15 * time.Second
 // CommitStatusLock serializes publication ownership, terminal decisions and POSTs.
 var CommitStatusLock = make(chan struct{}, 1)
 var terminalSettlementMu sync.Mutex
-var terminalSettlements []func()
+var terminalSettlements []*publicationSettlement
 
-type rawPublicationSettlement struct {
-	write func() error
-	done  chan error
+type publicationSettlement struct {
+	write       func() error
+	done        chan error
+	unavailable func() bool
 }
 
-var rawPublicationSettlements []*rawPublicationSettlement
+var rawPublicationSettlements []*publicationSettlement
 
-var rawRecoveryRunning bool
+var publicationRecoveryRunning bool
 
-func startRawRecoveryLocked() {
-	if rawRecoveryRunning {
+func startPublicationRecoveryLocked() {
+	if publicationRecoveryRunning {
 		return
 	}
-	rawRecoveryRunning = true
+	publicationRecoveryRunning = true
 	go func() {
 		for {
 			timer := time.NewTimer(time.Second)
@@ -50,8 +51,8 @@ func startRawRecoveryLocked() {
 			}
 			cancel()
 			terminalSettlementMu.Lock()
-			if len(rawPublicationSettlements) == 0 {
-				rawRecoveryRunning = false
+			if len(rawPublicationSettlements) == 0 && len(terminalSettlements) == 0 {
+				publicationRecoveryRunning = false
 				terminalSettlementMu.Unlock()
 				return
 			}
@@ -69,7 +70,7 @@ func drainPublicationSettlements() error {
 			err := pending.write()
 			terminalSettlementMu.Lock()
 			if err != nil {
-				startRawRecoveryLocked()
+				startPublicationRecoveryLocked()
 				for _, owned := range rawPublicationSettlements {
 					select {
 					case owned.done <- err:
@@ -87,15 +88,22 @@ func drainPublicationSettlements() error {
 			terminalSettlementMu.Unlock()
 			continue
 		}
-		pending := terminalSettlements
-		terminalSettlements = nil
-		terminalSettlementMu.Unlock()
-		if len(pending) == 0 {
+		if len(terminalSettlements) == 0 {
+			terminalSettlementMu.Unlock()
 			return nil
 		}
-		for _, settle := range pending {
-			settle()
+		pending := terminalSettlements[0]
+		terminalSettlementMu.Unlock()
+		err := pending.write()
+		terminalSettlementMu.Lock()
+		if err != nil && !pending.unavailable() {
+			startPublicationRecoveryLocked()
+			terminalSettlementMu.Unlock()
+			return err
 		}
+		terminalSettlements = terminalSettlements[1:]
+		pending.done <- err
+		terminalSettlementMu.Unlock()
 	}
 }
 
@@ -118,13 +126,14 @@ func ReleaseCommitStatusLock() {
 }
 
 func SettleIneligibleTerminal(d *db.DB, runID, message string, status types.RunStatus) error {
-	return settleTerminalWrite(func() error { return d.RecordIneligibleTerminal(runID, message, status, nil) })
+	return settleTerminalWrite(d, func() error { return d.RecordIneligibleTerminal(runID, message, status, nil) })
 }
 
-func settleTerminalWrite(write func() error) error {
+func settleTerminalWrite(d *db.DB, write func() error) error {
 	done := make(chan error, 1)
 	terminalSettlementMu.Lock()
-	terminalSettlements = append(terminalSettlements, func() { done <- write() })
+	terminalSettlements = append(terminalSettlements, &publicationSettlement{write: write, done: done, unavailable: d.Closed})
+	startPublicationRecoveryLocked()
 	terminalSettlementMu.Unlock()
 	select {
 	case CommitStatusLock <- struct{}{}:
@@ -161,10 +170,6 @@ func WithCommitStatusLock(ctx context.Context, write func() error) error {
 	}
 	defer ReleaseCommitStatusLock()
 	return write()
-}
-
-func UpdateRunPRState(ctx context.Context, d *db.DB, runID, state string) error {
-	return WithCommitStatusLock(ctx, func() error { return d.UpdateRunPRState(runID, state) })
 }
 
 // RecordRunFailure is shared by daemon panic and recovery fallbacks.
@@ -269,7 +274,7 @@ func (e *Executor) ReportRecoveredPublishedHeadStatus(ctx context.Context, run *
 }
 
 func (e *Executor) ReportSettledRunFailure(ctx context.Context, run *db.Run, repo *db.Repo) error {
-	durable, err := e.db.GetRun(run.ID)
+	durable, err := ReadSettledRun(e.db, run.ID)
 	if err != nil {
 		return err
 	}
@@ -291,7 +296,7 @@ func RecordRawShutdown(ctx context.Context, d *db.DB, runIDs []string, instance 
 		cancelOnce.Do(cancelRuns)
 		return d.SupersedeUncommittedCancellations(runIDs, instance)
 	}
-	pending := &rawPublicationSettlement{write: write, done: make(chan error, 1)}
+	pending := &publicationSettlement{write: write, done: make(chan error, 1)}
 	terminalSettlementMu.Lock()
 	rawPublicationSettlements = append(rawPublicationSettlements, pending)
 	terminalSettlementMu.Unlock()
@@ -307,4 +312,16 @@ func RecordRawShutdown(ctx context.Context, d *db.DB, runIDs []string, instance 
 		return err
 	}
 	return nil
+}
+
+func ReadSettledRun(d *db.DB, runID string) (*db.Run, error) {
+	durable, err := d.GetRun(runID)
+	if err != nil {
+		err = settleTerminalWrite(d, func() error {
+			var readErr error
+			durable, readErr = d.GetRun(runID)
+			return readErr
+		})
+	}
+	return durable, err
 }

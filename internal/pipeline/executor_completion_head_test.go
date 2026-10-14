@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,5 +97,55 @@ func TestExecutorCompletionRequiresExactCleanReceiptHead(t *testing.T) {
 				t.Fatalf("unverified completion: err=%v run=%+v merged calls=%d", err, current, mergedCalls)
 			}
 		})
+	}
+}
+
+func TestExecutorCompletionRawShutdownPreservesPreparationError(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := completionFixture(t, database, run)
+	if err := os.RemoveAll(filepath.Join(workDir, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordRawShutdown(context.Background(), database, []string{run.ID}, "runtime", func() {}); err != nil {
+		t.Fatal(err)
+	}
+	events := &eventCollector{}
+	executor := NewExecutor(database, p, nil, nil, nil, events.handler)
+	executor.workDir = workDir
+	prepErr := executor.completeRun(context.Background(), run, repo)
+	if prepErr == nil || !strings.Contains(prepErr.Error(), "read worktree head before completion") {
+		t.Fatalf("raw supersession swallowed Git preparation: %v", prepErr)
+	}
+	result := executor.failRun(run, repo, prepErr)
+	if !errors.Is(result, prepErr) {
+		t.Fatalf("original preparation error identity lost: %v", result)
+	}
+	stored, err := database.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunFailed || stored.Error == nil || *stored.Error != prepErr.Error() {
+		t.Fatalf("actual preparation failure lost: %+v,%v", stored, err)
+	}
+}
+
+func TestExecutorCompletionRawOutcomeEmitsOnce(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := completionFixture(t, database, run)
+	terminalEvents := 0
+	executor := NewExecutor(database, p, nil, nil, []Step{&adaptiveCallStep{name: types.StepCI, fn: func(*StepContext) (*StepOutcome, error) {
+		if err := RecordRawShutdown(context.Background(), database, []string{run.ID}, "runtime", func() {}); err != nil {
+			return nil, err
+		}
+		return &StepOutcome{}, nil
+	}}}, func(event ipc.Event) {
+		if event.Type == ipc.EventRunCompleted {
+			terminalEvents++
+		}
+	})
+	err := executor.Execute(context.Background(), run, repo, workDir)
+	if err == nil || err.Error() != db.RawShutdownReason {
+		t.Fatalf("untruthful raw completion result: %v", err)
+	}
+	stored, dbErr := database.GetRun(run.ID)
+	if dbErr != nil || stored.Status != types.RunFailed || stored.Error == nil || *stored.Error != db.RawShutdownReason || terminalEvents != 1 {
+		t.Fatalf("raw completion: %+v,%v events=%d", stored, dbErr, terminalEvents)
 	}
 }
