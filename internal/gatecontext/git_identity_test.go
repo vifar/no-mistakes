@@ -183,6 +183,55 @@ func TestIdentitySkippedNestedMetadataFailsClosed(t *testing.T) {
 	}
 }
 
+func TestIdentityIncompleteBareRemnantsFailClosed(t *testing.T) {
+	f := newTopologyFixture(t)
+	for _, repository := range []bool{false, true} {
+		for _, keep := range []string{"HEAD", "objects", "refs", "detached-HEAD"} {
+			t.Run(fmt.Sprintf("repository=%t/%s", repository, keep), func(t *testing.T) {
+				outer := t.TempDir()
+				if repository {
+					run(t, outer, "git", "init")
+				}
+				nested := filepath.Join(outer, "nested")
+				run(t, "", "git", "clone", "--bare", f.work, nested)
+				if keep == "detached-HEAD" {
+					run(t, nested, "git", "update-ref", "--no-deref", "HEAD", "refs/heads/main")
+					keep = "HEAD"
+				}
+				for _, entry := range []string{"HEAD", "objects", "refs"} {
+					if entry != keep {
+						if err := os.RemoveAll(filepath.Join(nested, entry)); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				cwd := filepath.Join(nested, "child")
+				if err := os.Mkdir(cwd, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-common-dir")
+				cmd.Dir = cwd
+				out, err := cmd.CombinedOutput()
+				if repository {
+					want, pathErr := filepath.EvalSymlinks(filepath.Join(outer, ".git"))
+					if pathErr != nil || err != nil || strings.TrimSpace(string(out)) != want {
+						t.Fatalf("real Git did not discover enclosing repository: %q, %v, %v", out, err, pathErr)
+					}
+				} else {
+					var exit *exec.ExitError
+					if !errors.As(err, &exit) || exit.ExitCode() != 128 || strings.TrimSpace(string(out)) != "fatal: not a git repository (or any of the parent directories): .git" {
+						t.Fatalf("real Git did not report discovery absence: %q, %v", out, err)
+					}
+				}
+				got, err := (gatecontext.Inspector{Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: cwd})
+				if err == nil {
+					t.Fatalf("incomplete bare remnant was admitted: %+v", got)
+				}
+			})
+		}
+	}
+}
+
 func TestIdentityOrdinaryMetadataNamesStillCheckAncestry(t *testing.T) {
 	f := activeIdentityFixture(t)
 	records, err := f.d.GetActiveRuns()
