@@ -20,7 +20,7 @@ No enrollment rewrite, marker exception, empty-directory control request, raw mu
 
 ## Contract
 
-1. The common-directory proof is authoritative only after canonical path, registered owner, and bare-repository structure agree.
+1. The common-directory proof is authoritative only after canonical path, registered owner, and bare-repository structure agree. Invalid registered common structure or unrecognizable HEAD returns an error even when linked actual metadata remains healthy; it cannot become an unmanaged verdict.
 2. An ordinary clone completes classification even if its top-level lookup would block. It does not execute that unnecessary lookup.
 3. A managed gate remains nested even when top-level attribution is unavailable. Run and phase metadata are optional; they cannot determine refusal.
 4. A canceled or failed first identity query returns an error. It never becomes a successful ordinary-caller verdict.
