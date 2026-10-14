@@ -1,6 +1,7 @@
 package gatecontext_test
 
 import (
+	"github.com/kunchenguid/no-mistakes/internal/testgit/gitfault"
 	"os"
 	"path/filepath"
 	"testing"
@@ -21,6 +22,7 @@ func TestMain(m *testing.M) {
 	globalConfig := filepath.Join(globalConfigDir, "gitconfig")
 	os.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
 	code := m.Run()
+	gitfault.Cleanup()
 	os.RemoveAll(globalConfigDir)
 	os.Exit(code)
 }

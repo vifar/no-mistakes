@@ -164,11 +164,20 @@ func runShellCommandWithOutputPipes(cmd *exec.Cmd, pipes []shellOutputPipe) erro
 	if waitDelayTimer != nil {
 		waitDelayTimer.Stop()
 	}
+	if waitDelayExpired {
+		// Closing the readers after the drain deadline produces a secondary read
+		// error. ErrWaitDelay is its cause; retain independent wait/copy failures.
+		if copyErr == nil || errors.Is(copyErr, os.ErrClosed) {
+			copyErr = exec.ErrWaitDelay
+		} else {
+			copyErr = errors.Join(exec.ErrWaitDelay, copyErr)
+		}
+	}
+	if waitErr != nil && copyErr != nil {
+		return errors.Join(waitErr, copyErr)
+	}
 	if waitErr != nil {
 		return waitErr
-	}
-	if waitDelayExpired {
-		return exec.ErrWaitDelay
 	}
 	return copyErr
 }
