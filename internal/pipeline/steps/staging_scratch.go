@@ -281,7 +281,7 @@ func humanBytes(n int64) string {
 // refuseOversizedStaged refuses the automatic commit when any staged blob
 // exceeds max_file_size_bytes, restoring the index to its pre-staging state so
 // nothing is partially committed and worktree files are untouched.
-func refuseOversizedStaged(sctx *pipeline.StepContext, snapshot string) error {
+func refuseOversizedStaged(sctx *pipeline.StepContext) error {
 	limit := sctx.Config.MaxFileSizeBytes
 	if limit <= 0 {
 		return nil
@@ -300,10 +300,6 @@ func refuseOversizedStaged(sctx *pipeline.StepContext, snapshot string) error {
 	}
 	if len(over) == 0 {
 		return nil
-	}
-	_, err = stepGitRun(sctx, "read-tree", snapshot)
-	if err != nil {
-		return fmt.Errorf("restore index after oversized file refusal: %w", err)
 	}
 	return &pipeline.ProtectedPathError{
 		Path: over[0].path,
