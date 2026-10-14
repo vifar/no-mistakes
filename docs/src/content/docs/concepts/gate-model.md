@@ -83,9 +83,10 @@ Pipeline-control commands check the caller's Git common and actual metadata
 directories in one command first. Physical-ancestor checks corroborate successful
 discovery too: incomplete metadata skipped by Git cannot select an enclosing
 repository. Gitfile targets are compared with the actual metadata directory so
-linked and separate Git directories remain supported. A registered common directory
-with invalid bare structure or unrecognizable `HEAD` fails closed even when the
-linked worktree metadata is healthy.
+linked and separate Git directories remain supported. Every discovered common directory
+must have a recognizable `HEAD` and object/reference directories, regardless of
+registration and even when the linked worktree metadata is healthy. Unborn
+symbolic and detached `HEAD` forms remain supported.
 Identity commands select explicit bare discovery only after substantive metadata
 evidence, so mixed ordinary files and directories cannot force an invalid Git directory.
 A canonical bare gate registered to the current owner proves managed identity,

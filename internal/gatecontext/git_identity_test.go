@@ -420,32 +420,84 @@ func TestIdentityValidMetadataTopologies(t *testing.T) {
 	}
 }
 
-func TestIdentityRegisteredLinkedCommonMetadataFailsClosed(t *testing.T) {
-	for _, damage := range []string{"missing-head", "directory-head", "invalid-head", "missing-objects", "file-objects"} {
-		t.Run(damage, func(t *testing.T) {
-			f := newTopologyFixture(t)
-			entry := "HEAD"
-			if strings.Contains(damage, "objects") {
-				entry = "objects"
+func TestIdentityLinkedCommonMetadataFailsClosed(t *testing.T) {
+	for _, topology := range []string{"registered", "unregistered", "ordinary"} {
+		t.Run(topology, func(t *testing.T) {
+			for _, damage := range []string{"missing-head", "directory-head", "invalid-head", "missing-objects", "file-objects", "missing-refs", "file-refs"} {
+				t.Run(damage, func(t *testing.T) {
+					f := newTopologyFixture(t)
+					common, linked := f.gate, f.managed
+					switch topology {
+					case "unregistered":
+						if err := f.d.DeleteRepo(f.repoID); err != nil {
+							t.Fatal(err)
+						}
+					case "ordinary":
+						common = filepath.Join(f.work, ".git")
+						linked = filepath.Join(t.TempDir(), "linked")
+						run(t, f.work, "git", "worktree", "add", "--detach", linked, "HEAD")
+					}
+					entry := "HEAD"
+					if strings.Contains(damage, "objects") {
+						entry = "objects"
+					} else if strings.Contains(damage, "refs") {
+						entry = "refs"
+					}
+					path := filepath.Join(common, entry)
+					if err := os.RemoveAll(path); err != nil {
+						t.Fatal(err)
+					}
+					switch damage {
+					case "directory-head":
+						if err := os.Mkdir(path, 0o755); err != nil {
+							t.Fatal(err)
+						}
+					case "invalid-head", "file-objects", "file-refs":
+						if err := os.WriteFile(path, []byte("invalid\n"), 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					inspector := gatecontext.Inspector{DB: f.d, Paths: f.p, ParentPID: func(int) (int, error) { return 1, nil }}
+					got, err := inspector.Inspect(context.Background(), gatecontext.Request{CWD: linked, PeerPID: 9000, DaemonPID: 4100})
+					if err == nil {
+						t.Fatalf("damaged common metadata admitted independent linked caller: %+v", got)
+					}
+				})
 			}
-			path := filepath.Join(f.gate, entry)
-			if err := os.RemoveAll(path); err != nil {
+		})
+	}
+}
+
+func TestIdentityLinkedCommonHeadForms(t *testing.T) {
+	for _, topology := range []string{"registered", "unregistered", "ordinary"} {
+		t.Run(topology, func(t *testing.T) {
+			f := newTopologyFixture(t)
+			common, linked := f.gate, f.managed
+			switch topology {
+			case "unregistered":
+				if err := f.d.DeleteRepo(f.repoID); err != nil {
+					t.Fatal(err)
+				}
+			case "ordinary":
+				common = filepath.Join(f.work, ".git")
+				linked = filepath.Join(t.TempDir(), "linked")
+				run(t, f.work, "git", "worktree", "add", "--detach", linked, "HEAD")
+			}
+			commit := exec.Command("git", "rev-parse", "HEAD")
+			commit.Dir = linked
+			detached, err := commit.Output()
+			if err != nil {
 				t.Fatal(err)
 			}
-			switch damage {
-			case "directory-head":
-				if err := os.Mkdir(path, 0o755); err != nil {
+			for _, head := range []string{"ref: refs/heads/unborn\n", string(detached)} {
+				if err := os.WriteFile(filepath.Join(common, "HEAD"), []byte(head), 0o644); err != nil {
 					t.Fatal(err)
 				}
-			case "invalid-head", "file-objects":
-				if err := os.WriteFile(path, []byte("invalid\n"), 0o644); err != nil {
-					t.Fatal(err)
+				got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: linked})
+				managed := topology == "registered"
+				if err != nil || got.ManagedGit != managed || got.Nested != managed {
+					t.Fatalf("valid common HEAD form refused or misclassified: %+v, %v", got, err)
 				}
-			}
-			inspector := gatecontext.Inspector{DB: f.d, Paths: f.p, ParentPID: func(int) (int, error) { return 1, nil }}
-			got, err := inspector.Inspect(context.Background(), gatecontext.Request{CWD: f.managed, PeerPID: 9000, DaemonPID: 4100})
-			if err == nil {
-				t.Fatalf("damaged registered common metadata admitted independent linked caller: %+v", got)
 			}
 		})
 	}
