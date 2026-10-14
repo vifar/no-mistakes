@@ -351,19 +351,52 @@ func gitMetadataMatchesDiscovery(cwd, gitDir string) (bool, error) {
 		} else if !os.IsNotExist(err) {
 			return false, err
 		}
-		for _, entry := range []string{"HEAD", "objects", "refs"} {
-			_, err := os.Lstat(filepath.Join(dir, entry))
-			if err == nil {
-				return false, nil
-			}
-			if !os.IsNotExist(err) {
-				return false, err
-			}
+		bare, err := bareGitMetadataPresent(dir)
+		if err != nil {
+			return false, err
+		}
+		if bare {
+			return false, nil
 		}
 		if filepath.Dir(dir) == dir {
 			return gitDir == "", nil
 		}
 	}
+}
+
+func bareGitMetadataPresent(dir string) (bool, error) {
+	evidence := 0
+	if info, err := os.Stat(filepath.Join(dir, "HEAD")); err == nil {
+		if info.Mode().IsRegular() {
+			evidence++
+		}
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	for _, structure := range [][]string{
+		{"objects", "objects/info", "objects/pack"},
+		{"refs", "refs/heads", "refs/tags"},
+	} {
+		present := true
+		for _, entry := range structure {
+			info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(entry)))
+			if err != nil {
+				if !os.IsNotExist(err) {
+					return false, err
+				}
+				present = false
+				break
+			}
+			if !info.IsDir() {
+				present = false
+				break
+			}
+		}
+		if present {
+			evidence++
+		}
+	}
+	return evidence >= 2, nil
 }
 
 func ancestry(pid int, parent func(int) (int, error)) (map[int]bool, error) {

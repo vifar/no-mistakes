@@ -98,6 +98,10 @@ authenticated process-ancestry lookup can take longer.
 A Git failure proceeds as repository absence only after a single recognized
 English discovery diagnostic, a normal exit, complete output draining, and
 filesystem checks that find no Git metadata in the caller's physical ancestors.
+An explicit `.git` entry remains significant even when malformed. Bare metadata
+requires corroborating file types and object/reference directory structure;
+ordinary names such as `HEAD`, `objects`, or `refs` alone are not evidence.
+These evidence rules apply to successful discovery as well as absence.
 Malformed gitfiles, incomplete repository directories, dubious ownership,
 unknown failures, canceled commands, and incomplete output draining fail closed.
 An unexpected managed-root query failure retains positive managed identity and
