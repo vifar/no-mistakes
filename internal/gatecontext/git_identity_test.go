@@ -3,6 +3,7 @@ package gatecontext_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -179,6 +180,74 @@ func TestIdentitySkippedNestedMetadataFailsClosed(t *testing.T) {
 				t.Fatalf("skipped nested metadata was admitted: %+v; Git reported %q", got, out)
 			}
 		})
+	}
+}
+
+func TestIdentityOrdinaryMetadataNamesStillCheckAncestry(t *testing.T) {
+	f := activeIdentityFixture(t)
+	records, err := f.d.GetActiveRuns()
+	if err != nil || len(records) != 1 {
+		t.Fatalf("active fixture run: %v, %v", records, err)
+	}
+	steps, err := f.d.GetStepsByRun(records[0].ID)
+	if err != nil || len(steps) != 1 {
+		t.Fatalf("active fixture step: %v, %v", steps, err)
+	}
+	agentPID := 4100
+	if err := f.d.SetStepAgentActivity(steps[0].ID, "started", &agentPID); err != nil {
+		t.Fatal(err)
+	}
+	inspector := gatecontext.Inspector{DB: f.d, Paths: f.p, ParentPID: func(pid int) (int, error) {
+		if pid == 4300 {
+			return agentPID, nil
+		}
+		return 1, nil
+	}}
+	for _, repository := range []bool{false, true} {
+		for _, kind := range []string{"file", "directory"} {
+			for _, name := range []string{"HEAD", "objects", "refs", "all"} {
+				t.Run(fmt.Sprintf("repository=%t/%s/%s", repository, kind, name), func(t *testing.T) {
+					outer := t.TempDir()
+					if repository {
+						run(t, outer, "git", "init")
+					}
+					cwd := filepath.Join(outer, "docs")
+					if err := os.Mkdir(cwd, 0o755); err != nil {
+						t.Fatal(err)
+					}
+					names := []string{name}
+					if name == "all" {
+						names = []string{"HEAD", "objects", "refs"}
+					}
+					for _, entry := range names {
+						path := filepath.Join(cwd, entry)
+						if kind == "directory" {
+							if err := os.Mkdir(path, 0o755); err != nil {
+								t.Fatal(err)
+							}
+						} else if err := os.WriteFile(path, []byte("ordinary project content\n"), 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					for _, tc := range []struct {
+						peer, daemon  int
+						nested, agent bool
+					}{
+						{9000, 0, false, false},
+						{4300, 0, true, true},
+						{4300, agentPID, true, true},
+					} {
+						got, err := inspector.Inspect(context.Background(), gatecontext.Request{CWD: cwd, PeerPID: tc.peer, DaemonPID: tc.daemon})
+						if err != nil || got.Nested != tc.nested || got.AgentDescendant != tc.agent || got.DaemonDescendant != (tc.daemon != 0) {
+							t.Fatalf("ordinary metadata names: %+v, %v", got, err)
+						}
+						if tc.agent && (got.RunID != records[0].ID || got.Phase != types.StepDocument) {
+							t.Fatalf("active-step attribution was lost: %+v", got)
+						}
+					}
+				})
+			}
+		}
 	}
 }
 
