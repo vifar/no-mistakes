@@ -746,15 +746,16 @@ func TestIdentityCommandsHaveSharedExecutionBudget(t *testing.T) {
 }
 
 func TestIdentityLiteralPathBytes(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("native Windows path runtime is untested")
+	names := []string{"repo", "repo with spaces"}
+	if runtime.GOOS != "windows" {
+		names = append(names, "repo\nname", "repo\n", "quote' $(literal) \t", "literal\\backslash", "literal\\backslash\n \t")
 	}
 	f := activeIdentityFixture(t)
 	records, err := f.d.GetActiveRuns()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"repo\nname", "repo\n", "quote' $(literal) \t"} {
+	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			root := filepath.Join(t.TempDir(), name)
 			run(t, "", "git", "init", root)
