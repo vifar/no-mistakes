@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,5 +71,41 @@ func TestFetchRunUpstreamBranch_TimesOutAndSaysSo(t *testing.T) {
 	}
 	if elapsed > 30*time.Second {
 		t.Fatalf("fetch took %v, the bound did not apply", elapsed)
+	}
+}
+
+func TestResolvePublicationBase_StalledFetch(t *testing.T) {
+	original := fetchUpstreamTimeout
+	fetchUpstreamTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { fetchUpstreamTimeout = original })
+
+	for _, pinned := range []bool{true, false} {
+		t.Run(fmt.Sprintf("pinned=%t", pinned), func(t *testing.T) {
+			base := strings.Repeat("0", 40)
+			if pinned {
+				base = "base"
+			}
+			sctx, dir, head := publicationBaseFixture(t, base, map[string]string{".cache/blob": "scratch"})
+			gitCmd(t, dir, "remote", "set-url", "origin", hangingGitRemote(t))
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			sctx.Ctx = ctx
+
+			start := time.Now()
+			err := assertPublishedRangeClean(sctx, head)
+			if elapsed := time.Since(start); elapsed > 3*time.Second {
+				t.Fatalf("publication fetch exceeded its budget: %v", elapsed)
+			}
+			if err == nil {
+				t.Fatal("publication must refuse scratch or an unverifiable range")
+			}
+			if pinned {
+				if !strings.Contains(err.Error(), ".cache/blob") {
+					t.Fatalf("pinned base did not preserve scratch scanning: %v", err)
+				}
+			} else if !strings.Contains(err.Error(), "trustworthy base") || !strings.Contains(err.Error(), ErrFetchTimeout.Error()) {
+				t.Fatalf("expected fail-closed timeout diagnostic, got %v", err)
+			}
+		})
 	}
 }

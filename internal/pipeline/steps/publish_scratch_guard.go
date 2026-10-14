@@ -1,6 +1,8 @@
 package steps
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -54,7 +56,12 @@ func resolvePublicationBase(sctx *pipeline.StepContext, head string) (string, er
 		}
 	} else {
 		private := "refs/no-mistakes/publication-base/" + sctx.Run.ID
-		fetchErr = git.FetchRemoteBranchToPrivateRef(sctx.Ctx, sctx.WorkDir, resolveUpstreamURL(sctx), target, private)
+		ctx, cancel := context.WithTimeoutCause(sctx.Ctx, fetchUpstreamTimeout, ErrFetchTimeout)
+		fetchErr = git.FetchRemoteBranchToPrivateRef(ctx, sctx.WorkDir, resolveUpstreamURL(sctx), target, private)
+		if fetchErr != nil && errors.Is(context.Cause(ctx), ErrFetchTimeout) {
+			fetchErr = fmt.Errorf("%w after %s: %v", ErrFetchTimeout, fetchUpstreamTimeout, fetchErr)
+		}
+		cancel()
 		if fetchErr == nil {
 			defer func() { _, _ = stepGitRun(sctx, "update-ref", "--no-deref", "-d", private) }()
 			if mb, err := stepGitRun(sctx, "merge-base", head, private); err == nil && mb != "" {
