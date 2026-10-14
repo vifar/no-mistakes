@@ -549,4 +549,7 @@ var migrationStatements = []string{
 	`ALTER TABLE run_pr_contexts ADD COLUMN retained_target_sha TEXT`,
 	`ALTER TABLE commit_status_publications ADD COLUMN strict_certificate TEXT`,
 	`ALTER TABLE commit_status_publications ADD COLUMN preserve_success INTEGER`,
+	// Owner-approved Test gaps accepted under strict shipping (see
+	// StepResult.AcceptedGapRefusal). NULL means no gap was accepted.
+	`ALTER TABLE step_results ADD COLUMN accepted_gaps_json TEXT`,
 }
