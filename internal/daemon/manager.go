@@ -1425,10 +1425,17 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		})
 	}
 
+	m.mu.Lock()
 	if m.shuttingDown.Load() {
+		m.mu.Unlock()
 		trackStartFailure("daemon_shutdown")
 		return "", fmt.Errorf("daemon is shutting down")
 	}
+	m.wg.Add(1)
+	m.mu.Unlock()
+	defer m.wg.Done()
+	ctx, cancelSetup := context.WithCancelCause(ctx)
+	defer cancelSetup(nil)
 	// Best-effort only: a clone's remotes may change after init. Refresh the
 	// registered URLs before constructing any run-owned Git operation, but keep
 	// the exact prior repo value and continue when discovery, validation, or the
@@ -1565,11 +1572,27 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// pr.publish_intent is enforced independently by the PR step.
 	storedOmitIntent := omitIntent || (globalCfg != nil && !globalCfg.Intent.PublishesIntentByDefault())
 
+	m.mu.Lock()
+	if m.shuttingDown.Load() {
+		m.mu.Unlock()
+		return "", fmt.Errorf("daemon is shutting down")
+	}
 	run, err := m.db.InsertRunWithOptions(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, storedOmitIntent, plan, pin, shippingPin)
 	if err != nil {
+		m.mu.Unlock()
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
+	m.cancels[run.ID] = cancelSetup
+	m.mu.Unlock()
+	bgOwnsWorktree := false
+	defer func() {
+		if !bgOwnsWorktree {
+			m.mu.Lock()
+			delete(m.cancels, run.ID)
+			m.mu.Unlock()
+		}
+	}()
 	if inherited := strings.TrimSpace(inheritedPRURL); inherited != "" {
 		if err := m.db.UpdateRunPRURL(run.ID, inherited); err != nil {
 			m.db.UpdateRunError(run.ID, fmt.Sprintf("inherit PR URL: %s", err))
@@ -1631,7 +1654,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// background goroutine takes ownership only once it is running. Arming it any
 	// later would leave the directory behind - in the operator's own worktree
 	// root, unswept - for whichever failures happen in between.
-	bgOwnsWorktree := false
 	defer func() {
 		if !bgOwnsWorktree {
 			m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_setup_failed")
@@ -1746,6 +1768,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("create_agent")
 		return "", err
 	}
+	defer func() {
+		if !bgOwnsWorktree {
+			_ = ag.Close()
+		}
+	}()
 
 	// Configuration decides this run's gates exactly once, here, and the
 	// resolved list is recorded before the executor can write a single step
@@ -1797,6 +1824,13 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		cancel(fmt.Errorf("daemon shutting down"))
 		_ = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, "daemon shutting down", nil)
 		return "", fmt.Errorf("daemon shutting down")
+	}
+	if ctx.Err() != nil {
+		m.mu.Unlock()
+		cause := context.Cause(ctx)
+		cancel(cause)
+		_ = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, safeurl.RedactText(cause.Error()), nil)
+		return "", cause
 	}
 	m.wg.Add(1)
 	m.executors[run.ID] = executor
