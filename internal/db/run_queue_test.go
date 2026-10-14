@@ -1,0 +1,143 @@
+package db
+
+import (
+	"path/filepath"
+	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
+
+func queuedRunForTest(t *testing.T, d *DB, repoID, branch string) *Run {
+	t.Helper()
+	run, err := d.InsertRun(repoID, branch, "head-"+branch, "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRunQueued(run.ID, `{"trigger":"push"}`); err != nil {
+		t.Fatal(err)
+	}
+	return run
+}
+
+func TestQueuedRunsOrderByQueuedAtThenID(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	a := queuedRunForTest(t, d, repo.ID, "a")
+	b := queuedRunForTest(t, d, repo.ID, "b")
+	c := queuedRunForTest(t, d, repo.ID, "c")
+
+	ids, err := d.QueuedRunIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 3 || ids[0] != a.ID || ids[1] != b.ID || ids[2] != c.ID {
+		t.Fatalf("queue order = %v, want [%s %s %s]", ids, a.ID, b.ID, c.ID)
+	}
+	// Equal timestamps fall back to id order (ids are monotonic).
+	if _, err := d.sql.Exec(`UPDATE runs SET queued_at = 7`); err != nil {
+		t.Fatal(err)
+	}
+	ids, _ = d.QueuedRunIDs()
+	if ids[0] != a.ID || ids[1] != b.ID || ids[2] != c.ID {
+		t.Fatalf("tie-break order = %v, want id order", ids)
+	}
+	if pos, total, err := d.QueuePosition(b.ID); err != nil || pos != 2 || total != 3 {
+		t.Fatalf("QueuePosition(b) = %d of %d, %v; want 2 of 3", pos, total, err)
+	}
+	if pos, total, _ := d.QueuePosition("missing"); pos != 0 || total != 3 {
+		t.Fatalf("QueuePosition(missing) = %d of %d, want 0 of 3", pos, total)
+	}
+}
+
+func TestMarkRunQueuedOnlyAppliesToPendingRun(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.MarkRunQueued(run.ID, ""); err == nil {
+		t.Fatal("a running run must not be re-queued")
+	}
+}
+
+func TestQueuedRunClaimAndCancelAreExclusive(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run := queuedRunForTest(t, d, repo.ID, "feature")
+
+	if spec, err := d.GetRunQueueSpec(run.ID); err != nil || spec != `{"trigger":"push"}` {
+		t.Fatalf("queue spec = %q, %v", spec, err)
+	}
+	if ok, err := d.ClaimQueuedRun(run.ID); err != nil || !ok {
+		t.Fatalf("claim = %v, %v; want true", ok, err)
+	}
+	if ok, _ := d.ClaimQueuedRun(run.ID); ok {
+		t.Fatal("a run was claimed twice")
+	}
+	if ok, _ := d.CancelQueuedRun(run.ID, "x"); ok {
+		t.Fatal("a claimed run was cancelled as queued")
+	}
+	got, _ := d.GetRun(run.ID)
+	if got.Status != types.RunPending {
+		t.Fatalf("claimed status = %s, want pending", got.Status)
+	}
+
+	other := queuedRunForTest(t, d, repo.ID, "other")
+	if ok, err := d.CancelQueuedRun(other.ID, types.RunCancelReasonAbortedByUser); err != nil || !ok {
+		t.Fatalf("cancel = %v, %v; want true", ok, err)
+	}
+	if ok, _ := d.ClaimQueuedRun(other.ID); ok {
+		t.Fatal("a cancelled run was claimed")
+	}
+	got, _ = d.GetRun(other.ID)
+	if got.Status != types.RunCancelled || got.Error == nil || *got.Error != types.RunCancelReasonAbortedByUser {
+		t.Fatalf("cancelled run = %s %v", got.Status, got.Error)
+	}
+}
+
+func TestQueuedRunIsTheBranchActiveRunButNotAStaleRun(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run := queuedRunForTest(t, d, repo.ID, "feature")
+
+	for _, branch := range []string{"feature", ""} {
+		active, err := d.GetActiveRun(repo.ID, branch)
+		if err != nil || active == nil || active.ID != run.ID || active.Status != types.RunQueued {
+			t.Fatalf("GetActiveRun(%q) = %#v, %v; want the queued run", branch, active, err)
+		}
+	}
+	// Crash recovery must leave queued runs queued: nothing was executing.
+	if n, err := d.RecoverStaleRuns("daemon crashed"); err != nil || n != 0 {
+		t.Fatalf("RecoverStaleRuns = %d, %v; want 0", n, err)
+	}
+	got, _ := d.GetRun(run.ID)
+	if got.Status != types.RunQueued {
+		t.Fatalf("status after stale recovery = %s, want queued", got.Status)
+	}
+	if running, _ := d.GetActiveRuns(); len(running) != 0 {
+		t.Fatalf("GetActiveRuns (executing runs) = %d, want 0", len(running))
+	}
+}
+
+func TestQueuedRunPersistsAcrossReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	a := queuedRunForTest(t, d, repo.ID, "a")
+	b := queuedRunForTest(t, d, repo.ID, "b")
+	d.Close()
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	ids, _ := d.QueuedRunIDs()
+	if len(ids) != 2 || ids[0] != a.ID || ids[1] != b.ID {
+		t.Fatalf("reopened queue = %v, want [%s %s]", ids, a.ID, b.ID)
+	}
+}

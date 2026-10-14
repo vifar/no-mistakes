@@ -141,6 +141,19 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 	if sctx != nil {
 		stall = AgentStallTimeout(sctx.Config)
 	}
+	// An agent turn is the heavy work the run-concurrency cap exists to bound:
+	// a run that yielded its slot (the CI step's PR poll) takes one back
+	// before spawning the agent, and the process-wide agent cap applies.
+	if sctx != nil {
+		if err := sctx.AcquireSlot(parent); err != nil {
+			return nil, err
+		}
+	}
+	releaseAgent, err := agentLimiter.acquire(parent)
+	if err != nil {
+		return nil, err
+	}
+	defer releaseAgent()
 	activity := observeAgentActivity(&opts)
 	return invokeAgent(parent, timeout, working, stall, cause, activity, func(ctx context.Context) (*agent.Result, error) {
 		if sessionRole != "" && sctx != nil && sctx.Sessions != nil {

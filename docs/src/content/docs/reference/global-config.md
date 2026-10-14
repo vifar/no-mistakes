@@ -63,6 +63,11 @@ session_reuse: true
 worktree_roots:
   /Users/you/src/my-repo: /Users/you/work/my-repo-runs
 
+daemon:
+  max_concurrent_runs: 3
+  hold_slot_while_parked: false
+  max_concurrent_agents: 0
+
 forge_profiles:
   github-personal:
     gh_config_dir: ~/.config/gh-personal
@@ -898,6 +903,36 @@ A run's own worktree is already removed the instant its pipeline finishes, so th
 This reap runs after every finished run and again at daemon startup, the same cadence `test.evidence.retention` uses. Only the default `<NM_HOME>/worktrees` tree is bounded; a checkout you placed with [`worktree_roots`](#worktree_roots) is your own directory, and only the directories no-mistakes' own run records name there are ever touched, per that section's rules.
 
 Global-only, for the same reason `test.evidence`'s local storage fields are: it governs this machine's local disk, so a repository does not get to set the retention budget for a directory every repository on the machine shares.
+
+### daemon
+
+How many pipeline runs the daemon executes at once. Launches beyond the limit are queued instead of competing for the machine.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` |
+
+| Field                         | Type   | Default | Description                                                                                          |
+| ----------------------------- | ------ | ------- | ---------------------------------------------------------------------------------------------------- |
+| `daemon.max_concurrent_runs`  | `int`  | `3`     | Runs that may hold an execution slot at once. `0` means unlimited; a negative value is rejected       |
+| `daemon.hold_slot_while_parked` | `bool` | `false` | Keep the slot while a run is parked at a gate or the CI step is waiting on its PR (the old behaviour) |
+| `daemon.max_concurrent_agents`  | `int`  | `0`     | Agent invocations allowed at once across all runs. `0` means unlimited; a negative value is rejected  |
+
+Without a limit, many sessions launching at once ran every pipeline concurrently. Agents for Review, Test, and fixes, plus the project's own tests and builds, then saturated the machine, and even cheap control calls (`gate_context`, `status`) timed out, which made `axi run` fail at launch and its callers retry, adding more load.
+
+**Queueing.** A launch that arrives while `max_concurrent_runs` runs already hold a slot is recorded durably with status `queued` and returns immediately, without a worktree, an agent, or an executor. Queued runs start first in, first out as slots free. A queued run is its branch's active run: `axi run` reattaches to it, a newer push to the same branch supersedes it, and `axi abort` cancels it without ever starting it. `axi status` shows `status: queued` and `queue_position: N`, and `axi run` prints `queued (position N of M)` and returns success with the run ID instead of holding the caller; pass `--wait` explicitly to wait through the queue. Queued runs survive a daemon restart and drain once it is back.
+
+**What holds a slot.** A run holds a slot only while it executes pipeline work. A run parked at a gate (`awaiting_approval` or `fix_review`) releases its slot. When you respond, the run takes a slot back ahead of every queued new run (resumed runs first, then new runs in order); if none is free it waits, and `axi status` shows it as `waiting_for_slot` with its position. The CI step's PR monitoring poll also releases the slot: monitoring a PR for days no longer occupies a slot. The step takes one back only to run an agent turn (a CI fix or conflict repair), and the run takes one back before any later step runs. A run frees its slot on completion, failure, cancellation, abort, and panic. Set `hold_slot_while_parked: true` to keep the slot through parks and CI monitoring instead; it then behaves as a plain cap on live runs.
+
+**Restart.** Runs that were executing when the daemon stopped are failed by crash recovery as before, except the parked ones it resumes. Resumed runs count against the limit but are never queued behind new work, so a restart can briefly leave more than `max_concurrent_runs` resumed runs; new launches queue until they drop below it. Queued runs stay queued, then start in their original order.
+
+**Agents.** `max_concurrent_agents` is a separate, optional cap on agent subprocess invocations across all runs. It bounds the heaviest work even when `max_concurrent_runs` is raised or unlimited; the invocation waits for a free agent slot before it starts, and its timeouts begin only then.
+
+**Changing the limits without a restart.** The daemon re-reads `max_concurrent_runs` and `hold_slot_while_parked` whenever the global config file changes (its modification time is checked at every launch, park, and finished run, and on a short timer), and starts queued runs at once when a raised cap has room. [`no-mistakes daemon set max-concurrent-runs N`](/no-mistakes/reference/cli/#no-mistakes-daemon-set-max-concurrent-runs) writes the value and tells the daemon to apply it immediately. Lowering the cap never kills or pauses a running run; new runs queue until usage drops below the new cap. `max_concurrent_agents` is picked up the same way.
+
+**Seeing usage.** `axi status` and the `axi` home view show a `slots` line (for example `2/3 in use, 4 queued`) and `no-mistakes doctor` prints a `run slots` line with the cap, slots in use, queued runs, and live runs that released their slot while parked.
+
+Global-only: a repository's `.no-mistakes.yaml` cannot set it, because it describes this machine's capacity.
 
 ### auto_fix
 

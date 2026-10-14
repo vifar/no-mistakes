@@ -439,4 +439,12 @@ var migrationStatements = []string{
 	// a late --closes can still reach the Issues section; non-NULL closes that window
 	// (see UpdateRunClosingIssueRefs / ClaimClosingIssueRefsForPRBody).
 	`ALTER TABLE runs ADD COLUMN closing_issue_refs_locked_at INTEGER`,
+	// A launch that arrives while the daemon is at daemon.max_concurrent_runs is
+	// recorded with status 'queued' instead of starting. queued_at (unix
+	// nanoseconds) orders the FIFO drain, including after a daemon restart, and
+	// queue_spec holds the start parameters the row does not already carry (the
+	// trigger and skipped steps). Both are NULL for every run that started
+	// without waiting.
+	`ALTER TABLE runs ADD COLUMN queued_at INTEGER`,
+	`ALTER TABLE runs ADD COLUMN queue_spec TEXT`,
 }

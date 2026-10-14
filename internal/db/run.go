@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
@@ -555,7 +556,7 @@ func (d *DB) GetRunsByRepoHead(repoID, branch, headSHA string) ([]*Run, error) {
 	return runs, rows.Err()
 }
 
-// GetActiveRun returns the currently active run (pending or running) for a repo,
+// GetActiveRun returns the currently active run (queued, pending or running) for a repo,
 // if any. When branch is non-empty, only a run on that exact branch is returned
 // - the setup wizard relies on this to decide whether a new run is needed for
 // the current branch. When branch is empty, returns the most recently created
@@ -565,11 +566,11 @@ func (d *DB) GetActiveRun(repoID, branch string) (*Run, error) {
 	var err error
 	if branch == "" {
 		err = scanRun(d.sql.QueryRow(
-			`SELECT `+runColumns+` FROM runs WHERE repo_id = ? AND status IN ('pending', 'running') ORDER BY created_at DESC, id DESC LIMIT 1`, repoID,
+			`SELECT `+runColumns+` FROM runs WHERE repo_id = ? AND status IN ('queued', 'pending', 'running') ORDER BY created_at DESC, id DESC LIMIT 1`, repoID,
 		), r)
 	} else {
 		err = scanRun(d.sql.QueryRow(
-			`SELECT `+runColumns+` FROM runs WHERE repo_id = ? AND branch = ? AND status IN ('pending', 'running') ORDER BY created_at DESC, id DESC LIMIT 1`, repoID, branch,
+			`SELECT `+runColumns+` FROM runs WHERE repo_id = ? AND branch = ? AND status IN ('queued', 'pending', 'running') ORDER BY created_at DESC, id DESC LIMIT 1`, repoID, branch,
 		), r)
 	}
 	if err == sql.ErrNoRows {
@@ -1378,4 +1379,98 @@ func (d *DB) SetRunCIRerunState(id, state string) error {
 		return fmt.Errorf("set run ci rerun state: %w", err)
 	}
 	return nil
+}
+
+// MarkRunQueued records that a freshly inserted run was not admitted because
+// the daemon is at its concurrency cap. The run becomes queued, stamped with a
+// nanosecond queued_at that orders the FIFO drain, and spec carries whatever the
+// start needs that the row does not already hold. It applies only to a run that
+// has not started, so a racing status change is never overwritten.
+func (d *DB) MarkRunQueued(id, spec string) (int64, error) {
+	ts := time.Now().UnixNano()
+	result, err := d.sql.Exec(`UPDATE runs SET status = ?, queued_at = ?, queue_spec = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		types.RunQueued, ts, spec, now(), id, types.RunPending)
+	if err != nil {
+		return 0, fmt.Errorf("mark run queued: %w", err)
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return 0, fmt.Errorf("mark run queued: %w", err)
+	} else if n != 1 {
+		return 0, fmt.Errorf("mark run queued: run %s is not pending", id)
+	}
+	return ts, nil
+}
+
+// ClaimQueuedRun moves a queued run to pending so exactly one caller starts
+// it. It reports false when the run is no longer queued (for example it was
+// aborted first), in which case the caller must not start it.
+func (d *DB) ClaimQueuedRun(id string) (bool, error) {
+	result, err := d.sql.Exec(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		types.RunPending, now(), id, types.RunQueued)
+	if err != nil {
+		return false, fmt.Errorf("claim queued run: %w", err)
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
+// CancelQueuedRun terminalizes a run that never started. It reports false when
+// the run is not queued any more, so a start that won the race is left alone.
+func (d *DB) CancelQueuedRun(id, reason string) (bool, error) {
+	result, err := d.sql.Exec(`UPDATE runs SET status = ?, error = ?, push_active = 0, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ? AND status = ?`,
+		types.RunCancelled, reason, now(), id, types.RunQueued)
+	if err != nil {
+		return false, fmt.Errorf("cancel queued run: %w", err)
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
+// QueuedRunIDs returns every queued run id in start order: oldest queued_at
+// first, ties broken by id (ids are monotonic, so they preserve creation order).
+func (d *DB) QueuedRunIDs() ([]string, error) {
+	rows, err := d.sql.Query(`SELECT id FROM runs WHERE status = ? ORDER BY COALESCE(queued_at, 0), id`, types.RunQueued)
+	if err != nil {
+		return nil, fmt.Errorf("list queued runs: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan queued run: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// GetRunQueueSpec returns the opaque start parameters recorded when the run
+// was queued, or the empty string.
+func (d *DB) GetRunQueueSpec(id string) (string, error) {
+	var spec sql.NullString
+	err := d.sql.QueryRow(`SELECT queue_spec FROM runs WHERE id = ?`, id).Scan(&spec)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get run queue spec: %w", err)
+	}
+	return spec.String, nil
+}
+
+// QueuePosition reports a queued run's 1-based position among queued runs and
+// the queue length, read straight from the database so a client without a
+// daemon sees the same answer. position is 0 when the run is not queued.
+func (d *DB) QueuePosition(id string) (position, total int, err error) {
+	ids, err := d.QueuedRunIDs()
+	if err != nil {
+		return 0, 0, err
+	}
+	for i, queued := range ids {
+		if queued == id {
+			return i + 1, len(ids), nil
+		}
+	}
+	return 0, len(ids), nil
 }

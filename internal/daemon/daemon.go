@@ -500,6 +500,10 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	logStartupPhase("evidence_cleanup", evidenceStarted)
 
 	mgr.resumeRecoveredRuns(plans)
+	// Queued runs were never executing, so recovery leaves them queued. Drain
+	// them only now that the resumed runs hold their slots.
+	mgr.recoverQueuedRuns()
+	mgr.StartLimitWatcher()
 	return staleRuns
 }
 
@@ -1022,7 +1026,7 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 	if err != nil {
 		return true, fmt.Sprintf("failed to look up run %s: %v", runID, err)
 	}
-	if run != nil && (run.Status == types.RunPending || run.Status == types.RunRunning) {
+	if run != nil && run.Status.Active() {
 		return true, fmt.Sprintf("run %s is %s", runID, run.Status)
 	}
 	if run != nil && run.Status == types.RunCIMonitorInterrupted {
@@ -1251,7 +1255,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			if err != nil {
 				return nil, fmt.Errorf("get steps: %w", err)
 			}
-			return runToInfo(d, run, steps), nil
+			return mgr.annotateQueue(runToInfo(d, run, steps)), nil
 		})
 		if err != nil {
 			return nil, err
@@ -1289,7 +1293,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			if err != nil {
 				return nil, fmt.Errorf("get steps for run %s: %w", r.ID, err)
 			}
-			infos = append(infos, *runToInfo(d, r, steps))
+			infos = append(infos, *mgr.annotateQueue(runToInfo(d, r, steps)))
 		}
 		return &ipc.GetRunsResult{Runs: infos}, nil
 	})
@@ -1309,7 +1313,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			if err != nil {
 				return nil, fmt.Errorf("get steps for run %s: %w", r.ID, err)
 			}
-			infos = append(infos, *runToInfo(d, r, steps))
+			infos = append(infos, *mgr.annotateQueue(runToInfo(d, r, steps)))
 		}
 		return &ipc.GetRunsResult{Runs: infos}, nil
 	})
@@ -1330,7 +1334,20 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err != nil {
 			return nil, fmt.Errorf("get steps: %w", err)
 		}
-		return &ipc.GetActiveRunResult{Run: runToInfo(d, run, steps)}, nil
+		return &ipc.GetActiveRunResult{Run: mgr.annotateQueue(runToInfo(d, run, steps))}, nil
+	})
+
+	srv.Handle(ipc.MethodGetSlots, func(_ context.Context, _ json.RawMessage) (interface{}, error) {
+		usage := mgr.SlotUsage()
+		return &usage, nil
+	})
+
+	srv.Handle(ipc.MethodReloadSlots, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		usage := mgr.ReloadLimits()
+		return &usage, nil
 	})
 
 	srv.Handle(ipc.MethodGateContext, func(ctx context.Context, params json.RawMessage) (interface{}, error) {

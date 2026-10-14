@@ -186,7 +186,7 @@ func normalizePipelineSteps(runID string, runStatus types.RunStatus, steps []ipc
 
 func shouldBackfillPipelineSteps(runStatus types.RunStatus, steps []ipc.StepResultInfo, knownSteps []types.StepName) bool {
 	if len(steps) == 0 {
-		return runStatus == types.RunPending || runStatus == types.RunRunning
+		return runStatus.Active()
 	}
 	if len(steps) >= len(knownSteps) {
 		return false

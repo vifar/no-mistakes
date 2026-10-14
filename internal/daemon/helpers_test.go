@@ -279,6 +279,13 @@ func (s *mockPanicStep) Execute(_ *pipeline.StepContext) (*pipeline.StepOutcome,
 // startTestDaemonWithSteps starts a daemon with a custom step factory.
 func startTestDaemonWithSteps(t *testing.T, sf StepFactory) (*paths.Paths, *db.DB) {
 	t.Helper()
+	return startTestDaemonWithStepsConfig(t, sf, "")
+}
+
+// startTestDaemonWithStepsConfig is startTestDaemonWithSteps with extra global
+// config YAML appended (for example a daemon: scheduling block).
+func startTestDaemonWithStepsConfig(t *testing.T, sf StepFactory, extraConfig string) (*paths.Paths, *db.DB) {
+	t.Helper()
 
 	tmpDir, err := os.MkdirTemp("", "dtest")
 	if err != nil {
@@ -293,7 +300,7 @@ func startTestDaemonWithSteps(t *testing.T, sf StepFactory) (*paths.Paths, *db.D
 
 	// Keep daemon tests hermetic now that the default config auto-detects agents.
 	mockClaude := writeMockClaude(t, t.TempDir())
-	configYAML := "agent: claude\nagent_path_override:\n  claude: " + mockClaude + "\n"
+	configYAML := "agent: claude\nagent_path_override:\n  claude: " + mockClaude + "\n" + extraConfig
 	if err := os.WriteFile(p.ConfigFile(), []byte(configYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}

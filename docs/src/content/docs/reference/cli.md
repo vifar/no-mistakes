@@ -110,6 +110,7 @@ no-mistakes axi
 ```
 
 With no subcommand, shows the executable path, description, repo, current branch, daemon state, recent runs, and next-step help, including a pointer to `no-mistakes axi run --help` and the installed `/no-mistakes` skill for full driving guidance.
+When the daemon is running, a `slots` line reports the run-concurrency cap and usage (for example `slots: "2/3 in use, 4 queued"`; `N in use (no cap)` when `daemon.max_concurrent_runs` is 0, plus a `parked (slot released)` count when any run gave its slot back at a gate). `axi status` shows the same line. A run waiting behind the cap has `status: queued` and `queue_position: N` (see [`daemon`](/no-mistakes/reference/global-config/#daemon)).
 When the current branch has an active run, that run appears as `active_run` with any approval gate and help for `axi respond` when it is parked or `axi status` when it is still running.
 If an active run object is parked at a decision gate, it includes `awaiting_agent: parked <duration>` immediately after `status`.
 That field is observability only; the `gate:` object still tells the agent which response to send.
@@ -231,6 +232,7 @@ So is a Test budget-cut gate that reports `test-agent-unvalidated-work`: approva
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
+When the daemon is at its `daemon.max_concurrent_runs` limit, the launch is recorded as a `queued` run and returns at once. Without an explicit `--wait`, `axi run` prints `queued (position N of M)` on stderr and returns success (exit 0) with the run object and `outcome: queued`; the run starts on its own when a slot frees. Passing `--wait` explicitly keeps driving through the queue, printing each position change, and never errors merely because the run is still queued. `axi abort --run <id>` cancels a queued run without ever starting it.
 `--wait` defaults to 8m so an agent harness with a 10-minute tool cap gets a structured error instead of an unbounded hang. It bounds the active-run lookup, event-subscription acknowledgement, and subsequent run driving. Elapsed wait is not a pipeline failure and does not mean the daemon is dead: run `no-mistakes axi status` and reattach with `axi run`. A timed-out `get_active_run` or `get_run` state read, before or during run driving, is retried only after a successful health probe. That probe allows up to 5 seconds for the health reply, capped by the caller's remaining deadline. Connection failures, RPC errors, an unhealthy status, or no health reply within that bound still stop the driver; genuine state-read RPC errors are not retried.
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
 When the CI step is still monitoring an open PR and checks are green - or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge. A generic empty check list without that declaration is not ready.
@@ -749,6 +751,8 @@ The standalone runner rows inspect default binary names; each ACP alias row (`cu
 The [Global Config Reference](/no-mistakes/reference/global-config/) owns ACP gate-validation availability and probing semantics.
 Each validation run performs the authoritative agent resolution again after applying any trusted repository-level override.
 
+When the daemon is running, `doctor` also prints one `run slots` line with the `daemon.max_concurrent_runs` cap, slots in use, queued runs, and the number of live runs that released their slot while parked, for example `2/3 in use, 4 queued, 1 parked (slot released)`.
+
 `doctor` checks `gh` and `az` availability, and that each configured [provider plugin](/no-mistakes/reference/global-config/#provider_plugins) command resolves (it does not run the plugin's handshake). [Provider Integration](/no-mistakes/guides/provider-integration/) owns the separate setup checks for GitLab, Forgejo, Bitbucket Cloud, Gitea, and the Azure DevOps extension and PAT.
 
 `tea` stays docs-only like `glab`, `forgejo-axi`, and Bitbucket's env vars, rather than an active `doctor` check like `gh`/`az`: Gitea is almost always self-hosted, so a bare "`tea` not found" row would be a near-universal, low-value warning for the vast majority of users who have no Gitea instance at all.
@@ -806,6 +810,19 @@ validation-step containment.
 
 This does not remove the managed service. A later `no-mistakes`, `no-mistakes daemon start`, `init`, `attach`, `rerun`, or `update` can start the daemon again through the same service manager when available, or as a detached daemon otherwise.
 On macOS, the retained LaunchAgent starts the daemon again at the next login; the stop output names its plist and points to `daemon uninstall`.
+
+## no-mistakes daemon set max-concurrent-runs
+
+Change how many pipeline runs execute at once, without restarting the daemon.
+
+```sh
+no-mistakes daemon set max-concurrent-runs 5
+no-mistakes daemon set max-concurrent-runs 0   # unlimited
+```
+
+Writes `daemon.max_concurrent_runs` into the global config (only that value line changes; comments and other settings are preserved, and the block is created when absent), then asks the running daemon to apply it immediately and prints the resulting slot usage. A value that is not a whole number of 0 or more is rejected before anything is written. With the daemon stopped, the value is only written and applies at the next start.
+
+Lowering the cap never stops or pauses a running run: it only holds back new starts until usage drops below the new cap. Raising it starts queued runs, first in first out, up to the new cap at once. The daemon also notices a hand edit of the config file within a couple of seconds, so editing `daemon.max_concurrent_runs` or `daemon.hold_slot_while_parked` needs no command at all; see [`daemon`](/no-mistakes/reference/global-config/#daemon).
 
 ## no-mistakes daemon uninstall
 

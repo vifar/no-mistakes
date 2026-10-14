@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -59,6 +60,14 @@ type RunManager struct {
 
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
 
+	// sched enforces daemon.max_concurrent_runs and owns the start order of
+	// queued runs; limitsMu/limitsCache memoise the live global config it reads.
+	sched       *slotScheduler
+	watchOnce   sync.Once
+	watchStop   chan struct{}
+	limitsMu    sync.Mutex
+	limitsCache runLimits
+
 	// evalCaptureMu serializes automatic eval collection. Concurrent runs
 	// finishing together would otherwise write the same per-repository object
 	// pool and the same registry file at once.
@@ -88,7 +97,7 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 	if stepFactory == nil {
 		stepFactory = func() []pipeline.Step { return steps.AllSteps() }
 	}
-	return &RunManager{
+	m := &RunManager{
 		executors:     make(map[string]*pipeline.Executor),
 		cancels:       make(map[string]context.CancelCauseFunc),
 		dones:         make(map[string]chan struct{}),
@@ -99,6 +108,241 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		stateRevs:     make(map[string]int64),
 		completedRuns: make(map[string]bool),
 	}
+	m.limitsCache = runLimits{max: config.DefaultMaxConcurrentRuns}
+	m.sched = newSlotScheduler(m.liveLimits)
+	m.sched.start = m.startQueuedRun
+	return m
+}
+
+// runLimits is the scheduling slice of the global config.
+type runLimits struct {
+	loaded  bool
+	modTime time.Time
+	size    int64
+	max     int
+	hold    bool
+}
+
+// liveLimits returns the current daemon.max_concurrent_runs and
+// daemon.hold_slot_while_parked. The global file is re-parsed only when its
+// mtime or size changes (parsing logs deprecation warnings, and this runs on
+// every slot yield), so an edit applies to the next scheduling decision. An
+// unreadable file keeps the last good limits.
+func (m *RunManager) liveLimits() (int, bool) {
+	m.limitsMu.Lock()
+	defer m.limitsMu.Unlock()
+	path := m.paths.ConfigFile()
+	info, err := os.Stat(path)
+	if err == nil && m.limitsCache.loaded && info.ModTime().Equal(m.limitsCache.modTime) && info.Size() == m.limitsCache.size {
+		return m.limitsCache.max, m.limitsCache.hold
+	}
+	cfg, loadErr := config.LoadGlobal(path)
+	if loadErr != nil || cfg == nil {
+		if loadErr != nil {
+			slog.Warn("failed to load global config for run limits; keeping previous limits", "error", loadErr)
+		}
+		return m.limitsCache.max, m.limitsCache.hold
+	}
+	m.limitsCache = runLimits{loaded: err == nil, max: cfg.Daemon.MaxConcurrentRuns, hold: cfg.Daemon.HoldSlotWhileParked}
+	if err == nil {
+		m.limitsCache.modTime, m.limitsCache.size = info.ModTime(), info.Size()
+	}
+	pipeline.SetMaxConcurrentAgents(cfg.Daemon.MaxConcurrentAgents)
+	return m.limitsCache.max, m.limitsCache.hold
+}
+
+// limitWatchInterval is how often the daemon notices an edited global config
+// and applies a changed run limit without waiting for the next launch or run
+// exit. A variable so tests can shorten it.
+var limitWatchInterval = 2 * time.Second
+
+// StartLimitWatcher applies edits to daemon.max_concurrent_runs and
+// daemon.hold_slot_while_parked without a restart: it re-checks the global
+// config file's mtime on a short interval and drains the queue, so a raised
+// cap starts queued runs promptly. Lowering the cap never touches a running
+// run; it only holds back new admissions until usage drops below it. The
+// watcher stops with Shutdown.
+func (m *RunManager) StartLimitWatcher() {
+	m.watchOnce.Do(func() {
+		m.watchStop = make(chan struct{})
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			ticker := time.NewTicker(limitWatchInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-m.watchStop:
+					return
+				case <-ticker.C:
+					m.sched.dispatch()
+				}
+			}
+		}()
+	})
+}
+
+// ReloadLimits re-reads the scheduling limits from the global config now,
+// starts whatever queued runs the new cap admits, and returns the resulting
+// slot usage. It is what `daemon set` calls over IPC.
+func (m *RunManager) ReloadLimits() ipc.SlotsResult {
+	m.limitsMu.Lock()
+	m.limitsCache.loaded = false
+	m.limitsMu.Unlock()
+	m.sched.dispatch()
+	return m.SlotUsage()
+}
+
+// SlotUsage reports the current cap and slot usage.
+func (m *RunManager) SlotUsage() ipc.SlotsResult {
+	m.sched.refresh()
+	st := m.sched.stats()
+	return ipc.SlotsResult{
+		MaxConcurrentRuns:   st.Max,
+		HoldSlotWhileParked: st.Hold,
+		InUse:               st.Active,
+		Queued:              st.Queued,
+		ParkedReleased:      st.Yielded,
+	}
+}
+
+// startQueuedRun is the queue drain's launcher. It runs inside dispatch and
+// must not block: it registers the run's cancel/done pair synchronously, so an
+// abort arriving at any moment after the run left the queue still finds it,
+// and finishes the launch on its own goroutine.
+func (m *RunManager) startQueuedRun(runID string, slot *runSlot) {
+	if m.shuttingDown.Load() {
+		slot.Release()
+		return
+	}
+	runCtx, cancel := context.WithCancelCause(context.Background())
+	handle := &runHandle{cancel: cancel, runCtx: runCtx, done: make(chan struct{})}
+	m.mu.Lock()
+	m.cancels[runID] = cancel
+	m.dones[runID] = handle.done
+	m.mu.Unlock()
+	m.wg.Add(1)
+	go func() {
+		defer m.wg.Done()
+		m.launchQueuedRun(runID, slot, handle)
+	}()
+}
+
+// launchQueuedRun finishes the launch of a run taken off the queue, rebuilding
+// everything from its row. Failures end the run as failed (as an inline launch
+// does); there is no caller left to return them to.
+func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHandle) {
+	defer func() {
+		// launchRun transfers the handle to the run goroutine once the
+		// executor exists; any earlier exit must unregister it here.
+		if r := recover(); r != nil {
+			slog.Error("panic launching queued run", "run_id", runID, "panic", r)
+			_ = m.db.UpdateRunError(runID, fmt.Sprintf("internal panic: %v", r))
+		}
+		if !handle.consumed {
+			m.mu.Lock()
+			delete(m.cancels, runID)
+			delete(m.dones, runID)
+			m.mu.Unlock()
+			handle.cancel(nil)
+			close(handle.done)
+			// Once consumed, the run goroutine owns the slot and frees it.
+			slot.Release()
+		}
+	}()
+	claimed, err := m.db.ClaimQueuedRun(runID)
+	if err != nil {
+		slog.Error("failed to claim queued run", "run_id", runID, "error", err)
+		return
+	}
+	if !claimed {
+		return // aborted or superseded while it waited
+	}
+	run, err := m.db.GetRun(runID)
+	if err != nil || run == nil {
+		slog.Error("queued run is unreadable", "run_id", runID, "error", err)
+		_ = m.db.UpdateRunError(runID, "queued run is unreadable")
+		return
+	}
+	fail := func(msg string) {
+		slog.Error("queued run cannot start", "run_id", runID, "error", msg)
+		_ = m.db.UpdateRunError(runID, msg)
+		m.broadcastTerminal(run, types.RunFailed, msg)
+	}
+	repo, err := m.db.GetRepo(run.RepoID)
+	if err != nil || repo == nil {
+		fail("queued run repository is missing")
+		return
+	}
+	var spec queueSpec
+	if raw, err := m.db.GetRunQueueSpec(runID); err == nil && raw != "" {
+		if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+			fail(fmt.Sprintf("decode queued run spec: %s", err))
+			return
+		}
+	}
+	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		fail(fmt.Sprintf("load config: %s", err))
+		return
+	}
+	if _, err := m.launchRun(context.Background(), repo, run, globalCfg, spec.Trigger, spec.SkipSteps, slot, handle); err != nil {
+		// launchRun already recorded the failure on the row for setup errors.
+		m.broadcastTerminal(run, types.RunFailed, err.Error())
+	}
+}
+
+// broadcastTerminal tells subscribers a run that never reached its executor
+// ended, and closes its streams.
+func (m *RunManager) broadcastTerminal(run *db.Run, status types.RunStatus, reason string) {
+	s := string(status)
+	m.broadcast(ipc.Event{
+		Type:   ipc.EventRunCompleted,
+		RunID:  run.ID,
+		RepoID: run.RepoID,
+		Status: &s,
+		Branch: &run.Branch,
+		Error:  &reason,
+	})
+	m.closeSubscribers(run.ID)
+}
+
+// annotateQueue stamps the run's place in the start order onto a snapshot.
+func (m *RunManager) annotateQueue(info *ipc.RunInfo) *ipc.RunInfo {
+	m.sched.annotate(info)
+	return info
+}
+
+// recoverQueuedRuns reloads the durable queue after a restart and drains it.
+// Queued runs stay queued across a restart: nothing about them was running.
+// Runs the recovery path resumed are already holding slots (beyond the cap if
+// need be) so the queue starts only as they free capacity.
+func (m *RunManager) recoverQueuedRuns() {
+	ids, err := m.db.QueuedRunIDs()
+	if err != nil {
+		slog.Error("failed to list queued runs for recovery", "error", err)
+		return
+	}
+	if len(ids) == 0 {
+		return
+	}
+	slog.Info("restored queued runs", "count", len(ids))
+	m.sched.restoreQueue(ids)
+	m.sched.dispatch()
+}
+
+// cancelQueuedRun ends a run that never started. It reports whether this call
+// cancelled it; false means a start won the race (or the run was not queued).
+func (m *RunManager) cancelQueuedRun(runID, reason string) (bool, error) {
+	cancelled, err := m.db.CancelQueuedRun(runID, reason)
+	if err != nil || !cancelled {
+		return false, err
+	}
+	if run, err := m.db.GetRun(runID); err == nil && run != nil {
+		m.broadcastTerminal(run, types.RunCancelled, reason)
+	}
+	slog.Info("cancelled queued run", "run_id", runID, "reason", reason)
+	return true, nil
 }
 
 type recoveredRunPlan struct {
@@ -419,7 +663,12 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		return
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
+	// A run resumed after a restart counts against the cap even when the cap
+	// is already full: it was executing before the restart, so it is never
+	// queued behind new work. It gives the slot back as soon as it parks.
+	slot := m.sched.forceAcquire(plan.run.ID)
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
+	executor.SetRunSlot(slot)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -443,6 +692,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		startedAt := time.Now()
 		defer m.wg.Done()
 		defer close(done)
+		defer slot.Release()
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				errMsg := fmt.Sprintf("internal panic: %v", recovered)
@@ -471,7 +721,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			m.mu.Unlock()
 		}()
 
-		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
+		resumeErr := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
+		slot.Release()
+		if err := resumeErr; err != nil {
 			if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
 				plan.run.Status = types.RunFailed
@@ -1635,6 +1887,89 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", fmt.Errorf("load global config: %w", globalCfgErr)
 	}
 
+	// Admission. The run row is durable from here on. A run that fits under
+	// daemon.max_concurrent_runs starts now, exactly as before. Otherwise it is
+	// recorded as queued and this call returns at once: no worktree, no agent,
+	// no executor. The queue drain (slotScheduler.dispatch) finishes the launch
+	// from the row alone, so a queued run also survives a daemon restart.
+	slot, admitted := m.sched.tryAdmit(run.ID)
+	if !admitted {
+		if err := m.enqueueRun(run, queueSpec{Trigger: trigger, SkipSteps: skipSteps}); err != nil {
+			m.db.UpdateRunError(run.ID, fmt.Sprintf("queue run: %s", err))
+			trackStartFailure("queue_run")
+			return "", fmt.Errorf("queue run: %w", err)
+		}
+		telemetry.Track("run", telemetry.Fields{
+			"action":      "queued",
+			"trigger":     trigger,
+			"branch_role": branchRole,
+		})
+		return run.ID, nil
+	}
+	return m.launchRun(ctx, repo, run, globalCfg, trigger, skipSteps, slot, nil)
+}
+
+// queueSpec is what a queued run needs to start that its row does not already
+// carry. Everything else (intent, PR base, pins, closing issues, shipping
+// options) is persisted on the run itself.
+type queueSpec struct {
+	Trigger   string           `json:"trigger"`
+	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
+}
+
+// runHandle is the cancel/done pair registered for a run before its launch
+// setup runs. A queued run's handle is registered when the queue drain picks
+// it, so an abort that arrives during setup still reaches the run.
+type runHandle struct {
+	cancel   context.CancelCauseFunc
+	runCtx   context.Context
+	done     chan struct{}
+	consumed bool
+}
+
+// enqueueRun persists the run as queued and puts it in the start order.
+func (m *RunManager) enqueueRun(run *db.Run, spec queueSpec) error {
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		return err
+	}
+	m.sched.admitMu.Lock()
+	defer m.sched.admitMu.Unlock()
+	if _, err := m.db.MarkRunQueued(run.ID, string(raw)); err != nil {
+		return err
+	}
+	run.Status = types.RunQueued
+	m.sched.enqueue(run.ID)
+	return nil
+}
+
+// launchRun performs the setup and background start of a run that already
+// holds slot. handle is nil for a launch that runs inline in the request and
+// non-nil for one the queue drain started. The slot is released on every
+// return that did not hand it to the run goroutine.
+func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, globalCfg *config.GlobalConfig, trigger string, skipSteps []types.StepName, slot *runSlot, handle *runHandle) (string, error) {
+	branch, headSHA := run.Branch, run.HeadSHA
+	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
+	trackStartFailure := func(stage string) {
+		telemetry.Track("run", telemetry.Fields{
+			"action":      "start_failed",
+			"trigger":     trigger,
+			"branch_role": branchRole,
+			"stage":       stage,
+		})
+	}
+	storedPRBaseBranch := ""
+	if run.PRBaseBranch != nil {
+		storedPRBaseBranch = *run.PRBaseBranch
+	}
+	bgOwnsSlot := false
+	defer func() {
+		if !bgOwnsSlot {
+			slot.Release()
+		}
+	}()
+
+	var err error
 	// Create worktree from the gate bare repo, where this repository's
 	// worktree placement says it belongs (see internal/worktrees). This is the
 	// only point at which configuration decides placement: the resolved
@@ -1816,8 +2151,15 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	})
 
 	// Create executor with event broadcast.
-	runCtx, cancel := context.WithCancelCause(context.Background())
+	var runCtx context.Context
+	var cancel context.CancelCauseFunc
+	if handle != nil {
+		runCtx, cancel = handle.runCtx, handle.cancel
+	} else {
+		runCtx, cancel = context.WithCancelCause(context.Background())
+	}
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	executor.SetRunSlot(slot)
 	executor.SetForgeContext(forgeCtx)
 	if hasRebaseCoreStep(execSteps) {
 		executor.SetPRContextGuard(steps.GuardPRContext)
@@ -1831,16 +2173,24 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}()
 	})
 
-	// Track executor.
-	done := make(chan struct{})
+	// Track executor. A queue-started run registered its cancel/done pair
+	// before setup; an inline launch registers them now.
+	var done chan struct{}
 	m.mu.Lock()
 	m.executors[run.ID] = executor
-	m.cancels[run.ID] = cancel
-	m.dones[run.ID] = done
+	if handle != nil {
+		done = handle.done
+		handle.consumed = true
+	} else {
+		done = make(chan struct{})
+		m.cancels[run.ID] = cancel
+		m.dones[run.ID] = done
+	}
 	m.mu.Unlock()
 
-	// Background goroutine now owns worktree cleanup.
+	// Background goroutine now owns worktree cleanup and the run's slot.
 	bgOwnsWorktree = true
+	bgOwnsSlot = true
 
 	// Launch pipeline in background.
 	m.wg.Add(1)
@@ -1848,6 +2198,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		startedAt := time.Now()
 		defer m.wg.Done()
 		defer close(done)
+		// Registered before the recover handler below so it runs after it:
+		// whether the pipeline completed, failed, was cancelled or panicked,
+		// the slot is freed and the queue drains.
+		defer slot.Release()
 		defer func() {
 			if r := recover(); r != nil {
 				errMsg := fmt.Sprintf("internal panic: %v", r)
@@ -1897,7 +2251,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			m.mu.Unlock()
 		}()
 
-		if err := executor.Execute(runCtx, run, repo, wtDir); err != nil {
+		err := executor.Execute(runCtx, run, repo, wtDir)
+		// The pipeline's own work is over: free the slot before the eval
+		// collection below, which is local bookkeeping and not pipeline load.
+		slot.Release()
+		if err != nil {
 			fields := telemetry.Fields{
 				"action":      "finished",
 				"trigger":     trigger,
@@ -2150,6 +2508,9 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 	m.mu.Unlock()
 
 	if !ok {
+		if run != nil && run.Status == types.RunQueued {
+			return pipeline.RespondDispositions{}, fmt.Errorf("run %s is queued and has not started; there is no gate to respond to yet", runID)
+		}
 		return pipeline.RespondDispositions{}, fmt.Errorf("no active executor for run %s", runID)
 	}
 
@@ -2315,6 +2676,14 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 // orphaned goroutines from continuing agent calls and git operations.
 func (m *RunManager) Shutdown() {
 	m.shuttingDown.Store(true)
+	m.watchOnce.Do(func() {}) // no watcher may start after shutdown begins
+	if m.watchStop != nil {
+		select {
+		case <-m.watchStop:
+		default:
+			close(m.watchStop)
+		}
+	}
 
 	m.mu.Lock()
 	cancels := make(map[string]context.CancelCauseFunc, len(m.cancels))
@@ -2342,6 +2711,18 @@ func (m *RunManager) Shutdown() {
 
 // HandleCancel stops an active run and propagates cancellation to the executor.
 func (m *RunManager) HandleCancel(runID string) error {
+	// A run still waiting in the queue has no executor: take it out of the
+	// start order and end it without ever starting it.
+	if m.sched.removeQueued(runID) {
+		cancelled, err := m.cancelQueuedRun(runID, types.RunCancelReasonAbortedByUser)
+		if err != nil {
+			return err
+		}
+		if cancelled {
+			return nil
+		}
+		// Lost the race to a claim: the run is starting, fall through.
+	}
 	m.mu.Lock()
 	cancel, ok := m.cancels[runID]
 	m.mu.Unlock()
@@ -2371,7 +2752,14 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 		if run.Branch != branch {
 			continue
 		}
-		if run.Status != types.RunPending && run.Status != types.RunRunning {
+		if !run.Status.Active() {
+			continue
+		}
+		if run.Status == types.RunQueued && m.sched.removeQueued(run.ID) {
+			// A newer push supersedes a run that never started.
+			if _, err := m.cancelQueuedRun(run.ID, types.RunCancelReasonSuperseded); err != nil {
+				slog.Error("failed to cancel superseded queued run", "run_id", run.ID, "error", err)
+			}
 			continue
 		}
 

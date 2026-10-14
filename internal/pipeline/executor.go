@@ -67,6 +67,11 @@ type Executor struct {
 
 	onEvent EventFunc
 
+	// slot is the run's daemon concurrency slot (nil: no cap). The executor
+	// yields it while a gate is parked and takes it again, ahead of queued new
+	// runs, when the operator's response resumes work.
+	slot RunSlot
+
 	// sessions manages this run's durable review-loop agent sessions; shared
 	// carries run-scoped step-to-step results. Both are created per Execute.
 	sessions *RunSessions
@@ -812,9 +817,13 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		gate.stepResult.DurationMS,
 	)
 
+	e.yieldSlot()
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
+	}
+	if err == nil {
+		err = e.acquireSlot(ctx)
 	}
 	if err != nil {
 		if dbErr := e.db.FailStep(gate.stepResult.ID, err.Error(), duration); dbErr != nil {
@@ -1435,6 +1444,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		PRContext:         e.prContext,
 		DB:                e.db,
 		StepResultID:      sr.ID,
+		Slot:              e.slot,
 		UserIntent:        userIntent,
 		IntentSource:      userIntentSource,
 		Sessions:          e.sessions,
@@ -1511,7 +1521,17 @@ rounds:
 				return false, "", err
 			}
 		}
-		outcome, err := step.Execute(sctx)
+		// Every step but CI runs on a held slot. CI yields its slot during the
+		// PR monitoring poll and re-acquires only for agent work (RunAgent), so
+		// it must not take one back here just to start monitoring.
+		var outcome *StepOutcome
+		var err error
+		if stepName != types.StepCI {
+			err = e.acquireSlot(ctx)
+		}
+		if err == nil {
+			outcome, err = step.Execute(sctx)
+		}
 		if err == nil && run.Shipping != nil {
 			if outcome.Skipped || outcome.SkipRemaining {
 				err = fmt.Errorf("strict shipping forbids automatic step skips")
@@ -1809,9 +1829,13 @@ rounds:
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
 
+			e.yieldSlot()
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
 			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
+			}
+			if err == nil {
+				err = e.acquireSlot(ctx)
 			}
 			if err != nil {
 				if dbErr := e.db.FailStep(sr.ID, err.Error(), executionMS); dbErr != nil {

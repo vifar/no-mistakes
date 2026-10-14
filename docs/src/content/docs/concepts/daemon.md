@@ -116,7 +116,9 @@ If you push to the same branch while a run is already active, the daemon:
 2. Waits for it to finish
 3. Starts a new run with the latest push
 
-Pushes to different branches run concurrently.
+Pushes to different branches run concurrently, up to [`daemon.max_concurrent_runs`](/no-mistakes/reference/global-config/#daemon) (default 3). A launch beyond that limit is recorded as a `queued` run and returned immediately; queued runs start in order as slots free. A newer push to a branch whose run is still queued supersedes it the same way. The control plane (`status`, `respond`, `abort`, `gate_context`, launch) never waits on a slot.
+
+The cap is adjustable while the daemon runs: it re-reads `daemon.max_concurrent_runs` and `daemon.hold_slot_while_parked` when the global config changes, and `no-mistakes daemon set max-concurrent-runs N` applies a new value immediately over IPC. Lowering it never stops a running run, it only holds back new admissions until usage is below the new cap; raising it starts queued runs up to the new cap at once. `axi status`, the `axi` home view, and `doctor` report the cap, slots in use, queued runs, and parked runs that released their slot.
 
 This is another reason the daemon exists: branch-level coordination is easier to
 reason about in one long-lived process than inside independent hook invocations.
@@ -133,6 +135,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Preserves a run that was actively monitoring CI for an already-created PR as `ci_monitor_interrupted` rather than failing it: the run has no final verified verdict, so a restart mid-monitor is not a code failure. That run is terminal and never resumed
 - Before failing any other stale active run, verifies its managed worktree head and pins an unpublished descendant under the run-specific recovery ref so later rerun or guarded custody recovery does not fall back to a stale gate branch
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
+- Leaves `queued` runs queued (nothing about them was running) and starts them first in, first out once the resumed runs hold their slots. Resumed runs count against `daemon.max_concurrent_runs` but are never queued behind new work, so a restart can briefly exceed the limit
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
 - Terminates processes a crashed daemon left running in worktrees no run owns any more, using the same working-directory scoping as run cleanup plus a ten-minute age floor so a run starting concurrently with startup is never mistaken for a leak
 - Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`, or whose unresolved refusal requires [retention](#what-it-does); under `~/.no-mistakes/worktrees/` that means eligible leftovers from terminal runs plus directories with no matching run record, while in a [configured worktree root](/no-mistakes/reference/global-config/#worktree_roots) only the directories run records name are ever swept or removed. A `ci_monitor_interrupted` worktree is also kept when its checked-out commit differs from the run's last pushed commit, since it may still hold an unpushed CI auto-fix commit
