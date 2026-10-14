@@ -42,14 +42,6 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 	if err != nil {
 		return fmt.Errorf("scan published commits: %w", err)
 	}
-	objects, err := stepGitRun(sctx, "rev-list", "--objects", "--no-object-names", base+".."+head)
-	if err != nil {
-		return fmt.Errorf("scan published objects: %w", err)
-	}
-	publishedObjects := map[string]bool{}
-	for _, sha := range strings.Fields(objects) {
-		publishedObjects[sha] = true
-	}
 	var entries, introduced []rawDiffEntry
 	seen := map[string]bool{}
 	for _, line := range strings.Split(commits, "\n") {
@@ -73,7 +65,7 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 		entries = append(entries, changes...)
 		for _, entry := range addedOrModified(changes) {
 			key := entry.path + "\x00" + entry.newSHA
-			if publishedObjects[entry.newSHA] && !seen[key] {
+			if !seen[key] {
 				seen[key] = true
 				introduced = append(introduced, entry)
 			}
@@ -81,6 +73,7 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 	}
 
 	var scratch []string
+	addedPathsSeen := map[string]bool{}
 	baseDirs := map[string]bool{}
 	dirInBase := func(dir string) (bool, error) {
 		if known, ok := baseDirs[dir]; ok {
@@ -96,11 +89,12 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 		return exists, nil
 	}
 	for _, entry := range entries {
-		if entry.status != "A" || entry.newMode == "160000" {
+		if entry.status != "A" || entry.newMode == "160000" || addedPathsSeen[entry.path] {
 			continue
 		}
+		addedPathsSeen[entry.path] = true
 		if pattern, excluded := matchesStagingExclude(sctx, entry.path); excluded {
-			scratch = appendUnique(scratch, fmt.Sprintf("%s (matches staging_exclude %q)", entry.path, pattern))
+			scratch = append(scratch, fmt.Sprintf("%s (matches staging_exclude %q)", entry.path, pattern))
 			continue
 		}
 		// Walk scratch components shallow to deep; the first one the base tree
@@ -116,7 +110,7 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 				return fmt.Errorf("scan published range: %w", err)
 			}
 			if !exists {
-				scratch = appendUnique(scratch, fmt.Sprintf("%s (new directory %s/)", entry.path, dir))
+				scratch = append(scratch, fmt.Sprintf("%s (new directory %s/)", entry.path, dir))
 				break
 			}
 		}

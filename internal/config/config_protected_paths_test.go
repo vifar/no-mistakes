@@ -70,8 +70,8 @@ func TestStagingPolicy_DefaultsAndExplicitZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := Merge(DefaultGlobalConfig(), unset).MaxFileSizeBytes; got != 52428800 {
-		t.Errorf("default max_file_size_bytes = %d, want 52428800", got)
+	if got := Merge(DefaultGlobalConfig(), unset).MaxFileSizeBytes; got != 10485760 {
+		t.Errorf("default max_file_size_bytes = %d, want 10485760", got)
 	}
 	zero, err := LoadRepoFromBytes([]byte("max_file_size_bytes: 0"))
 	if err != nil {

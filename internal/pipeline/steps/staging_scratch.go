@@ -78,17 +78,18 @@ func stageUntrackedChanges(sctx *pipeline.StepContext) error {
 		return fmt.Errorf("list untracked files: %w", err)
 	}
 	var toAdd, skipped []string
+	skippedSeen := map[string]bool{}
 	for _, entry := range nulFields(listed) {
 		if !strings.HasSuffix(entry, "/") {
 			if _, excluded := matchesStagingExclude(sctx, entry); excluded {
-				skipped = append(skipped, entry)
+				skipped = appendUnique(skipped, skippedSeen, entry)
 				continue
 			}
 			toAdd = append(toAdd, entry)
 			continue
 		}
 		if isScratchDirName(path.Base(strings.TrimSuffix(entry, "/"))) {
-			skipped = append(skipped, entry)
+			skipped = appendUnique(skipped, skippedSeen, entry)
 			continue
 		}
 		// A wholly untracked directory is expanded so nested scratch and
@@ -100,11 +101,11 @@ func stageUntrackedChanges(sctx *pipeline.StepContext) error {
 		for _, file := range nulFields(files) {
 			rel := strings.TrimPrefix(file, entry)
 			if scratch := firstScratchComponent(rel, strings.HasSuffix(file, "/")); scratch != "" {
-				skipped = appendUnique(skipped, entry+scratch)
+				skipped = appendUnique(skipped, skippedSeen, entry+scratch)
 				continue
 			}
 			if _, excluded := matchesStagingExclude(sctx, file); excluded {
-				skipped = append(skipped, file)
+				skipped = appendUnique(skipped, skippedSeen, file)
 				continue
 			}
 			toAdd = append(toAdd, file)
@@ -132,12 +133,11 @@ func nulFields(raw string) []string {
 	return fields
 }
 
-func appendUnique(list []string, value string) []string {
-	for _, existing := range list {
-		if existing == value {
-			return list
-		}
+func appendUnique(list []string, seen map[string]bool, value string) []string {
+	if seen[value] {
+		return list
 	}
+	seen[value] = true
 	return append(list, value)
 }
 

@@ -1315,3 +1315,130 @@ func TestAssertPublishedRangeClean_ExistingScratchComponentMustBeTree(t *testing
 		})
 	}
 }
+
+func TestAssertPublishedRangeClean_RefusesReusedOversizedBaseBlob(t *testing.T) {
+	t.Parallel()
+	dir, _, _ := setupGitRepo(t)
+	content := strings.Repeat("x", 600)
+	base := scratchGuardCommit(t, dir, map[string]string{"fixture.dat": content})
+	gitCmd(t, dir, "branch", "-f", "main", base)
+	head := scratchGuardCommit(t, dir, map[string]string{"copied.dat": content, "feature.txt": content})
+	sctx := newTestContext(t, &mockAgent{}, dir, base, head, config.Commands{})
+	sctx.Config.MaxFileSizeBytes = 500
+	err := assertPublishedRangeClean(sctx, head)
+	if err == nil {
+		t.Fatal("expected refusal for additions and modifications reusing oversized base blob")
+	}
+	for _, path := range []string{"copied.dat", "feature.txt"} {
+		if !strings.Contains(err.Error(), path) {
+			t.Errorf("refusal does not name %s: %v", path, err)
+		}
+	}
+}
+
+func TestStagePipelineChanges_SkipsTestPhaseDriver(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, base, head, config.Commands{})
+	logs := captureLogs(sctx)
+	for _, prefix := range []string{".test-phase-driver", "pkg/.test-phase-driver"} {
+		writeTestFile(t, dir, prefix+"/driver", "\x00\x01stand-in binary")
+		writeTestFile(t, dir, prefix+"/config.json", "{}")
+	}
+	writeTestFile(t, dir, "pkg/code.go", "package pkg\n")
+	if err := stagePipelineChanges(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := stagedNames(t, dir); len(got) != 1 || got[0] != "pkg/code.go" {
+		t.Fatalf("driver files must remain untracked: %q", got)
+	}
+	if len(*logs) != 1 || !strings.Contains((*logs)[0], ".test-phase-driver/") || !strings.Contains((*logs)[0], "pkg/.test-phase-driver/") {
+		t.Fatalf("expected one log naming both skipped driver directories: %q", *logs)
+	}
+}
+
+func TestAssertPublishedRangeClean_RefusesTestPhaseDriver(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, base, head, config.Commands{})
+	head = scratchGuardCommit(t, dir, map[string]string{
+		".test-phase-driver/driver":     "\x00stand-in binary",
+		"pkg/.test-phase-driver/driver": "\x00stand-in binary",
+	})
+	err := assertPublishedRangeClean(sctx, head)
+	if err == nil || !strings.Contains(err.Error(), ".test-phase-driver/driver") || !strings.Contains(err.Error(), "pkg/.test-phase-driver/driver") {
+		t.Fatalf("expected refusal naming both driver paths: %v", err)
+	}
+}
+
+func TestStagePipelineChanges_RefusesOversizedOrdinaryBinary(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, base, head, config.Commands{})
+	sctx.Config.MaxFileSizeBytes = 100
+	content := strings.Repeat("\x00\x01\x02\x03", 50)
+	writeTestFile(t, dir, "tools/driver", content)
+	before := gitCmd(t, dir, "ls-files", "--stage")
+	err := stagePipelineChanges(sctx)
+	if err == nil || !strings.Contains(err.Error(), "tools/driver (200 B)") {
+		t.Fatalf("expected refusal naming ordinary binary and size: %v", err)
+	}
+	if got := gitCmd(t, dir, "ls-files", "--stage"); got != before {
+		t.Fatalf("refusal changed the index: %s", got)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "tools/driver")); err != nil || string(got) != content {
+		t.Fatalf("refusal changed binary content: %v", err)
+	}
+}
+
+func TestAssertPublishedRangeClean_LargeScratchHistoryCountsUniquePaths(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, base, head, config.Commands{})
+	blob := gitCmd(t, dir, "rev-parse", "HEAD:feature.txt")
+	const count = 63000
+	var input strings.Builder
+	for i := 0; i < count; i++ {
+		fmt.Fprintf(&input, "100644 %s\t.fixture/f%05d\n", blob, i)
+	}
+	if _, err := stepGitRunInput(sctx, input.String(), "update-index", "--index-info"); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "commit", "-m", "large scratch fixture")
+	gitCmd(t, dir, "update-index", "--force-remove", ".fixture/f00000")
+	gitCmd(t, dir, "commit", "-m", "remove scratch path")
+	gitCmd(t, dir, "update-index", "--add", "--cacheinfo", "100644,"+blob+",.fixture/f00000")
+	gitCmd(t, dir, "commit", "-m", "re-add scratch path")
+	head = gitCmd(t, dir, "rev-parse", "HEAD")
+	err := assertPublishedRangeClean(sctx, head)
+	if err == nil || !strings.Contains(err.Error(), "63000 path(s)") || !strings.Contains(err.Error(), "and 62980 more") {
+		t.Fatalf("expected exact unique total and capped diagnostics: %v", err)
+	}
+	if strings.Contains(err.Error(), ".fixture/f00020") {
+		t.Fatalf("refusal rendered paths beyond its cap: %v", err)
+	}
+}
+
+func BenchmarkAppendUniquePaths(b *testing.B) {
+	for _, count := range []int{1000, 63000} {
+		b.Run(fmt.Sprint(count), func(b *testing.B) {
+			paths := make([]string, count)
+			for i := range paths {
+				paths[i] = fmt.Sprintf("pkg/.scratch-%05d/", i)
+			}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				var listed []string
+				seen := map[string]bool{}
+				for repeat := 0; repeat < 2; repeat++ {
+					for _, path := range paths {
+						listed = appendUnique(listed, seen, path)
+					}
+				}
+				if len(listed) != count {
+					b.Fatalf("unique path count = %d, want %d", len(listed), count)
+				}
+			}
+		})
+	}
+}
