@@ -22,7 +22,7 @@ metadata:
 
 **Git on Bare Gate Repos (`safe.bareRepository`)**
 
-- Agent harnesses and hardened CI inject `safe.bareRepository=explicit`, which forbids cwd-based discovery of bare repositories. Route every gate git call through `git.Run`, which detects a bare git dir and prepends `--git-dir=<dir>`; never shell out to git in a bare gate repo relying on `cmd.Dir` or `-C` discovery (issue #362).
+- Agent harnesses and hardened CI inject `safe.bareRepository=explicit`, which forbids cwd-based discovery of bare repositories. General gate Git calls use `git.Run`, which detects a bare git dir and prepends `--git-dir=<dir>`; identity discovery uses the dedicated owner described under Recursive Gate-Execution Containment above. Never shell out to git in a bare gate repo relying on `cmd.Dir` or `-C` discovery (issue #362).
 - Startup gate migration is DB-authoritative with a strict validated `<id>.git` legacy fallback; it must reject non-gates before hook or Git mutation and use `git.RunBare` so a malformed directory cannot discover an ancestor worktree. Completed migrations carry the content-versioned gate-config stamp and normal restarts must stay filesystem-only for current gates. Regressions: `TestMigrateGateConfigsRejectsInvalidDirectoriesAndSkipsCurrentGates`, `TestColdDetachedStartupProductionGateCardinality`.
 - Regressions: `TestRunOnBareRepoUnderSafeBareRepositoryExplicit`, `TestWorktreeAddRemoveOnBareRepoUnderSafeBareRepositoryExplicit`, `TestInitUnderSafeBareRepositoryExplicit`.
 
