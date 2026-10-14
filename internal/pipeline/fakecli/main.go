@@ -13,10 +13,12 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
@@ -1213,6 +1215,9 @@ func forwardCommitStatus(args []string) bool {
 			}
 		}
 	}
+	if os.Getenv("FAKE_CLI_STATUS_PIPE_IGNORE_TERM") == "1" && body["state"] == "success" {
+		signal.Ignore(syscall.SIGTERM)
+	}
 	if os.Getenv("FAKE_CLI_STATUS_PIPE_CHILD") == "1" && body["state"] == "success" {
 		child := exec.Command(os.Args[0], os.Args[1:]...)
 		child.Env = append(os.Environ(), "FAKE_CLI_STATUS_PIPE_CHILD=0")
@@ -1224,6 +1229,11 @@ func forwardCommitStatus(args []string) bool {
 		return true
 	}
 	http.DefaultClient.Timeout = 25 * time.Second
+	if timeout := os.Getenv("FAKE_CLI_STATUS_HTTP_TIMEOUT"); timeout != "" {
+		if duration, err := time.ParseDuration(timeout); err == nil {
+			http.DefaultClient.Timeout = duration
+		}
+	}
 	data, _ := json.Marshal(body)
 	req, err := http.NewRequest(method, base+"/"+endpoint, strings.NewReader(string(data)))
 	if err != nil {

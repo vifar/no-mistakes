@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -21,12 +23,44 @@ const commitStatusTimeout = 15 * time.Second
 
 // CommitStatusLock serializes publication ownership, terminal decisions and POSTs.
 var CommitStatusLock = make(chan struct{}, 1)
+var terminalSettlementMu sync.Mutex
+var terminalSettlements []func()
+
+func ReleaseCommitStatusLock() {
+	for {
+		terminalSettlementMu.Lock()
+		pending := terminalSettlements
+		terminalSettlements = nil
+		if len(pending) == 0 {
+			<-CommitStatusLock
+			terminalSettlementMu.Unlock()
+			return
+		}
+		terminalSettlementMu.Unlock()
+		for _, settle := range pending {
+			settle()
+		}
+	}
+}
+
+func SettleIneligibleTerminal(d *db.DB, runID, message string, status types.RunStatus) error {
+	done := make(chan error, 1)
+	terminalSettlementMu.Lock()
+	terminalSettlements = append(terminalSettlements, func() { done <- d.RecordIneligibleTerminal(runID, message, status, nil) })
+	terminalSettlementMu.Unlock()
+	select {
+	case CommitStatusLock <- struct{}{}:
+		ReleaseCommitStatusLock()
+	default:
+	}
+	return <-done
+}
 
 func AcquireCommitStatusLock(ctx context.Context) error {
 	select {
 	case CommitStatusLock <- struct{}{}:
 		if err := ctx.Err(); err != nil {
-			<-CommitStatusLock
+			ReleaseCommitStatusLock()
 			return err
 		}
 		return nil
@@ -41,7 +75,7 @@ func WithCommitStatusLock(ctx context.Context, write func() error) error {
 	if err := AcquireCommitStatusLock(bounded); err != nil {
 		return err
 	}
-	defer func() { <-CommitStatusLock }()
+	defer ReleaseCommitStatusLock()
 	return write()
 }
 
@@ -54,7 +88,7 @@ func RecordRunFailure(ctx context.Context, d *db.DB, runID, message string, head
 	err := WithCommitStatusLock(ctx, func() error { return d.RecordIneligibleTerminal(runID, message, types.RunFailed, head) })
 	if err != nil {
 		slog.Warn("recording ineligible terminal fallback", "run", runID, "error", err)
-		if settlementErr := WithCommitStatusLock(context.Background(), func() error { return d.RecordIneligibleTerminal(runID, message, types.RunFailed, nil) }); settlementErr != nil {
+		if settlementErr := SettleIneligibleTerminal(d, runID, message, types.RunFailed); settlementErr != nil {
 			return errors.Join(err, settlementErr)
 		}
 	}
@@ -148,4 +182,18 @@ func (e *Executor) ReportRecoveredPublishedHeadStatus(ctx context.Context, run *
 		state = "success"
 	}
 	e.reportPublishedHeadStatus(ctx, run, repo, state)
+}
+
+func (e *Executor) ReportSettledRunFailure(ctx context.Context, run *db.Run, repo *db.Repo) error {
+	durable, err := e.db.GetRun(run.ID)
+	if err != nil {
+		return err
+	}
+	if durable == nil || (durable.Status != types.RunFailed && durable.Status != types.RunCancelled) {
+		return fmt.Errorf("terminal failure outcome unsettled")
+	}
+	run.Status, run.Error, run.HeadSHA = durable.Status, durable.Error, durable.HeadSHA
+	e.ReportPublishedHeadFailure(ctx, run, repo)
+	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
+	return nil
 }

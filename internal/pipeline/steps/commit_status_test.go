@@ -124,7 +124,7 @@ func TestCommitStatusRemoteConfirmationHasOwnDeadline(t *testing.T) {
 	if err := acquireCommitStatusLock(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	<-commitStatusLock
+	pipeline.ReleaseCommitStatusLock()
 }
 
 func TestPushCommitStatusRecordingErrorsOnlyWarn(t *testing.T) {
@@ -252,7 +252,7 @@ func TestCommitStatusLockWaitHonorsContext(t *testing.T) {
 				if err := acquireCommitStatusLock(context.Background()); err != nil {
 					t.Fatal(err)
 				}
-				defer func() { <-commitStatusLock }()
+				defer pipeline.ReleaseCommitStatusLock()
 				ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 				defer cancel()
 				bounded := *sc
@@ -389,8 +389,8 @@ func TestCommitStatusSerializesRecoveryAndNewPublication(t *testing.T) {
 		t.Fatal("recovery POST did not reach the endpoint")
 	}
 	select {
-	case commitStatusLock <- struct{}{}:
-		<-commitStatusLock
+	case pipeline.CommitStatusLock <- struct{}{}:
+		pipeline.ReleaseCommitStatusLock()
 		t.Fatal("recovery POST did not hold the shared status lock")
 	default:
 	}

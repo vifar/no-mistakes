@@ -105,6 +105,10 @@ func (m *RunManager) prepareControlledShutdown(ctx context.Context, expected ipc
 				return nil, fmt.Errorf("planned shutdown terminal outcome unavailable for run %s: %v", id, err)
 			}
 		}
+		active, err := m.db.GetActiveRuns()
+		if err != nil || len(active) != 0 {
+			return nil, fmt.Errorf("planned shutdown has unsettled runs: %v", err)
+		}
 		m.mu.Lock()
 		raw := m.rawShutdown
 		m.mu.Unlock()

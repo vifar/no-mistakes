@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -516,6 +517,8 @@ func TestDaemonPanic_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("FAKE_CLI_MODE", "gh")
 	t.Setenv("FAKE_CLI_STATUS_PIPE_CHILD", "1")
+	t.Setenv("FAKE_CLI_STATUS_HTTP_TIMEOUT", "60s")
+	t.Setenv("FAKE_CLI_STATUS_PIPE_IGNORE_TERM", "1")
 	entered, release, panicking, callbackDone := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
@@ -527,13 +530,13 @@ func TestDaemonPanic_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Error(err)
 		}
+		mu.Lock()
+		states = append(states, payload.State)
+		mu.Unlock()
 		if payload.State == "success" {
 			close(entered)
 			<-release
 		}
-		mu.Lock()
-		states = append(states, payload.State)
-		mu.Unlock()
 		w.WriteHeader(201)
 	}))
 	defer server.Close()
@@ -568,10 +571,17 @@ func TestDaemonPanic_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("daemon did not reach actual panic")
 	}
-	time.Sleep(16 * time.Second)
+	time.Sleep(32 * time.Second)
 	run, err := d.GetRun(result.RunID)
-	if err != nil || run.Status != types.RunRunning {
-		t.Errorf("panic terminal write bypassed paused reporter after deadline: %+v,%v", run, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Status == types.RunRunning {
+		if run.WorktreeDir == nil {
+			t.Error("unsettled run lost worktree binding")
+		} else if _, err := os.Stat(*run.WorktreeDir); err != nil {
+			t.Errorf("unsettled panic lost custody: %v", err)
+		}
 	}
 	unblock()
 	<-callbackDone
@@ -619,7 +629,9 @@ func TestRecoveredFailure_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("FAKE_CLI_MODE", "gh")
 	t.Setenv("FAKE_CLI_STATUS_PIPE_CHILD", "1")
-	for _, mode := range []string{"panic", "fallback"} {
+	t.Setenv("FAKE_CLI_STATUS_HTTP_TIMEOUT", "60s")
+	t.Setenv("FAKE_CLI_STATUS_PIPE_IGNORE_TERM", "1")
+	for _, mode := range []string{"panic", "fallback", "panic raw"} {
 		t.Run(mode, func(t *testing.T) {
 			p := paths.WithRoot(t.TempDir())
 			if err := p.EnsureDirs(); err != nil {
@@ -640,7 +652,7 @@ func TestRecoveredFailure_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 			}
 			cfg := config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{})
 			recoveredSteps := []pipeline.Step{&steps.PushStep{}}
-			if mode == "panic" {
+			if strings.HasPrefix(mode, "panic") {
 				if _, err := d.InsertStepResult(run.ID, types.StepReview); err != nil {
 					t.Fatal(err)
 				}
@@ -671,13 +683,13 @@ func TestRecoveredFailure_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 					t.Error(err)
 				}
+				mu.Lock()
+				states = append(states, payload.State)
+				mu.Unlock()
 				if payload.State == "success" {
 					close(entered)
 					<-release
 				}
-				mu.Lock()
-				states = append(states, payload.State)
-				mu.Unlock()
 				w.WriteHeader(201)
 			}))
 			defer func() { unblock(); server.Close() }()
@@ -691,11 +703,42 @@ func TestRecoveredFailure_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 				t.Fatal("success did not reach endpoint")
 			}
 			mgr := NewRunManager(d, p, nil)
+			mgr.runtimeStartedAt = time.Now().UTC()
+			subscription, err := mgr.Subscribe(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer subscription.Close()
 			mgr.resumeRecoveredRun(recoveredRunPlan{run: run, repo: repo, workDir: t.TempDir(), gateDir: p.RepoDir(repo.ID), cfg: cfg, agent: recoveredRunTestAgent{}, steps: recoveredSteps})
 			time.Sleep(16 * time.Second)
+			params := ipc.ShutdownParams{ExpectedPID: os.Getpid(), ExpectedStartedAt: mgr.runtimeStartedAt.Format(time.RFC3339Nano), ExpectedInstance: mgr.runtimeInstance}
+			rawDone := make(chan struct{})
+			if mode == "panic raw" {
+				go func() { mgr.Shutdown(); close(rawDone) }()
+				select {
+				case <-rawDone:
+					t.Error("raw shutdown relinquished outstanding settlement")
+				case <-time.After(50 * time.Millisecond):
+				}
+			} else {
+				bounded, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+				if ack, err := mgr.prepareControlledShutdown(bounded, params); err == nil || ack != nil {
+					t.Errorf("outstanding settlement acknowledged shutdown: %+v,%v", ack, err)
+				}
+				cancel()
+			}
+			time.Sleep(16 * time.Second)
 			stored, err := d.GetRun(run.ID)
-			if err != nil || stored.Status != types.RunRunning {
-				t.Errorf("recovered terminal write crossed outstanding POST: %+v,%v", stored, err)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status == types.RunRunning {
+				mgr.mu.Lock()
+				_, owned := mgr.executors[run.ID]
+				mgr.mu.Unlock()
+				if !owned {
+					t.Error("recovered failure abandoned custody before settlement")
+				}
 			}
 			unblock()
 			<-callbackDone
@@ -718,6 +761,26 @@ func TestRecoveredFailure_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 			pub, err := reopened.GetCommitStatusPublication(context.Background(), run.ID, publication)
 			if err != nil || pub.LastState != "failure" || pub.StrictCertificate != nil {
 				t.Fatalf("reopened failure publication: %+v,%v", pub, err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			event, ok := subscription.Next(ctx)
+			cancel()
+			if !ok || event.StateRev != mgr.StateRev(run.ID) || event.StateRev == 0 {
+				t.Fatalf("settled public revision: %+v,%v", event, ok)
+			}
+			if event.Type != ipc.EventStreamGap && (event.Type != ipc.EventRunCompleted || event.Status == nil || *event.Status != string(types.RunFailed)) {
+				t.Fatalf("settled public outcome: %+v,%v", event, ok)
+			}
+			if mode != "panic raw" {
+				if ack, err := mgr.prepareControlledShutdown(context.Background(), params); err != nil || ack == nil || !ack.OK {
+					t.Fatalf("settled shutdown retry: %+v,%v", ack, err)
+				}
+			} else {
+				select {
+				case <-rawDone:
+				case <-time.After(time.Second):
+					t.Fatal("raw drain did not finish after settlement")
+				}
 			}
 			sc.DB = reopened
 			for _, state := range []string{"pending", "success", "failure"} {
@@ -757,7 +820,171 @@ func TestRecoveredFailure_StorageErrorDoesNotClaimTerminalState(t *testing.T) {
 
 	mgr.resumeRecoveredRun(recoveredRunPlan{run: run, repo: repo, workDir: t.TempDir(), gateDir: t.TempDir(), cfg: config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{}), agent: recoveredRunTestAgent{}})
 	mgr.wg.Wait()
+	mgr.mu.Lock()
+	_, owned := mgr.executors[run.ID]
+	done := mgr.dones[run.ID]
+	mgr.mu.Unlock()
+	if !owned || done == nil {
+		t.Fatal("storage failure lost tracked custody")
+	}
+	select {
+	case <-done:
+		t.Fatal("storage failure signalled settled custody")
+	default:
+	}
+	mgr.runtimeStartedAt = time.Now().UTC()
+	params := ipc.ShutdownParams{ExpectedPID: os.Getpid(), ExpectedStartedAt: mgr.runtimeStartedAt.Format(time.RFC3339Nano), ExpectedInstance: mgr.runtimeInstance}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if ack, err := mgr.prepareControlledShutdown(ctx, params); err == nil || ack != nil {
+		t.Fatalf("unsettled storage acknowledged shutdown: %+v,%v", ack, err)
+	}
 	if run.Status != types.RunRunning {
 		t.Fatalf("failed storage claimed committed recovered terminal: status=%s", run.Status)
+	}
+}
+
+func TestAdmissionFailure_SettlesBeforeReleasingCustody(t *testing.T) {
+	bin := t.TempDir()
+	if out, err := exec.Command("go", "build", "-o", filepath.Join(bin, "gh"), "../pipeline/fakecli").CombinedOutput(); err != nil {
+		t.Fatalf("fake gh: %v: %s", err, out)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("NM_DEMO", "1")
+	t.Setenv("FAKE_CLI_MODE", "gh")
+	t.Setenv("FAKE_CLI_STATUS_PIPE_CHILD", "1")
+	t.Setenv("FAKE_CLI_STATUS_PIPE_IGNORE_TERM", "1")
+	t.Setenv("FAKE_CLI_STATUS_HTTP_TIMEOUT", "60s")
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	repo, head := setupTestGitRepo(t, p, d, "admission-status")
+	entered, release, ready, factoryRelease, callbackDone := make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	defer unblock()
+	var mu sync.Mutex
+	var states []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct{ State string }
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Error(err)
+		}
+		mu.Lock()
+		states = append(states, payload.State)
+		mu.Unlock()
+		if payload.State == "success" {
+			close(entered)
+			<-release
+		}
+		w.WriteHeader(201)
+	}))
+	defer func() { unblock(); server.Close() }()
+	t.Setenv("FAKE_CLI_STATUS_API_URL", server.URL)
+	var run *db.Run
+	mgr := NewRunManager(d, p, func() []pipeline.Step {
+		active, err := d.GetActiveRuns()
+		if err != nil || len(active) != 1 {
+			panic("admitted row unavailable")
+		}
+		run = active[0]
+		if err := d.PutCommitStatusPublication(run.ID, db.CommitStatusPublication{SHA: head, Host: "github.com", Repo: "test/repo", Validated: true}); err != nil {
+			panic(err)
+		}
+		sc := &pipeline.StepContext{Ctx: context.Background(), DB: d, Run: run, Repo: repo, WorkDir: run.WorktreePath(), Config: config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{})}
+		go func() { defer close(callbackDone); (&steps.PushStep{}).ReportPublishedHeadStatus(sc, "success", "") }()
+		<-entered
+		close(ready)
+		<-factoryRelease
+		return []pipeline.Step{&steps.PushStep{}}
+	})
+	mgr.runtimeStartedAt = time.Now().UTC()
+	startDone := make(chan error, 1)
+	go func() {
+		_, err := mgr.startRun(context.Background(), repo, "main", head, head, "test", nil, "intent", "", false, "", nil)
+		startDone <- err
+	}()
+	select {
+	case <-ready:
+	case <-time.After(10 * time.Second):
+		t.Fatal("admission did not reach status POST")
+	}
+	subscription, err := mgr.Subscribe(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	rawDone := make(chan struct{})
+	go func() { mgr.Shutdown(); close(rawDone) }()
+	until := time.Now().Add(time.Second)
+	for !mgr.shuttingDown.Load() && time.Now().Before(until) {
+		time.Sleep(time.Millisecond)
+	}
+	if !mgr.shuttingDown.Load() {
+		t.Fatal("raw shutdown did not fence admission")
+	}
+	close(factoryRelease)
+	time.Sleep(32 * time.Second)
+	stored, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status == types.RunPending {
+		mgr.mu.Lock()
+		_, owned := mgr.cancels[run.ID]
+		mgr.mu.Unlock()
+		if !owned {
+			t.Error("unsettled admission lost cancellation custody")
+		}
+		if _, err := os.Stat(run.WorktreePath()); err != nil {
+			t.Errorf("unsettled admission lost worktree: %v", err)
+		}
+	}
+	unblock()
+	<-callbackDone
+	select {
+	case err := <-startDone:
+		if err == nil {
+			t.Error("shutdown admitted an executor")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("admission did not settle")
+	}
+	select {
+	case <-rawDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("raw shutdown did not drain admission")
+	}
+	reopened, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	stored, err = reopened.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunFailed {
+		t.Fatalf("reopened admission outcome: %+v,%v", stored, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	event, ok := subscription.Next(ctx)
+	if !ok || event.StateRev != mgr.StateRev(run.ID) || event.StateRev == 0 {
+		t.Fatalf("admission public terminal revision: %+v,%v", event, ok)
+	}
+	if event.Type != ipc.EventStreamGap && (event.Type != ipc.EventRunCompleted || event.Status == nil || *event.Status != string(types.RunFailed)) {
+		t.Fatalf("admission public terminal event: %+v,%v", event, ok)
+	}
+	if _, err := os.Stat(run.WorktreePath()); !os.IsNotExist(err) {
+		t.Fatalf("settled admission resources not cleaned: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if fmt.Sprint(states) != "[success failure]" {
+		t.Fatalf("admission HTTP ordering: %v", states)
 	}
 }

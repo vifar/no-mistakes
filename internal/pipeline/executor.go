@@ -2317,7 +2317,7 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		slog.Warn("settling ineligible terminal outcome", "run", run.ID, "error", dbErr)
 		err = errors.Join(err, dbErr)
 		verified = false
-		dbErr = WithCommitStatusLock(context.Background(), func() error { return e.db.RecordIneligibleTerminal(run.ID, errMsg, runStatus, nil) })
+		dbErr = SettleIneligibleTerminal(e.db, run.ID, errMsg, runStatus)
 	}
 	if dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
