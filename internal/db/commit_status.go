@@ -3,6 +3,10 @@ package db
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // CommitStatusPublication binds reporting to a confirmed publication by this
@@ -10,6 +14,8 @@ import (
 type CommitStatusPublication struct {
 	SHA, Host, Repo, LastState string
 	Validated, CIEligible      bool
+	StrictCertificate          *string
+	PreserveSuccess            *bool
 }
 
 // CommitStatusAttempt is written before a remote mutation. An attempt is not
@@ -54,8 +60,59 @@ func (d *DB) putCommitStatusPublication(runID string, p CommitStatusPublication,
 		return false, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`INSERT INTO commit_status_publications (run_id,sha,host,repo,last_state,validated,ci_eligible)
-		VALUES (?,?,?,?,?,?,?) ON CONFLICT(host,repo,sha,run_id) DO UPDATE SET last_state=excluded.last_state,validated=excluded.validated,ci_eligible=excluded.ci_eligible`, runID, p.SHA, p.Host, p.Repo, p.LastState, p.Validated, p.CIEligible); err != nil {
+	var status types.RunStatus
+	if err := tx.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&status); err != nil {
+		return false, err
+	}
+	if status == types.RunCancelled {
+		var preserved bool
+		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM commit_status_publications WHERE run_id=? AND host=? AND repo=? AND sha=? AND retired=0 AND preserve_success=1 AND strict_certificate IS NOT NULL AND last_state='success')`, runID, p.Host, p.Repo, p.SHA).Scan(&preserved); err != nil {
+			return false, err
+		}
+		if preserved {
+			if confirm {
+				if _, err := tx.Exec(`DELETE FROM commit_status_attempts WHERE run_id=? AND retired=0`, runID); err != nil {
+					return false, err
+				}
+			}
+			return true, tx.Commit()
+		}
+	}
+	revoked, err := rawShutdownSuperseded(tx, runID)
+	if err != nil {
+		return false, err
+	}
+	if revoked && (p.StrictCertificate != nil || (p.LastState != "" && p.LastState != "failure")) {
+		return false, fmt.Errorf("raw shutdown forbids status promotion")
+	}
+	if (status == types.RunFailed || status == types.RunCancelled || status == types.RunCIMonitorInterrupted) && p.LastState != "" && p.LastState != "failure" {
+		return false, fmt.Errorf("terminal outcome forbids %s status", p.LastState)
+	}
+	if status == types.RunCompleted && p.LastState != "" {
+		expected := "failure"
+		if p.Validated {
+			expected = "success"
+		}
+		if p.LastState != expected {
+			return false, fmt.Errorf("completed outcome requires %s status", expected)
+		}
+	}
+	if p.StrictCertificate != nil {
+		var claimed StatusCertificate
+		if err := json.Unmarshal([]byte(*p.StrictCertificate), &claimed); err != nil {
+			return false, err
+		}
+		actual, err := buildStatusCertificate(tx, runID, p.SHA, claimed.ConfigDigest)
+		if err != nil {
+			return false, err
+		}
+		if actual == nil || *actual != *p.StrictCertificate {
+			p.StrictCertificate = nil
+			p.PreserveSuccess = nil
+		}
+	}
+	if _, err := tx.Exec(`INSERT INTO commit_status_publications (run_id,sha,host,repo,last_state,validated,ci_eligible,strict_certificate,preserve_success)
+		VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(host,repo,sha,run_id) DO UPDATE SET last_state=excluded.last_state,validated=excluded.validated,ci_eligible=excluded.ci_eligible,strict_certificate=excluded.strict_certificate,preserve_success=excluded.preserve_success`, runID, p.SHA, p.Host, p.Repo, p.LastState, p.Validated, p.CIEligible, p.StrictCertificate, p.PreserveSuccess); err != nil {
 		return false, err
 	}
 	for _, table := range []string{"commit_status_attempts", "commit_status_publications"} {
@@ -82,7 +139,7 @@ func (d *DB) putCommitStatusPublication(runID string, p CommitStatusPublication,
 
 func (d *DB) GetCommitStatusPublication(ctx context.Context, runID string, p CommitStatusPublication) (*CommitStatusPublication, error) {
 	current := &CommitStatusPublication{}
-	err := d.sql.QueryRowContext(ctx, `SELECT sha,host,repo,last_state,validated,ci_eligible FROM commit_status_publications WHERE run_id=? AND host=? AND repo=? AND sha=? AND retired=0`, runID, p.Host, p.Repo, p.SHA).Scan(&current.SHA, &current.Host, &current.Repo, &current.LastState, &current.Validated, &current.CIEligible)
+	err := d.sql.QueryRowContext(ctx, `SELECT sha,host,repo,last_state,validated,ci_eligible,strict_certificate,preserve_success FROM commit_status_publications WHERE run_id=? AND host=? AND repo=? AND sha=? AND retired=0`, runID, p.Host, p.Repo, p.SHA).Scan(&current.SHA, &current.Host, &current.Repo, &current.LastState, &current.Validated, &current.CIEligible, &current.StrictCertificate, &current.PreserveSuccess)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -90,7 +147,7 @@ func (d *DB) GetCommitStatusPublication(ctx context.Context, runID string, p Com
 }
 
 func (d *DB) GetCommitStatusPublications(ctx context.Context, runID string) ([]CommitStatusPublication, error) {
-	rows, err := d.sql.QueryContext(ctx, `SELECT sha,host,repo,last_state,validated,ci_eligible FROM commit_status_publications WHERE run_id=? AND retired=0 ORDER BY rowid`, runID)
+	rows, err := d.sql.QueryContext(ctx, `SELECT sha,host,repo,last_state,validated,ci_eligible,strict_certificate,preserve_success FROM commit_status_publications WHERE run_id=? AND retired=0 ORDER BY rowid`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +155,7 @@ func (d *DB) GetCommitStatusPublications(ctx context.Context, runID string) ([]C
 	var publications []CommitStatusPublication
 	for rows.Next() {
 		var p CommitStatusPublication
-		if err := rows.Scan(&p.SHA, &p.Host, &p.Repo, &p.LastState, &p.Validated, &p.CIEligible); err != nil {
+		if err := rows.Scan(&p.SHA, &p.Host, &p.Repo, &p.LastState, &p.Validated, &p.CIEligible, &p.StrictCertificate, &p.PreserveSuccess); err != nil {
 			return nil, err
 		}
 		publications = append(publications, p)
@@ -109,7 +166,7 @@ func (d *DB) GetCommitStatusPublications(ctx context.Context, runID string) ([]C
 // CommitStatusRecoveryRunIDs includes terminal runs whose durable outcome has
 // not reached the forge. Selection shares the reporting deadline.
 func (d *DB) CommitStatusRecoveryRunIDs(ctx context.Context) ([]string, error) {
-	rows, err := d.sql.QueryContext(ctx, `SELECT DISTINCT r.id FROM runs r LEFT JOIN commit_status_publications p ON p.run_id=r.id AND p.retired=0 LEFT JOIN commit_status_attempts a ON a.run_id=r.id AND a.retired=0 WHERE r.status IN ('completed','failed','cancelled') AND (a.run_id IS NOT NULL OR (p.run_id IS NOT NULL AND p.last_state != CASE WHEN r.status='completed' AND p.validated=1 THEN 'success' ELSE 'failure' END)) ORDER BY r.created_at,r.id`)
+	rows, err := d.sql.QueryContext(ctx, `SELECT DISTINCT r.id FROM runs r LEFT JOIN commit_status_publications p ON p.run_id=r.id AND p.retired=0 LEFT JOIN commit_status_attempts a ON a.run_id=r.id AND a.retired=0 WHERE r.status IN ('completed','failed','cancelled','ci_monitor_interrupted') AND (a.run_id IS NOT NULL OR (p.run_id IS NOT NULL AND p.last_state != CASE WHEN r.status='completed' AND p.validated=1 THEN 'success' WHEN r.status='cancelled' AND p.preserve_success=1 AND p.strict_certificate IS NOT NULL THEN 'success' ELSE 'failure' END)) ORDER BY r.created_at,r.id`)
 	if err != nil {
 		return nil, err
 	}

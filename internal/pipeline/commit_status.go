@@ -2,21 +2,187 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const commitStatusTimeout = 15 * time.Second
+
+// CommitStatusLock serializes publication ownership, terminal decisions and POSTs.
+var CommitStatusLock = make(chan struct{}, 1)
+var terminalSettlementMu sync.Mutex
+var terminalSettlements []*publicationSettlement
+
+type publicationSettlement struct {
+	write       func() error
+	done        chan error
+	unavailable func() bool
+}
+
+var rawPublicationSettlements []*publicationSettlement
+
+var publicationRecoveryRunning bool
+
+func startPublicationRecoveryLocked() {
+	if publicationRecoveryRunning {
+		return
+	}
+	publicationRecoveryRunning = true
+	go func() {
+		for {
+			timer := time.NewTimer(time.Second)
+			<-timer.C
+			ctx, cancel := context.WithTimeout(context.Background(), commitStatusTimeout)
+			if err := AcquireCommitStatusLock(ctx); err == nil {
+				ReleaseCommitStatusLock()
+			}
+			cancel()
+			terminalSettlementMu.Lock()
+			if len(rawPublicationSettlements) == 0 && len(terminalSettlements) == 0 {
+				publicationRecoveryRunning = false
+				terminalSettlementMu.Unlock()
+				return
+			}
+			terminalSettlementMu.Unlock()
+		}
+	}()
+}
+
+func drainPublicationSettlements() error {
+	for {
+		terminalSettlementMu.Lock()
+		if len(rawPublicationSettlements) > 0 {
+			pending := rawPublicationSettlements[0]
+			terminalSettlementMu.Unlock()
+			err := pending.write()
+			terminalSettlementMu.Lock()
+			if err != nil {
+				startPublicationRecoveryLocked()
+				for _, owned := range rawPublicationSettlements {
+					select {
+					case owned.done <- err:
+					default:
+					}
+				}
+				terminalSettlementMu.Unlock()
+				return err
+			}
+			rawPublicationSettlements = rawPublicationSettlements[1:]
+			select {
+			case pending.done <- nil:
+			default:
+			}
+			terminalSettlementMu.Unlock()
+			continue
+		}
+		if len(terminalSettlements) == 0 {
+			terminalSettlementMu.Unlock()
+			return nil
+		}
+		pending := terminalSettlements[0]
+		terminalSettlementMu.Unlock()
+		err := pending.write()
+		terminalSettlementMu.Lock()
+		if err != nil && !pending.unavailable() {
+			startPublicationRecoveryLocked()
+			terminalSettlementMu.Unlock()
+			return err
+		}
+		terminalSettlements = terminalSettlements[1:]
+		pending.done <- err
+		terminalSettlementMu.Unlock()
+	}
+}
+
+func ReleaseCommitStatusLock() {
+	for {
+		if err := drainPublicationSettlements(); err != nil {
+			terminalSettlementMu.Lock()
+			<-CommitStatusLock
+			terminalSettlementMu.Unlock()
+			return
+		}
+		terminalSettlementMu.Lock()
+		if len(terminalSettlements) == 0 && len(rawPublicationSettlements) == 0 {
+			<-CommitStatusLock
+			terminalSettlementMu.Unlock()
+			return
+		}
+		terminalSettlementMu.Unlock()
+	}
+}
+
+func SettleIneligibleTerminal(d *db.DB, runID, message string, status types.RunStatus) error {
+	return settleTerminalWrite(d, func() error { return d.RecordIneligibleTerminal(runID, message, status, nil) })
+}
+
+func settleTerminalWrite(d *db.DB, write func() error) error {
+	done := make(chan error, 1)
+	terminalSettlementMu.Lock()
+	terminalSettlements = append(terminalSettlements, &publicationSettlement{write: write, done: done, unavailable: d.Closed})
+	startPublicationRecoveryLocked()
+	terminalSettlementMu.Unlock()
+	select {
+	case CommitStatusLock <- struct{}{}:
+		ReleaseCommitStatusLock()
+	default:
+	}
+	return <-done
+}
+
+func AcquireCommitStatusLock(ctx context.Context) error {
+	select {
+	case CommitStatusLock <- struct{}{}:
+		if err := drainPublicationSettlements(); err != nil {
+			terminalSettlementMu.Lock()
+			<-CommitStatusLock
+			terminalSettlementMu.Unlock()
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			ReleaseCommitStatusLock()
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func WithCommitStatusLock(ctx context.Context, write func() error) error {
+	bounded, cancel := context.WithTimeout(ctx, commitStatusTimeout)
+	defer cancel()
+	if err := AcquireCommitStatusLock(bounded); err != nil {
+		return err
+	}
+	defer ReleaseCommitStatusLock()
+	return write()
+}
+
+// RecordRunFailure is shared by daemon panic and recovery fallbacks.
+func RecordRunFailure(ctx context.Context, d *db.DB, runID, message string, head *string) error {
+	err := WithCommitStatusLock(ctx, func() error { return d.RecordIneligibleTerminal(runID, message, types.RunFailed, head) })
+	if err != nil {
+		slog.Warn("recording ineligible terminal fallback", "run", runID, "error", err)
+		if settlementErr := SettleIneligibleTerminal(d, runID, message, types.RunFailed); settlementErr != nil {
+			return errors.Join(err, settlementErr)
+		}
+	}
+	return nil
+}
 
 // PublishedHeadStatusReporter is an optional step hook for best-effort status
 // updates at run completion, failure, and CI readiness, including recovery.
@@ -105,4 +271,57 @@ func (e *Executor) ReportRecoveredPublishedHeadStatus(ctx context.Context, run *
 		state = "success"
 	}
 	e.reportPublishedHeadStatus(ctx, run, repo, state)
+}
+
+func (e *Executor) ReportSettledRunFailure(ctx context.Context, run *db.Run, repo *db.Repo) error {
+	durable, err := ReadSettledRun(e.db, run.ID)
+	if err != nil {
+		return err
+	}
+	if durable == nil || (durable.Status != types.RunFailed && durable.Status != types.RunCancelled) {
+		return fmt.Errorf("terminal failure outcome unsettled")
+	}
+	run.Status, run.Error, run.HeadSHA = durable.Status, durable.Error, durable.HeadSHA
+	e.ReportPublishedHeadFailure(ctx, run, repo)
+	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
+	return nil
+}
+
+func RecordRawShutdown(ctx context.Context, d *db.DB, runIDs []string, instance string, cancelRuns func()) error {
+	if len(runIDs) == 0 {
+		return nil
+	}
+	var cancelOnce sync.Once
+	write := func() error {
+		cancelOnce.Do(cancelRuns)
+		return d.SupersedeUncommittedCancellations(runIDs, instance)
+	}
+	pending := &publicationSettlement{write: write, done: make(chan error, 1)}
+	terminalSettlementMu.Lock()
+	rawPublicationSettlements = append(rawPublicationSettlements, pending)
+	terminalSettlementMu.Unlock()
+	bounded, cancel := context.WithTimeout(ctx, commitStatusTimeout)
+	defer cancel()
+	if err := AcquireCommitStatusLock(bounded); err != nil {
+		slog.Warn("raw shutdown terminal outcome unsettled", "error", err)
+		return err
+	}
+	ReleaseCommitStatusLock()
+	if err := <-pending.done; err != nil {
+		slog.Warn("raw shutdown terminal outcome unsettled", "error", err)
+		return err
+	}
+	return nil
+}
+
+func ReadSettledRun(d *db.DB, runID string) (*db.Run, error) {
+	durable, err := d.GetRun(runID)
+	if err != nil {
+		err = settleTerminalWrite(d, func() error {
+			var readErr error
+			durable, readErr = d.GetRun(runID)
+			return readErr
+		})
+	}
+	return durable, err
 }

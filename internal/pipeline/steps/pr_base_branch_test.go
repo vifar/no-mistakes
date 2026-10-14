@@ -467,7 +467,7 @@ func TestCIStep_AutoFixUsesPinnedPRTarget(t *testing.T) {
 	developTip := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", "origin", "develop")
 
-	sctx := newTestContext(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Repo.UpstreamURL = "https://github.com/test/repo.git"
 	sctx.Run.Branch = "refs/heads/feature"
 	runBase := "epic/feature"

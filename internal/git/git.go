@@ -114,9 +114,6 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	shellenv.ConfigureShellCommand(cmd)
 	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = fmt.Errorf("%w (%v)", ctxErr, err)
-		}
 		return nil, fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(strings.TrimSpace(stderr.String())))
 	}
 	return out, nil

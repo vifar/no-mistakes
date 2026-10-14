@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,12 +14,16 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
 )
 
@@ -50,6 +55,19 @@ func isFakeProviderPlugin(arg0 string) bool {
 
 func handleFakeCLI(mode string) {
 	args := os.Args[1:]
+	if filepath.Base(os.Args[0]) == "git" && os.Getenv("FAKE_CLI_TERMINAL_GIT_MARKER") != "" {
+		if _, err := os.Stat(os.Getenv("FAKE_CLI_TERMINAL_GIT_MARKER")); err == nil && fakeGitSubcommand(args) == "rev-parse" {
+			client := &http.Client{Timeout: 10 * time.Second}
+			response, err := client.Get(os.Getenv("FAKE_CLI_STATUS_API_URL") + "/terminal-head")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			response.Body.Close()
+		}
+		fakeGitForward(args, os.Getenv("FAKE_CLI_REAL_GIT"))
+		return
+	}
 	logFile := os.Getenv("FAKE_CLI_LOG")
 
 	if logFile != "" {
@@ -65,6 +83,16 @@ func handleFakeCLI(mode string) {
 	}
 
 	switch mode {
+	case "raw-shutdown-process-loss":
+		d, err := db.Open(os.Getenv("FAKE_CLI_DB_PATH"))
+		if err != nil {
+			os.Exit(1)
+		}
+		err = pipeline.RecordRawShutdown(context.Background(), d, []string{os.Getenv("FAKE_CLI_RAW_RUN")}, "old-runtime", func() {})
+		if err == nil || !strings.Contains(err.Error(), "raw write rolled back") {
+			os.Exit(1)
+		}
+		os.Exit(0)
 	case "git-status-confirmation-pipe-child":
 		time.Sleep(time.Hour)
 		return
@@ -1451,6 +1479,25 @@ func forwardCommitStatus(args []string) bool {
 				fmt.Fprintln(os.Stderr, "status profile must suppress ambient GitHub environment")
 				os.Exit(1)
 			}
+		}
+	}
+	if os.Getenv("FAKE_CLI_STATUS_PIPE_IGNORE_TERM") == "1" && body["state"] == "success" {
+		signal.Ignore(syscall.SIGTERM)
+	}
+	if os.Getenv("FAKE_CLI_STATUS_PIPE_CHILD") == "1" && body["state"] == "success" {
+		child := exec.Command(os.Args[0], os.Args[1:]...)
+		child.Env = append(os.Environ(), "FAKE_CLI_STATUS_PIPE_CHILD=0")
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		if err := child.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return true
+	}
+	http.DefaultClient.Timeout = 25 * time.Second
+	if timeout := os.Getenv("FAKE_CLI_STATUS_HTTP_TIMEOUT"); timeout != "" {
+		if duration, err := time.ParseDuration(timeout); err == nil {
+			http.DefaultClient.Timeout = duration
 		}
 	}
 	data, _ := json.Marshal(body)

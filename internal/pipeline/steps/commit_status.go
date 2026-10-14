@@ -18,21 +18,10 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-var commitStatusLock = make(chan struct{}, 1)
-
 const commitStatusOperationTimeout = 15 * time.Second
 
 func acquireCommitStatusLock(ctx context.Context) error {
-	select {
-	case commitStatusLock <- struct{}{}:
-		if err := ctx.Err(); err != nil {
-			<-commitStatusLock
-			return err
-		}
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return pipeline.AcquireCommitStatusLock(ctx)
 }
 
 // Plugins currently expose PR/CI operations, but no commit-status capability.
@@ -74,7 +63,7 @@ func reconcileCommitStatusAttempt(sctx *pipeline.StepContext) (*db.CommitStatusP
 	if err := acquireCommitStatusLock(ctx); err != nil {
 		return nil, err
 	}
-	defer func() { <-commitStatusLock }()
+	defer pipeline.ReleaseCommitStatusLock()
 	bounded := *sctx
 	bounded.Ctx = ctx
 	attempt, err := sctx.DB.GetCommitStatusAttempt(sctx.Run.ID)
@@ -140,7 +129,7 @@ func confirmVerifiedCommitStatus(sctx *pipeline.StepContext, sha, target, ref st
 	if err := acquireCommitStatusLock(ctx); err != nil {
 		return nil, err
 	}
-	defer func() { <-commitStatusLock }()
+	defer pipeline.ReleaseCommitStatusLock()
 	confirmed, err := sctx.DB.ConfirmCommitStatusAttempt(sctx.Run.ID, attempt.CommitStatusPublication)
 	if err != nil || !confirmed {
 		return nil, err
@@ -173,7 +162,7 @@ func commitStatusReporter(sctx *pipeline.StepContext, publication *db.CommitStat
 			statusWarning(log, "wait for reporting", err)
 			return
 		}
-		defer func() { <-commitStatusLock }()
+		defer pipeline.ReleaseCommitStatusLock()
 		current, err := sctx.DB.GetCommitStatusPublication(bounded, sctx.Run.ID, db.CommitStatusPublication{SHA: sha, Host: statusHost, Repo: statusRepo})
 		if err != nil {
 			statusWarning(log, "read publication ownership", err)
@@ -183,6 +172,34 @@ func commitStatusReporter(sctx *pipeline.StepContext, publication *db.CommitStat
 			return
 		}
 		publication := current
+		durableRun, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil || durableRun == nil {
+			statusWarning(log, "read terminal outcome", err)
+			return
+		}
+		switch durableRun.Status {
+		case types.RunCancelled:
+			if publication.PreserveSuccess != nil && *publication.PreserveSuccess && publication.StrictCertificate != nil && publication.LastState == "success" {
+				return
+			}
+			state = "failure"
+		case types.RunFailed, types.RunCIMonitorInterrupted:
+			state = "failure"
+		case types.RunCompleted:
+			if publication.Validated {
+				state = "success"
+			} else {
+				state = "failure"
+			}
+		}
+		revoked, err := sctx.DB.RawShutdownSuperseded(sctx.Run.ID)
+		if err != nil {
+			statusWarning(log, "read shutdown eligibility", err)
+			return
+		}
+		if revoked {
+			state = "failure"
+		}
 		if state == "success" && publication.CIEligible && validatedSHA == publication.SHA && !publication.Validated {
 			publication.Validated = true
 			if err := sctx.DB.PutCommitStatusPublication(sctx.Run.ID, *publication); err != nil {
@@ -191,14 +208,28 @@ func commitStatusReporter(sctx *pipeline.StepContext, publication *db.CommitStat
 			}
 		}
 		if state == "success" && !publication.Validated {
-			if sctx.Run.Status != types.RunCompleted {
+			if durableRun.Status != types.RunCompleted {
 				return
 			}
 			state = "failure"
 		}
-		if state == publication.LastState {
+		var certificate *string
+		if state == "success" && publication.Validated {
+			certificate, err = sctx.DB.BuildStatusCertificate(sctx.Run.ID, sha, pipeline.StatusConfigDigest(sctx.Config))
+			if err != nil {
+				statusWarning(log, "read strict validation", err)
+				return
+			}
+		}
+		if state == publication.LastState && (state != "success" || certificate == nil || (publication.StrictCertificate != nil && *publication.StrictCertificate == *certificate)) {
 			return
 		}
+		if err := sctx.DB.RevokeStatusCertificate(bounded, sctx.Run.ID, *publication); err != nil {
+			statusWarning(log, "revoke prior success", err)
+			return
+		}
+		publication.StrictCertificate = nil
+		publication.PreserveSuccess = nil
 		description := "no-mistakes pipeline running"
 		switch state {
 		case "success":
@@ -211,6 +242,7 @@ func commitStatusReporter(sctx *pipeline.StepContext, publication *db.CommitStat
 			return
 		}
 		publication.LastState = state
+		publication.StrictCertificate = certificate
 		if err := sctx.DB.PutCommitStatusPublication(sctx.Run.ID, *publication); err != nil {
 			statusWarning(log, "record posted state", err)
 		}

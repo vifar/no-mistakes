@@ -323,7 +323,7 @@ func TestProviderPlugin_RepairFailsOnLogProtocolViolation(t *testing.T) {
 		t.Error("the fix agent ran after a plugin contract violation")
 		return &agent.Result{Output: json.RawMessage(`{"summary":"x","code_change_needed":false}`)}, nil
 	}}
-	sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.PreviousFindings = `{"findings":[{"id":"ci-1","severity":"error","description":"failed","action":"auto-fix","category":"ci-check","check":"test"}]}`
 	host := &pluginLogViolationHost{
 		completionSnapshotHost: completionSnapshotHost{checks: []scm.Check{{Name: "test", Bucket: scm.CheckBucketFail}}},

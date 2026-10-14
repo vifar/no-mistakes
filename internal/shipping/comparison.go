@@ -15,10 +15,18 @@ import (
 
 func Digest(b []byte) string { return fmt.Sprintf("%x", sha256.Sum256(b)) }
 
+type remoteObservationError struct{ cause error }
+
+func (*remoteObservationError) Error() string {
+	return "observe shipping ref: remote observation failed"
+}
+
+func (e *remoteObservationError) Unwrap() error { return e.cause }
+
 func RemoteHead(ctx context.Context, dir, remote, branch string) (string, error) {
 	out, err := git.Run(ctx, dir, "ls-remote", "--exit-code", remote, "refs/heads/"+branch)
 	if err != nil {
-		return "", fmt.Errorf("observe shipping ref: remote observation failed")
+		return "", &remoteObservationError{cause: err}
 	}
 	rows := strings.Fields(out)
 	if len(rows) != 2 || rows[1] != "refs/heads/"+branch || len(rows[0]) != 40 {

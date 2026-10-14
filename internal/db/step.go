@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -137,15 +138,25 @@ func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
 }
 
 func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
-	if stepOrder <= types.StepReview.Order() {
-		if _, err := d.sql.Exec(`UPDATE review_comparisons SET approved=0 WHERE run_id=?`, runID); err != nil {
-			return err
-		}
-		if _, err := d.sql.Exec(`UPDATE runs SET ci_ready_at=NULL,ci_ready_no_ci=0 WHERE id=? AND shipping_options IS NOT NULL`, runID); err != nil {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if stepOrder <= types.StepLint.Order() {
+		if err := invalidateStatusValidation(context.Background(), tx, runID); err != nil {
 			return err
 		}
 	}
-	_, err := d.sql.Exec(`
+	if stepOrder <= types.StepReview.Order() {
+		if _, err := tx.Exec(`UPDATE review_comparisons SET approved=0 WHERE run_id=?`, runID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE runs SET ci_ready_at=NULL,ci_ready_no_ci=0 WHERE id=? AND shipping_options IS NOT NULL`, runID); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(`
 		UPDATE step_results
 		SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL,
 			findings_json = NULL, error = NULL, started_at = NULL,
@@ -155,7 +166,7 @@ func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 	if err != nil {
 		return fmt.Errorf("reset steps for revalidation: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // UpdateStepStatus updates a step's status.
@@ -239,12 +250,24 @@ func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
 // a newly loaded trusted configuration, so its supplied limit replaces the
 // one recorded by an earlier execution.
 func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var runID string
+	if err := tx.QueryRow(`SELECT run_id FROM step_results WHERE id=?`, id).Scan(&runID); err != nil {
+		return err
+	}
+	if err := invalidateStatusValidation(context.Background(), tx, runID); err != nil {
+		return err
+	}
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = ?, override_reason = NULL, approval_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimitDBValue(autoFixLimit), id)
+	_, err = tx.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = ?, override_reason = NULL, approval_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimitDBValue(autoFixLimit), id)
 	if err != nil {
 		return fmt.Errorf("start step fix round: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (d *DB) SetStepAutoFixLimit(id string, autoFixLimit int) error {

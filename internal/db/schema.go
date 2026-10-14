@@ -1,6 +1,18 @@
 package db
 
 const schemaSQL = `
+CREATE TABLE IF NOT EXISTS status_validation_epochs (
+ run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+ epoch INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS status_validation_steps (
+ step_id TEXT PRIMARY KEY REFERENCES step_results(id) ON DELETE CASCADE,
+ head_sha TEXT NOT NULL, epoch INTEGER NOT NULL, config_digest TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS controlled_shutdown_runs (
+ run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+ instance TEXT NOT NULL, lifecycle TEXT NOT NULL, reason TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS pipeline_commit_heads (
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     head_sha TEXT NOT NULL,
@@ -439,4 +451,6 @@ var migrationStatements = []string{
 	// a late --closes can still reach the Issues section; non-NULL closes that window
 	// (see UpdateRunClosingIssueRefs / ClaimClosingIssueRefsForPRBody).
 	`ALTER TABLE runs ADD COLUMN closing_issue_refs_locked_at INTEGER`,
+	`ALTER TABLE commit_status_publications ADD COLUMN strict_certificate TEXT`,
+	`ALTER TABLE commit_status_publications ADD COLUMN preserve_success INTEGER`,
 }

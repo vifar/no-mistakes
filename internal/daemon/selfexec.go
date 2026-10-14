@@ -247,35 +247,7 @@ func reinstallManagedServiceIfChanged(p *paths.Paths) (bool, error) {
 }
 
 func stopCurrentDaemonBeforeManagedRestart(p *paths.Paths) error {
-	instance := captureRunningDaemon(p)
-	if managed, err := stopManagedService(p); managed {
-		var detachedErr error
-		// A managed service definition can coexist with a detached daemon.
-		// Stopping the service is then a successful no-op, so shut down any
-		// daemon that is still answering before restarting the service.
-		if alive, _ := daemonHealthCheck(p); alive {
-			detachedErr = stopDetachedDaemon(p)
-		}
-		if waitErr := waitForDaemonStop(p, instance); waitErr != nil {
-			switch {
-			case err != nil && detachedErr != nil:
-				return fmt.Errorf("stop managed daemon before restart: %w; detached shutdown: %v; wait for exit: %v", err, detachedErr, waitErr)
-			case err != nil:
-				return fmt.Errorf("stop managed daemon before restart: %w; wait for exit: %v", err, waitErr)
-			case detachedErr != nil:
-				return fmt.Errorf("detached shutdown before managed restart: %w; wait for exit: %v", detachedErr, waitErr)
-			default:
-				return fmt.Errorf("wait for managed daemon exit before restart: %w", waitErr)
-			}
-		}
-		return nil
-	}
-	if alive, _ := daemonHealthCheck(p); alive {
-		if err := stopDetachedDaemon(p); err != nil {
-			return fmt.Errorf("stop existing daemon before managed restart: %w", err)
-		}
-	}
-	return nil
+	return stopPlannedDaemon(p)
 }
 
 func stopManagedFallback(p *paths.Paths) error {
@@ -587,72 +559,87 @@ func daemonIsRunningViaIPC(p *paths.Paths, budget ...time.Duration) (bool, error
 }
 
 // Stop sends a shutdown request to the running daemon and waits for it to exit.
-func Stop(p *paths.Paths) error {
+func Stop(p *paths.Paths) error { return stopPlannedDaemon(p) }
+
+func stopDetachedDaemon(p *paths.Paths) error { return stopPlannedDaemon(p) }
+
+// The same instance-bound preparation covers planned stop and managed refresh.
+// The supervisor is disabled only after IPC has drained the run decisions.
+func stopPlannedDaemon(p *paths.Paths) error {
 	instance := captureRunningDaemon(p)
-	if managed, err := stopManagedService(p); managed {
-		var detachedErr error
-		if err != nil {
-			if alive, _ := daemonHealthCheck(p); alive {
-				detachedErr = stopDetachedDaemon(p)
+	if instance.pid > 0 {
+		if exited, err := instance.exited(); err == nil && exited {
+			instance = daemonInstance{}
+		}
+	}
+	if instance.pid <= 0 || instance.startedAt.IsZero() || instance.instance == "" {
+		// A live PID that failed capture is not a proven-dead daemon. Retain
+		// its artifacts and refuse both preservation and individual kills.
+		if instance.pid <= 0 {
+			if record, err := readDaemonPIDFile(p.PIDFile()); err == nil && record.PID > 0 {
+				running, inspectErr := daemonProcessRunning(record.PID)
+				if inspectErr != nil || running {
+					return errors.Join(fmt.Errorf("captured daemon identity is unavailable"), inspectErr)
+				}
 			}
 		}
-		if waitErr := waitForDaemonStop(p, instance); waitErr != nil {
-			switch {
-			case err != nil && detachedErr != nil:
-				return fmt.Errorf("%w; detached shutdown: %v; wait for exit: %v", err, detachedErr, waitErr)
-			case err != nil:
-				return fmt.Errorf("%w; wait for exit: %v", err, waitErr)
-			default:
-				return waitErr
+		cleared, err := clearDeadDaemonArtifacts(p)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if cleared {
+			_, serviceErr := stopManagedService(p)
+			return serviceErr
+		}
+		if errors.Is(err, os.ErrNotExist) {
+			if _, socketErr := os.Stat(p.Socket()); os.IsNotExist(socketErr) {
+				lock, lockErr := acquireSingletonLock(p)
+				if lockErr != nil {
+					return lockErr
+				}
+				defer lock.Release()
+				if _, pidErr := os.Stat(p.PIDFile()); os.IsNotExist(pidErr) {
+					_, serviceErr := stopManagedService(p)
+					return serviceErr
+				}
 			}
 		}
-		return nil
+		return fmt.Errorf("captured daemon identity is unavailable")
 	}
-	return stopDetachedDaemon(p)
-}
-
-func stopDetachedDaemon(p *paths.Paths) error {
-	// Identify the process we are about to shut down before asking it to
-	// exit: the daemon removes its own PID file during teardown, so after
-	// the shutdown request there is no longer a way to name the instance
-	// this stop is responsible for.
-	instance := captureRunningDaemon(p)
-
-	client, err := daemonDial(p.Socket())
-	if err != nil {
-		stale, staleErr := staleDaemonArtifacts(p)
-		if staleErr != nil {
-			return staleErr
+	client, dialErr := daemonDial(p.Socket())
+	var requestErr error
+	if dialErr == nil {
+		expected := ipc.ShutdownParams{ExpectedPID: instance.pid, ExpectedStartedAt: instance.startedAt.UTC().Format(time.RFC3339Nano), ExpectedInstance: instance.instance}
+		var result ipc.ShutdownResult
+		requestErr = client.CallWithTimeout(ipc.MethodShutdown, &expected, &result, 35*time.Second)
+		_ = client.Close()
+		if requestErr == nil && (!result.OK || result.PID != expected.ExpectedPID || result.StartedAt != expected.ExpectedStartedAt || result.Instance != expected.ExpectedInstance || result.Lifecycle == "") {
+			requestErr = fmt.Errorf("daemon shutdown acknowledgement identity is incomplete or changed")
 		}
-		if stale {
-			cleanupDaemonArtifacts(p)
-			return nil
-		}
-		if killErr := stopDetachedDaemonByPID(p); killErr != nil {
-			return fmt.Errorf("dial daemon: %w; pid fallback: %v", err, killErr)
-		}
-		return nil
+	} else {
+		requestErr = fmt.Errorf("dial daemon shutdown: %w", dialErr)
 	}
-
-	var result ipc.ShutdownResult
-	callErr := client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, &result)
-	// Hand the connection back before waiting on the exit it gates. The
-	// daemon's accept loop drains in-flight connection handlers before it
-	// finishes shutting down, so a stopper that kept its client open while
-	// waiting would deadlock against the very exit it is waiting for: the
-	// daemon cannot exit until this connection closes, and this call would
-	// not return (and so not run a deferred close) until the daemon exits.
-	_ = client.Close()
-	if callErr != nil {
-		return fmt.Errorf("shutdown request: %w", callErr)
+	if requestErr != nil {
+		if exited, inspectErr := instance.exited(); inspectErr == nil && exited {
+			if cleared, clearErr := clearDeadDaemonArtifacts(p); clearErr != nil && !errors.Is(clearErr, os.ErrNotExist) {
+				return errors.Join(requestErr, clearErr)
+			} else if cleared {
+				_, serviceErr := stopManagedService(p)
+				return errors.Join(requestErr, serviceErr)
+			}
+		}
+		return requestErr
 	}
-	return waitForDaemonStop(p, instance)
+	_, serviceErr := stopManagedService(p)
+	waitErr := waitForDaemonStop(p, instance)
+	return errors.Join(requestErr, serviceErr, waitErr)
 }
 
 // daemonInstance names the exact daemon process a stop is responsible for.
-// A zero value means no provable external process was captured, so callers
-// fall back to health-only stop confirmation.
+// Planned shutdown refuses incomplete identity unless singleton-held checks
+// prove stale artifacts can be cleared; IPC health alone cannot authorize it.
 type daemonInstance struct {
+	instance  string
 	pid       int
 	startedAt time.Time
 }
@@ -660,29 +647,28 @@ type daemonInstance struct {
 // captureRunningDaemon best-effort identifies the live daemon process for this
 // root from the PID file, validated against the process's real start time so a
 // recycled PID cannot be mistaken for the daemon. It must be called before a
-// shutdown request, while the record still exists. An in-process daemon (test
-// harnesses driving RunWithResources in a goroutine) reports our own PID and
-// is deliberately not captured: it never exits as a process.
+// shutdown request, while the complete runtime record still exists. In-process
+// test daemons are captured for IPC; the fallback never kills our own process.
 func captureRunningDaemon(p *paths.Paths) daemonInstance {
 	record, err := readDaemonPIDFile(p.PIDFile())
 	if err != nil || record.PID <= 0 {
 		return daemonInstance{}
 	}
-	if record.PID == os.Getpid() {
-		return daemonInstance{}
+	if record.StartedAt.IsZero() {
+		return daemonInstance{pid: record.PID, instance: record.Instance}
 	}
 	startedAt, err := daemonProcessStartTime(record.PID)
 	if err != nil {
-		return daemonInstance{pid: record.PID, startedAt: record.StartedAt.UTC()}
+		return daemonInstance{pid: record.PID, startedAt: record.StartedAt.UTC(), instance: record.Instance}
 	}
 	matches, err := daemonPIDRecordMatchesProcess(p, record, startedAt)
 	if err != nil {
-		return daemonInstance{pid: record.PID}
+		return daemonInstance{pid: record.PID, instance: record.Instance}
 	}
 	if !matches {
 		return daemonInstance{}
 	}
-	return daemonInstance{pid: record.PID, startedAt: startedAt}
+	return daemonInstance{pid: record.PID, startedAt: startedAt, instance: record.Instance}
 }
 
 // exited reports whether this instance is gone. A PID now owned by a different
@@ -692,15 +678,15 @@ func (i daemonInstance) exited() (bool, error) {
 	if i.pid <= 0 {
 		return true, nil
 	}
-	if i.startedAt.IsZero() {
-		return false, fmt.Errorf("daemon pid %d start time is unknown", i.pid)
-	}
 	running, err := daemonProcessRunning(i.pid)
 	if err != nil {
 		return false, err
 	}
 	if !running {
 		return true, nil
+	}
+	if i.startedAt.IsZero() {
+		return false, fmt.Errorf("daemon pid %d start time is unknown", i.pid)
 	}
 	startedAt, err := daemonProcessStartTime(i.pid)
 	if err != nil {
@@ -711,34 +697,6 @@ func (i daemonInstance) exited() (bool, error) {
 		diff = -diff
 	}
 	return diff > orphanStartTimeTolerance, nil
-}
-
-func stopDetachedDaemonByPID(p *paths.Paths) error {
-	pid, err := ReadPID(p)
-	if err != nil {
-		return err
-	}
-	if err := validateDaemonPIDFallback(p, pid); err != nil {
-		return err
-	}
-	if err := daemonKillPID(pid); err != nil {
-		return fmt.Errorf("kill daemon pid %d: %w", pid, err)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		running, err := daemonProcessRunning(pid)
-		if err != nil {
-			return err
-		}
-		if !running {
-			cleanupDaemonArtifacts(p)
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	return fmt.Errorf("daemon pid %d still running after kill", pid)
 }
 
 func validateDaemonPIDFallback(p *paths.Paths, pid int) error {
@@ -830,7 +788,8 @@ func daemonSocketAcceptingConnections(path string) (bool, error) {
 // waitForDaemonStop waits until the daemon instance this stop is responsible
 // for is really gone, then clears its artifacts.
 //
-// Losing IPC health is necessary but NOT sufficient proof of exit. The daemon
+// For a captured process, exit is authoritative even if successor IPC is healthy.
+// Losing IPC health alone is NOT sufficient proof of exit. The daemon
 // closes its IPC listener at the START of shutdown, and closing a Unix
 // listener unlinks the socket, so the health check reports "not running"
 // while the process is still draining runs, closing the database, flushing
@@ -844,38 +803,55 @@ func daemonSocketAcceptingConnections(path string) (bool, error) {
 func waitForDaemonStop(p *paths.Paths, instance daemonInstance) error {
 	deadline := time.Now().Add(daemonStopTimeout())
 	for time.Now().Before(deadline) {
-		alive, err := daemonHealthCheck(p)
-		if err == nil && !alive {
+		if instance.pid == os.Getpid() {
+			record, err := readDaemonPIDFile(p.PIDFile())
+			if err == nil && record.Instance != "" && record.Instance != instance.instance {
+				return nil
+			}
+			if os.IsNotExist(err) {
+				if lock, lockErr := acquireSingletonLock(p); lockErr == nil {
+					lock.Release()
+					return nil
+				}
+			}
+		} else if instance.pid > 0 {
 			exited, exitErr := instance.exited()
 			if exitErr == nil && exited {
-				cleanupDaemonArtifacts(p)
+				cleanupCapturedDaemonArtifacts(p, instance)
 				slog.Info("daemon stopped gracefully")
 				return nil
 			}
+		} else if alive, err := daemonHealthCheck(p); err == nil && !alive {
+			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	// Try to kill by PID as last resort. Prefer the PID file, which carries
-	// its own consistency validation; fall back to the captured instance for
-	// a daemon that already removed its PID file but is still running.
-	pid, err := ReadPID(p)
-	switch {
-	case err == nil:
-		if err := validateDaemonPIDFallback(p, pid); err != nil {
-			return err
-		}
-	default:
-		exited, exitErr := instance.exited()
-		switch {
-		case exitErr != nil:
-			return fmt.Errorf("daemon did not stop within timeout: inspect daemon instance: %w", exitErr)
-		case exited:
-			return fmt.Errorf("daemon did not stop within timeout")
-		default:
-			pid = instance.pid
+	if instance.pid == os.Getpid() {
+		return fmt.Errorf("refusing to kill our own pid %d", instance.pid)
+	}
+	if instance.pid <= 0 {
+		if record, err := readDaemonPIDFile(p.PIDFile()); err == nil && record.PID == os.Getpid() {
+			return fmt.Errorf("refusing to kill our own pid %d", record.PID)
 		}
 	}
+	if instance.pid <= 0 || instance.startedAt.IsZero() {
+		return fmt.Errorf("daemon did not stop within timeout: captured process identity is unavailable")
+	}
+	exited, exitErr := instance.exited()
+	if exitErr != nil {
+		return fmt.Errorf("inspect captured daemon: %w", exitErr)
+	}
+	if exited {
+		cleanupCapturedDaemonArtifacts(p, instance)
+		return nil
+	}
+	// Validate the captured process itself; a successor PID file is never a target.
+	matches, err := daemonPIDRecordMatchesProcess(p, daemonPIDFile{PID: instance.pid, StartedAt: instance.startedAt}, instance.startedAt)
+	if err != nil || !matches {
+		return fmt.Errorf("captured daemon identity could not be verified: %v", err)
+	}
+	pid := instance.pid
 
 	slog.Warn("daemon did not stop gracefully, killing", "pid", pid)
 	if err := daemonKillPID(pid); err != nil {
@@ -884,18 +860,31 @@ func waitForDaemonStop(p *paths.Paths, instance daemonInstance) error {
 
 	killDeadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(killDeadline) {
-		running, err := daemonProcessRunning(pid)
+		exited, err := instance.exited()
 		if err != nil {
 			return err
 		}
-		if !running {
-			cleanupDaemonArtifacts(p)
+		if exited {
+			cleanupCapturedDaemonArtifacts(p, instance)
 			slog.Warn("daemon killed after shutdown timeout", "pid", pid)
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("daemon pid %d still running after kill", pid)
+}
+
+func cleanupCapturedDaemonArtifacts(p *paths.Paths, instance daemonInstance) {
+	lock, err := acquireSingletonLock(p)
+	if err != nil {
+		return
+	}
+	defer lock.Release()
+	record, err := readDaemonPIDFile(p.PIDFile())
+	if err != nil || record.PID != instance.pid || !record.StartedAt.Equal(instance.startedAt) || record.Instance != instance.instance {
+		return
+	}
+	cleanupDaemonArtifacts(p)
 }
 
 // clearDeadDaemonArtifacts removes the socket and PID file of a daemon that
