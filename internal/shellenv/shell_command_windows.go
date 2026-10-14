@@ -221,6 +221,17 @@ func forceKillShellCommand(cmd *exec.Cmd) error {
 	return nil
 }
 
+func ShellCommandGroupActive(cmd *exec.Cmd) (bool, error) {
+	job, ok := shellCommandJob(cmd)
+	if !ok || !job.assigned.Load() {
+		return false, errors.New("command has no assigned job")
+	}
+	var info jobObjectBasicAccountingInformation
+	err := windows.QueryInformationJobObject(job.handle, windows.JobObjectBasicAccountingInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil)
+	return info.ActiveProcesses > 0, err
+}
+
 func waitForWindowsJobExit(job windows.Handle, window time.Duration) {
 	if window <= 0 {
 		return

@@ -93,7 +93,7 @@ func (p *nativeAgentPipe) markDone() {
 // but a wedged omp that keeps its stdout fd open leaves bufio.Scanner blocked
 // in Read, so the stall watcher that cancelled ctx never returns. Closing the
 // local pipe ends that Read with EOF/error and lets the invocation fail.
-func startNativeAgentCommand(ctx context.Context, cmd *exec.Cmd, activity func()) (*nativeAgentCommand, error) {
+func startNativeAgentCommand(ctx context.Context, cmd *exec.Cmd, activity func(), requireCompletedChildren bool) (*nativeAgentCommand, error) {
 	stdoutR, stdoutW, err := os.Pipe()
 	if err != nil {
 		return nil, fmt.Errorf("stdout pipe: %w", err)
@@ -129,6 +129,14 @@ func startNativeAgentCommand(ctx context.Context, cmd *exec.Cmd, activity func()
 	started.stderr = &nativeAgentPipe{file: stderrR, done: started.markPipeDone, activity: activity}
 	go func() {
 		err := shellenv.AttributeOOMKill(oomBase, oomOK, cmd.Wait())
+		if err == nil && requireCompletedChildren {
+			active, probeErr := shellenv.ShellCommandGroupActive(cmd)
+			if probeErr != nil {
+				err = fmt.Errorf("native check completion is unverified: %w", probeErr)
+			} else if active {
+				err = errors.New("native check completion is unverified: agent exited with active owned children")
+			}
+		}
 		started.terminate()
 		started.waitCh <- started.waitForPipes(err)
 		close(started.exited)

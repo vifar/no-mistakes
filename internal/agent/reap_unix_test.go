@@ -27,7 +27,7 @@ func TestNativeAgentCommand_SlowClaudeCallbackPreservesCompletedTurn(t *testing.
 	cmd := exec.CommandContext(ctx, "sh", "-c", `printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"review complete"}]}}' '{"type":"result","subtype":"success","structured_output":{"ok":true}}'`)
 	shellenv.ConfigureShellCommand(cmd)
 	cmd.WaitDelay = 50 * time.Millisecond
-	started, err := startNativeAgentCommand(ctx, cmd, nil)
+	started, err := startNativeAgentCommand(ctx, cmd, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestNativeAgentCommand_WaitDelayClosesEscapedPipeHolder(t *testing.T) {
 	shellenv.ConfigureShellCommand(cmd)
 	cmd.WaitDelay = 100 * time.Millisecond
 
-	started, err := startNativeAgentCommand(context.Background(), cmd, nil)
+	started, err := startNativeAgentCommand(context.Background(), cmd, nil, false)
 	if err != nil {
 		t.Fatalf("startNativeAgentCommand: %v", err)
 	}

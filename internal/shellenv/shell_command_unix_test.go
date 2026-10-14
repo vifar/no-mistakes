@@ -16,6 +16,68 @@ import (
 	"time"
 )
 
+func TestShellCommandGroupActiveIgnoresZombiesButKeepsLiveChildren(t *testing.T) {
+	for _, live := range []bool{false, true} {
+		t.Run(strconv.FormatBool(live), func(t *testing.T) {
+			leader := exec.CommandContext(context.Background(), "/bin/sh", "-c", "read release")
+			ConfigureShellCommand(leader)
+			stdin, err := leader.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := StartShellCommand(leader); err != nil {
+				t.Fatal(err)
+			}
+			defer TerminateShellCommandGroup(leader)
+			defer stdin.Close()
+			// The test owns the child's wait, so the exited group member stays a
+			// zombie until this test reaps it. No orphan/init timing is involved.
+			zombie := exec.Command("/bin/sh", "-c", "exit 0")
+			zombie.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: leader.Process.Pid}
+			if err := zombie.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer zombie.Wait()
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(zombie.Process.Pid)).Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.HasPrefix(strings.TrimSpace(string(out)), "Z") {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("child did not become a zombie")
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			if live {
+				child := exec.Command("sleep", "30")
+				child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: leader.Process.Pid}
+				if err := child.Start(); err != nil {
+					t.Fatal(err)
+				}
+				defer child.Wait()
+				defer child.Process.Kill()
+			}
+			if _, err := stdin.Write([]byte("release\n")); err != nil {
+				t.Fatal(err)
+			}
+			if err := leader.Wait(); err != nil {
+				t.Fatal(err)
+			}
+			if err := syscall.Kill(-leader.Process.Pid, 0); err != nil && !errors.Is(err, syscall.EPERM) {
+				t.Fatalf("fixture group must still exist: %v", err)
+			}
+			active, err := ShellCommandGroupActive(leader)
+			if err != nil || active != live {
+				t.Fatalf("live=%v: group active=%v, error=%v", live, active, err)
+			}
+		})
+	}
+}
+
 // TestTerminateShellCommandGroup_ReapsGrandchildAfterCleanExit pins the
 // success-path guarantee that keeps the daemon alive: when a leader configured
 // with ConfigureShellCommand exits 0 but leaves a grandchild alive in its

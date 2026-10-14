@@ -469,3 +469,74 @@ func TestTransientBackoffDuration_Progression(t *testing.T) {
 		}
 	}
 }
+
+func TestRunWithRetry_SkipsRetryWhenFirstAttemptConsumedTheBudget(t *testing.T) {
+	defer withFastBackoff(t)()
+
+	const deadline = 500 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
+	defer cancel()
+	transientErr := fmt.Errorf("API Error: overloaded_error: please retry")
+	calls := 0
+	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
+		calls++
+		time.Sleep(400 * time.Millisecond)
+		return nil, transientErr
+	})
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1: a retry may not start with less budget than the failed attempt took", calls)
+	}
+	if !errors.Is(err, transientErr) {
+		t.Fatalf("err = %v, want it to wrap the original error", err)
+	}
+	if !strings.Contains(err.Error(), "retry skipped") || !strings.Contains(err.Error(), "step budget") {
+		t.Fatalf("err = %q, want a skipped-for-budget message", err)
+	}
+}
+
+func TestRunWithRetry_SkipsRetryWhenBackoffConsumesTheRemainingBudget(t *testing.T) {
+	prev := transientBackoff
+	transientBackoff = func(ctx context.Context, attempt int) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(150 * time.Millisecond):
+			return nil
+		}
+	}
+	defer func() { transientBackoff = prev }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	transientErr := fmt.Errorf("API Error: overloaded_error: please retry")
+	calls := 0
+	_, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
+		calls++
+		time.Sleep(200 * time.Millisecond)
+		return nil, transientErr
+	})
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1: the backoff left less budget than the failed attempt took", calls)
+	}
+	if !errors.Is(err, transientErr) || !strings.Contains(err.Error(), "retry skipped") {
+		t.Fatalf("err = %v, want a skipped-for-budget error wrapping the original", err)
+	}
+}
+
+func TestRunWithRetry_RetriesFastFailureUnderShortDeadline(t *testing.T) {
+	defer withFastBackoff(t)()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	calls := 0
+	res, err := runWithRetry(ctx, "claude", RunOpts{}, 3, classifyTransient, nil, func() (*Result, error) {
+		calls++
+		if calls < 2 {
+			return nil, fmt.Errorf("API Error: overloaded_error: please retry")
+		}
+		return &Result{Text: "ok"}, nil
+	})
+	if err != nil || res == nil || res.Text != "ok" || calls != 2 {
+		t.Fatalf("res=%+v err=%v calls=%d, want a successful second attempt", res, err, calls)
+	}
+}
