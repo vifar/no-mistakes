@@ -937,12 +937,21 @@ type gitlabJob struct {
 	Status     string `json:"status"`
 	Stage      string `json:"stage"`
 	FinishedAt string `json:"finished_at"`
-	Commit     struct {
+	// AllowFailure marks a job GitLab lets fail without failing the pipeline.
+	AllowFailure bool `json:"allow_failure"`
+	Commit       struct {
 		ID string `json:"id"`
 	} `json:"commit"`
 	Pipeline struct {
 		SHA string `json:"sha"`
 	} `json:"pipeline"`
+}
+
+func (j gitlabJob) bucket() scm.CheckBucket {
+	if j.AllowFailure && strings.EqualFold(strings.TrimSpace(j.Status), "failed") {
+		return scm.CheckBucketSkip
+	}
+	return gitlabStatusBucket(j.Status)
 }
 
 // completedAt parses the job's finished_at timestamp, returning the zero time
@@ -1084,7 +1093,7 @@ func jobsToChecks(jobs []gitlabJob) []scm.Check {
 			Name:        job.Name,
 			ProviderID:  providerID,
 			HeadSHA:     gitlabJobHeadSHA(job),
-			Bucket:      gitlabStatusBucket(job.Status),
+			Bucket:      job.bucket(),
 			CompletedAt: job.completedAt(),
 		})
 	}
@@ -1116,7 +1125,7 @@ func findFailedJobTargetIDs(out []byte, checkTargets []scm.CheckTarget) []int {
 	jobs, _ := decodeGitlabJobs(out)
 	var matched []int
 	for _, job := range jobs {
-		if !strings.EqualFold(job.Status, "failed") {
+		if !strings.EqualFold(job.Status, "failed") || job.AllowFailure {
 			continue
 		}
 		_, nameMatch := names[job.Name]

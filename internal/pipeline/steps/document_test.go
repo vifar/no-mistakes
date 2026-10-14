@@ -365,6 +365,155 @@ func TestDocumentStep_NoChanges_SkipsAgent(t *testing.T) {
 	}
 }
 
+// TestDocumentStep_NoOpPassWithEmptySummarySucceeds pins the legitimate
+// no-op pass: an agent that found nothing stale and edited nothing may
+// return an empty findings array with an empty summary, and the step must
+// succeed instead of refusing the pass with "missing summary".
+func TestDocumentStep_NoOpPassWithEmptySummarySucceeds(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	for _, summary := range []string{"", "   "} {
+		ag := &mockAgent{
+			name: "test",
+			runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"` + summary + `"}`)}, nil
+			},
+		}
+		sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+		step := &DocumentStep{}
+		outcome, err := step.Execute(sctx)
+		if err != nil {
+			t.Fatalf("summary %q: Execute() error = %v, want a successful no-op pass", summary, err)
+		}
+		if outcome.NeedsApproval {
+			t.Errorf("summary %q: expected no approval for a no-op pass", summary)
+		}
+		if outcome.FixSummary != NoChangesAppliedSummary {
+			t.Errorf("summary %q: fix summary = %q, want %q", summary, outcome.FixSummary, NoChangesAppliedSummary)
+		}
+		if status := gitStatusPorcelain(t, dir); status != "" {
+			t.Errorf("summary %q: expected clean worktree after a no-op pass, got %q", summary, status)
+		}
+		if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+			t.Errorf("summary %q: HEAD = %s, want unchanged %s", summary, got, headSHA)
+		}
+	}
+}
+
+// TestDocumentStep_FindingsWithEmptySummaryStillFails keeps the summary
+// requirement whenever the agent reports unresolved findings, even though a
+// no-op pass may now omit one.
+func TestDocumentStep_FindingsWithEmptySummaryStillFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"config docs conflict, needs human decision","action":"ask-user"}],"summary":""}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	step := &DocumentStep{}
+	if _, err := step.Execute(sctx); err == nil || !strings.Contains(err.Error(), "validate document analyzer findings: missing summary") {
+		t.Fatalf("Execute() error = %v, want missing summary with findings reported", err)
+	}
+}
+
+// TestDocumentStep_FindingsWithMissingSummaryKeyStillFails pins the output
+// shape itself: the summary field must be present even when empty is allowed,
+// so an omitted field stays a validation failure.
+func TestDocumentStep_FindingsWithMissingSummaryKeyStillFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"config docs conflict, needs human decision","action":"ask-user"}]}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	step := &DocumentStep{}
+	if _, err := step.Execute(sctx); err == nil || !strings.Contains(err.Error(), "validate document analyzer findings: missing summary") {
+		t.Fatalf("Execute() error = %v, want missing summary for an absent summary field", err)
+	}
+}
+
+// TestDocumentStep_ChangesWithEmptySummaryStillFails keeps the summary
+// requirement when the pass actually edited files: an agent that changed
+// documentation without naming what it did is not a no-op, even with no
+// unresolved findings.
+func TestDocumentStep_ChangesWithEmptySummaryStillFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Updated\n"), 0o644)
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":""}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	step := &DocumentStep{}
+	if _, err := step.Execute(sctx); err == nil || !strings.Contains(err.Error(), "validate document analyzer findings: missing summary") {
+		t.Fatalf("Execute() error = %v, want missing summary after changing files", err)
+	}
+	// Any edits the agent made should still be committed.
+	if status := gitStatusPorcelain(t, dir); status != "" {
+		t.Fatalf("expected agent edits committed despite missing summary, got %q", status)
+	}
+}
+
+// TestDocumentStep_AgentSelfCommittedChangesWithEmptySummaryStillFails
+// covers the review-bot finding: an agent that commits its own edits leaves a
+// clean worktree, so the pipeline commits nothing and committed would be
+// false even though the head advanced. Head movement counts as changes, so
+// the pass must not read as a no-op.
+func TestDocumentStep_AgentSelfCommittedChangesWithEmptySummaryStillFails(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Self committed\n"), 0o644)
+			gitCmd(t, dir, "add", "README.md")
+			gitCmd(t, dir, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "docs: update README")
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":""}`)}, nil
+		},
+	}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+
+	step := &DocumentStep{}
+	if _, err := step.Execute(sctx); err == nil || !strings.Contains(err.Error(), "validate document analyzer findings: missing summary") {
+		t.Fatalf("Execute() error = %v, want missing summary after the agent committed its own edits", err)
+	}
+	// The agent's own commit must remain on the branch.
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got == headSHA {
+		t.Fatal("expected the agent's self-commit to remain on the branch")
+	}
+	if got := lastCommitMessage(t, dir); got != "docs: update README" {
+		t.Fatalf("last commit message = %q, want the agent's own commit", got)
+	}
+	if status := gitStatusPorcelain(t, dir); status != "" {
+		t.Fatalf("expected clean worktree, got %q", status)
+	}
+	// The run head must have followed the agent's commit.
+	if sctx.Run.HeadSHA == headSHA {
+		t.Fatal("expected sctx.Run.HeadSHA to advance to the agent's commit")
+	}
+}
+
 func TestDocumentStep_MalformedOutput_CommitsAndFailsClosed(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

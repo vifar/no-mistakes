@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm/gitea"
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 	"github.com/kunchenguid/no-mistakes/internal/scm/gitlab"
+	"github.com/kunchenguid/no-mistakes/internal/scm/origin"
 	"github.com/kunchenguid/no-mistakes/internal/scm/plugin"
 )
 
@@ -252,11 +253,24 @@ func buildHost(sctx *pipeline.StepContext, provider scm.Provider) (scm.Host, str
 		if repoSlug == "" {
 			return nil, "could not resolve Gitea owner/repo from the remote URL"
 		}
-		// login comes from tea's own config.yml (see scm.ResolveGiteaLogin); an
-		// empty login is tolerated here and surfaces as an actionable error
+		// The account comes from tea's own config (see scm.ResolveTeaAccount);
+		// a missing one is tolerated here and surfaces as an actionable error
 		// from Host.Available instead of failing host construction outright.
-		login := scm.ResolveGiteaLogin(host)
-		return gitea.New(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, host, login, repoSlug), ""
+		account := scm.ResolveTeaAccount(host)
+		return gitea.New(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, host, account, repoSlug), ""
+	case scm.ProviderOrigin:
+		if sctx.Repo.ForkURL != "" {
+			return nil, "fork PR routing for Cursor Origin is not implemented"
+		}
+		repoSlug := origin.RepoSlug(sctx.Repo.UpstreamURL)
+		if repoSlug == "" && sctx.Run.PRURL != nil {
+			repoSlug = origin.RepoSlug(*sctx.Run.PRURL)
+		}
+		if repoSlug == "" {
+			return nil, "could not resolve Cursor Origin owner/repo from the remote URL"
+		}
+		draft := sctx.Config != nil && sctx.Config.Providers.Origin.DraftPullRequests
+		return origin.New(cmdFactory, func() bool { return stepCLIAvailable(sctx, provider) }, repoSlug, draft), ""
 	default:
 		return nil, fmt.Sprintf("provider %s is not supported yet", provider)
 	}

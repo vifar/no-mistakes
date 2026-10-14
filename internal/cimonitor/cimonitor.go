@@ -100,6 +100,7 @@ func ParseActivity(logs []string) Activity {
 			strings.Contains(line, "CI checks running"),
 			line == ChecksAwaitingApprovalMsg,
 			strings.HasPrefix(line, ChecksHeadWaitingPrefix),
+			line == BehindBaseMsg,
 			strings.Contains(line, "mergeable state still pending"),
 			strings.Contains(line, "no CI checks reported"),
 			strings.Contains(line, "waiting for checks to register"),

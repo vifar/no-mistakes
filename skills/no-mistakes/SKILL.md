@@ -306,11 +306,12 @@ selection behavior.
 
 Before any post-pipeline local commit or fresh run, read the structured `branch_sync` object returned by AXI home, status, or a drive result.
 Only when its `next_action.code` is `sync`, run `no-mistakes axi sync` first.
-That guarded sync may be a strict fast-forward or a content-equivalent diverged advance that anchors the pre-sync head before moving the branch with reset semantics; genuine divergence stays blocked.
+That guarded sync may be a strict fast-forward or a content-equivalent diverged advance that anchors the pre-sync head before moving the branch with reset semantics; genuine divergence stays blocked and names `git checkout --detach <pushed-sha>`, which moves no branch ref.
 If it reports `next_action.code` is `continue_active_run`, the pipeline still owns the branch: run the reported command, keep driving the active run, and do not make local follow-up commits.
 When `next_action.code` is `recover_custody`, run its exact `next_action.command` rather than reconstructing one. That is `no-mistakes axi sync --recover` to take a still-available preserved pipeline head, or `no-mistakes axi sync --recover --keep-local` in two keep-local cases: when an accessible gate confirms the verified preserved head is missing and you are explicitly discarding those unpublished commits, or when a bound archive proves divergent later work remains preserved while recovery keeps the branch at the exact reported required head and never selects, merges, or replays the archive. Do not substitute plain `--recover` or `rerun` for a reported keep-local action. `no-mistakes rerun` can resume validating a still-available ordinary preserved head instead, subject to the clean-head check above.
 Ordinary recovery takes that head by fast-forward, or by adopting a diverged preserved head proven to carry every local change - the ordinary result of the pipeline rebasing your commits onto a newer base - after anchoring your pre-recovery head under `refs/no-mistakes/recover-local/<run>`.
 The ordinary containment proof is deliberately narrow, so a rebase whose fix rounds also rewrote your own lines refuses instead of being adopted: when nothing can tell a deliberate pipeline fix from a dropped change, the decision is yours.
+When a run failed in a step after Test without touching the code (a Document or Lint fetch error) and its recorded head was never verified, recovery still returns custody at that head once your clean checkout sits exactly on it and the gate proves the head is the reviewed result plus the pipeline's own later commits on top of the live gate branch; recovery never moves a behind worktree onto an unverified head, so check that exact head out first.
 When `next_action.code` is `recover_remote_rewritten`, the configured push target was force-rewritten outside the pipeline after a terminal run: run exact `no-mistakes axi sync --recover`. It re-verifies the live target, anchors the superseded pipeline head under `refs/no-mistakes/recover-rewritten/<run>/<generation>`, and rebinds only the recorded push binding to the verified live head; it never moves your branch, the gate, or the remote. It refuses `--keep-local`, a live head or target that changes during recovery, a head it cannot anchor, and a merged or closed PR. Afterwards follow the ordinary `next_action` it reports.
 When `next_action.code` is `adopt_published`, a custody-returned branch was rebased after its gate lane stopped moving: run `no-mistakes axi sync --adopt-published`. It verifies the configured push target already has the exact rebased local head, preserves the old lane head, and updates only that stale gate lane. If the target differs or changes during verification, it refuses without replacing the lane.
 A `branch_sync.state` of `user_owned` means the run went terminal before changing the submitted head and cancellation released the branch: the exact branch and head are yours and immediately usable for whichever delivery path is authorized - no sync action is needed, and a repeated `--recover` there is a harmless no-op.
@@ -336,6 +337,10 @@ gate or preserved head through the full pipeline, including Rebase.
 Do **not** reach for `no-mistakes axi run` to refresh a still-active PR:
 after `checks-passed` it reattaches to the running monitor (HEAD unchanged)
 and returns its output without rebasing.
+If the base advances while that comparison is pinned, the ordinary PR boundary
+rejects the changed comparison when the step returns. A green-BEHIND rebase
+cannot carry the old comparison authority across the new base; let the run
+terminate, then use the rerun flow above after custody and clean-head checks.
 
 On a successful outcome (`checks-passed` or `passed`), close the loop with the
 user: summarize what happened during the pipeline in a concise, easily readable

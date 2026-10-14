@@ -44,6 +44,7 @@ const (
 	ciNoChecksPassedMsg         = cimonitor.NoChecksPassedMsg
 	ciChecksRunningMsg          = cimonitor.ChecksRunningMsg
 	ciChecksAwaitingApprovalMsg = cimonitor.ChecksAwaitingApprovalMsg
+	ciBehindBaseMsg             = cimonitor.BehindBaseMsg
 )
 
 // CIStep monitors an open PR until it is merged, closed, or its configured idle
@@ -79,6 +80,10 @@ type CIStep struct {
 	// must not re-arm the timeout. Overridable for testing; defaults to
 	// fetching the upstream default branch.
 	baseBranchTip func(context.Context) (string, bool)
+	// replayBase is the resolved base tip an in-flight rebase repair targets,
+	// set only for the duration of that repair's recording. recordRepair
+	// proves a pure replay against exactly this commit and nothing else.
+	replayBase string
 }
 
 // SetPollIntervalOverride is a test hook; production leaves the override unset.
@@ -490,7 +495,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		retryRefusal = false
 		if repair.Revalidate {
-			return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
+			return &pipeline.StepOutcome{RestartFrom: repair.restartFrom()}, nil
 		}
 	}
 	// A PR can close while CI is waiting. Observe that lifecycle before asking
@@ -514,6 +519,28 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		if repairOutcome != nil {
 			return repairOutcome, nil
+		}
+		// A repair that recorded nothing (the fixer failed) must not fall
+		// through to monitoring the old published head while a carried review
+		// approval still awaits its restart at Test: green checks there would
+		// complete the run with the carried head never published. A commit the
+		// failed fixer still left on top of the carried head goes through
+		// recordRepair like any other, so it revokes the approval and restarts
+		// at Review; only the unchanged carried head restarts at Test.
+		pending, err := sctx.DB.RunTestRestartPending(sctx.Run.ID)
+		if err != nil {
+			return nil, err
+		}
+		if pending {
+			head, err := stepGitHeadSHA(sctx)
+			if err != nil {
+				return nil, fmt.Errorf("resolve head after failed CI fix: %w", err)
+			}
+			repair, err := s.recordRepair(sctx, head)
+			if err != nil {
+				return nil, err
+			}
+			return &pipeline.StepOutcome{RestartFrom: repair.restartFrom(), Findings: sctx.DeferredFindings}, nil
 		}
 	}
 
@@ -552,6 +579,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	// poll-interval and grace-period pacing are unaffected by re-arming.
 	timeoutAnchor := started
 	lastBaseTip := ""
+	// behindBaseTip is the base tip a green, BEHIND PR was last seen at. The
+	// rebase repair fires only when the next poll still sees it green and
+	// BEHIND at that same tip, so a base that keeps moving does not spend a
+	// rebase and a full revalidation on a head that is stale again at once.
+	behindBaseTip := ""
 	mergeabilityBlockedReason := ""
 	var timeoutFailingChecks []scm.CheckTarget
 	timeoutMergeConflict := false
@@ -604,6 +636,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		}
 		botCommentReadFailed := false
+		behindObserved := false
 
 		if !unlimited && now().Sub(timeoutAnchor) >= timeout {
 			return timeoutOutcome()
@@ -678,6 +711,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 
 		// Check mergeable state if the provider supports it
 		mergeConflict := false
+		mergeBehind := false
 		mergeabilityKnown := true
 		if host.Capabilities().MergeableState {
 			mergeState, mergeErr := host.GetMergeableState(ctx, pr)
@@ -691,6 +725,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				mergeabilityKnown = false
 			} else {
 				mergeConflict = mergeState.Conflict()
+				// Unless ci.rebase_behind opts in, BEHIND reads as MERGEABLE:
+				// the green PR reports checks-passed and waits for a human.
+				mergeBehind = mergeState.Behind() && sctx.Config != nil && sctx.Config.CI.RebaseBehind
 				mergeabilityKnown = mergeState.Resolved()
 				if !mergeabilityKnown {
 					sctx.Log(fmt.Sprintf("mergeable state still pending: %s", mergeState))
@@ -959,6 +996,28 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						sctx.Log(fmt.Sprintf("issues detected: %s", botFindings.Summary))
 						return ciObservationOutcome(botFindings), nil
 					}
+					if mergeBehind {
+						// Green checks the forge still will not merge: the
+						// base requires branches to be up to date. The
+						// merge-conflict repair rebases onto the PR base.
+						behindObserved = true
+						tipCtx, cancel := context.WithTimeout(ctx, defaultBaseBranchTipResolveWindow)
+						tip, resolved := baseBranchTip(tipCtx)
+						cancel()
+						if !resolved || tip == "" || tip != behindBaseTip {
+							behindBaseTip = ""
+							if resolved {
+								behindBaseTip = tip
+							}
+							lastMonitorLog = logCIMonitorStatus(sctx, ciBehindBaseMsg, lastMonitorLog)
+							break
+						}
+						clearCIMonitorReady(sctx)
+						sctx.DeferredFindings = ""
+						findings := ciObservationFindings(ciIssues{provider: host.Provider(), checks: checks, behindBase: true})
+						sctx.Log(fmt.Sprintf("issues detected: %s", findings.Summary))
+						return ciObservationOutcome(findings), nil
+					}
 					sctx.DeferredFindings = ""
 					passedMsg := ciChecksPassedMsg
 					if len(checks) == 0 {
@@ -977,6 +1036,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 
 		if !botCommentReadFailed {
 			consecutiveBotCommentErrs = 0
+		}
+		if !behindObserved {
+			behindBaseTip = ""
 		}
 		if err := waitForPoll(); err != nil {
 			return nil, err

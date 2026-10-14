@@ -138,6 +138,9 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		purpose = "housekeeping"
 	}
 
+	// The head before the agent runs. The agent may commit its own edits;
+	// capture it so the correction wrapper and change detection both work.
+	headBefore := sctx.Run.HeadSHA
 	result, err := runPipelineCorrectionAgent(sctx, func() (*agent.Result, error) {
 		return sctx.RunAgentContext(ctx, agent.RunOpts{
 			Prompt:     prompt,
@@ -162,6 +165,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if err != nil {
 		return nil, err
 	}
+	changesApplied := committed || sctx.Run.HeadSHA != headBefore
 
 	// Without trustworthy structured output we cannot confirm the agent
 	// resolved every gap. Fail the step rather than creating an approval gate:
@@ -170,7 +174,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	var findings Findings
 	if result.Output == nil {
 		return nil, fmt.Errorf("document analyzer returned no structured findings")
-	} else if err := unmarshalRequiredFindings(result.Output, &findings, true); err != nil {
+	} else if err := validateDocumentAnalyzerFindings(result.Output, &findings, changesApplied); err != nil {
 		return nil, fmt.Errorf("validate document analyzer findings: %w", err)
 	}
 
@@ -197,8 +201,25 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		NeedsApproval: needsApproval,
 		AutoFixable:   false,
 		Findings:      string(findingsJSON),
-		FixSummary:    fixResultSummary(committed),
+		FixSummary:    fixResultSummary(changesApplied),
 	}, nil
+}
+
+// validateDocumentAnalyzerFindings parses the document pass's structured
+// output. A pass that reports no unresolved findings and made no changes -
+// nothing for the pipeline to commit and no head movement from the agent's
+// own commits - is a legitimate no-op, so its (present) summary may be empty.
+// Whenever the agent reports unresolved findings or actually changed files,
+// the summary is still required so the outcome names what remains or what
+// was done; an absent summary field stays a shape violation in every case.
+func validateDocumentAnalyzerFindings(raw []byte, findings *Findings, changesCommitted bool) error {
+	if err := unmarshalRequiredFindings(raw, findings, false); err != nil {
+		return err
+	}
+	if strings.TrimSpace(findings.Summary) == "" && (len(findings.Items) > 0 || changesCommitted) {
+		return fmt.Errorf("missing summary")
+	}
+	return nil
 }
 
 // buildPrompt assembles the document (or combined document+lint) prompt: the

@@ -62,6 +62,11 @@ func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 		return nil
 	}
 
+	message, err := sctx.Config.Test.Evidence.RenderCommitMessage(branch, sctx.Run.ID)
+	if err != nil {
+		sctx.Log(fmt.Sprintf("test evidence not published, linking local paths instead: %v", err))
+		return nil
+	}
 	result, err := evidence.Publish(sctx.Ctx, evidence.Request{
 		RepoDir:   sctx.WorkDir,
 		PushURL:   resolvePushURL(sctx),
@@ -76,7 +81,7 @@ func publishRunEvidence(sctx *pipeline.StepContext) *evidenceLinks {
 		// PR-body rendering applies. The name comes from the package that owns
 		// the location, so the two cannot drift.
 		ExcludeDirs:       []string{reviewqa.DirName},
-		Message:           fmt.Sprintf("no-mistakes: evidence for %s (run %s)", branch, sctx.Run.ID),
+		Message:           message,
 		ForbiddenBranches: []string{branch, sctx.Repo.DefaultBranch},
 	})
 	if err != nil {

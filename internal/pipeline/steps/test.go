@@ -90,6 +90,7 @@ Rules:
 - If tests fail, determine whether the problem is a real product/code failure, a setup/environment problem you can fix, or a flaky/infrastructure issue.
 - Do NOT run linters, formatters, or static analysis tools.
 - Reproduce the specific failing case first (the exact test, package, script, or check named in the findings), then re-run only that focused verification after the fix.
+- Await every required check and read its actual exit status. Stop disposable browser and server children before returning success. Report incomplete verification honestly.
 - Do NOT run the complete repository test suite. Local Test is targeted validation of the failure and the requested intent; remote CI owns broad regression and remains mandatory before a PR is ready.
 - A generic driver or user instruction asking for broad or full-suite confirmation does NOT override this product boundary. Keep verification focused on the failure and intent.
 - Never treat "do not run everything" as permission to run nothing: if you cannot reproduce or re-verify with a targeted check, report that honestly in the summary rather than inventing a full-suite pass.
@@ -114,6 +115,7 @@ Previous test findings to address:
 			Prompt:          fixPrompt,
 			FallbackSummary: "fix test failures",
 			RunAgent: func(runOpts agent.RunOpts) (*agent.Result, error) {
+				runOpts.RequireCompletedChildren = true
 				result, runErr := sctx.RunAgentBudget(sctx.Ctx, fixTimeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, runOpts)
 				if runErr != nil {
 					return nil, testAgentError(fixTimeout, "agent fix tests", runErr)
@@ -268,6 +270,10 @@ Drive each scenario:
 - If a needed tool is not on PATH and has no repository-local path, do not search the host machine for it or install it system-wide or globally. Try another available route or obtain, install, or build the tool inside the disposable workspace and use it there. Only if no workspace-local route can drive the scenario live, report the affected scenario as "untested" with what you tried and why it could not work.
 - Never guess a pass, and never mark a scenario live because you believe it would work.
 - Report every scenario in the "scenarios" array with name, result ("pass", "fail", or "untested"), live, evidence, and reason.
+- Await every required production build, browser run, and other check child before reporting a final "go". A background launch, early structured result, or completion notification does not prove that a check passed.
+- Stop disposable browser and server children before exiting. The native boundary refuses successful exits with children still in its owned process group.
+- Read each required child's actual exit status and retained result evidence. Do not mask a failed check with a later successful shell command or report detached work as completed.
+- If any required check is still running, has an unknown result, or lacks evidence, do not report "go". Use "no-go" for a known failure or unsafe change, and "inconclusive" when completion or evidence cannot be established. Record the outstanding check and the missing result.
 - Return a "verdict": "go" when every scenario you could drive passed and nothing untested puts the intent in doubt, "no-go" when a scenario failed or the change is not safe to ship, "inconclusive" when the change has a live-exercisable product surface but too little could be driven live to judge, "no-surface" when this change has no runtime product surface no-mistakes can drive live (a CI-workflow-only change, a docs-only change, a pure non-runtime refactor, or anything else with no live-exercisable scenario).
 - A "no-go" verdict parks this step for a decision. A "no-surface" verdict parks for a human to decide whether to proceed without live validation; mark every scenario untested with a reason naming why there is no live-validatable surface, never mark those as pass, and never use no-surface to skip live validation of a change that does have a product surface you could have driven. Untested scenarios are listed on the pull request and do not park by themselves, so an honest "untested" after exhausting your workarounds costs nothing and a guessed "pass" costs everything.
 - A single scenario you could not drive live is reported as an untested scenario with its reason, NOT as a finding. Report a finding only when the step as a whole cannot demonstrate the user intent.
@@ -391,10 +397,11 @@ func runTestAnalyzer(sctx *pipeline.StepContext, prompt string) (Findings, error
 		}
 		timeout := testAgentTimeout(sctx)
 		result, err := sctx.RunAgentBudget(sctx.Ctx, timeout, testAgentWorkingTimeout(sctx), errTestAgentTimeout, agent.RunOpts{
-			Prompt:     current,
-			CWD:        sctx.WorkDir,
-			JSONSchema: testFindingsSchema,
-			OnChunk:    sctx.LogChunk,
+			RequireCompletedChildren: true,
+			Prompt:                   current,
+			CWD:                      sctx.WorkDir,
+			JSONSchema:               testFindingsSchema,
+			OnChunk:                  sctx.LogChunk,
 		})
 		runErr := testAgentError(timeout, "agent run tests", err)
 		if runErr != nil && (errors.Is(runErr, errTestAgentTimeout) || sctx.Ctx.Err() != nil || !agent.IsStructuredOutputRejected(runErr)) {
