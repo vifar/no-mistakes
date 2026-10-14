@@ -9,9 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -273,7 +276,7 @@ func TestWatcherStrictProofRequiresExecutedPass(t *testing.T) {
 }
 
 func TestWatcherTargetRefReadCancellation(t *testing.T) {
-	for _, mode := range []string{"certified", "missing proof", "joined failure"} {
+	for _, mode := range []string{"certified", "missing proof", "joined failure", "independent Git failure"} {
 		t.Run(mode, func(t *testing.T) {
 			sc, databasePath, publication := strictStatusContext(t)
 			comparison, err := sc.DB.CaptureReviewComparison(sc.Run.ID, db.ReviewComparison{SourceRepo: "test/repo", SourceBranch: "feature", TargetBranch: "main", TargetSHA: sc.Run.BaseSHA, HeadSHA: sc.Run.HeadSHA, MergeBaseSHA: sc.Run.BaseSHA, DiffDigest: strings.Repeat("b", 64)})
@@ -330,6 +333,9 @@ func TestWatcherTargetRefReadCancellation(t *testing.T) {
 			bin := t.TempDir()
 			entered := filepath.Join(bin, "entered")
 			script := fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = ls-remote ] && [ \"$2\" = --exit-code ]; then\n: > %q\nwhile :; do sleep 1; done\nfi\nexec %q \"$@\"\n", entered, realGit)
+			if mode == "independent Git failure" {
+				script = fmt.Sprintf("#!/bin/sh\nif [ \"$1\" = ls-remote ] && [ \"$2\" = --exit-code ]; then\n(trap '' TERM; sleep 30) &\nprintf '%%s' \"$$\" > %q\nexec %q ls-remote --exit-code %q \"$4\"\nfi\nexec %q \"$@\"\n", entered, realGit, t.TempDir(), realGit)
+			}
 			if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -356,8 +362,14 @@ func TestWatcherTargetRefReadCancellation(t *testing.T) {
 			go func() { done <- executor.Execute(ctx, sc.Run, sc.Repo, sc.WorkDir) }()
 			deadline := time.After(20 * time.Second)
 			for {
-				if _, err := os.Stat(entered); err == nil {
-					break
+				if raw, err := os.ReadFile(entered); err == nil {
+					if mode != "independent Git failure" {
+						break
+					}
+					pid, err := strconv.Atoi(string(raw))
+					if err == nil && errors.Is(watcherProcessProbe(pid), syscall.ESRCH) {
+						break
+					}
 				}
 				select {
 				case err := <-done:
@@ -376,7 +388,12 @@ func TestWatcherTargetRefReadCancellation(t *testing.T) {
 			case <-time.After(20 * time.Second):
 				t.Fatal("watcher did not settle")
 			}
-			if !errors.Is(readErr, context.Canceled) {
+			if mode == "independent Git failure" {
+				var exit *exec.ExitError
+				if !errors.As(readErr, &exit) || exit.ExitCode() != 128 || errors.Is(readErr, context.Canceled) {
+					t.Errorf("independent Git exit lost identity: %v", readErr)
+				}
+			} else if !errors.Is(readErr, context.Canceled) {
 				t.Errorf("target read lost cancellation identity: %v", readErr)
 			}
 			if err := sc.DB.Close(); err != nil {
@@ -392,7 +409,7 @@ func TestWatcherTargetRefReadCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 			wantStatus := types.RunCancelled
-			if mode == "joined failure" {
+			if mode == "joined failure" || mode == "independent Git failure" {
 				wantStatus = types.RunFailed
 			}
 			if run.Status != wantStatus {
@@ -487,4 +504,16 @@ func TestWatcherImmutableRefErrorsRetainIdentity(t *testing.T) {
 			}
 		})
 	}
+}
+
+func watcherProcessProbe(pid int) error {
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	err = process.Signal(syscall.Signal(0))
+	if errors.Is(err, os.ErrProcessDone) {
+		return syscall.ESRCH
+	}
+	return err
 }
