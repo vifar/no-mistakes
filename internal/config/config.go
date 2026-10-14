@@ -373,9 +373,9 @@ type RepositoryPRRaw struct {
 type RepositoryOverrides map[string]RepositoryOverride
 
 // DefaultMaxFileSizeBytes is the largest blob an automatic commit may stage or
-// a published range may add when max_file_size_bytes is unset (50 MiB, under
+// a published range may add when max_file_size_bytes is unset (10 MiB, under
 // GitHub's 100 MB hard push limit with room for the warning threshold).
-const DefaultMaxFileSizeBytes int64 = 50 * 1024 * 1024
+const DefaultMaxFileSizeBytes int64 = 10 * 1024 * 1024
 
 // RepoConfig represents .no-mistakes.yaml in a repo root.
 type RepoConfig struct {

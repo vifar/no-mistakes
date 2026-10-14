@@ -679,7 +679,7 @@ Largest file an automatic commit may stage or a published branch may add.
 | | |
 | --- | --- |
 | Type | `integer` (bytes) |
-| Default | `52428800` (50 MiB) |
+| Default | `10485760` (10 MiB) |
 | Trust | Trusted default branch only, regardless of `allow_repo_commands` |
 
 `0` disables the check; a negative value fails config loading. The default sits under GitHub's 100 MB push limit, so an oversized file fails fast with a named path instead of at the forge.
