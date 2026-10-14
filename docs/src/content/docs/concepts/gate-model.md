@@ -84,6 +84,8 @@ directories in one command first. Physical-ancestor checks corroborate successfu
 discovery too: incomplete metadata skipped by Git cannot select an enclosing
 repository. Gitfile targets are compared with the actual metadata directory so
 linked and separate Git directories remain supported.
+Identity commands select explicit bare discovery only after substantive metadata
+evidence, so mixed ordinary files and directories cannot force an invalid Git directory.
 A canonical bare gate registered to the current owner proves managed identity,
 including when the caller is in the bare gate itself. Ordinary clones and their
 linked worktrees do not need a worktree-root query. For managed callers, the

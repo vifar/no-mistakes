@@ -158,7 +158,7 @@ func (i Inspector) Inspect(ctx context.Context, req Request) (Result, error) {
 				continue
 			}
 			if worktreeRoot == "" {
-				top, err := git.RunWithEnv(identityCtx, req.CWD, identityLocale, "rev-parse", "--show-toplevel")
+				top, err := runIdentityGit(identityCtx, req.CWD, "rev-parse", "--show-toplevel")
 				if err != nil {
 					// A registered bare gate has no worktree root. This known absence
 					// costs attribution only; positive managed identity remains decisive.
@@ -268,7 +268,7 @@ func (i Inspector) registeredManagedCommonDir(commonDir string) (string, bool, e
 }
 
 func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
-	identity, err := git.RunWithEnv(ctx, cwd, identityLocale, "rev-parse", "--path-format=absolute", "--git-common-dir", "--absolute-git-dir")
+	identity, err := runIdentityGit(ctx, cwd, "rev-parse", "--path-format=absolute", "--git-common-dir", "--absolute-git-dir")
 	if err != nil {
 		if normalGitDiagnostic(err, "fatal: not a git repository (or any of the parent directories): .git") {
 			absent, fsErr := gitMetadataMatchesDiscovery(cwd, "")
@@ -293,6 +293,32 @@ func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
 		return "", fmt.Errorf("gate execution context: Git discovery skipped repository metadata")
 	}
 	return dirs[0], nil
+}
+
+func runIdentityGit(ctx context.Context, cwd string, args ...string) (string, error) {
+	physical, err := filepath.Abs(cwd)
+	if err != nil {
+		return "", err
+	}
+	physical, err = filepath.EvalSymlinks(physical)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Lstat(filepath.Join(physical, ".git")); err != nil {
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		if git.LooksLikeBareRepository(physical) {
+			bare, err := bareGitMetadataPresent(physical)
+			if err != nil {
+				return "", err
+			}
+			if bare {
+				args = append([]string{"--git-dir=" + physical}, args...)
+			}
+		}
+	}
+	return git.RunDiscoveryWithEnv(ctx, cwd, identityLocale, args...)
 }
 
 // Only a sole normal exit can prove a discovery absence. A joined output-drain

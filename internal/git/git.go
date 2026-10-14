@@ -95,6 +95,10 @@ func RunWithEnv(ctx context.Context, dir string, extraEnv []string, args ...stri
 	return runInDirWithEnv(ctx, dir, extraEnv, args...)
 }
 
+func RunDiscoveryWithEnv(ctx context.Context, dir string, extraEnv []string, args ...string) (string, error) {
+	return runInDirWithEnv(ctx, dir, extraEnv, args...)
+}
+
 func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
 	return runInDirWithEnv(ctx, dir, nil, args...)
 }

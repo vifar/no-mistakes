@@ -253,8 +253,11 @@ func TestIdentityOrdinaryMetadataNamesStillCheckAncestry(t *testing.T) {
 		return 1, nil
 	}}
 	for _, repository := range []bool{false, true} {
-		for _, kind := range []string{"file", "directory"} {
+		for _, kind := range []string{"file", "directory", "ffd", "fdf", "fdd", "dff", "dfd", "ddf"} {
 			for _, name := range []string{"HEAD", "objects", "refs", "all"} {
+				if len(kind) == 3 && name != "all" {
+					continue
+				}
 				t.Run(fmt.Sprintf("repository=%t/%s/%s", repository, kind, name), func(t *testing.T) {
 					outer := t.TempDir()
 					if repository {
@@ -268,9 +271,13 @@ func TestIdentityOrdinaryMetadataNamesStillCheckAncestry(t *testing.T) {
 					if name == "all" {
 						names = []string{"HEAD", "objects", "refs"}
 					}
-					for _, entry := range names {
+					for index, entry := range names {
 						path := filepath.Join(cwd, entry)
-						if kind == "directory" {
+						directory := kind == "directory"
+						if len(kind) == 3 {
+							directory = kind[index] == 'd'
+						}
+						if directory {
 							if err := os.Mkdir(path, 0o755); err != nil {
 								t.Fatal(err)
 							}
@@ -296,6 +303,56 @@ func TestIdentityOrdinaryMetadataNamesStillCheckAncestry(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+func TestIdentityManagedAttributionIgnoresOrdinaryMixedNames(t *testing.T) {
+	f := activeIdentityFixture(t)
+	records, err := f.d.GetActiveRuns()
+	if err != nil || len(records) != 1 {
+		t.Fatalf("active fixture run: %v, %v", records, err)
+	}
+	if err := f.d.SetRunWorktreeDir(records[0].ID, f.managed); err != nil {
+		t.Fatal(err)
+	}
+	cwd := filepath.Join(f.managed, "docs")
+	if err := os.MkdirAll(filepath.Join(cwd, "objects"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cwd, "HEAD"), []byte("ordinary project content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: cwd})
+	if err != nil || !got.ManagedGit || !got.Nested || got.RunID != records[0].ID || got.Phase != types.StepDocument {
+		t.Fatalf("managed attribution with ordinary mixed names: %+v, %v", got, err)
+	}
+}
+
+func TestIdentityBareDiscoveryUnderSafeBareRepositoryExplicit(t *testing.T) {
+	f := newTopologyFixture(t)
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "safe.bareRepository")
+	t.Setenv("GIT_CONFIG_VALUE_0", "explicit")
+	for _, tc := range []struct {
+		cwd     string
+		managed bool
+	}{
+		{f.gate, true}, {f.origin, false},
+	} {
+		got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: tc.cwd})
+		if err != nil || got.ManagedGit != tc.managed || got.Nested != tc.managed {
+			t.Fatalf("explicit bare discovery: %+v, %v", got, err)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		link := filepath.Join(t.TempDir(), "bare-link")
+		if err := os.Symlink(f.gate, link); err != nil {
+			t.Fatal(err)
+		}
+		got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: link})
+		if err != nil || !got.ManagedGit || !got.Nested {
+			t.Fatalf("symlinked explicit bare discovery: %+v, %v", got, err)
 		}
 	}
 }
