@@ -1442,3 +1442,41 @@ func BenchmarkAppendUniquePaths(b *testing.B) {
 		})
 	}
 }
+
+func TestCommitAgentFixes_TrackedScratchDirectoryReplacement(t *testing.T) {
+	t.Parallel()
+	for _, directory := range []string{".config", "pkg/.config", ".config/.nested", "node_modules", "pkg/node_modules"} {
+		for _, deletionStaged := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/deletion_staged=%t", directory, deletionStaged), func(t *testing.T) {
+				t.Parallel()
+				dir, baseSHA, _ := setupGitRepo(t)
+				oldPath := directory + "/old.toml"
+				newPath := directory + "/new.toml"
+				head := scratchGuardCommit(t, dir, map[string]string{oldPath: "old config\n"})
+				sctx := newTestContextWithDBRecords(t, &mockAgent{}, dir, baseSHA, head, config.Commands{})
+				if err := os.Remove(filepath.Join(dir, oldPath)); err != nil {
+					t.Fatal(err)
+				}
+				if deletionStaged {
+					gitCmd(t, dir, "add", "-u")
+				}
+				writeTestFile(t, dir, newPath, "replacement config\n")
+				writeTestFile(t, dir, directory+"/.scratch/blob", "new scratch")
+				if err := commitAgentFixes(sctx, types.StepDocument, "replace config", ""); err != nil {
+					t.Fatal(err)
+				}
+				changes := gitCmd(t, dir, "show", "--format=", "--name-status", "--no-renames", "HEAD")
+				want := "A\t" + newPath + "\nD\t" + oldPath
+				if changes != want {
+					t.Fatalf("replacement commit must contain addition and deletion only: got %q, want %q", changes, want)
+				}
+				if got := gitCmd(t, dir, "show", "HEAD:"+newPath); got != "replacement config" {
+					t.Fatalf("replacement content = %q", got)
+				}
+				if _, err := os.Stat(filepath.Join(dir, directory, ".scratch/blob")); err != nil {
+					t.Fatalf("skipped scratch must remain in the worktree: %v", err)
+				}
+			})
+		}
+	}
+}

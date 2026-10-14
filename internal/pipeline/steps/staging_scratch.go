@@ -2,7 +2,6 @@ package steps
 
 import (
 	"fmt"
-	"path"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -50,20 +49,38 @@ func matchesStagingExclude(sctx *pipeline.StepContext, file string) (string, boo
 	return "", false
 }
 
-// firstScratchComponent returns the shortest leading directory prefix of rel
-// (a slash path) whose last component is scratch, or "". dirPath reports that
-// rel itself names a directory, so its final component counts too.
-func firstScratchComponent(rel string, dirPath bool) string {
+func gitTreeHasDirectory(sctx *pipeline.StepContext, tree, dir string) (bool, error) {
+	out, err := stepGitRun(sctx, "--literal-pathspecs", "ls-tree", "-z", tree, "--", dir)
+	if err != nil {
+		return false, err
+	}
+	fields := strings.Fields(strings.SplitN(out, "\t", 2)[0])
+	return len(fields) == 3 && fields[1] == "tree", nil
+}
+
+func firstNewScratchComponent(sctx *pipeline.StepContext, headDirs map[string]bool, rel string, dirPath bool) (string, error) {
 	parts := strings.Split(strings.TrimSuffix(rel, "/"), "/")
 	if !dirPath {
 		parts = parts[:len(parts)-1]
 	}
 	for i, part := range parts {
 		if isScratchDirName(part) {
-			return strings.Join(parts[:i+1], "/") + "/"
+			dir := strings.Join(parts[:i+1], "/")
+			exists, known := headDirs[dir]
+			if !known {
+				var err error
+				exists, err = gitTreeHasDirectory(sctx, "HEAD", dir)
+				if err != nil {
+					return "", err
+				}
+				headDirs[dir] = exists
+			}
+			if !exists {
+				return dir + "/", nil
+			}
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // stageUntrackedChanges stages untracked files individually. A wholly
@@ -79,17 +96,22 @@ func stageUntrackedChanges(sctx *pipeline.StepContext) error {
 	}
 	var toAdd, skipped []string
 	skippedSeen := map[string]bool{}
+	headDirs := map[string]bool{}
 	for _, entry := range nulFields(listed) {
+		scratch, err := firstNewScratchComponent(sctx, headDirs, entry, strings.HasSuffix(entry, "/"))
+		if err != nil {
+			return fmt.Errorf("check tracked scratch directories: %w", err)
+		}
+		if scratch != "" {
+			skipped = appendUnique(skipped, skippedSeen, scratch)
+			continue
+		}
 		if !strings.HasSuffix(entry, "/") {
 			if _, excluded := matchesStagingExclude(sctx, entry); excluded {
 				skipped = appendUnique(skipped, skippedSeen, entry)
 				continue
 			}
 			toAdd = append(toAdd, entry)
-			continue
-		}
-		if isScratchDirName(path.Base(strings.TrimSuffix(entry, "/"))) {
-			skipped = appendUnique(skipped, skippedSeen, entry)
 			continue
 		}
 		// A wholly untracked directory is expanded so nested scratch and
@@ -99,9 +121,12 @@ func stageUntrackedChanges(sctx *pipeline.StepContext) error {
 			return fmt.Errorf("list untracked files in %s: %w", entry, err)
 		}
 		for _, file := range nulFields(files) {
-			rel := strings.TrimPrefix(file, entry)
-			if scratch := firstScratchComponent(rel, strings.HasSuffix(file, "/")); scratch != "" {
-				skipped = appendUnique(skipped, skippedSeen, entry+scratch)
+			scratch, err := firstNewScratchComponent(sctx, headDirs, file, strings.HasSuffix(file, "/"))
+			if err != nil {
+				return fmt.Errorf("check tracked scratch directories: %w", err)
+			}
+			if scratch != "" {
+				skipped = appendUnique(skipped, skippedSeen, scratch)
 				continue
 			}
 			if _, excluded := matchesStagingExclude(sctx, file); excluded {

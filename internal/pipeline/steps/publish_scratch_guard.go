@@ -79,12 +79,10 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 		if known, ok := baseDirs[dir]; ok {
 			return known, nil
 		}
-		out, err := stepGitRun(sctx, "--literal-pathspecs", "ls-tree", "-z", base, "--", dir)
+		exists, err := gitTreeHasDirectory(sctx, base, dir)
 		if err != nil {
 			return false, err
 		}
-		fields := strings.Fields(strings.SplitN(out, "\t", 2)[0])
-		exists := len(fields) == 3 && fields[1] == "tree"
 		baseDirs[dir] = exists
 		return exists, nil
 	}
