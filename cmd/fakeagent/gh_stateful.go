@@ -74,6 +74,11 @@ func runGhStatefulPRStub(args []string) int {
 	if repo == "" {
 		repo = "example/repo"
 	}
+	forge, err := loadGhForge()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fakeagent gh stateful-pr: %v\n", err)
+		return 1
+	}
 
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		return 0
@@ -87,21 +92,37 @@ func runGhStatefulPRStub(args []string) int {
 				query = arg
 			}
 		}
+		answers := forge
+		if answers == nil {
+			answers = &ghForge{}
+		}
 		switch {
 		case strings.Contains(query, "statusCheckRollup"):
-			fmt.Println(`{"data":{"repository":{"object":{"statusCheckRollup":null}}}}`)
+			fmt.Println(answers.graphqlChecks())
 			return 0
 		case strings.Contains(query, "reviewThreads"):
-			fmt.Println(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}}}`)
+			fmt.Println(answers.graphqlReviewThreads())
 			return 0
 		}
 	}
-	if len(args) >= 3 && args[0] == "api" && slices.Contains(args, "--method") && argAfter(args, "--method") == "GET" {
+	// gh api defaults to GET, which is how the exact-PR-facts read (and the
+	// strict readiness receipt built on it) asks for the pull request.
+	if len(args) >= 2 && args[0] == "api" && (!slices.Contains(args, "--method") || argAfter(args, "--method") == "GET") {
 		endpoint := ""
 		for _, arg := range args[1:] {
 			if strings.HasPrefix(arg, "repos/") {
 				endpoint = arg
 				break
+			}
+		}
+		if forge != nil {
+			if out, errText, handled := forge.rest(repo, endpoint, args); handled {
+				if errText != "" {
+					fmt.Fprintln(os.Stderr, errText)
+					return 1
+				}
+				fmt.Println(out)
+				return 0
 			}
 		}
 		if endpoint == "repos/"+repo+"/pulls" {
@@ -237,7 +258,17 @@ func runGhStatefulPRStub(args []string) int {
 		"mergeable":   "MERGEABLE",
 		"headRefOid":  ghStatefulHeadOID(repo, pr.Head),
 	}
-	if jq := argAfter(args, "--jq"); strings.HasPrefix(jq, ".") {
+	if jq := argAfter(args, "--jq"); jq == `.mergeable + " " + .mergeStateStatus` {
+		mergeable, status := fields["mergeable"], "CLEAN"
+		if forge != nil && forge.Mergeable != "" {
+			mergeable = forge.Mergeable
+		}
+		if forge != nil && forge.MergeStateStatus != "" {
+			status = forge.MergeStateStatus
+		}
+		fmt.Println(mergeable, status)
+		return 0
+	} else if strings.HasPrefix(jq, ".") {
 		if value, ok := fields[strings.TrimPrefix(jq, ".")]; ok {
 			fmt.Println(value)
 			return 0
