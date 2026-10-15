@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
@@ -437,19 +438,38 @@ func TestSupersedeReplacesSameEventRetrigger(t *testing.T) {
 func TestSupersedeNeedsAKnownEventAndDistinctRun(t *testing.T) {
 	t.Parallel()
 	h := New(nil, nil, "", "test/repo")
-	job := scm.Check{Name: "build", Kind: scm.CheckKindRun, Workflow: "CI", WorkflowID: 10, RunID: 7, WorkflowEvent: "push", WorkflowBranch: "feature", Bucket: scm.CheckBucketPass}
+	job := scm.Check{Name: "build", Kind: scm.CheckKindRun, Workflow: "CI", Bucket: scm.CheckBucketPass,
+		StartedAt: time.Date(2026, 10, 14, 10, 0, 0, 0, time.UTC), CompletedAt: time.Date(2026, 10, 14, 10, 5, 0, 0, time.UTC),
+		Link: "https://github.com/test/repo/actions/runs/7/job/1"}
+	run := func(id int64, event, branch string, start time.Time) scm.Check {
+		return scm.Check{Name: "CI", WorkflowRun: true, Kind: scm.CheckKindRun, WorkflowID: 10, RunID: id, WorkflowEvent: event, WorkflowBranch: branch,
+			Bucket: scm.CheckBucketFail, StartedAt: start, Link: fmt.Sprintf("https://github.com/test/repo/actions/runs/%d", id)}
+	}
+	first := run(7, "push", "feature", time.Date(2026, 10, 14, 10, 0, 0, 0, time.UTC))
+	first.Bucket = scm.CheckBucketPass
+	later := time.Date(2026, 10, 14, 11, 0, 0, 0, time.UTC)
 	for name, tc := range map[string]struct {
 		run  scm.Check
 		want bool
 	}{
-		"same run is handled during collection": {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 7, WorkflowEvent: "push", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, false},
-		"unknown event":                         {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, Bucket: scm.CheckBucketFail}, false},
-		"different event":                       {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, WorkflowEvent: "pull_request", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, false},
-		"same event, other branch":              {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, WorkflowEvent: "push", WorkflowBranch: "other", Bucket: scm.CheckBucketFail}, false},
-		"newer run, same event":                 {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, WorkflowEvent: "push", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, true},
+		"unknown event":            {run(8, "", "feature", later), false},
+		"different event":          {run(8, "pull_request", "feature", later), false},
+		"same event, other branch": {run(8, "push", "other", later), false},
+		"newer run, same event":    {run(8, "push", "feature", later), true},
 	} {
-		got := h.supersedeStaleJobResults([]scm.Check{job, tc.run})
-		if superseded := len(got) == 1; superseded != tc.want {
+		if name == "unknown event" {
+			first.WorkflowEvent = ""
+		} else {
+			first.WorkflowEvent = "push"
+		}
+		got := h.appendUnrepresentedWorkflowRuns([]scm.Check{job}, []scm.Check{first, tc.run})
+		superseded := true
+		for _, c := range got {
+			if !c.WorkflowRun && c.Name == "build" {
+				superseded = false
+			}
+		}
+		if superseded != tc.want {
 			t.Errorf("%s: superseded = %v, want %v (%+v)", name, superseded, tc.want, got)
 		}
 	}
@@ -787,7 +807,8 @@ func TestGetChecksSkippedSuccessorDoesNotRetireAFailure(t *testing.T) {
 // share its name.
 func TestGetChecksAttemptSequencesJudgeTheNewestMeaningfulAttempt(t *testing.T) {
 	t.Parallel()
-	outcomes := []string{"jobs-pass", "jobs-fail", "jobless-fail", "jobless-pass", "jobless-skip", "pending"}
+	// partial-*: the attempt has reported only a passing lint job so far.
+	outcomes := []string{"jobs-pass", "jobs-fail", "jobless-fail", "jobless-pass", "jobless-skip", "pending", "partial-fail", "partial-pass"}
 	var sequences [][]string
 	var build func(prefix []string)
 	build = func(prefix []string) {
@@ -802,35 +823,42 @@ func TestGetChecksAttemptSequencesJudgeTheNewestMeaningfulAttempt(t *testing.T) 
 		}
 	}
 	build(nil)
+	// The same collection path GetChecks takes after parsing: reconcile jobs
+	// with the workflow runs, then collapse same-name reruns.
+	h := New(nil, nil, "", "test/repo")
+	at := func(hour, minute int) time.Time { return time.Date(2026, 10, 14, hour, minute, 0, 0, time.UTC) }
+	job := func(id int64, runID int, name string, bucket scm.CheckBucket, hour int) scm.Check {
+		c := scm.Check{Name: name, ProviderID: fmt.Sprintf("github-check-run:%d", id), Kind: scm.CheckKindRun, Workflow: "CI", App: "github-actions",
+			Bucket: bucket, StartedAt: at(hour, 0), Link: fmt.Sprintf("https://github.com/test/repo/actions/runs/%d/job/%d", runID, id)}
+		if bucket != scm.CheckBucketPending {
+			c.CompletedAt = at(hour, 5)
+		}
+		return c
+	}
 	for _, jobName := range []string{"build", "CI"} {
 		for _, seq := range sequences {
-			var jobs, runs []string
+			var jobs, runs []scm.Check
 			for i, outcome := range seq {
 				id := i + 1
-				start := fmt.Sprintf("2026-10-14T1%d:00:00Z", id)
-				status, conclusion := "completed", "success"
+				bucket := scm.CheckBucketPass
 				switch outcome {
-				case "jobs-fail", "jobless-fail":
-					conclusion = "failure"
+				case "jobs-fail", "jobless-fail", "partial-fail":
+					bucket = scm.CheckBucketFail
 				case "jobless-skip":
-					conclusion = "skipped"
+					bucket = scm.CheckBucketSkip
 				case "pending":
-					status, conclusion = "in_progress", ""
+					bucket = scm.CheckBucketPending
 				}
-				conclusionJSON := `"conclusion":null`
-				if conclusion != "" {
-					conclusionJSON = fmt.Sprintf(`"conclusion":%q`, conclusion)
-				}
-				runs = append(runs, fmt.Sprintf(`{"id":%d,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":%q,%s,"run_started_at":%q,"html_url":"https://github.com/test/repo/actions/runs/%d"}`, id, status, conclusionJSON, start, id))
-				if strings.HasPrefix(outcome, "jobs-") || outcome == "pending" {
-					jobConclusion, jobStatus := "SUCCESS", "COMPLETED"
-					if outcome == "jobs-fail" {
-						jobConclusion = "FAILURE"
-					}
-					if outcome == "pending" {
-						jobStatus, jobConclusion = "IN_PROGRESS", ""
-					}
-					jobs = append(jobs, fmt.Sprintf(`{"__typename":"CheckRun","databaseId":%d,"name":%q,"status":%q,"conclusion":%q,"startedAt":%q,"completedAt":"2026-10-14T1%d:05:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/%d/job/%d","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`, 100+id, jobName, jobStatus, jobConclusion, start, id, id, 100+id))
+				runs = append(runs, scm.Check{Name: "CI", ProviderID: fmt.Sprintf("github-workflow-run:%d", id), Kind: scm.CheckKindRun, Bucket: bucket,
+					StartedAt: at(10+id, 0), WorkflowID: 10, RunID: int64(id), WorkflowEvent: "pull_request", WorkflowBranch: "feature", WorkflowRun: true,
+					Link: fmt.Sprintf("https://github.com/test/repo/actions/runs/%d", id)})
+				switch {
+				case strings.HasPrefix(outcome, "jobs-"):
+					jobs = append(jobs, job(int64(100+id), id, jobName, bucket, 10+id))
+				case outcome == "pending":
+					jobs = append(jobs, job(int64(100+id), id, jobName, scm.CheckBucketPending, 10+id))
+				case strings.HasPrefix(outcome, "partial-"):
+					jobs = append(jobs, job(int64(200+id), id, "lint", scm.CheckBucketPass, 10+id))
 				}
 			}
 			newest := ""
@@ -840,7 +868,7 @@ func TestGetChecksAttemptSequencesJudgeTheNewestMeaningfulAttempt(t *testing.T) 
 					break
 				}
 			}
-			checks := checksForAttempts(t, "["+strings.Join(jobs, ",")+"]", fmt.Sprintf(`[{"total_count":%d,"workflow_runs":[`, len(runs))+strings.Join(runs, ",")+`]}]`)
+			checks := h.collapseLatestByName(h.appendUnrepresentedWorkflowRuns(jobs, runs))
 			scope := scm.NewCheckScope(nil, scm.CheckScopePolicy{Resolved: &scm.CheckScopeResolution{Required: []scm.RequiredCheck{{Context: jobName}}, Derived: true}}, "main", nil)
 			scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks)
 			if got, want := scoped.Ready(), newest == "jobs-pass"; got != want {
@@ -856,7 +884,7 @@ func TestGetChecksAttemptSequencesJudgeTheNewestMeaningfulAttempt(t *testing.T) 
 					reported = true
 				}
 			}
-			if reported && (newest == "jobs-fail" || newest == "jobless-fail") {
+			if reported && (newest == "jobs-fail" || newest == "jobless-fail" || newest == "partial-fail") {
 				repairable := false
 				for _, c := range scoped.Relevant {
 					if c.Bucket == scm.CheckBucketFail && !c.ExpectedMissing {

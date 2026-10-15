@@ -480,10 +480,9 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 			return nil, err
 		}
 		checks = h.appendUnrepresentedWorkflowRuns(checks, runs)
-		// Supersede before collapsing: a job named like its workflow would
-		// otherwise collapse into the newer workflow-level check and drop the
-		// identity that check must carry.
-		checks = h.supersedeStaleJobResults(checks)
+		// Reconcile attempts before collapsing: a job named like its workflow
+		// would otherwise collapse into the newer workflow-level check and
+		// drop the identity that check must carry.
 		checks = h.collapseLatestByName(checks)
 		for i := range checks {
 			checks[i].HeadSHA = headSHA
@@ -692,25 +691,41 @@ func (h *Host) repoSlug() string {
 	return repo
 }
 
-// appendUnrepresentedWorkflowRuns reconciles jobs with the REST run state
-// before deciding whether jobs represent a run. GitHub reuses the run ID for
-// reruns, and checkSuite.workflowRun.runAttempt is the parent's current attempt,
-// not the job's attempt. An unfinished run therefore makes its jobs pending;
-// once completed, the current-attempt start distinguishes stale completed jobs.
+// appendUnrepresentedWorkflowRuns reconciles the rollup's jobs with the REST
+// workflow runs for the head. GitHub reuses the run ID for reruns, and
+// checkSuite.workflowRun.runAttempt is the parent's current attempt, not the
+// job's attempt: an unfinished run makes its jobs pending, and a job completed
+// before its run's current attempt started is stale.
+//
+// Attempts of one trigger - the same workflow, event, and head branch - are
+// then judged as GitHub's newest meaningful attempt, ordered by when each
+// current attempt started (a rerun keeps its run ID). A skipped attempt ran
+// nothing and never counts. Only the newest attempt's current jobs remain;
+// every older attempt's jobs and run-level results, and the newest attempt's
+// own stale jobs, are retired. Each retired job name the newest attempt has not
+// reported yet is then owned by how that attempt stands: a failing or
+// unfinished attempt's run-level result stands for it (blocking, and
+// repairable when failed), while a passing attempt leaves it missing until
+// the current job registers. A failing or unfinished attempt whose reported
+// jobs all passed also keeps its run-level result. Runs of an unknown event,
+// and runs triggered independently, are separate triggers.
 func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.Check {
 	represented := make(map[string][]int, len(checks))
-	drop := make(map[int]bool)
 	for i, check := range checks {
 		if runID := h.actionsRunID(check.Link); runID != "" {
 			represented[runID] = append(represented[runID], i)
 		}
 	}
-	var jobless []scm.Check
+	drop := make(map[int]bool)
+	type attempt struct {
+		run       scm.Check
+		current   []int
+		displaced []scm.Check
+	}
+	attempts := make([]attempt, 0, len(runs))
 	for _, run := range runs {
-		runID := h.actionsRunID(run.Link)
-		currentJobs := false
-		current := map[string]bool{}
-		if runID != "" {
+		a := attempt{run: run}
+		if runID := h.actionsRunID(run.Link); runID != "" {
 			for _, i := range represented[runID] {
 				check := &checks[i]
 				if check.StartedAt.IsZero() && !run.StartedAt.IsZero() {
@@ -727,38 +742,95 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 					check.CompletedAt = time.Time{}
 				} else if !check.CompletedAt.IsZero() && !run.StartedAt.IsZero() && check.CompletedAt.Before(run.StartedAt) {
 					drop[i] = true
-					// Only a non-green attempt speaks for the jobs it replaced. A
-					// green run whose current jobs have not reached the rollup yet
-					// proves nothing about them: their requirements stay missing
-					// until the jobs register.
-					if run.Bucket != scm.CheckBucketPass && run.Bucket != scm.CheckBucketSkip {
-						run.Supersedes = append(run.Supersedes, scm.Check{Name: check.Name, ProviderID: check.ProviderID, Workflow: check.Workflow, Kind: check.Kind, App: check.App, AppID: check.AppID})
-					}
+					a.displaced = append(a.displaced, jobIdentity(*check))
 					continue
 				}
-				currentJobs = true
-				current[check.Name] = true
+				a.current = append(a.current, i)
 			}
 		}
-		if !currentJobs {
-			jobless = append(jobless, run)
+		attempts = append(attempts, a)
+	}
+
+	trigger := func(run scm.Check) string {
+		if run.WorkflowID == 0 || run.WorkflowEvent == "" {
+			return fmt.Sprintf("run:%d", run.RunID)
+		}
+		return fmt.Sprintf("%d\x00%s\x00%s", run.WorkflowID, run.WorkflowEvent, run.WorkflowBranch)
+	}
+	var order []string
+	groups := map[string][]int{}
+	for i, a := range attempts {
+		key := trigger(a.run)
+		if _, seen := groups[key]; !seen {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], i)
+	}
+	for _, key := range order {
+		members := groups[key]
+		newest := -1
+		for _, i := range members {
+			if attempts[i].run.Bucket == scm.CheckBucketSkip {
+				continue
+			}
+			if newest < 0 {
+				newest = i
+				continue
+			}
+			if after, ordered := h.attemptAfter(attempts[i].run, attempts[newest].run); ordered && after {
+				newest = i
+			}
+		}
+		if newest < 0 {
+			// Every attempt was skipped: nothing ran, and each stands alone.
+			for _, i := range members {
+				if len(attempts[i].current) == 0 {
+					checks = append(checks, attempts[i].run)
+				}
+			}
 			continue
 		}
-		// A failed attempt that has reported only some of its jobs still
-		// stands for the displaced jobs no current job has replaced yet;
-		// dropping it would leave those requirements to stale or no evidence.
-		var uncovered []scm.Check
-		for _, identity := range run.Supersedes {
-			if !current[identity.Name] {
-				uncovered = append(uncovered, identity)
+		latest := attempts[newest]
+		retired := append([]scm.Check(nil), latest.displaced...)
+		for _, i := range members {
+			if i == newest {
+				continue
+			}
+			for _, j := range attempts[i].current {
+				drop[j] = true
+				retired = append(retired, jobIdentity(checks[j]))
+			}
+			retired = append(retired, attempts[i].displaced...)
+		}
+		reported := map[string]bool{}
+		explained := false
+		for _, j := range latest.current {
+			reported[checks[j].Name] = true
+			if b := checks[j].Bucket; b != scm.CheckBucketPass && b != scm.CheckBucketSkip {
+				explained = true
 			}
 		}
-		if len(uncovered) > 0 {
-			run.Supersedes = uncovered
-			jobless = append(jobless, run)
+		var uncovered []scm.Check
+		for _, identity := range retired {
+			if reported[identity.Name] {
+				continue
+			}
+			reported[identity.Name] = true
+			uncovered = append(uncovered, identity)
+		}
+		run := latest.run
+		green := run.Bucket == scm.CheckBucketPass || run.Bucket == scm.CheckBucketSkip
+		if !green {
+			run.Supersedes = append(run.Supersedes, uncovered...)
+		}
+		// The run-level result is reported when it is the attempt's only
+		// result, when it stands for retired jobs, and when it failed or is
+		// unfinished while every job it reported passed: that outcome comes
+		// from a job not reported yet and must not disappear.
+		if len(latest.current) == 0 || !green && (len(uncovered) > 0 || !explained) {
+			checks = append(checks, run)
 		}
 	}
-	checks = append(checks, h.retireObsoleteJoblessRuns(jobless, runs)...)
 	kept := make([]scm.Check, 0, len(checks)-len(drop))
 	for i, check := range checks {
 		if !drop[i] {
@@ -768,52 +840,10 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 	return kept
 }
 
-// retireObsoleteJoblessRuns drops a jobless workflow-level result once a later
-// attempt of the same workflow, event, and branch exists; attempts are ordered
-// by when they started, not by run ID, because a rerun keeps its ID. The job
-// identities a retired result stood for pass to the newest attempt when that
-// attempt is jobless too and did not pass, so a requirement it covered is still owned by the
-// failure that replaced it rather than silently dropped. A newest attempt with
-// current jobs speaks for its own jobs.
-func (h *Host) retireObsoleteJoblessRuns(jobless, runs []scm.Check) []scm.Check {
-	sameTrigger := func(a, b scm.Check) bool {
-		return a.WorkflowID != 0 && a.WorkflowID == b.WorkflowID && a.RunID != b.RunID &&
-			a.WorkflowEvent != "" && a.WorkflowEvent == b.WorkflowEvent && a.WorkflowBranch == b.WorkflowBranch
-	}
-	newest := make([]int64, len(jobless))
-	for i, run := range jobless {
-		latest := run
-		for _, other := range runs {
-			// A skipped attempt runs no jobs and stands for nothing, so it
-			// cannot make an earlier result obsolete.
-			if sameTrigger(run, other) && other.Bucket != scm.CheckBucketSkip {
-				if after, ordered := h.attemptAfter(other, latest); ordered && after {
-					latest = other
-				}
-			}
-		}
-		newest[i] = latest.RunID
-	}
-	for i, run := range jobless {
-		if newest[i] == run.RunID {
-			continue
-		}
-		for j := range jobless {
-			// As for stale jobs, only a non-green attempt speaks for jobs it
-			// has not reported: a passing or skipped jobless attempt leaves
-			// their requirements missing until its jobs register.
-			if jobless[j].RunID == newest[i] && jobless[j].Bucket != scm.CheckBucketPass && jobless[j].Bucket != scm.CheckBucketSkip {
-				jobless[j].Supersedes = append(jobless[j].Supersedes, run.Supersedes...)
-			}
-		}
-	}
-	var kept []scm.Check
-	for i, run := range jobless {
-		if newest[i] == run.RunID {
-			kept = append(kept, run)
-		}
-	}
-	return kept
+// jobIdentity is the identity a run-level result stands for when it owns a
+// retired job.
+func jobIdentity(c scm.Check) scm.Check {
+	return scm.Check{Name: c.Name, ProviderID: c.ProviderID, Workflow: c.Workflow, Kind: c.Kind, App: c.App, AppID: c.AppID}
 }
 
 // collapseLatestByName collapses orderable same-name reruns of one workflow
@@ -871,65 +901,6 @@ func (h *Host) collapseLatestByName(checks []scm.Check) []scm.Check {
 		}
 	}
 	return collapsed
-}
-
-// supersedeStaleJobResults lets a newer workflow run that has produced no job
-// speak for the jobs of the older attempt of the same workflow. The rollup
-// keeps the older attempt's passing job forever, while the newer run may have
-// failed (or still be queued) before creating any job, such as on a workflow
-// validation error; the job-level names never reappear, so nothing would
-// replace the stale pass. Each such older job is dropped. A newer attempt that
-// did not pass records the job's context and then stands for it; a passing
-// one has not reported its own jobs yet, so it stands for nothing and the
-// job's requirement stays missing until the current job registers. A skipped
-// attempt never creates jobs and leaves older results in place.
-func (h *Host) supersedeStaleJobResults(checks []scm.Check) []scm.Check {
-	drop := make(map[int]bool)
-	for wi := range checks {
-		w := &checks[wi]
-		if !w.WorkflowRun || w.Bucket == scm.CheckBucketSkip {
-			continue
-		}
-		for ji := range checks {
-			j := checks[ji]
-			if ji == wi || j.WorkflowRun || j.Kind != scm.CheckKindRun {
-				continue
-			}
-			sameWorkflow := w.WorkflowID != 0 && w.WorkflowID == j.WorkflowID || j.WorkflowID == 0 && j.Workflow != "" && j.Workflow == w.Name
-			if !sameWorkflow {
-				continue
-			}
-			// Only a proven retry or retrigger replaces an older result: the
-			// same workflow, triggered by the same event for the same head
-			// branch (runs are listed per head commit). Runs
-			// triggered independently (a pull_request run and a later
-			// workflow_dispatch run) are separate results, and a run whose
-			// event is unknown is not proven to be either.
-			if w.WorkflowEvent == "" || w.WorkflowEvent != j.WorkflowEvent || w.WorkflowBranch != j.WorkflowBranch {
-				continue
-			}
-			if w.RunID != 0 && w.RunID == j.RunID {
-				continue
-			}
-			if after, ordered := h.attemptAfter(*w, j); !ordered || !after {
-				continue
-			}
-			drop[ji] = true
-			if w.Bucket != scm.CheckBucketPass {
-				w.Supersedes = append(w.Supersedes, scm.Check{Name: j.Name, ProviderID: j.ProviderID, Workflow: j.Workflow, Kind: j.Kind, App: j.App, AppID: j.AppID})
-			}
-		}
-	}
-	if len(drop) == 0 {
-		return checks
-	}
-	kept := make([]scm.Check, 0, len(checks)-len(drop))
-	for i, c := range checks {
-		if !drop[i] {
-			kept = append(kept, c)
-		}
-	}
-	return kept
 }
 
 // attemptAfter orders two attempts by execution: the current attempt's start
