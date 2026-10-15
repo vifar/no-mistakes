@@ -57,10 +57,15 @@ func (s *Store) migrate() error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("eval registry is closed")
 	}
-	if err := s.dropParkPassSchema(); err != nil {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin eval registry migration: %w", err)
+	}
+	defer tx.Rollback()
+	if err := dropParkPassSchema(tx); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`
+	_, err = tx.Exec(`
 CREATE TABLE IF NOT EXISTS cases (
     id TEXT PRIMARY KEY,
     source_run_id TEXT NOT NULL,
@@ -119,19 +124,14 @@ CREATE TABLE IF NOT EXISTS diversified_pins (
 		return fmt.Errorf("migrate eval registry: %w", err)
 	}
 	var reservationLeaseColumn int
-	if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('replay_case_reservations') WHERE name = 'reserved_until'`).Scan(&reservationLeaseColumn); err != nil {
+	if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('replay_case_reservations') WHERE name = 'reserved_until'`).Scan(&reservationLeaseColumn); err != nil {
 		return fmt.Errorf("inspect eval replay reservation schema: %w", err)
 	}
 	if reservationLeaseColumn == 0 {
-		if _, err := s.db.Exec(`ALTER TABLE replay_case_reservations ADD COLUMN reserved_until INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if _, err := tx.Exec(`ALTER TABLE replay_case_reservations ADD COLUMN reserved_until INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return fmt.Errorf("migrate eval replay reservations: %w", err)
 		}
 	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin eval cache migration: %w", err)
-	}
-	defer tx.Rollback()
 	cacheColumnsAdded := false
 	for _, column := range []string{"cache_read_tokens", "cache_write_tokens"} {
 		var cacheTokenColumn int
@@ -200,20 +200,20 @@ WHERE path = ?`,
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit eval cache migration: %w", err)
+		return fmt.Errorf("commit eval registry migration: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) dropParkPassSchema() error {
+func dropParkPassSchema(tx *sql.Tx) error {
 	var parkColumn int
-	if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('cases') WHERE name = 'verdict_should_park'`).Scan(&parkColumn); err != nil {
+	if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('cases') WHERE name = 'verdict_should_park'`).Scan(&parkColumn); err != nil {
 		return fmt.Errorf("inspect eval case schema: %w", err)
 	}
 	if parkColumn == 0 {
 		return nil
 	}
-	_, err := s.db.Exec(`
+	_, err := tx.Exec(`
 DROP TABLE IF EXISTS evaluations;
 DROP TABLE IF EXISTS replay_case_reservations;
 DROP TABLE IF EXISTS pending_case_deletions;
