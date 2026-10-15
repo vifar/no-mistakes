@@ -21,6 +21,9 @@ import (
 // contract, not the implementation's classification of its own input.
 func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 	root := t.TempDir()
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "no-global-config"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("GIT_CONFIG_COUNT", "0")
 	cli := filepath.Join(root, "no-mistakes")
 	provider := filepath.Join(root, "fakecli")
 	for _, target := range []struct{ output, pkg string }{
@@ -34,7 +37,7 @@ func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 	}
 	// fakecli's canned PR-facts endpoint names test/repo. Supply this test's
 	// independent exact PR identity, forwarding all other reads to fakecli.
-	wrapper := "#!/bin/sh\nfor arg do\ncase \"$arg\" in repos/owner/project/pulls/7) printf '%s\\n' \"$FAKE_CLI_PR_FACTS_JSON\"; exit 0;; esac\ndone\nexec '" + strings.ReplaceAll(provider, "'", "'\\''") + "' \"$@\"\n"
+	wrapper := "#!/bin/sh\nfor arg do\ncase \"$arg\" in repos/owner/project/pulls/7) printf '%s\\n' \"$FAKE_CLI_PR_FACTS_JSON\"; exit 0;; graphql) if [ -n \"$RECEIPT_TEST_GRAPHQL\" ]; then printf '%s\\n' \"$RECEIPT_TEST_GRAPHQL\"; exit 0; fi;; esac\ndone\nexec '" + strings.ReplaceAll(provider, "'", "'\\''") + "' \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(root, "gh"), []byte(wrapper), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -45,15 +48,22 @@ func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 	const comment = `[{"author":"greptile-apps[bot]","path":"source.txt","line":1,"body":"Unresolved concern"}]`
 	// The newer workflow has no jobs, so the product must retain both its
 	// own identity and the older job's identity when deciding readiness.
-	const ciRerun = `[{"id":1,"workflow_id":10,"name":"CI","status":"completed","conclusion":"success","html_url":"https://github.com/owner/project/actions/runs/1"},{"id":2,"workflow_id":10,"name":"CI","status":"completed","conclusion":"failure","html_url":"https://github.com/owner/project/actions/runs/2"}]`
-	const approvalRerun = `[{"id":1,"workflow_id":20,"name":"Final Approval","status":"completed","conclusion":"success","html_url":"https://github.com/owner/project/actions/runs/1"},{"id":2,"workflow_id":20,"name":"Final Approval","status":"completed","conclusion":"failure","html_url":"https://github.com/owner/project/actions/runs/2"}]`
+	const ciRerun = `[{"id":1,"workflow_id":10,"name":"CI","event":"push","head_branch":"feature","status":"completed","conclusion":"success","html_url":"https://github.com/owner/project/actions/runs/1"},{"id":2,"workflow_id":10,"name":"CI","event":"push","head_branch":"feature","status":"completed","conclusion":"failure","html_url":"https://github.com/owner/project/actions/runs/2"}]`
+	const approvalRerun = `[{"id":1,"workflow_id":20,"name":"Final Approval","event":"push","head_branch":"feature","status":"completed","conclusion":"success","html_url":"https://github.com/owner/project/actions/runs/1"},{"id":2,"workflow_id":20,"name":"Final Approval","event":"push","head_branch":"feature","status":"completed","conclusion":"failure","html_url":"https://github.com/owner/project/actions/runs/2"}]`
 	const oldBuild = `{"name":"build","workflow":"CI","state":"SUCCESS","bucket":"pass","app":"github-actions","appId":15368,"link":"https://github.com/owner/project/actions/runs/1/job/5"}`
 	const oldUnit = `{"name":"unit","workflow":"CI","state":"SUCCESS","bucket":"pass","app":"github-actions","appId":15368,"link":"https://github.com/owner/project/actions/runs/1/job/6"}`
 	const oldApproval = `{"name":"approve","workflow":"Final Approval","state":"SUCCESS","bucket":"pass","app":"github-actions","link":"https://github.com/owner/project/actions/runs/1/job/7"}`
+	// GitHub reports the parent run's CURRENT attempt on old jobs too. The
+	// independent oracle is the run status and job completion time: an active
+	// run is pending, and a completed run cannot reuse jobs from before its start.
+	const staleJob = `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-10-14T09:00:00Z","detailsUrl":"https://github.com/owner/project/actions/runs/7/job/5","checkSuite":{"app":{"slug":"github-actions","databaseId":15368},"workflowRun":{"runAttempt":2,"workflow":{"name":"CI"}}}}`
+	const currentJob = `{"__typename":"CheckRun","databaseId":6,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-10-14T11:00:00Z","detailsUrl":"https://github.com/owner/project/actions/runs/7/job/6","checkSuite":{"app":{"slug":"github-actions","databaseId":15368},"workflowRun":{"runAttempt":2,"workflow":{"name":"CI"}}}}`
+	const rerunIdentity = `"id":7,"workflow_id":10,"run_attempt":2,"name":"CI","event":"push","head_branch":"feature","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/owner/project/actions/runs/7"`
 	for _, tc := range []struct {
 		name, checks, protection, rules, comments, refusal string
 		runs                                               string
 		policy                                             scm.CheckScopePolicy
+		jobs                                               string
 	}{
 		{name: "auto ignores outside approval failure", checks: buildPass + "," + approveFail},
 		{name: "required failure refuses", checks: `{"name":"build","state":"FAILURE","bucket":"fail"}`, refusal: "all live checks green"},
@@ -83,6 +93,12 @@ func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 		{name: "jobless workflow retains own wildcard must pass", checks: buildPass + "," + oldUnit, runs: ciRerun, policy: scm.CheckScopePolicy{MustPass: []string{"CI*"}}, refusal: "all live checks green"},
 		{name: "jobless workflow retains own literal must pass", checks: buildPass + "," + oldUnit, runs: ciRerun, policy: scm.CheckScopePolicy{MustPass: []string{"CI"}}, refusal: "all live checks green"},
 		{name: "superseded required build retains app binding", checks: oldBuild, runs: ciRerun, protection: `{"checks":[{"context":"build","app_id":99}]}`, refusal: "all live checks green"},
+		{name: "queued same-run rerun rejects stale parent-attempt success", jobs: staleJob, runs: `[{` + rerunIdentity + `,"status":"queued","conclusion":"success"}]`, refusal: "all live checks green"},
+		{name: "running same-run rerun rejects stale parent-attempt success", jobs: staleJob, runs: `[{` + rerunIdentity + `,"status":"in_progress","conclusion":""}]`, refusal: "all live checks green"},
+		{name: "waiting same-run rerun rejects stale parent-attempt success", jobs: staleJob, runs: `[{` + rerunIdentity + `,"status":"waiting","conclusion":""}]`, refusal: "all live checks green"},
+		{name: "pending same-run rerun rejects stale parent-attempt success", jobs: staleJob, runs: `[{` + rerunIdentity + `,"status":"pending","conclusion":""}]`, refusal: "all live checks green"},
+		{name: "same-run failure before jobs rejects stale parent-attempt success", jobs: staleJob, runs: `[{` + rerunIdentity + `,"status":"completed","conclusion":"failure"}]`, refusal: "all live checks green"},
+		{name: "completed same-run rerun accepts current passing job", jobs: staleJob + "," + currentJob, runs: `[{` + rerunIdentity + `,"status":"completed","conclusion":"success"}]`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newExportFixture(t)
@@ -113,6 +129,11 @@ func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 				"PATH="+root+string(os.PathListSeparator)+os.Getenv("PATH"), "GIT_CONFIG_GLOBAL="+filepath.Join(root, "no-global-config"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_COUNT=0",
 				"NO_MISTAKES_TELEMETRY=off", "NO_MISTAKES_NO_UPDATE_CHECK=1", "FAKE_CLI_MODE=ci-gh", "FAKE_CLI_PR_HEAD_SHA="+f.run.HeadSHA,
 				"FAKE_CLI_PR_FACTS_JSON="+string(rawFacts), "FAKE_CLI_CHECKS=["+tc.checks+"]", "FAKE_CLI_PROTECTION_JSON="+protection, "FAKE_CLI_RULES_JSON="+rules, "FAKE_CLI_REVIEW_COMMENTS="+tc.comments, "FAKE_CLI_WORKFLOW_RUNS="+tc.runs)
+			if tc.jobs != "" {
+				graphql := `{"data":{"repository":{"object":{"__typename":"Commit","oid":"` + f.run.HeadSHA + `","statusCheckRollup":{"contexts":{"nodes":[` + tc.jobs + `],"pageInfo":{"hasNextPage":false}}}}}}}`
+				cmd.Env = append(cmd.Env, "RECEIPT_TEST_GRAPHQL="+graphql)
+				t.Logf("GitHub rollup=%s", graphql)
+			}
 			out, runErr := cmd.CombinedOutput()
 			t.Logf("no-mistakes axi review-receipt --phase ci-ready\n%s", out)
 			if tc.refusal != "" {

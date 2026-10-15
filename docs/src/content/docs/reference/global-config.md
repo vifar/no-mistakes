@@ -582,6 +582,7 @@ Accepts any Go `time.ParseDuration` string: `30m`, `2h`, `4h30m`, etc.
 This is an idle timeout, not an absolute deadline: every time the base branch advances, the monitor re-arms it.
 For ordinary runs, when the live target commit advances with green checks and no merge conflict, CI clears readiness and keeps monitoring, withholding checks-passed. It may wait until ci_timeout, or indefinitely when unlimited. When CI returns, including with findings, the boundary guard rejects the changed comparison and terminates the run. The monitor does not automatically repair or revalidate that changed comparison. After termination, restart from the current target and head; never hand-rebase. See the [restart and custody conditions](/no-mistakes/reference/cli/#no-mistakes-rerun).
 With an unchanged comparison, a genuinely idle/abandoned PR still parks at an approval gate after the timeout elapses.
+Repeated failures to read the PR target do not bypass this deadline: the monitor clears readiness, waits between retries, and checks the timeout before retrying the target read.
 While that CI gate is parked, the daemon continues bounded read-only PR-state checks.
 If the PR is merged or closed externally, an eligible stale gate returns to CI execution under the [CI completion rules](/no-mistakes/reference/pipeline-steps/#ci); the observation alone does not complete the run. An open, unknown, or temporarily unreachable PR remains parked for a user decision.
 

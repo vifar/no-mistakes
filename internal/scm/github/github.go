@@ -689,6 +689,11 @@ func (h *Host) repoSlug() string {
 	return repo
 }
 
+// appendUnrepresentedWorkflowRuns reconciles jobs with the REST run state
+// before deciding whether jobs represent a run. GitHub reuses the run ID for
+// reruns, and checkSuite.workflowRun.runAttempt is the parent's current attempt,
+// not the job's attempt. An unfinished run therefore makes its jobs pending;
+// once completed, the current-attempt start distinguishes stale completed jobs.
 func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.Check {
 	represented := make(map[string][]int, len(checks))
 	drop := make(map[int]bool)
