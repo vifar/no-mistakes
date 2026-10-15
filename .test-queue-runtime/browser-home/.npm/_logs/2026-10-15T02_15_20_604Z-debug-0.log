@@ -1,0 +1,49 @@
+0 verbose cli /opt/homebrew/Cellar/node/26.9.0/bin/node /opt/homebrew/lib/node_modules/npm/bin/npm-cli.js
+1 info using npm@11.19.1
+2 info using node@v26.9.0
+3 silly config load:file:/opt/homebrew/lib/node_modules/npm/npmrc
+4 silly config load:file:/Users/king/.no-mistakes/worktrees/81fdcdba50ef/01M4YKM87S76QG4DJCDC4XJXMC/.npmrc
+5 silly config load:file:/Users/king/.no-mistakes/worktrees/81fdcdba50ef/01M4YKM87S76QG4DJCDC4XJXMC/.test-queue-runtime/browser-home/.npmrc
+6 silly config load:file:/opt/homebrew/etc/npmrc
+7 verbose title npm exec chrome-devtools-mcp@latest --userDataDir=/Users/king/.no-mistakes/worktrees/81fdcdba50ef/01M4YKM87S76QG4DJCDC4XJXMC/.test-queue-runtime/chrome-profile --headless --chrome-arg=--use-mock-keychain --chrome-arg=--password-store=basic
+8 verbose argv "exec" "--yes" "--" "chrome-devtools-mcp@latest" "--userDataDir=/Users/king/.no-mistakes/worktrees/81fdcdba50ef/01M4YKM87S76QG4DJCDC4XJXMC/.test-queue-runtime/chrome-profile" "--headless" "--chrome-arg=--use-mock-keychain" "--chrome-arg=--password-store=basic"
+9 verbose logfile logs-max:10 dir:/Users/king/.no-mistakes/worktrees/81fdcdba50ef/01M4YKM87S76QG4DJCDC4XJXMC/.test-queue-runtime/browser-home/.npm/_logs/2026-10-15T02_15_20_604Z-
+10 verbose logfile /Users/king/.no-mistakes/worktrees/81fdcdba50ef/01M4YKM87S76QG4DJCDC4XJXMC/.test-queue-runtime/browser-home/.npm/_logs/2026-10-15T02_15_20_604Z-debug-0.log
+11 silly logfile done cleaning log files
+12 silly packumentCache heap:4395630592 maxSize:1098907648 maxEntrySize:549453824
+13 http fetch GET 200 https://registry.npmjs.org/chrome-devtools-mcp 155ms (cache miss)
+14 silly packumentCache heap:4395630592 maxSize:1098907648 maxEntrySize:549453824
+15 http fetch GET 200 https://registry.npmjs.org/npm 232ms
+16 silly packumentCache heap:4395630592 maxSize:1098907648 maxEntrySize:549453824
+17 silly idealTree buildDeps
+18 silly fetch manifest chrome-devtools-mcp@1.10.1
+19 silly packumentCache full:https://registry.npmjs.org/chrome-devtools-mcp cache-miss
+20 http fetch GET 200 https://registry.npmjs.org/chrome-devtools-mcp 57ms (cache miss)
+21 silly packumentCache full:https://registry.npmjs.org/chrome-devtools-mcp set size:undefined disposed:false
+22 silly fetch manifest @blackwell-systems/gcf@^2.2.2
+23 silly packumentCache full:https://registry.npmjs.org/@blackwell-systems%2fgcf cache-miss
+24 http fetch GET 200 https://registry.npmjs.org/@blackwell-systems%2fgcf 46ms (cache miss)
+25 silly packumentCache full:https://registry.npmjs.org/@blackwell-systems%2fgcf set size:undefined disposed:false
+26 silly fetch manifest @toon-format/toon@^4.1.0
+27 silly packumentCache full:https://registry.npmjs.org/@toon-format%2ftoon cache-miss
+28 http fetch GET 200 https://registry.npmjs.org/@toon-format%2ftoon 117ms (cache miss)
+29 silly packumentCache full:https://registry.npmjs.org/@toon-format%2ftoon set size:undefined disposed:false
+30 silly placeDep ROOT chrome-devtools-mcp@1.10.1 OK for:  want: 1.10.1
+31 silly reify moves {}
+32 silly audit bulk request { 'chrome-devtools-mcp': [ '1.10.1' ] }
+33 http cache chrome-devtools-mcp@https://registry.npmjs.org/chrome-devtools-mcp/-/chrome-devtools-mcp-1.10.1.tgz 0ms (cache hit)
+34 silly tarball no local data for chrome-devtools-mcp@https://registry.npmjs.org/chrome-devtools-mcp/-/chrome-devtools-mcp-1.10.1.tgz. Extracting by manifest.
+35 http fetch POST 200 https://registry.npmjs.org/-/npm/v1/security/advisories/bulk 84ms
+36 silly audit report {}
+37 http fetch GET 200 https://registry.npmjs.org/chrome-devtools-mcp/-/chrome-devtools-mcp-1.10.1.tgz 435ms (cache miss)
+38 verbose cwd /Users/king/.no-mistakes/worktrees/81fdcdba50ef/01M4YKM87S76QG4DJCDC4XJXMC
+39 verbose os Darwin 27.0.0
+40 verbose node v26.9.0
+41 verbose npm  v11.19.1
+42 notice
+42 notice New major version of npm available! 11.19.1 -> 12.2.0
+42 notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.0
+42 notice To update run: npm install -g npm@12.2.0
+42 notice  { force: true, Symbol(proc-log.meta): true }
+43 verbose exit 0
+44 info ok

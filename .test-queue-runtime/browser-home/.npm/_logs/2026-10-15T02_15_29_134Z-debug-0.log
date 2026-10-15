@@ -1,0 +1,18 @@
+0 verbose cli /opt/homebrew/Cellar/node/26.9.0/bin/node /opt/homebrew/bin/npm
+1 info using npm@11.19.1
+2 info using node@v26.9.0
+3 silly config load:file:/opt/homebrew/lib/node_modules/npm/npmrc
+4 silly config load:file:/Users/king/.no-mistakes/worktrees/81fdcdba50ef/01M4YKM87S76QG4DJCDC4XJXMC/.npmrc
+5 silly config load:file:/Users/king/.no-mistakes/worktrees/81fdcdba50ef/01M4YKM87S76QG4DJCDC4XJXMC/.test-queue-runtime/browser-home/.npmrc
+6 silly config load:file:/opt/homebrew/etc/npmrc
+7 verbose title npm config get registry
+8 verbose argv "config" "get" "registry"
+9 verbose logfile logs-max:10 dir:/Users/king/.no-mistakes/worktrees/81fdcdba50ef/01M4YKM87S76QG4DJCDC4XJXMC/.test-queue-runtime/browser-home/.npm/_logs/2026-10-15T02_15_29_134Z-
+10 verbose logfile /Users/king/.no-mistakes/worktrees/81fdcdba50ef/01M4YKM87S76QG4DJCDC4XJXMC/.test-queue-runtime/browser-home/.npm/_logs/2026-10-15T02_15_29_134Z-debug-0.log
+11 silly logfile done cleaning log files
+12 verbose cwd /Users/king/.no-mistakes/worktrees/81fdcdba50ef/01M4YKM87S76QG4DJCDC4XJXMC
+13 verbose os Darwin 27.0.0
+14 verbose node v26.9.0
+15 verbose npm  v11.19.1
+16 verbose exit 0
+17 info ok
