@@ -333,8 +333,8 @@ func issuesSection(sctx *pipeline.StepContext, authorText string) string {
 
 // appendIssuesSection appends section to body as its final block. The section
 // must be live Markdown outside any code, so a body that ends inside an open
-// fence has the fence closed first: a closing reference inside a fence is
-// ignored by the verifier, which is what would fail publication.
+// fence has the fence closed first. On providers that ignore references inside
+// code, leaving the fence open would make closing-reference verification fail.
 func appendIssuesSection(body, section string) string {
 	if section == "" {
 		return body
@@ -436,10 +436,10 @@ func verifyClosingIssues(ctx context.Context, host scm.Host, pr *scm.PR, sctx *p
 	return verifyClosingIssuesInBody(content.Body, sctx)
 }
 
-// verifyClosingIssuesInBody is the closing-reference guard. It deliberately
-// keeps ignoring references inside code: relaxing it would let a quoted
-// "Closes #N" count as a request. A rejection logs why, because the missing
-// reference is otherwise indistinguishable from a body that never had one.
+// verifyClosingIssuesInBody is the closing-reference guard. It uses the
+// provider's closing grammar; extractClosingKeywordLines owns whether code is
+// skipped. A rejection logs why, because the missing reference is otherwise
+// indistinguishable from a body that never had one.
 func verifyClosingIssuesInBody(body string, sctx *pipeline.StepContext) error {
 	if sctx == nil {
 		return nil
