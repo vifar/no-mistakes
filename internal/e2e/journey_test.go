@@ -2077,7 +2077,7 @@ func assertSupersededRunCancellation(t *testing.T, h *Harness) {
 func assertDifferentBranchDoesNotCancelActiveRun(t *testing.T, h *Harness) {
 	t.Helper()
 	slowCommand := filepath.Join(h.BinDir, "nm-different-branch-slow-e2e")
-	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nsleep 10\n"), 0o755); err != nil {
+	if err := os.WriteFile(slowCommand, []byte("#!/bin/sh\nmkfifo \"$0.fifo\"\nexec cat \"$0.fifo\"\n"), 0o755); err != nil {
 		t.Fatalf("write different-branch slow test command: %v", err)
 	}
 	slowConfig := "ignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\ncommands:\n  test: nm-different-branch-slow-e2e\n  lint: true\n"
