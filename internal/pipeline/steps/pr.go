@@ -387,19 +387,21 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 	if err != nil {
 		return prContent{}, err
 	}
-	if err := validateOwnedPRBudget(content.Body, bodyLimit); err != nil {
+	redacted := redactPRContent(content)
+	if err := validateOwnedPRBudget(redacted.Body, bodyLimit); err != nil {
 		return prContent{}, err
 	}
-	return redactPRContent(content), nil
+	return redacted, nil
 }
 
-// redactPRContent removes the operator's home directory from the content about
-// to be published. Ordinary drafts call it after length caps; the placeholder
-// never grows a path. Owned composition calls it before its integrity guard
-// and non-truncating size check so publication cannot invalidate that guard.
+// redactPRContent removes the operator's home directory, and the control
+// characters gh rewrites on read, from the content about to be published.
+// Ordinary drafts call it after length caps; neither step grows the text. Owned
+// composition calls it before its integrity guard and non-truncating size check
+// so publication cannot invalidate that guard.
 func redactPRContent(content prContent) prContent {
-	content.Title = safepath.RedactText(content.Title)
-	content.Body = safepath.RedactText(content.Body)
+	content.Title = safepath.RedactText(neutralizePRControls(content.Title))
+	content.Body = safepath.RedactText(neutralizePRControls(content.Body))
 	return content
 }
 
