@@ -870,3 +870,28 @@ func TestGetChecksAttemptSequencesJudgeTheNewestMeaningfulAttempt(t *testing.T) 
 		}
 	}
 }
+
+// Attempt 2 of run 7 failed but has so far reported only a passing lint; the
+// old build is stale. The failed attempt keeps standing for build until a
+// current build replaces it, so readiness never turns green on lint alone.
+func TestGetChecksPartiallyReportedFailedRerunStandsForUncoveredJobs(t *testing.T) {
+	t.Parallel()
+	oldBuild := `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-14T10:00:00Z","completedAt":"2026-10-14T10:05:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/7/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`
+	lint := `{"__typename":"CheckRun","databaseId":6,"name":"lint","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-14T11:01:00Z","completedAt":"2026-10-14T11:03:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/7/job/6","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`
+	runs := `[{"total_count":1,"workflow_runs":[{"id":7,"workflow_id":10,"run_attempt":2,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/7"}]}]`
+	checks := checksForAttempts(t, "["+oldBuild+","+lint+"]", runs)
+	scope := scm.NewCheckScope(nil, scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAll}, "main", nil)
+	scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks)
+	if scoped.Ready() {
+		t.Fatalf("readiness went green on lint while the failed attempt still stands for build: %+v", checks)
+	}
+	found := false
+	for _, c := range checks {
+		if c.WorkflowRun && c.Bucket == scm.CheckBucketFail && len(c.Supersedes) == 1 && c.Supersedes[0].Name == "build" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("checks = %+v; want the failed attempt standing for build", checks)
+	}
+}

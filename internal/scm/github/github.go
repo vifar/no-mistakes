@@ -709,6 +709,7 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 	for _, run := range runs {
 		runID := h.actionsRunID(run.Link)
 		currentJobs := false
+		current := map[string]bool{}
 		if runID != "" {
 			for _, i := range represented[runID] {
 				check := &checks[i]
@@ -736,9 +737,24 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 					continue
 				}
 				currentJobs = true
+				current[check.Name] = true
 			}
 		}
 		if !currentJobs {
+			jobless = append(jobless, run)
+			continue
+		}
+		// A failed attempt that has reported only some of its jobs still
+		// stands for the displaced jobs no current job has replaced yet;
+		// dropping it would leave those requirements to stale or no evidence.
+		var uncovered []scm.Check
+		for _, identity := range run.Supersedes {
+			if !current[identity.Name] {
+				uncovered = append(uncovered, identity)
+			}
+		}
+		if len(uncovered) > 0 {
+			run.Supersedes = uncovered
 			jobless = append(jobless, run)
 		}
 	}
