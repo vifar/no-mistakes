@@ -455,3 +455,101 @@ func TestExecutor_GateRecheckStopsAfterApprovalCancelAndShutdown(t *testing.T) {
 		})
 	}
 }
+
+func TestExecutor_RecoveredReconciliationPreservesPendingOnTransientError(t *testing.T) {
+	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+		t.Run(string(status), func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			workDir := completionFixture(t, database, run)
+			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			row, err := database.InsertStepResult(run.ID, types.StepCI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.StartStep(row.ID); err != nil {
+				t.Fatal(err)
+			}
+			findings := `{"findings":[],"summary":"closed PR"}`
+			if _, err := database.InsertStepRound(row.ID, 1, "initial", &findings, nil, 1); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.ParkStepForApproval(run.ID, row.ID, status, 0, 1, &findings); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.SetStepPendingResponse(row.ID, `{"kind":"reconcile"}`, answeredActivity); err != nil {
+				t.Fatal(err)
+			}
+			run, err = database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			step := &reconcilingApprovalStep{name: types.StepCI, callStart: make(chan int64, 2), release: make(chan struct{}, 2)}
+			step.resolved.Store(true)
+			transient := error(errors.New("temporary GetPRState failure"))
+			step.err.Store(&transient)
+			slot := &recordingSlot{}
+			exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+			exec.SetRunSlot(slot)
+			exec.SetGateReconcileTimings(10*time.Millisecond, time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- exec.Resume(ctx, run, repo, workDir) }()
+			defer func() { cancel(); close(step.release); <-done }()
+			for attempt := int64(1); attempt <= 2; attempt++ {
+				select {
+				case call := <-step.callStart:
+					if call != attempt {
+						t.Fatalf("reconciliation attempt = %d, want %d", call, attempt)
+					}
+				case <-ctx.Done():
+					t.Fatal("transient reconciliation error was not retried")
+				}
+				current, err := database.GetRun(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := ValidateRecoveredRun(database, current, []Step{step}); err != nil {
+					t.Fatalf("attempt %d lost crash recoverability: %v", attempt, err)
+				}
+				persisted, err := database.GetStepResult(row.ID)
+				if err != nil || persisted.Status != status || !persisted.AnsweredWaitingForSlot() || persisted.PendingResponse == nil || *persisted.PendingResponse != `{"kind":"reconcile"}` {
+					t.Fatalf("attempt %d lost pending reconciliation: %+v, %v", attempt, persisted, err)
+				}
+				if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err == nil {
+					t.Fatal("pending reconciliation accepted another response")
+				}
+				if attempt == 2 {
+					step.err.Store(nil)
+				}
+				step.release <- struct{}{}
+			}
+			select {
+			case err := <-done:
+				done <- err
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-ctx.Done():
+				t.Fatal("successful retry did not complete the run")
+			}
+			current, err := database.GetRun(run.ID)
+			if err != nil || current.Status != types.RunCompleted || current.AwaitingAgentSince != nil {
+				t.Fatalf("run after successful retry: %+v, %v", current, err)
+			}
+			persisted, err := database.GetStepResult(row.ID)
+			if err != nil || persisted.Status != types.StepStatusCompleted || persisted.PendingResponse != nil {
+				t.Fatalf("step after successful retry: %+v, %v", persisted, err)
+			}
+			foundYield := false
+			for _, event := range slot.log() {
+				foundYield = foundYield || event == "yield"
+			}
+			if !foundYield {
+				t.Fatal("retry backoff retained the run slot")
+			}
+		})
+	}
+}

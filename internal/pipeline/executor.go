@@ -886,11 +886,11 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 
 	if gate.stepResult.PendingResponse != nil && e.recoveredResponse == nil {
-		if err := e.acquireAnsweredGateSlot(ctx, run.ID, gate.stepResult.ID); err != nil {
+		_, resolved, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, true, true)
+		if err != nil {
 			return e.failRun(run, repo, err, ctx)
 		}
-		resolved, err := e.reconcileApprovalGate(ctx, gate.step, reconcileCtx, gate.findings)
-		if err != nil {
+		if err := e.acquireAnsweredGateSlot(ctx, run.ID, gate.stepResult.ID); err != nil {
 			return e.failRun(run, repo, err, ctx)
 		}
 		if resolved {
@@ -926,7 +926,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		response = *recorded
 	} else {
 		e.yieldSlot()
-		response, reconciled, err = e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, true)
+		response, reconciled, err = e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, true, false)
 	}
 	e.endGateWait(run.ID, parkStart, err)
 	if err == nil && !reconciled && response.action == types.ActionAbort {
@@ -1942,7 +1942,7 @@ rounds:
 			e.mu.Unlock()
 
 			e.yieldSlot()
-			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
+			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true, false)
 			e.endGateWait(run.ID, parkStart, err)
 			if err == nil && !reconciled && response.action == types.ActionAbort {
 				e.recordDeclinedRound(currentRoundID, effectiveFindings, stepName, roundNum)
@@ -2537,7 +2537,7 @@ func pluralize(n int, singular, plural string) string {
 // cancelled. Reconciliation runs synchronously under a bounded child context,
 // so no watcher goroutine can outlive approval, cancellation, or shutdown.
 // The caller must set e.waiting and e.waitingStep before calling this method.
-func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sctx *StepContext, findings string, immediate bool) (approvalResponse, bool, error) {
+func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sctx *StepContext, findings string, immediate, pendingReconciliation bool) (approvalResponse, bool, error) {
 	defer e.clearApprovalGate()
 
 	_, reconciles := step.(ApprovalGateReconciler)
@@ -2564,26 +2564,36 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		case <-ctx.Done():
 			return approvalResponse{}, false, context.Cause(ctx)
 		case <-timer.C:
+			if pendingReconciliation {
+				if err := e.acquireSlot(ctx); err != nil {
+					return approvalResponse{}, false, err
+				}
+			}
 			// A resumer runs first and returns a RESPONSE rather than a
 			// completion, so the gate re-enters its step exactly as it would
 			// for an operator's own action. Claiming the gate here is the same
 			// race guard reconciliation uses: an operator response that landed
 			// first wins.
-			if action, resume, err := e.resumeApprovalGate(ctx, step, sctx, findings); resume {
-				if claimed, err := e.claimGateReconciliation(&approvalResponse{action: action}); err != nil {
-					return approvalResponse{}, false, err
-				} else if claimed {
-					return approvalResponse{action: action}, false, nil
-				}
-				return <-e.approvalCh, false, nil
-			} else if err != nil && ctx.Err() == nil {
-				if sctx != nil && sctx.Log != nil {
-					sctx.Log(fmt.Sprintf("warning: could not re-check parked %s gate; preserving it: %v", step.Name(), err))
-				} else {
-					slog.Warn("could not re-check parked approval gate; preserving it", "step", step.Name(), "error", err)
+			if !pendingReconciliation {
+				if action, resume, err := e.resumeApprovalGate(ctx, step, sctx, findings); resume {
+					if claimed, err := e.claimGateReconciliation(&approvalResponse{action: action}); err != nil {
+						return approvalResponse{}, false, err
+					} else if claimed {
+						return approvalResponse{action: action}, false, nil
+					}
+					return <-e.approvalCh, false, nil
+				} else if err != nil && ctx.Err() == nil {
+					if sctx != nil && sctx.Log != nil {
+						sctx.Log(fmt.Sprintf("warning: could not re-check parked %s gate; preserving it: %v", step.Name(), err))
+					} else {
+						slog.Warn("could not re-check parked approval gate; preserving it", "step", step.Name(), "error", err)
+					}
 				}
 			}
 			resolved, err := e.reconcileApprovalGate(ctx, step, sctx, findings)
+			if pendingReconciliation && err == nil {
+				return approvalResponse{}, resolved, nil
+			}
 			if resolved {
 				if claimed, err := e.claimGateReconciliation(nil); err != nil {
 					return approvalResponse{}, false, err
@@ -2601,6 +2611,9 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 				} else {
 					slog.Warn("could not reconcile parked approval gate; preserving it", "step", step.Name(), "error", err)
 				}
+			}
+			if pendingReconciliation {
+				e.yieldSlot()
 			}
 			timer.Reset(e.gateReconcileInterval)
 		}
