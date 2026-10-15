@@ -787,6 +787,12 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.mu.Unlock()
 	duration := recoveredStepDuration(gate.stepResult)
 	failRecoveredGate := func(err error) error {
+		if errors.Is(err, ErrDaemonShutdown) || errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+			current, dbErr := e.db.GetStepResult(gate.stepResult.ID)
+			if dbErr == nil && current != nil && (current.Status == types.StepStatusAwaitingApproval || current.Status == types.StepStatusFixReview) {
+				return ErrParkedAtShutdown
+			}
+		}
 		e.endGateWait(run.ID, parkStart, err)
 		e.clearApprovalGate()
 		if dbErr := e.db.FailStep(gate.stepResult.ID, err.Error(), duration); dbErr != nil {
