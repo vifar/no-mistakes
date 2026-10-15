@@ -803,7 +803,7 @@ func (f *schedFixture) restartDaemon() {
 		}
 		f.t.Cleanup(func() {
 			if client, err := ipc.Dial(f.p.Socket()); err == nil {
-				_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+				_ = client.Call(ipc.MethodShutdown, testShutdownParams(f.t, f.p), nil)
 				client.Close()
 			}
 			select {

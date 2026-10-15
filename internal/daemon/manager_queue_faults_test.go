@@ -869,7 +869,7 @@ func TestDaemonStartupFailsWhenQueuedRunsCannotBeRestored(t *testing.T) {
 		}
 	case <-time.After(60 * time.Second):
 		if client, err := ipc.Dial(f.p.Socket()); err == nil {
-			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+			_ = client.Call(ipc.MethodShutdown, testShutdownParams(t, f.p), nil)
 			client.Close()
 		}
 		t.Fatal("daemon kept serving although its queued runs could not be restored")
