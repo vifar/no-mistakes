@@ -132,7 +132,7 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 
 **Parked / Awaiting-Agent Signal**
 
-- `runs.awaiting_agent_since` is non-nil **iff** a step is actually parked at an `awaiting_approval`/`fix_review` gate: the executor sets it on gate entry, clears it when `waitForApproval` returns, and `RecoverStaleRuns` clears it on crash recovery. It is observability only (rendered as `awaiting_agent: parked <duration>` in `axi status`) and never changes gate resolution, auto-resume, or the `--yes` default.
+- `runs.awaiting_agent_since` is non-nil **iff** a step is actually parked at an `awaiting_approval`/`fix_review` gate: the executor sets it on gate entry and clears it through `CompleteRunAwaitingAgent` when that gate ends. A daemon-shutdown cancellation returns `ErrParkedAtShutdown` without clearing the marker; startup's `RecoverStaleRunsExcept` preserves validated parked runs and clears the marker on runs it makes terminal. It is observability only (rendered as `awaiting_agent: parked <duration>` in `axi status`) and never changes gate resolution, auto-resume, or the `--yes` default. The lifecycle model is owned by `docs/src/content/docs/concepts/daemon.md`.
 - Tests: `internal/db/run_test.go`, `internal/pipeline/executor_approval_test.go`, `internal/cli/axi_test.go`, e2e `TestAxiParkedAwaitingAgentSignal`.
 
 **Approval Override Is Never a Silent Clean Pass (`pipeline.ApprovalOverrideVerifier`)**

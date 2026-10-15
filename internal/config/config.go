@@ -787,21 +787,15 @@ type CI struct {
 	// date) through the merge-conflict repair, which revalidates from Review.
 	// Off by default: each base advance would then cost another full pass, so
 	// a green BEHIND PR reports checks-passed and waits for a human to bring
-	// it up to date (see VISION.md's cost rule).
+	// it up to date. The ci.rebase_behind section in
+	// docs/src/content/docs/reference/repo-config.md owns that policy.
 	RebaseBehind bool
-	// CarryReviewOnReplay opts a CI rebase repair that is a provable pure
-	// replay into keeping the run's review approval: when the repaired head
-	// is the reviewed commits replayed onto the resolved base tip - a linear
-	// chain of the same length, each commit replaying onto its new parent with
-	// no conflict to exactly its recorded tree, and each one patch-identical
-	// (`git patch-id --verbatim`) to the reviewed commit it replaced - the
-	// approval moves to the replayed head and validation restarts at Test
-	// instead of Review. Anything that fails any part of that proof, or any
-	// error while checking it, takes today's path and revalidates from Review.
-	//
-	// Off by default. It has no effect when RevalidateRepairs is true, which
-	// keeps meaning "every repair re-passes Review", or when the run has a
-	// review-anchored gate, which would otherwise be skipped for the new head.
+	// CarryReviewOnReplay requests a Test restart with carried Review approval
+	// after a CI rebase repair. ciCarriesReviewOnReplay excludes strict shipping
+	// and fixed PR comparisons: their review authority cannot move to a new
+	// base. pureReplayGap owns the replay proof. The full policy and remaining
+	// exclusions are owned by ci.carry_review_on_replay in
+	// docs/src/content/docs/reference/repo-config.md.
 	CarryReviewOnReplay bool
 }
 

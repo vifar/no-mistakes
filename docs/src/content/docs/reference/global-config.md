@@ -623,6 +623,8 @@ Most agent-driven mutation steps fail the run, CI auto-fix parks for a user deci
 The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the approval behavior.
 A late successful return after cancellation is rejected, so post-agent commits and PR content cannot use work from a timed-out turn.
 
+For agent invocations with a fixed deadline, transient-error retries share that deadline. A retry is skipped if the remaining time is shorter than the failed attempt's duration, checked both before and after backoff; the error reports those durations and retains the original failure.
+
 The diagnostic names which bound cut the invocation and how long it ran, and separately reports what activity was actually measured.
 With no still-working cap set it reads `after 30m0s (silent budget; no still-working cap is set; ran 30m0s)`, which claims nothing about output or child processes because nothing checked them.
 With a cap set it reads `after 30m0s (stall budget, then no recent output or live child process; ran 42m0s)` for a turn that went idle, or `at its 1h0m0s still-working cap (silent budget 30m0s; ran 1h0m0s)` for a turn that reached the cap.

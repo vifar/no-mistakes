@@ -317,9 +317,6 @@ Installing and authenticating the CLI does not remove that restriction.
 - [Transient-check rerun](/no-mistakes/reference/repo-config/#cirerun_transient)
 - Review-bot findings at the CI gate
 
-Every `origin` invocation carries `--repo owner/repo` so the daemon's detached
-worktree does not have to infer the repository from its working directory.
-
 ## Self-hosted GitHub/GitLab
 
 Self-hosted GitHub Enterprise and self-hosted GitLab instances work through the same `gh` and `glab` CLIs. Authenticate the CLI against your instance (`gh auth login --hostname your-ghe.example.com`, `glab auth login --hostname gitlab.example.com`) and `no-mistakes` will route through the CLI as usual.

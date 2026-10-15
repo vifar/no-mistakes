@@ -15,7 +15,7 @@
 //     hide a live PR) and accepts open or draft so a draft opened by a previous
 //     run is updated instead of duplicated.
 //   - The daemon's detached bare-gate repo has no Origin remote, so every
-//     invocation carries `--repo owner/repo` (the same reason gh/tea do).
+//     PR/CI invocation carries `--repo owner/repo` (the same reason gh/tea do).
 //   - Git remotes are `https://origin.cursor.com/{owner}/{repo}.git`. The web
 //     PR URL is `https://cursor.com/codebase/{owner}/{repo}/pull/{n}`. RepoSlug
 //     strips the `/codebase/` prefix so both forms yield the same -R slug.
