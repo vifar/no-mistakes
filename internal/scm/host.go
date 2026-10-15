@@ -202,6 +202,9 @@ const (
 
 // Check is a single CI check result on a PR.
 type Check struct {
+	// ExpectedMissing marks a synthetic placeholder for an unmet requirement,
+	// not a provider execution. It blocks readiness but must never defer repairs
+	// or count as evidence that a check has started running after a repair.
 	ExpectedMissing bool
 	Name            string
 	ProviderID      string `json:"provider_id,omitempty"`

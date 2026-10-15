@@ -38,7 +38,8 @@ func hasFailingChecks(checks []scm.Check) bool {
 	return false
 }
 
-// hasPendingChecks returns true if any CI check is still running or queued.
+// hasPendingChecks includes approval holds and synthetic missing requirements,
+// since they block readiness even though they are not executing.
 func hasPendingChecks(checks []scm.Check) bool {
 	for _, c := range checks {
 		if c.Pending() {
@@ -50,8 +51,8 @@ func hasPendingChecks(checks []scm.Check) bool {
 
 // hasExecutingPendingChecks returns true if any CI check is still running or
 // queued on its own. A check the provider holds for maintainer approval is
-// pending but will not finish without a human, so it never defers escalation
-// of the other checks' failures.
+// pending but will not finish without a human; a synthetic missing requirement
+// has not started at all. Neither defers escalation of other checks' failures.
 func hasExecutingPendingChecks(checks []scm.Check) bool {
 	for _, c := range checks {
 		if c.Pending() && !c.AwaitingApproval && !c.ExpectedMissing {
@@ -93,7 +94,7 @@ func failingCheckNames(checks []scm.Check) []string {
 }
 
 // unresolvedCheckNames returns "name (bucket)" for every check that does not
-// count toward allChecksPassed - i.e. everything but CheckBucketPass and
+// count toward ScopedChecks.Ready - i.e. everything but CheckBucketPass and
 // CheckBucketSkip. Unlike failingCheckNames, this also surfaces pending,
 // cancelled, and any other non-terminal-pass bucket, so a caller reporting an
 // approval override can name pending/unknown checks, not just failing ones.
