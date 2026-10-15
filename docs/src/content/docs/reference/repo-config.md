@@ -655,7 +655,7 @@ Before staging an automatic Review, Test, Document, Lint, or CI repair, a reposi
 
 A protected-path refusal always requires an explicit response, including under AXI `--yes` and TUI yolo mode. CI does not retry its fixer, and automatic gate reconciliation cannot clear the refusal, even if the PR closes. Approval is rejected because it would skip unfinished work: inspect and resolve the reported edit, then use `no-mistakes axi respond --action fix` to retry the step, including its commit and publication. Deliberate skip and abort behavior is unchanged.
 
-For CI, that explicit fix finishes the retained repair before normal monitoring can report `checks-passed`, even if forge checks turned green while parked or the response selects only an added finding. It uses the existing [repair revalidation policy](#cirevalidate_repairs), including mandatory revalidation from Review for a rebased conflict repair, and the existing publication guards. If the retained repair cannot finish, the refusal remains available for another explicit fix response.
+For CI, that explicit fix finishes the retained repair before normal monitoring can report `checks-passed`, even if forge checks turned green while parked or the response selects only an added finding. It uses the existing [repair revalidation policy](#cirevalidate_repairs) and publication guards. If the retained repair cannot finish, the refusal remains available for another explicit fix response.
 
 This is a staging guard, not an agent filesystem sandbox or a check on semantic intent. It does not inspect changes already committed by the author or an agent, and it does not infer whether an unprotected edit belongs to a finding. With an empty list, no path is protected. `ignore_patterns` only filters checks and does not prevent staging; see [scratch-safe automatic staging](#scratch-safe-automatic-staging) for what staging leaves out.
 
@@ -819,7 +819,7 @@ ci:
 
 For ordinary runs, one rule decides how every CI repair is delivered, on every CI-fix path - automatic and manual, CI failure and merge conflict alike:
 
-> A repair is published without revalidating only when its continuity with the reviewed, published head can be **proven**. When that continuity cannot be proven, the repair revalidates from Review.
+> A repair is published without revalidating only when its continuity with the reviewed, published head can be **proven**. Otherwise it stays local for revalidation, starting at Review unless the [`ci.carry_review_on_replay`](#cicarry_review_on_replay) exception applies.
 
 Continuity is proven when the repaired head is the run's durably review-approved commit or a descendant of it. That is the same fact the Push step's publication guard enforces, so the decision to publish and the guard that permits the push can never disagree.
 
@@ -841,7 +841,7 @@ The tradeoff `true` buys is cost against an unreviewed repair:
 | Ordinary repair that builds on the reviewed head | published immediately, one agent round | revalidated: one agent round plus a full Review, Test, Document, Lint, Push, PR pass |
 | Merge-conflict repair | revalidated | revalidated |
 | Ordinary repair is reviewed before it reaches the PR | no | yes |
-| Steps that re-run when a repair revalidates | Review onward; Intent and Rebase do not | same |
+| Steps that re-run when a repair revalidates | Review onward by default; [pure replay](#cicarry_review_on_replay) may start at Test; Intent and Rebase do not | Review onward; Intent and Rebase do not |
 | Run identity | unchanged; a restart is a same-run rewind | same |
 
 Turn it on where even an ordinary unreviewed CI repair is unacceptable.

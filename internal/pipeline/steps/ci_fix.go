@@ -734,7 +734,7 @@ func ciRepairPolicyDescription(sctx *pipeline.StepContext) string {
 //
 //	A repair is published without revalidating only when its continuity with the
 //	reviewed, published head can be PROVEN. When that continuity cannot be
-//	proven, the repair revalidates from Review.
+//	proven, the repair stays local for revalidation.
 //
 // ci.revalidate_repairs governs intent identically on every path: true asks for
 // revalidation outright, false asks to publish when it is safe to do so. Merge
@@ -749,7 +749,9 @@ func ciRepairPolicyDescription(sctx *pipeline.StepContext) string {
 //
 // Once recording or publication succeeds, the run's recorded head advances;
 // the two paths differ in whether the repair is published now or held until
-// Review has approved it.
+// revalidation completes. ciCarriesReviewOnReplay and pureReplayGap own the
+// narrow exception that carries Review approval and restarts at Test; the
+// remaining cases revoke approval and restart at Review.
 func (s *CIStep) recordRepair(sctx *pipeline.StepContext, headSHA string) (ciRepairResult, error) {
 	if ciRevalidatesRepairs(sctx) {
 		return s.recordLocalRepair(sctx, headSHA)

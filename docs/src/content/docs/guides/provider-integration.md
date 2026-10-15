@@ -278,7 +278,7 @@ Nearly every real Gitea instance is self-hosted at an arbitrary hostname with no
 
 Logging in as shown above is enough to make detection succeed; if `tea` has no login for the host, detection fails closed and the upstream is treated as unsupported. Two tea 1.0 instances on one hostname (different ports or base paths) are ambiguous and also fail closed.
 
-Because `tea` infers "which instance" from the current directory's git remote - context the daemon's detached worktree does not have - every `tea` invocation `no-mistakes` makes selects the account explicitly: `--login <name>` on tea 0.x, `--host <instance url>` on tea 1.0, resolved from the matched config entry. The tea generation is detected once, with a side-effect-free `--help` probe; a `tea` binary that matches neither generation is never guessed at: the step is skipped with an `unrecognized tea CLI` reason, the same way a logged-out CLI is, and so is a tea 1.0 binary with no tea 1.0 login for the host.
+Because `tea` infers "which instance" from the current directory's git remote - context the daemon's detached worktree does not have - each account-scoped `tea` invocation `no-mistakes` makes selects the account explicitly: `--login <name>` on tea 0.x, `--host <instance url>` on tea 1.0, resolved from the matched config entry. The tea generation is detected once, with side-effect-free `--help` probes. A binary that matches neither generation fails availability with an `unrecognized tea CLI` reason; a missing account for the installed generation also fails availability. Ordinary guarded network runs then fail at PR-context resolution before Rebase under the [pipeline admission rules](/no-mistakes/reference/pipeline-steps/).
 
 ## Cursor Origin
 
