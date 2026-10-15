@@ -291,7 +291,7 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		// executor exists; any earlier exit must unregister it here.
 		if r := recover(); r != nil {
 			slog.Error("panic launching queued run", "run_id", runID, "panic", r)
-			_ = m.db.UpdateRunError(runID, fmt.Sprintf("internal panic: %v", r))
+			m.failRunSetup(handle.runCtx, runID, fmt.Sprintf("internal panic: %v", r))
 		}
 		if !handle.consumed {
 			m.mu.Lock()
@@ -306,25 +306,18 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		}
 	}()
 	if cause := context.Cause(handle.runCtx); cause != nil {
-		status := types.RunFailed
-		if cause.Error() == types.RunCancelReasonAbortedByUser || cause.Error() == types.RunCancelReasonSuperseded {
-			status = types.RunCancelled
-		}
-		if _, err := m.db.TerminateActiveRun(runID, cause.Error(), status); err != nil {
-			slog.Warn("failed to persist cancelled dispatch", "run_id", runID, "error", err)
-		}
+		m.failRunSetup(handle.runCtx, runID, cause.Error())
 		return
 	}
 	run, err := m.db.GetRun(runID)
 	if err != nil || run == nil {
 		slog.Error("queued run is unreadable", "run_id", runID, "error", err)
-		_ = m.db.UpdateRunError(runID, "queued run is unreadable")
+		m.failRunSetup(handle.runCtx, runID, "queued run is unreadable")
 		return
 	}
 	fail := func(msg string) {
 		slog.Error("queued run cannot start", "run_id", runID, "error", msg)
-		_ = m.db.UpdateRunError(runID, msg)
-		m.broadcastTerminal(run, types.RunFailed, msg)
+		m.failRunSetup(handle.runCtx, runID, msg)
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil || repo == nil {
@@ -348,13 +341,37 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		fail(fmt.Sprintf("load config: %s", err))
 		return
 	}
-	if _, err := m.launchRun(handle.runCtx, repo, run, globalCfg, spec.Trigger, spec.SkipSteps, slot, handle); err != nil {
-		// launchRun already recorded the failure on the row for setup errors.
-		status, reason := types.RunFailed, err.Error()
-		if cause := context.Cause(handle.runCtx); cause != nil && (cause.Error() == types.RunCancelReasonAbortedByUser || cause.Error() == types.RunCancelReasonSuperseded) {
-			status, reason = types.RunCancelled, cause.Error()
+	_, _ = m.launchRun(handle.runCtx, repo, run, globalCfg, spec.Trigger, spec.SkipSteps, slot, handle)
+}
+
+func (m *RunManager) failRunSetup(ctx context.Context, runID, reason string) {
+	m.mu.Lock()
+	status := types.RunFailed
+	cause := context.Cause(ctx)
+	if owned := m.runs[runID]; owned != nil && owned.handle != nil {
+		if original := context.Cause(owned.handle.runCtx); original != nil {
+			cause = original
 		}
-		m.broadcastTerminal(run, status, reason)
+	}
+	if cause != nil {
+		status, reason = types.RunCancelled, cause.Error()
+	}
+	_, err := m.db.TerminateActiveRun(runID, reason, status)
+	run, readErr := m.db.GetRun(runID)
+	m.mu.Unlock()
+	if err != nil {
+		slog.Warn("failed to persist run setup failure", "run_id", runID, "error", err)
+	}
+	if readErr != nil {
+		slog.Warn("failed to read run setup outcome", "run_id", runID, "error", readErr)
+		return
+	}
+	if run != nil && !run.Status.Active() {
+		reason = ""
+		if run.Error != nil {
+			reason = *run.Error
+		}
+		m.broadcastTerminal(run, run.Status, reason)
 	}
 }
 
@@ -2089,7 +2106,7 @@ func (m *RunManager) enqueueRun(run *db.Run, spec queueSpec) error {
 // holds slot. handle is nil for a launch that runs inline in the request and
 // non-nil for one the queue drain started. The slot is released on every
 // return that did not hand it to the run goroutine.
-func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, globalCfg *config.GlobalConfig, trigger string, skipSteps []types.StepName, slot *runSlot, handle *runHandle) (string, error) {
+func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, globalCfg *config.GlobalConfig, trigger string, skipSteps []types.StepName, slot *runSlot, handle *runHandle) (runID string, err error) {
 	if handle == nil {
 		runCtx, cancel := context.WithCancelCause(context.Background())
 		handle = &runHandle{runCtx: runCtx, cancel: cancel, done: make(chan struct{})}
@@ -2127,16 +2144,16 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	bgOwnsSlot := false
 	defer func() {
 		if !bgOwnsSlot {
-			if cause := context.Cause(handle.runCtx); cause != nil && (cause.Error() == types.RunCancelReasonAbortedByUser || cause.Error() == types.RunCancelReasonSuperseded) {
-				if _, err := m.db.TerminateActiveRun(run.ID, cause.Error(), types.RunCancelled); err != nil {
-					slog.Warn("failed to persist cancelled run setup", "run_id", run.ID, "error", err)
-				}
+			if r := recover(); r != nil {
+				err = fmt.Errorf("internal panic: %v", r)
+			}
+			if err != nil {
+				m.failRunSetup(setupCtx, run.ID, err.Error())
 			}
 			slot.Release()
 		}
 	}()
 
-	var err error
 	// Create worktree from the gate bare repo, where this repository's
 	// worktree placement says it belongs (see internal/worktrees). This is the
 	// only point at which configuration decides placement: the resolved
@@ -2147,23 +2164,19 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	layout := worktrees.New(m.paths, globalCfg.WorktreeRoots)
 	checkouts, err := registeredCheckouts(m.db)
 	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("list registered checkouts: %s", err))
 		trackStartFailure("list_registered_checkouts")
 		return "", fmt.Errorf("list registered checkouts: %w", err)
 	}
 	if err := layout.ValidateCheckout(repo.WorkingPath, checkouts...); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("worktree placement: %s", err))
 		trackStartFailure("invalid_worktree_placement")
 		return "", fmt.Errorf("worktree placement: %w", err)
 	}
 	wtDir := layout.Dir(repo.ID, repo.WorkingPath, run.ID)
 	if err := m.db.SetRunWorktreeDir(run.ID, wtDir); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("record worktree placement: %s", err))
 		trackStartFailure("record_worktree_placement")
 		return "", fmt.Errorf("record worktree placement: %w", err)
 	}
 	if err := git.WorktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)
 	}
@@ -2181,13 +2194,11 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	}()
 
 	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("configure worktree git identity: %s", err))
 		trackStartFailure("configure_worktree_identity")
 		return "", fmt.Errorf("configure worktree git identity: %w", err)
 	}
 	if storedPRBaseBranch != "" {
 		if err := steps.VerifyRemoteBranchExists(ctx, wtDir, storedPRBaseBranch); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
 			trackStartFailure("pr_base_branch_missing")
 			return "", err
 		}
@@ -2204,7 +2215,6 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 
 	repoCfg, err := config.LoadRepo(wtDir)
 	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
 		trackStartFailure("load_repo_config")
 		return "", fmt.Errorf("load repo config: %w", err)
 	}
@@ -2225,7 +2235,6 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	// SECURITY: a trusted-config fetch failure must abort, not silently disable
 	// the disable_project_settings opt-out (see assertGateTrustedConfigReadable).
 	if err := assertGateTrustedConfigReadable(ctx, wtDir, repo.DefaultBranch, trustedSHA); err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("trusted_config_unreadable")
 		return "", err
 	}
@@ -2242,29 +2251,24 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	}
 	cfg := config.MergeForRemote(globalCfg, effectiveRepoCfg, repo.UpstreamURL)
 	if err := cfg.Review.ValidatePathInstructionsBudget(); err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("review_path_instructions_budget")
 		return "", err
 	}
 	if run.PiProfile != nil {
 		if err := cfg.ValidatePiProfileAgents(); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
 			return "", err
 		}
 		if err := cfg.ApplyPiProfile(run.PiProfile); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
 			return "", err
 		}
 	}
 	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("evidence_root")
 		return "", err
 	}
 	cfg.TrustedConfigSHA = trustedSHA
 	if globalCfg.Eval.CaptureProvenance {
 		if err := cfg.EnableEvalProvenance(globalCfg, effectiveRepoCfg); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
 			trackStartFailure("eval_provenance")
 			return "", err
 		}
@@ -2274,7 +2278,6 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		err = forgecontext.RefuseProviderPluginOverlap(ctx, forgeCtx, cfg.ProviderPlugins, repo.UpstreamURL)
 	}
 	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("resolve forge profile: %s", err))
 		trackStartFailure("resolve_forge_profile")
 		return "", fmt.Errorf("resolve forge profile: %w", err)
 	}
@@ -2284,7 +2287,6 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	// fail-closed check.
 	ag, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
 	if err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("create_agent")
 		return "", err
 	}
@@ -2297,12 +2299,10 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	// its resume at a step sequence it never executed.
 	pinnedGates, err := config.MarshalGates(cfg.Gates)
 	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("record gates: %s", err))
 		trackStartFailure("record_gates")
 		return "", fmt.Errorf("record gates: %w", err)
 	}
 	if err := m.db.SetRunGates(run.ID, pinnedGates); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("record gates: %s", err))
 		trackStartFailure("record_gates")
 		return "", fmt.Errorf("record gates: %w", err)
 	}
