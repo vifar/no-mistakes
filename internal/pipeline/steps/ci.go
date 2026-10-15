@@ -248,8 +248,9 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		return fmt.Sprintf("could not verify live CI target: %v", err), nil
 	}
 	pr.BaseBranch = targetBranch
-	scoped := newCIChecksScope(sctx, host, targetBranch).Apply(ctx, pr, checks)
-	excludedChecks := append(scoped.External, scoped.Informational...)
+	overrideScope := newCIChecksScope(sctx, host, targetBranch)
+	scoped := overrideScope.Apply(ctx, pr, checks)
+	excludedChecks := append(append(scoped.External, scoped.Informational...), overrideScope.ExternalReviewBotChecks()...)
 	checks = scoped.Relevant
 	if scoped.Ready() {
 		if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
@@ -783,6 +784,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			if err := scopeRetainedCIFindings(sctx, checkScope, pr, append(append([]scm.Check(nil), checks...), excludedChecks...)); err != nil {
 				return nil, err
 			}
+			// A configured exclusion of a review bot's check also covers the bot
+			// before it registers one, so the absent-bot fallback stays off.
+			excludedChecks = append(excludedChecks, checkScope.ExternalReviewBotChecks()...)
 			if summary := scoped.Summary(); summary != lastScopeLog {
 				lastScopeLog = summary
 				if summary != "" {

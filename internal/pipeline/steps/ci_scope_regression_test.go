@@ -252,3 +252,34 @@ func TestCIScopeRetainedBotExclusionKeepsUnrelatedNamelessFindings(t *testing.T)
 		}
 	}
 }
+
+// An external pattern for a review bot's check must hold before the bot has
+// registered one: otherwise the absent-bot fallback invents a nameless entry
+// whose older comments block readiness.
+func TestCIScopeAbsentExternalBotDoesNotReturnThroughComments(t *testing.T) {
+	absentBot := `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`
+	for _, external := range []bool{true, false} {
+		t.Run(map[bool]string{true: "external", false: "not external"}[external], func(t *testing.T) {
+			env := append(fakeCIGH(t, "OPEN", absentBot), greenGreptileCommentJSON, `FAKE_CLI_PROTECTION_JSON={"contexts":["build"]}`, `FAKE_CLI_RULES_JSON=[]`)
+			sctx, ag, _, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsAlways, env)
+			if external {
+				sctx.Config.CI.ExternalChecks = []string{"Greptile Review"}
+			}
+			step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error { return context.Canceled })
+			outcome, err := step.Execute(sctx)
+			if external {
+				if !errors.Is(err, context.Canceled) || outcome != nil || !*ready {
+					t.Fatalf("an absent external bot blocked readiness: %+v %v", outcome, err)
+				}
+				if reason, err := step.VerifyApprovalOverride(sctx); err != nil || reason != "" {
+					t.Fatalf("an absent external bot blocked approval: %q %v", reason, err)
+				}
+			} else if err != nil || outcome == nil || !outcome.NeedsApproval || !strings.Contains(outcome.Findings, "review bot") {
+				t.Fatalf("an absent non-external bot lost today's behavior: %+v %v", outcome, err)
+			}
+			if len(ag.calls) != 0 {
+				t.Fatal("repair dispatched")
+			}
+		})
+	}
+}

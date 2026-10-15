@@ -290,13 +290,17 @@ type ReviewBot struct {
 	// Logins are the account logins the bot posts review comments as.
 	Logins       []string
 	GitLabLogins []string
+	// CheckNames are the names the bot's check is published under, so a
+	// configured exclusion of that check applies to the bot even before it
+	// registers one.
+	CheckNames []string
 }
 
 // ReviewBots is the registry of supported review bots. Both halves of the
 // integration - check identity and comment authorship - read it, so adding a
 // bot is one entry here.
 var ReviewBots = []ReviewBot{
-	{AppSlug: "greptile-apps", Logins: []string{"greptile-apps[bot]", "greptile-apps"}, GitLabLogins: []string{"greptileai"}},
+	{AppSlug: "greptile-apps", Logins: []string{"greptile-apps[bot]", "greptile-apps"}, GitLabLogins: []string{"greptileai"}, CheckNames: []string{"Greptile Review"}},
 }
 
 // ReviewBotForApp returns the registered review bot that publishes checks

@@ -327,3 +327,58 @@ func TestCheckScopeMissingRequirementIsExplicit(t *testing.T) {
 		})
 	}
 }
+
+func TestCheckScopeWorkflowQualifiedExternalPatternExcludesMissingContext(t *testing.T) {
+	t.Parallel()
+	host := &requiredChecksHost{contexts: []string{"build", "approve"}}
+	build := Check{Name: "build", Bucket: CheckBucketPass}
+	for _, tc := range []struct {
+		name     string
+		external []string
+		checks   []Check
+		ready    bool
+	}{
+		{"missing context is excluded by the job part", []string{"Final Approval / approve*"}, []Check{build}, true},
+		{"job part is a glob", []string{"* / appr?ve"}, []Check{build}, true},
+		{"non-matching job pattern still blocks", []string{"Final Approval / deploy*"}, []Check{build}, false},
+		{"bare pattern still excludes", []string{"approve"}, []Check{build}, true},
+		{"registered check still matches by display form", []string{"Final Approval / approve*"},
+			[]Check{build, {Name: "approve", Workflow: "Final Approval", Bucket: CheckBucketFail}}, true},
+		{"registered check from another workflow is not excluded", []string{"Final Approval / approve*"},
+			[]Check{build, {Name: "approve", Workflow: "Other", Bucket: CheckBucketFail}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scoped := NewCheckScope(host, CheckScopePolicy{ExternalChecks: tc.external}, "main", nil).Apply(context.Background(), &PR{HeadSHA: "h"}, tc.checks)
+			if scoped.Ready() != tc.ready {
+				t.Fatalf("Ready()=%v want %v: %+v", scoped.Ready(), tc.ready, scoped)
+			}
+			for _, c := range scoped.Relevant {
+				if c.ExpectedMissing && tc.ready {
+					t.Fatalf("an excluded context became a placeholder: %+v", c)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckScopeQualifiedMustPassDoesNotDuplicateRequiredPlaceholder(t *testing.T) {
+	t.Parallel()
+	host := &requiredChecksHost{contexts: []string{"lint"}}
+	scoped := NewCheckScope(host, CheckScopePolicy{MustPass: []string{"CI / lint"}}, "main", nil).Apply(context.Background(), &PR{}, nil)
+	if len(scoped.Relevant) != 1 || scoped.Relevant[0].Name != "lint" {
+		t.Fatalf("relevant = %+v, want one placeholder for the bare required context", scoped.Relevant)
+	}
+}
+
+func TestExternalReviewBotChecksFollowExternalPatterns(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		patterns []string
+		want     int
+	}{{nil, 0}, {[]string{"Greptile Review"}, 1}, {[]string{"Greptile*"}, 1}, {[]string{"Other"}, 0}} {
+		got := NewCheckScope(nil, CheckScopePolicy{ExternalChecks: tc.patterns}, "main", nil).ExternalReviewBotChecks()
+		if len(got) != tc.want || tc.want == 1 && got[0].App != "greptile-apps" {
+			t.Errorf("patterns %v: markers = %+v, want %d", tc.patterns, got, tc.want)
+		}
+	}
+}

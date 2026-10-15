@@ -270,7 +270,7 @@ func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck,
 	}
 	expected := append([]RequiredCheck(nil), required...)
 	for _, p := range s.policy.MustPass {
-		if p = strings.TrimSpace(p); p != "" && !strings.ContainsAny(p, "*?") && !reportedForms[p] {
+		if p = strings.TrimSpace(p); p != "" && !strings.ContainsAny(p, "*?") && !reportedForms[p] && !matchesMissingContext([]string{p}, required) {
 			expected = append(expected, RequiredCheck{Context: p})
 		}
 	}
@@ -280,7 +280,7 @@ func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck,
 	}
 	seen := make(map[RequiredCheck]bool, len(expected))
 	for _, want := range expected {
-		if seen[want] || MatchesAnyCheckPattern(s.policy.ExternalChecks, want.Context) {
+		if seen[want] || MatchesMissingContext(s.policy.ExternalChecks, want.Context) {
 			continue
 		}
 		seen[want] = true
@@ -316,6 +316,53 @@ func (s *CheckScope) classify(c Check, required []RequiredCheck, derived bool) C
 		}
 	}
 	return CheckRoleInformational
+}
+
+// MatchesMissingContext reports whether a pattern names a required context
+// that no check has registered yet. A missing context carries no workflow
+// metadata, so besides the whole pattern, a pattern of the form
+// "<workflow> / <job-pattern>" is tested by its job part against the bare
+// context: the registered check would display as "<workflow> / <context>", and
+// the pattern that excludes it must exclude its placeholder too.
+func MatchesMissingContext(patterns []string, context string) bool {
+	for _, p := range patterns {
+		if MatchCheckPattern(p, context) {
+			return true
+		}
+		if _, job, ok := strings.Cut(strings.TrimSpace(p), " / "); ok && MatchCheckPattern(job, context) {
+			return true
+		}
+	}
+	return false
+}
+
+// matchesMissingContext reports whether any pattern names one of the
+// already-required contexts, so a literal must_pass entry for it does not add
+// a second placeholder.
+func matchesMissingContext(patterns []string, required []RequiredCheck) bool {
+	for _, r := range required {
+		if MatchesMissingContext(patterns, r.Context) {
+			return true
+		}
+	}
+	return false
+}
+
+// ExternalReviewBotChecks returns presence markers for registered review bots
+// whose known check names match an external pattern, whether or not the bot
+// has registered a check on the head. They let the absent-bot fallback honor
+// the exclusion.
+func (s *CheckScope) ExternalReviewBotChecks() []Check {
+	var out []Check
+	for _, bot := range ReviewBots {
+		for _, name := range bot.CheckNames {
+			if MatchesAnyCheckPattern(s.policy.ExternalChecks, name) {
+				out = append(out, Check{Name: name, App: bot.AppSlug})
+				break
+			}
+		}
+	}
+	return out
 }
 
 // MatchesAnyCheckPattern reports whether name matches any glob pattern.
