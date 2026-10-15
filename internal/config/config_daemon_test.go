@@ -172,3 +172,55 @@ func TestSetGlobalDaemonSettingCreatesNewFilePrivate(t *testing.T) {
 		t.Fatalf("new config mode = %o, want 600", info.Mode().Perm())
 	}
 }
+
+// A config that is a symlink is updated through the link: the target is
+// replaced atomically with its own mode, and the link stays a link.
+func TestSetGlobalDaemonSettingUpdatesThroughASymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlinks and modes")
+	}
+	dir := t.TempDir()
+	targetDir := filepath.Join(dir, "dotfiles")
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDir, "no-mistakes.yaml")
+	if err := os.WriteFile(target, []byte("# mine\ndaemon:\n  max_concurrent_runs: 3\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "config.yaml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetGlobalDaemonSetting(link, "max_concurrent_runs", "9"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Lstat(link)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the config symlink was replaced: %v, %v", info, err)
+	}
+	if got, _ := os.Readlink(link); got != target {
+		t.Fatalf("link now points at %q, want %q", got, target)
+	}
+	data, _ := os.ReadFile(target)
+	if string(data) != "# mine\ndaemon:\n  max_concurrent_runs: 9\n" {
+		t.Fatalf("target = %q", data)
+	}
+	if info, _ := os.Stat(target); info.Mode().Perm() != 0o640 {
+		t.Fatalf("target mode = %o, want 640", info.Mode().Perm())
+	}
+	// A dangling link is refused rather than replaced by a regular file.
+	dangling := filepath.Join(dir, "dangling.yaml")
+	if err := os.Symlink(filepath.Join(dir, "missing", "x.yaml"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetGlobalDaemonSetting(dangling, "max_concurrent_runs", "2"); err == nil {
+		t.Fatal("a dangling config symlink was rewritten")
+	}
+	if info, err := os.Lstat(dangling); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("dangling symlink was replaced: %v, %v", info, err)
+	}
+}

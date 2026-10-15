@@ -159,6 +159,21 @@ type runLimits struct {
 	hold    bool
 }
 
+// SeedLimits installs the limits from the validated startup configuration
+// before any recovery or admission. A config file that is later missing or
+// unreadable then keeps these accepted limits instead of falling back to the
+// built-in defaults.
+func (m *RunManager) SeedLimits(cfg *config.GlobalConfig) {
+	if cfg == nil {
+		return
+	}
+	m.limitsMu.Lock()
+	m.limitsCache = runLimits{max: cfg.Daemon.MaxConcurrentRuns, hold: cfg.Daemon.HoldSlotWhileParked}
+	m.limitsMu.Unlock()
+	pipeline.SetMaxConcurrentAgents(cfg.Daemon.MaxConcurrentAgents)
+	m.sched.refresh()
+}
+
 // liveLimits returns the current daemon.max_concurrent_runs and
 // daemon.hold_slot_while_parked. The global file is re-parsed only when its
 // mtime or size changes (parsing logs deprecation warnings, and this runs on
@@ -169,7 +184,13 @@ func (m *RunManager) liveLimits() (int, bool) {
 	defer m.limitsMu.Unlock()
 	path := m.paths.ConfigFile()
 	info, err := os.Stat(path)
-	if err == nil && m.limitsCache.loaded && info.ModTime().Equal(m.limitsCache.modTime) && info.Size() == m.limitsCache.size {
+	if err != nil {
+		// A file that vanished (or cannot be inspected) keeps the limits last
+		// accepted: parsing a missing file would yield the built-in defaults and
+		// silently replace what the operator configured.
+		return m.limitsCache.max, m.limitsCache.hold
+	}
+	if m.limitsCache.loaded && info.ModTime().Equal(m.limitsCache.modTime) && info.Size() == m.limitsCache.size {
 		return m.limitsCache.max, m.limitsCache.hold
 	}
 	cfg, loadErr := config.LoadGlobal(path)
@@ -452,11 +473,20 @@ func (m *RunManager) loadQueuedRuns() ([]*db.Run, error) {
 	return runs, nil
 }
 
+// holdQueue keeps queued runs from starting until releaseQueue. Daemon startup
+// holds it before anything can dispatch.
+func (m *RunManager) holdQueue() {
+	m.mu.Lock()
+	m.sched.held = true
+	m.mu.Unlock()
+}
+
 // restoreQueuedRuns registers loaded queued rows in the ownership table and the
-// scheduler and drains the queue. Queued runs were never executing, so they
-// stay queued across a restart. It runs after recovered gates are resumed, so
-// those gates are already waiting for (or holding) slots and keep priority over
-// the restored new runs.
+// scheduler, in start order. Queued runs were never executing, so they stay
+// queued across a restart. It runs after recovered gates are resumed, so those
+// gates are already waiting for (or holding) slots and keep priority over the
+// restored new runs. Nothing is claimed or started here: startup holds the
+// queue until IPC is serving (see releaseQueue).
 func (m *RunManager) restoreQueuedRuns(runs []*db.Run) {
 	if len(runs) == 0 {
 		return
@@ -470,7 +500,17 @@ func (m *RunManager) restoreQueuedRuns(runs []*db.Run) {
 	m.mu.Unlock()
 	slog.Info("restored queued runs", "count", len(ids))
 	m.sched.restoreQueue(ids)
+}
+
+// releaseQueue ends startup's hold: queued runs start, and the config watcher
+// begins. Daemon startup calls it only once IPC has bound and answered health,
+// so a startup that fails earlier leaves every queued row queued for the next.
+func (m *RunManager) releaseQueue() {
+	m.mu.Lock()
+	m.sched.held = false
+	m.mu.Unlock()
 	m.sched.dispatch()
+	m.StartLimitWatcher()
 }
 
 // cancelManagedRun is the single cancellation path for abort and supersede. It

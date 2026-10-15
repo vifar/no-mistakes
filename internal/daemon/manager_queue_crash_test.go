@@ -2,12 +2,15 @@ package daemon
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -157,4 +160,173 @@ func TestAnsweredRecoveredGateKeepsItsPriorityHandoffSlot(t *testing.T) {
 		t.Fatalf("answered gate status = %s when the queued run started; it was handed the slot first", got)
 	}
 	f.step.release(queued)
+}
+
+// The limits accepted at startup survive a config file that later vanishes or
+// stops parsing: scheduling keeps the accepted cap, not the built-in default.
+func TestSeededLimitsSurviveAMissingOrUnreadableConfig(t *testing.T) {
+	for _, fault := range []string{"removed", "unparseable"} {
+		t.Run(fault, func(t *testing.T) {
+			f := newFaultFixture(t, "1")
+			if err := config.SetGlobalDaemonSetting(f.p.ConfigFile(), "max_concurrent_agents", "2"); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.LoadGlobal(f.p.ConfigFile())
+			if err != nil {
+				t.Fatal(err)
+			}
+			pipeline.SetMaxConcurrentAgents(0)
+			f.mgr.SeedLimits(cfg)
+			if pipeline.MaxConcurrentAgents() != 2 {
+				t.Fatalf("agent cap = %d, want the seeded 2", pipeline.MaxConcurrentAgents())
+			}
+			t.Cleanup(func() { pipeline.SetMaxConcurrentAgents(0) })
+			if fault == "unparseable" {
+				// Launching needs a readable config, so occupy the slot first and
+				// check the scheduler's own view after the fault.
+				first := f.push("first")
+				f.waitStarted(first)
+				if err := os.WriteFile(f.p.ConfigFile(), []byte("daemon: [unterminated\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if usage := f.mgr.ReloadLimits(); usage.MaxConcurrentRuns != 1 || usage.InUse != 1 {
+					t.Fatalf("slot usage after the config broke = %+v, want the accepted cap 1", usage)
+				}
+				if _, admitted := f.mgr.sched.tryAdmit("another"); admitted {
+					t.Fatal("a second run was admitted: the cap of 1 was replaced by the built-in default")
+				}
+				if pipeline.MaxConcurrentAgents() != 2 {
+					t.Fatalf("agent cap = %d after the fault, want 2", pipeline.MaxConcurrentAgents())
+				}
+				f.step.release(first)
+				return
+			}
+			if err := os.Remove(f.p.ConfigFile()); err != nil {
+				t.Fatal(err)
+			}
+			first := f.push("first")
+			f.waitStarted(first)
+			second := f.push("second")
+			if got := f.status(second); got != types.RunQueued {
+				t.Fatalf("second launch status = %s: the cap of 1 was replaced by the built-in default", got)
+			}
+			if usage := f.mgr.SlotUsage(); usage.MaxConcurrentRuns != 1 {
+				t.Fatalf("slot usage = %+v, want cap 1", usage)
+			}
+			if pipeline.MaxConcurrentAgents() != 2 {
+				t.Fatalf("agent cap = %d after the fault, want 2", pipeline.MaxConcurrentAgents())
+			}
+			f.step.release(first)
+			f.waitStarted(second)
+			f.step.release(second)
+		})
+	}
+}
+
+// Queued rows must survive a startup that fails after recovery began: queue
+// dispatch is held until IPC is serving, so an IPC bind failure leaves them
+// queued (not claimed into crash-looking pending runs) for the next start.
+func TestStartupFailureAfterRecoveryLeavesQueuedRowsQueued(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	// Parked gates are recovered before IPC binds. Each one releases the slot it
+	// was admitted with when it parks, which is exactly the event that would start
+	// a queued run early if startup did not hold the queue.
+	plans := seedRecoveredQueueGates(f)
+	if err := config.SetGlobalDaemonSetting(f.p.ConfigFile(), "hold_slot_while_parked", "false"); err != nil {
+		t.Fatal(err)
+	}
+	repo, err := f.d.GetRepo("fault-repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var queued []string
+	for _, branch := range []string{"q1", "q2"} {
+		run, err := f.d.InsertRun(repo.ID, branch, f.head, f.head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.d.MarkRunQueued(run.ID, `{"trigger":"push"}`); err != nil {
+			t.Fatal(err)
+		}
+		queued = append(queued, run.ID)
+	}
+	f.mgr.Shutdown()
+
+	// The IPC endpoint cannot be bound: a directory sits where the socket goes.
+	if err := os.MkdirAll(filepath.Join(f.p.Socket(), "blocker"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err = RunWithOptions(f.p, f.d, func() []pipeline.Step { return []pipeline.Step{f.step} })
+	if err == nil || !strings.Contains(err.Error(), "bind IPC") {
+		t.Fatalf("RunWithOptions error = %v, want the IPC bind failure", err)
+	}
+	for _, id := range queued {
+		if got := f.status(id); got != types.RunQueued {
+			t.Fatalf("queued run %s is %s after the failed start; it must stay queued", id, got)
+		}
+	}
+	if len(f.step.startedIDs()) != 0 {
+		t.Fatalf("queued runs executed before IPC was serving: %v", f.step.startedIDs())
+	}
+	for _, plan := range plans {
+		if got := f.status(plan.run.ID); got != types.RunRunning {
+			t.Fatalf("recovered gate %s is %s after the failed start, want it untouched", plan.run.ID, got)
+		}
+	}
+
+	// The next start restores and runs them in order.
+	if err := os.RemoveAll(f.p.Socket()); err != nil {
+		t.Fatal(err)
+	}
+	sf := &schedFixture{t: t, p: f.p, d: f.d, step: f.step}
+	sf.restartDaemon()
+	sf.waitStarted(queued[0])
+	sf.step.release(queued[0])
+	sf.waitStarted(queued[1])
+	sf.step.release(queued[1])
+	sf.waitStatus(queued[1], types.RunCompleted)
+}
+
+// While startup holds the queue, any scheduling event (a recovered gate parking
+// and releasing its slot, the config watcher, a limit reload) leaves queued rows
+// queued; releasing the hold starts them in order.
+func TestHeldQueueStartsNothingUntilReleased(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	repo, err := f.d.GetRepo("fault-repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, branch := range []string{"h1", "h2"} {
+		run, err := f.d.InsertRun(repo.ID, branch, f.head, f.head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.d.MarkRunQueued(run.ID, `{"trigger":"push"}`); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, run.ID)
+	}
+	runs, err := f.mgr.loadQueuedRuns()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.mgr.holdQueue()
+	f.mgr.restoreQueuedRuns(runs)
+	f.mgr.sched.dispatch()
+	f.mgr.ReloadLimits()
+	time.Sleep(200 * time.Millisecond)
+	for _, id := range ids {
+		if got := f.status(id); got != types.RunQueued {
+			t.Fatalf("held queued run %s is %s", id, got)
+		}
+	}
+	if st := f.mgr.sched.stats(); st.Active != 0 || st.Queued != 2 {
+		t.Fatalf("held queue stats = %+v", st)
+	}
+	f.mgr.releaseQueue()
+	f.waitStarted(ids[0])
+	f.step.release(ids[0])
+	f.waitStarted(ids[1])
+	f.step.release(ids[1])
 }

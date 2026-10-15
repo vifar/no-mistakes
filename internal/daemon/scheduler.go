@@ -33,6 +33,11 @@ type slotScheduler struct {
 	hold     bool
 	active   int
 	retrying bool
+	// held keeps queued new runs from being claimed and launched. Daemon startup
+	// holds the queue until IPC is serving: a claim moves a row from queued to
+	// pending, and a startup that fails after that would leave a crashed-looking
+	// pending run in place of its durable queued state.
+	held bool
 	// yielded counts live runs that gave their slot back for a wait (a parked
 	// gate, the CI poll) and have not taken one again.
 	yielded int
@@ -126,7 +131,7 @@ func (s *slotScheduler) dispatch() {
 			continue
 		}
 		if len(s.queued) > 0 {
-			if s.retrying {
+			if s.retrying || s.held {
 				s.mu.Unlock()
 				return
 			}

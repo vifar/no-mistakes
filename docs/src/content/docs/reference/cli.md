@@ -835,7 +835,7 @@ no-mistakes daemon set max-concurrent-runs 5
 no-mistakes daemon set max-concurrent-runs 0   # unlimited
 ```
 
-Writes `daemon.max_concurrent_runs` into the global config (only that value line changes; comments and other settings are preserved, and the block is created when absent), then asks the running daemon to apply it immediately and prints the resulting slot usage. A value that is not a whole number of 0 or more is rejected before anything is written. With the daemon stopped, the value is only written and applies at the next start.
+Writes `daemon.max_concurrent_runs` into the global config (only that value line changes; comments and other settings are preserved, and the block is created when absent), then asks the running daemon to apply it immediately and prints the resulting slot usage. A value that is not a whole number of 0 or more is rejected before anything is written. If `config.yaml` is a symlink, the target is updated in place with its own file mode and the link is left intact. With the daemon stopped, the value is only written and applies at the next start.
 
 The global [`daemon` configuration](/no-mistakes/reference/global-config/#daemon) owns hot reload, admission order, and the effects of raising or lowering a cap. The [validation-step containment rule](/no-mistakes/concepts/daemon/#starting-and-stopping) also applies to `daemon set`, before any config write.
 

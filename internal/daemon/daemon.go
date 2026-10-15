@@ -243,6 +243,9 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConf
 	defer agent.SetServerPIDsDir("")
 
 	mgr := NewRunManager(d, p, stepFactory)
+	// The validated startup limits are what scheduling falls back on if the file
+	// is later missing or unreadable.
+	mgr.SeedLimits(globalCfg)
 
 	// Publish process identity as soon as the singleton lock is held. Startup
 	// callers can now distinguish a launched child from IPC readiness and detect
@@ -273,13 +276,15 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConf
 	if err != nil {
 		return fmt.Errorf("restore queued runs: %w", err)
 	}
+	// Queued runs are registered now but not started, and the limit watcher is
+	// not running, until IPC is serving (releaseQueue below).
+	mgr.holdQueue()
 
 	// Recovery remains exclusive and completes before IPC is bound. It resumes
 	// parked gates, which register for slots ahead of the queued runs restored
 	// right after.
 	recoveredRuns := recoverOnStartup(d, p, mgr, layout)
 	mgr.restoreQueuedRuns(queuedRuns)
-	mgr.StartLimitWatcher()
 
 	srv := ipc.NewServer()
 
@@ -326,6 +331,7 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConf
 		return fmt.Errorf("confirm IPC health: %w", err)
 	}
 	logStartupPhase("ipc_health", healthStarted)
+	mgr.releaseQueue()
 	reportingDone := make(chan struct{})
 	go func() {
 		defer close(reportingDone)

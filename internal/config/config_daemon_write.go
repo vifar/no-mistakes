@@ -17,7 +17,17 @@ import (
 // left byte-for-byte alone; only the one value line changes. The result is
 // parsed with the same strict loader the daemon uses before anything is written,
 // so a refused value or an unparseable result never reaches disk.
+//
+// A config file that is a symlink is updated through it: the target is replaced
+// atomically, with its own mode, and the link stays a link.
 func SetGlobalDaemonSetting(path, key, value string) error {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&fs.ModeSymlink != 0 {
+		target, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return fmt.Errorf("resolve global config symlink: %w", err)
+		}
+		path = target
+	}
 	data, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read global config: %w", err)

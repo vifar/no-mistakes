@@ -385,3 +385,11 @@ func (a *limitedAgent) ReportsAgentAttempts() bool {
 func (a *limitedAgent) NeutralizesGateInstructions() bool {
 	return agent.NeutralizesGateInstructions(a.Agent)
 }
+
+// MaxConcurrentAgents reports the process-wide agent invocation cap (0 means
+// unlimited).
+func MaxConcurrentAgents() int {
+	agentLimiter.mu.Lock()
+	defer agentLimiter.mu.Unlock()
+	return agentLimiter.limit
+}
