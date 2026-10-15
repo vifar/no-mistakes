@@ -714,3 +714,22 @@ func TestGetChecksOrdersAttemptsByRunStartNotJobStart(t *testing.T) {
 		t.Fatalf("checks = %+v; want run 8's failure superseding run 7's build", checks)
 	}
 }
+
+// Run 7 passed build, was rerun and failed before jobs, then run 8 also failed
+// before jobs. Run 8 retires run 7's result and must carry the build identity
+// run 7 took over; otherwise the requirement loses its actionable failure.
+func TestGetChecksRetiredJoblessResultPassesItsIdentitiesOn(t *testing.T) {
+	t.Parallel()
+	job7 := `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-14T10:00:00Z","completedAt":"2026-10-14T10:05:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/7/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`
+	runs := `[{"total_count":2,"workflow_runs":[` +
+		`{"id":7,"workflow_id":10,"run_attempt":2,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/7"},` +
+		`{"id":8,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T12:00:00Z","html_url":"https://github.com/test/repo/actions/runs/8"}]}]`
+	checks := checksForAttempts(t, "["+job7+"]", runs)
+	if len(checks) != 1 || checks[0].RunID != 8 || checks[0].Bucket != scm.CheckBucketFail || len(checks[0].Supersedes) != 1 || checks[0].Supersedes[0].Name != "build" {
+		t.Fatalf("checks = %+v; want run 8's failure carrying build", checks)
+	}
+	scope := scm.NewCheckScope(nil, scm.CheckScopePolicy{MustPass: []string{"build*"}, Resolved: &scm.CheckScopeResolution{Required: []scm.RequiredCheck{{Context: "lint"}}, Derived: true}}, "main", nil)
+	if scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, append(checks, scm.Check{Name: "lint", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPass})); scoped.Ready() {
+		t.Fatalf("readiness passed over the failure that owns build: %+v", scoped)
+	}
+}

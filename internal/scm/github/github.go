@@ -705,6 +705,7 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 			represented[runID] = append(represented[runID], i)
 		}
 	}
+	var jobless []scm.Check
 	for _, run := range runs {
 		runID := h.actionsRunID(run.Link)
 		currentJobs := false
@@ -738,29 +739,57 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 			}
 		}
 		if !currentJobs {
-			// A jobless result is obsolete once a later attempt of the same
-			// workflow, event, and branch exists. Attempts are ordered by
-			// when they started, not by run ID: a rerun keeps its ID.
-			superseded := false
-			for _, newer := range runs {
-				if run.WorkflowID == 0 || run.WorkflowID != newer.WorkflowID || run.RunID == newer.RunID ||
-					run.WorkflowEvent == "" || run.WorkflowEvent != newer.WorkflowEvent || run.WorkflowBranch != newer.WorkflowBranch {
-					continue
-				}
-				if after, ordered := h.attemptAfter(newer, run); ordered && after {
-					superseded = true
-					break
-				}
-			}
-			if !superseded {
-				checks = append(checks, run)
-			}
+			jobless = append(jobless, run)
 		}
 	}
+	checks = append(checks, h.retireObsoleteJoblessRuns(jobless, runs)...)
 	kept := make([]scm.Check, 0, len(checks)-len(drop))
 	for i, check := range checks {
 		if !drop[i] {
 			kept = append(kept, check)
+		}
+	}
+	return kept
+}
+
+// retireObsoleteJoblessRuns drops a jobless workflow-level result once a later
+// attempt of the same workflow, event, and branch exists; attempts are ordered
+// by when they started, not by run ID, because a rerun keeps its ID. The job
+// identities a retired result stood for pass to the newest attempt when that
+// attempt is jobless too, so a requirement it covered is still owned by the
+// failure that replaced it rather than silently dropped. A newest attempt with
+// current jobs speaks for its own jobs.
+func (h *Host) retireObsoleteJoblessRuns(jobless, runs []scm.Check) []scm.Check {
+	sameTrigger := func(a, b scm.Check) bool {
+		return a.WorkflowID != 0 && a.WorkflowID == b.WorkflowID && a.RunID != b.RunID &&
+			a.WorkflowEvent != "" && a.WorkflowEvent == b.WorkflowEvent && a.WorkflowBranch == b.WorkflowBranch
+	}
+	newest := make([]int64, len(jobless))
+	for i, run := range jobless {
+		latest := run
+		for _, other := range runs {
+			if sameTrigger(run, other) {
+				if after, ordered := h.attemptAfter(other, latest); ordered && after {
+					latest = other
+				}
+			}
+		}
+		newest[i] = latest.RunID
+	}
+	for i, run := range jobless {
+		if newest[i] == run.RunID {
+			continue
+		}
+		for j := range jobless {
+			if jobless[j].RunID == newest[i] {
+				jobless[j].Supersedes = append(jobless[j].Supersedes, run.Supersedes...)
+			}
+		}
+	}
+	var kept []scm.Check
+	for i, run := range jobless {
+		if newest[i] == run.RunID {
+			kept = append(kept, run)
 		}
 	}
 	return kept
