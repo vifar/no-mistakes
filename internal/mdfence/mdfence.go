@@ -21,7 +21,7 @@ type Fence struct {
 // a fence with three or more backticks or tildes, indented by at most three
 // spaces; a backtick fence's info string may not contain a backtick. It closes
 // with a run of the same character at least as long as the opener and nothing
-// after it but whitespace. Four-space-indented lines cannot open a fence.
+// after it but ASCII spaces or tabs. Four-space-indented lines cannot open a fence.
 func (f *Fence) Consume(raw string) {
 	raw = strings.TrimSuffix(raw, "\r")
 	line := strings.TrimLeft(raw, " ")
