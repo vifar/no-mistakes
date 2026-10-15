@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -79,6 +80,7 @@ type Executor struct {
 	workDir  string
 
 	mu                     sync.Mutex
+	activeAgentPID         atomic.Int64 // live lifecycle ownership, independent of SQLite
 	approvalCh             chan approvalResponse // buffered channel for approval responses
 	waiting                bool                  // true when blocked on approval
 	waitingStep            types.StepName        // which step is currently awaiting approval
@@ -101,6 +103,12 @@ type Executor struct {
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
 	onPRMerged            func(context.Context, string)
+}
+
+// ActiveAgentPID returns the current agent's PID without accessing the database.
+// The daemon uses it to authorize cancellation even when SQLite is unavailable.
+func (e *Executor) ActiveAgentPID() int {
+	return int(e.activeAgentPID.Load())
 }
 
 // PRContextDecision carries the read-only target selected at a step boundary.
@@ -1234,6 +1242,7 @@ func (e *Executor) autoFixLimit(stepName types.StepName) int {
 // Returns whether to skip the remainder, an optional earlier restart step,
 // and any execution error.
 func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult, run *db.Run, repo *db.Repo, workDir, logDir string, state stepExecutionState) (bool, types.StepName, error) {
+	defer e.activeAgentPID.Store(0)
 	stepName := step.Name()
 	logPath := filepath.Join(logDir, string(stepName)+".log")
 	finalExitCode := 0
@@ -1333,10 +1342,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		switch event.Phase {
 		case agent.LifecyclePhaseStart:
 			pid := event.PID
+			e.activeAgentPID.Store(int64(pid))
 			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, &pid); dbErr != nil {
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}
 		case agent.LifecyclePhaseExit:
+			e.activeAgentPID.Store(0)
 			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, nil); dbErr != nil {
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}

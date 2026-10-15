@@ -2623,6 +2623,25 @@ func telemetryFailedStepName(database *db.DB, runID string) string {
 	return ""
 }
 
+// activeAgentPIDs snapshots live executors without depending on persisted state.
+func (m *RunManager) activeAgentPIDs() []int {
+	m.mu.Lock()
+	var executors []*pipeline.Executor
+	for _, owned := range m.runs {
+		if owned.executor != nil {
+			executors = append(executors, owned.executor)
+		}
+	}
+	m.mu.Unlock()
+	var pids []int
+	for _, exec := range executors {
+		if pid := exec.ActiveAgentPID(); pid > 0 {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
 // HandleRespond routes a user approval action to the executor for the given run.
 func (m *RunManager) HandleRespond(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string) error {
 	_, err := m.HandleRespondWithOverrides(runID, step, action, findingIDs, nil, nil, nil, "")

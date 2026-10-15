@@ -1578,8 +1578,15 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 	})
 
 	srv.Handle(ipc.MethodCancelRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
-		if err := refuseNested(ctx, false); err != nil {
+		result, err := (gatecontext.Inspector{Paths: mgr.paths, ActiveAgentPIDs: mgr.activeAgentPIDs}).Inspect(ctx, gatecontext.Request{
+			PeerPID:   ipc.PeerPID(ctx),
+			DaemonPID: os.Getpid(),
+		})
+		if err != nil {
 			return nil, err
+		}
+		if result.Nested {
+			return nil, fmt.Errorf("%s", gatecontext.RefusalMessage(result))
 		}
 		var p ipc.CancelRunParams
 		if err := json.Unmarshal(params, &p); err != nil {

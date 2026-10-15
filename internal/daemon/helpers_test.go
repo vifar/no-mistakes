@@ -348,6 +348,11 @@ func setupTestGitRepo(t *testing.T, p *paths.Paths, d *db.DB, repoID string) (*d
 	// Create bare repo at the expected gate path.
 	bareDir := p.RepoDir(repoID)
 	gitCmd(t, "", "init", "--bare", bareDir)
+	// Match managed gates: concurrent run setup must write identity into
+	// each worktree's config instead of racing on the bare's config.lock.
+	if err := git.IsolateHooksPath(ctx, bareDir); err != nil {
+		t.Fatal(err)
+	}
 
 	// Push from work to bare so it has refs.
 	gitCmd(t, workDir, "remote", "add", "gate", bareDir)

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/gatecontext"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -693,4 +695,64 @@ func TestAbortOfRecoveredGateWaitingForSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.waitFor("admitted gate to complete", func() bool { return f.status(plans[0].run.ID) == types.RunCompleted })
+}
+
+// The claimed-cancellation contract applies to the public RPC, including its
+// authorization guard: an unreadable database must not keep a workload alive.
+func TestClaimedCancelRPCStopsWorkWhenDatabaseReadsFail(t *testing.T) {
+	const childSocket = "NM_TEST_CANCEL_NESTED_SOCKET"
+	const childRun = "NM_TEST_CANCEL_NESTED_RUN"
+	if socket := os.Getenv(childSocket); socket != "" {
+		client, err := ipc.Dial(socket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer client.Close()
+		err = client.CallWithTimeout(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: os.Getenv(childRun)}, nil, 3*time.Second)
+		if err == nil || !strings.Contains(err.Error(), gatecontext.ErrorCode) {
+			t.Fatalf("daemon descendant cancellation = %v, want nested caller refusal", err)
+		}
+		return
+	}
+	f := newSchedFixture(t, "daemon:\n  max_concurrent_runs: 1\n")
+	id, _ := f.push("claimed-read-failure")
+	f.waitStarted(id)
+	raw, err := sql.Open("sqlite", f.p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	// Change only this disposable database. Both the handler and its guard
+	// now receive a real SQLite read error, rather than a mocked DB result.
+	if _, err := raw.Exec("ALTER TABLE runs RENAME TO unreadable_runs"); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := raw.Exec("ALTER TABLE unreadable_runs RENAME TO runs"); err != nil {
+			t.Errorf("restore disposable database: %v", err)
+		}
+	}()
+	// A real child of this in-process daemon remains forbidden from controlling
+	// the pipeline, even though the same SQLite fault must not block an operator.
+	child := exec.Command(os.Args[0], "-test.run=^TestClaimedCancelRPCStopsWorkWhenDatabaseReadsFail$", "-test.timeout=10s")
+	child.Env = append(os.Environ(), childSocket+"="+f.p.Socket(), childRun+"="+id)
+	if output, err := child.CombinedOutput(); err != nil {
+		t.Fatalf("nested cancellation guard: %v\n%s", err, output)
+	}
+	if got := f.slots().InUse; got != 1 {
+		t.Fatalf("nested caller changed occupied slots to %d, want 1", got)
+	}
+	err = f.client.CallWithTimeout(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: id}, nil, 3*time.Second)
+	t.Logf("cancel_run response with database reads unavailable: %v", err)
+	t.Logf("get_slots after cancellation request: %+v", f.slots())
+	if err != nil {
+		t.Fatalf("claimed abort must reach its cancellation handle before database access: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for f.slots().InUse != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("claimed workload kept its slot after abort with an unreadable database")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
