@@ -62,10 +62,10 @@ type Run struct {
 	Error             *string
 	// AwaitingAgentSince is the unix-seconds timestamp at which the run parked
 	// at a gate awaiting the driving agent's response (an awaiting_approval or
-	// fix_review step). It is nil whenever the run is not parked: the executor
-	// sets it on gate entry and clears it the moment the agent responds (or the
-	// wait is cancelled). It is observability only and does not affect gate
-	// resolution.
+	// fix_review step). It remains set while a pending response waits for a run
+	// slot, so recovery can validate the durable park; status hides it for an
+	// answered gate. Dispatch or cancellation clears it. It is observability
+	// only and does not affect gate resolution.
 	AwaitingAgentSince *int64
 	// ParkedMS accumulates the run's total parked-at-gate wall time in
 	// milliseconds across every gate wait (local performance telemetry;

@@ -1934,8 +1934,8 @@ rounds:
 			// Surface the park as a pollable, run-level signal so a supervisor can
 			// tell in one `axi status` read that the run is waiting for the agent
 			// to drive this gate (versus actively running/fixing/ci). Observability
-			// only: it does not change the wait below. Response acceptance clears
-			// it before any capacity wait; cancellation clears it when this wait ends.
+			// only: it does not change the wait below. Pending response acceptance
+			// hides it from status; dispatch or cancellation clears the saved marker.
 			if dbErr := e.db.ParkStepForApproval(run.ID, sr.ID, approvalStatus, finalExitCode, executionMS, findingsPtr); dbErr != nil {
 				e.waiting = false
 				e.waitingStep = ""
