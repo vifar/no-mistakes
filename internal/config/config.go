@@ -128,9 +128,8 @@ const (
 	// CIReviewBotCommentsOnFailure reads a registered review bot's unresolved
 	// comments only when that bot's check failed.
 	CIReviewBotCommentsOnFailure = "on_failure"
-	// CIReviewBotCommentsAlways also reads them when the bot's check completed
-	// green on the current head, or has not registered on it yet once every
-	// other check is green.
+	// CIReviewBotCommentsAlways enables the broader comment policy documented
+	// at docs/src/content/docs/reference/repo-config.md#cireview_bot_comments.
 	CIReviewBotCommentsAlways = "always"
 	// CIRequiredChecksAuto and CIRequiredChecksAll are the ci.required_checks
 	// policies; see CI.RequiredChecks.
@@ -1606,13 +1605,10 @@ ci:
   # repository that sets ci.revalidate_repairs on its own default branch
   # overrides this value.
   revalidate_repairs: false
-  # When the CI step reads a registered review bot's (Greptile's) unresolved
-  # review comments. "on_failure" (default) reads them only when the bot's
-  # check failed. "always" also reads them when the bot's check completed green
-  # on the current head, or has not registered on it yet once every other check
-  # is green, so an unresolved bot comment parks the step for a decision
-  # instead of reporting checks-passed. A repository that sets
-  # ci.review_bot_comments on its own default branch overrides this value.
+  # When unresolved review-bot comments block CI readiness ("on_failure" or
+  # "always"). Policy semantics and check-scope interactions:
+  # https://kunchenguid.github.io/no-mistakes/reference/repo-config/#cireview_bot_comments
+  # A repository setting this key on its default branch overrides this value.
   review_bot_comments: on_failure
   # Which checks on the PR head decide CI readiness and repair. "auto"
   # (default) evaluates only the status checks the target branch requires
