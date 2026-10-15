@@ -710,8 +710,10 @@ func (h *Host) repoSlug() string {
 // appendUnrepresentedWorkflowRuns reconciles the rollup's jobs with the REST
 // workflow runs for the head. GitHub reuses the run ID for reruns, and
 // checkSuite.workflowRun.runAttempt is the parent's current attempt, not the
-// job's attempt: an unfinished run makes its jobs pending, and a job completed
-// before its run's current attempt started is stale.
+// job's attempt. On reruns, membership in currentAttemptJobs decides which
+// jobs are current; timestamps cannot distinguish stale jobs from successes
+// carried over by a partial rerun. Without that membership data, an unfinished
+// run makes its jobs pending and earlier completions are retired otherwise.
 //
 // Attempts of one trigger - the same workflow, event, and head branch - are
 // then judged as GitHub's newest meaningful attempt, ordered by when each

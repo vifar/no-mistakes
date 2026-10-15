@@ -317,6 +317,11 @@ func (s *CheckScope) Includes(ctx context.Context, pr *PR, check Check) bool {
 	return s.classify(check, required, derived) == CheckRoleRequired
 }
 
+// IncludesContext scopes retained work when no live check identifies its
+// producer. An unknown producer must not discard an app-bound required repair;
+// this name-only decision does not satisfy the requirement for readiness.
+// External exclusions still win, and the raw context is tested before treating
+// " / " as a workflow separator because it can be part of the provider's name.
 func (s *CheckScope) IncludesContext(ctx context.Context, pr *PR, name string) bool {
 	required, derived := s.requiredContexts(ctx, pr)
 	required = append([]RequiredCheck(nil), required...)
