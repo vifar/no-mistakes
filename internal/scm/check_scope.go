@@ -32,8 +32,9 @@ var ErrRequiredChecksUnavailable = errors.New("required status checks are not av
 // (including a legacy commit status, which has no application) does not
 // satisfy it. Zero means any producer.
 type RequiredCheck struct {
-	Context string
-	AppID   int64
+	Context    string
+	AppID      int64
+	SelfStatus bool
 }
 
 func (r RequiredCheck) String() string {
@@ -45,7 +46,7 @@ func (r RequiredCheck) String() string {
 
 // satisfiedBy reports whether c is the check this requirement names.
 func (r RequiredCheck) satisfiedBy(c Check) bool {
-	return c.Name == r.Context && (r.AppID <= 0 || c.AppID == r.AppID)
+	return c.Name == r.Context && (r.AppID <= 0 || c.AppID == r.AppID) && (!r.SelfStatus || c.Kind == CheckKindRun)
 }
 
 // RequiredChecksReader is implemented by providers that can name the status
@@ -287,7 +288,7 @@ func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck,
 				break
 			}
 		}
-		if satisfied {
+		if satisfied || (want.SelfStatus && want.AppID <= 0) {
 			continue
 		}
 		out.Relevant = append(out.Relevant, Check{Name: want.Context, AppID: want.AppID, HeadSHA: head, Bucket: CheckBucketPending, State: "EXPECTED", Kind: CheckKindStatus, ExpectedMissing: true})

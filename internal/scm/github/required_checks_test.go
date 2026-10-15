@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -198,27 +199,71 @@ func TestGetChecksReadsProducingAppID(t *testing.T) {
 	}
 }
 
-func TestGetRequiredChecksExcludesPipelineStatusFromEverySource(t *testing.T) {
+func TestRequiredSelfStatusPreservesCheckRuns(t *testing.T) {
 	t.Parallel()
-	for _, tc := range []struct {
-		name       string
-		protection string
-		rules      string
-	}{
-		{"legacy protection", `{"contexts":["build","no-mistakes"]}`, `[[]]`},
-		{"app-bound protection", `{"contexts":["build","no-mistakes"],"checks":[{"context":"no-mistakes","app_id":7}]}`, `[[]]`},
-		{"ruleset", `{"contexts":["build"]}`, `[[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"no-mistakes","integration_id":7}]}}]]`},
-		{"whitespace", `{"contexts":["build"," no-mistakes "]}`, `[[]]`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			contexts, err := requiredContexts(t, map[string]githubTestResponse{
-				protectionCmd: {stdout: tc.protection},
-				rulesCmd:      {stdout: tc.rules},
+	for _, source := range []string{"protection", "ruleset"} {
+		for _, tc := range []struct {
+			name  string
+			appID int64
+			node  string
+			ready bool
+		}{
+			{"bound failure", 7, `{"__typename":"CheckRun","databaseId":1,"name":"no-mistakes","status":"COMPLETED","conclusion":"FAILURE","checkSuite":{"app":{"databaseId":7}}}`, false},
+			{"bound success", 7, `{"__typename":"CheckRun","databaseId":1,"name":"no-mistakes","status":"COMPLETED","conclusion":"SUCCESS","checkSuite":{"app":{"databaseId":7}}}`, true},
+			{"bound wrong app", 8, `{"__typename":"CheckRun","databaseId":1,"name":"no-mistakes","status":"COMPLETED","conclusion":"SUCCESS","checkSuite":{"app":{"databaseId":7}}}`, false},
+			{"bound missing", 7, "", false},
+			{"unbound failure", 0, `{"__typename":"CheckRun","databaseId":1,"name":"no-mistakes","status":"COMPLETED","conclusion":"FAILURE","checkSuite":{"app":{"databaseId":7}}}`, false},
+			{"unbound success", 0, `{"__typename":"CheckRun","databaseId":1,"name":"no-mistakes","status":"COMPLETED","conclusion":"SUCCESS","checkSuite":{"app":{"databaseId":7}}}`, true},
+			{"unbound self status only", 0, "", true},
+		} {
+			t.Run(source+"/"+tc.name, func(t *testing.T) {
+				protection := `{"contexts":["build"]}`
+				rules := `[[]]`
+				if source == "protection" {
+					protection = fmt.Sprintf(`{"contexts":["build","no-mistakes"],"checks":[{"context":"no-mistakes","app_id":%d}]}`, tc.appID)
+				} else {
+					rules = fmt.Sprintf(`[[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"no-mistakes","integration_id":%d}]}}]]`, tc.appID)
+				}
+				nodes := `[{"__typename":"CheckRun","databaseId":2,"name":"build","status":"COMPLETED","conclusion":"SUCCESS"},{"__typename":"StatusContext","id":"self","context":"no-mistakes","state":"PENDING"}`
+				if tc.node != "" {
+					nodes += "," + tc.node
+				}
+				nodes += "]"
+				host := New(githubTestCmdFactory(map[string]githubTestResponse{
+					protectionCmd: {stdout: protection},
+					rulesCmd:      {stdout: rules},
+					"gh pr view 5 --repo test/repo --json headRefOid --jq .headRefOid":                                       {stdout: "abc123\n"},
+					githubCommitChecksCommand("", "test/repo", "abc123"):                                                     {stdout: githubCommitChecksResponse(nodes)},
+					"gh api --method GET repos/test/repo/actions/runs -f head_sha=abc123 -f per_page=100 --paginate --slurp": {stdout: `[{"total_count":0,"workflow_runs":[]}]`},
+				}), nil, "", "test/repo")
+				pr := &scm.PR{Number: "5", HeadSHA: "abc123"}
+				checks, err := host.GetChecks(context.Background(), pr)
+				if err != nil {
+					t.Fatal(err)
+				}
+				scope := scm.NewCheckScope(host, scm.CheckScopePolicy{}, "main", nil)
+				scoped := scope.Apply(context.Background(), pr, checks)
+				if scoped.Ready() != tc.ready {
+					t.Fatalf("ready = %v, want %v: %+v", scoped.Ready(), tc.ready, scoped)
+				}
+				for _, check := range checks {
+					if scope.Includes(context.Background(), pr, check) != (check.Name == "build" || tc.appID == 0 || check.AppID == tc.appID) {
+						t.Fatalf("Includes disagrees with required app identity: %+v", check)
+					}
+				}
 			})
-			if err != nil || !reflect.DeepEqual(contexts, []string{"build"}) {
-				t.Fatalf("requirements = %v, %v; want only build", contexts, err)
-			}
-		})
+		}
+	}
+}
+
+func TestGetRequiredChecksRejectsObjectRulePages(t *testing.T) {
+	t.Parallel()
+	_, err := requiredContexts(t, map[string]githubTestResponse{
+		protectionCmd: {stdout: `{"contexts":["build"]}`},
+		rulesCmd:      {stdout: `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"test"}]}}]`},
+	})
+	if err == nil {
+		t.Fatal("object pages must fail the slurped array-page contract")
 	}
 }
 

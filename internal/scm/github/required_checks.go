@@ -77,26 +77,13 @@ func (h *Host) GetRequiredChecks(ctx context.Context, _ *scm.PR, branch string) 
 		// --slurp wraps each page in an outer array; flatten every page before
 		// deriving contexts, since the required_status_checks rule can be on
 		// any of them.
-		var pages []json.RawMessage
+		var pages [][]rule
 		if err := json.Unmarshal(rules, &pages); err != nil {
 			return nil, fmt.Errorf("parse branch rules: %w", err)
 		}
 		var all []rule
-		for _, raw := range pages {
-			trimmed := strings.TrimSpace(string(raw))
-			if strings.HasPrefix(trimmed, "[") {
-				var page []rule
-				if err := json.Unmarshal(raw, &page); err != nil {
-					return nil, fmt.Errorf("parse branch rules: %w", err)
-				}
-				all = append(all, page...)
-				continue
-			}
-			var single rule
-			if err := json.Unmarshal(raw, &single); err != nil {
-				return nil, fmt.Errorf("parse branch rules: %w", err)
-			}
-			all = append(all, single)
+		for _, page := range pages {
+			all = append(all, page...)
 		}
 		// required_status_checks is the only check requirement modelled here.
 		// These rule types also gate merges on checks or statuses but name no
@@ -123,9 +110,10 @@ func (h *Host) GetRequiredChecks(ctx context.Context, _ *scm.PR, branch string) 
 		}
 	}
 
-	return slices.DeleteFunc(required, func(check scm.RequiredCheck) bool {
-		return strings.TrimSpace(check.Context) == CommitStatusContext
-	}), nil
+	for i := range required {
+		required[i].SelfStatus = strings.TrimSpace(required[i].Context) == CommitStatusContext
+	}
+	return required, nil
 }
 
 // unmodeledCheckRules are the ruleset rule types that gate merging on checks,
