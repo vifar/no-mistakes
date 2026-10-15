@@ -264,17 +264,21 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConf
 	}()
 	slog.Info("daemon process launched", "pid", pidRecord.PID)
 
-	// Recovery remains exclusive and completes before IPC is bound.
-	recoveredRuns := recoverOnStartup(d, p, mgr, layout)
-	// Queued runs were never executing, so recovery leaves them queued. They
-	// are restored only now that the resumed runs hold their slots, and a
-	// failure to restore them is fatal: serving requests with durable queued
-	// rows outside the ownership table would leave them unstartable and
-	// unabortable.
-	if err := mgr.recoverQueuedRuns(); err != nil {
-		mgr.Shutdown()
+	// The durable queue is validated first, read-only, before recovery has any
+	// side effect. If it cannot be read the daemon refuses to start with
+	// nothing changed: parked gates stay parked for the next start instead of
+	// being resumed and then cancelled by the failure, and no queued row is ever
+	// served outside the ownership table (see loadQueuedRuns).
+	queuedRuns, err := mgr.loadQueuedRuns()
+	if err != nil {
 		return fmt.Errorf("restore queued runs: %w", err)
 	}
+
+	// Recovery remains exclusive and completes before IPC is bound. It resumes
+	// parked gates, which register for slots ahead of the queued runs restored
+	// right after.
+	recoveredRuns := recoverOnStartup(d, p, mgr, layout)
+	mgr.restoreQueuedRuns(queuedRuns)
 	mgr.StartLimitWatcher()
 
 	srv := ipc.NewServer()

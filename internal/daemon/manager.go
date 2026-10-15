@@ -423,43 +423,54 @@ func (m *RunManager) annotateQueue(info *ipc.RunInfo) *ipc.RunInfo {
 	return info
 }
 
-// recoverQueuedRuns reloads the durable queue after a restart and drains it.
-// Queued runs stay queued across a restart: nothing about them was running.
+// loadQueuedRuns reads and validates the durable queue after a restart. It is
+// read-only and all-or-nothing: either every queued row is returned in start
+// order, or an error is, with no side effect on the database or the manager.
 //
-// It is all or nothing and its error is fatal to daemon startup. A queued row
-// that is not in the ownership table can be neither started nor aborted (abort
-// and supersede consult the table first), and nothing would ever retry it, so
-// a daemon that served requests after a failed restoration would strand
-// durable rows. Failing startup lets the supervisor retry once the database
-// answers.
-func (m *RunManager) recoverQueuedRuns() error {
+// Daemon startup runs it BEFORE any recovery work and fails on its error. A
+// queued row that never reaches the ownership table can be neither started nor
+// aborted (abort and supersede consult the table first), so serving without it
+// would strand durable rows; and failing only after parked gates were resumed
+// would cancel them and persist the shutdown as their terminal failure. Failing
+// first leaves every gate parked and recoverable on the next start.
+func (m *RunManager) loadQueuedRuns() ([]*db.Run, error) {
 	ids, err := m.db.QueuedRunIDs()
 	if err != nil {
-		return fmt.Errorf("list queued runs: %w", err)
+		return nil, fmt.Errorf("list queued runs: %w", err)
 	}
-	if len(ids) == 0 {
-		return nil
-	}
-	restored := make([]*db.Run, 0, len(ids))
+	runs := make([]*db.Run, 0, len(ids))
 	for _, id := range ids {
 		run, err := m.db.GetRun(id)
 		if err != nil {
-			return fmt.Errorf("read queued run %s: %w", id, err)
+			return nil, fmt.Errorf("read queued run %s: %w", id, err)
 		}
 		if run == nil {
-			return fmt.Errorf("queued run %s disappeared", id)
+			return nil, fmt.Errorf("queued run %s disappeared", id)
 		}
-		restored = append(restored, run)
+		runs = append(runs, run)
 	}
+	return runs, nil
+}
+
+// restoreQueuedRuns registers loaded queued rows in the ownership table and the
+// scheduler and drains the queue. Queued runs were never executing, so they
+// stay queued across a restart. It runs after recovered gates are resumed, so
+// those gates are already waiting for (or holding) slots and keep priority over
+// the restored new runs.
+func (m *RunManager) restoreQueuedRuns(runs []*db.Run) {
+	if len(runs) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(runs))
 	m.mu.Lock()
-	for _, run := range restored {
+	for _, run := range runs {
 		m.runs[run.ID] = &managedRun{run: run, state: ownershipQueued}
+		ids = append(ids, run.ID)
 	}
 	m.mu.Unlock()
 	slog.Info("restored queued runs", "count", len(ids))
 	m.sched.restoreQueue(ids)
 	m.sched.dispatch()
-	return nil
 }
 
 // cancelManagedRun is the single cancellation path for abort and supersede. It

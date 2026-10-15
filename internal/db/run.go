@@ -1386,9 +1386,22 @@ func (d *DB) SetRunCIRerunState(id, state string) error {
 // start needs that the row does not already hold. It applies only to a run that
 // has not started, so a racing status change is never overwritten.
 func (d *DB) MarkRunQueued(id, spec string) (int64, error) {
-	ts := time.Now().UnixNano()
-	result, err := d.sql.Exec(`UPDATE runs SET status = ?, queued_at = ?, queue_spec = ?, updated_at = ? WHERE id = ? AND status = ?`,
-		types.RunQueued, ts, spec, now(), id, types.RunPending)
+	clock := d.queueClock
+	if clock == nil {
+		clock = func() int64 { return time.Now().UnixNano() }
+	}
+	// queued_at orders the FIFO drain after a restart, so it must follow
+	// admission order whatever the wall clock does (a step backwards would
+	// otherwise reorder the queue). The stamp is therefore at least one past
+	// the highest stamp already stored. Callers serialize admission, so the
+	// highest stored stamp is always the previous admission's.
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("mark run queued: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE runs SET status = ?, queued_at = MAX(?, COALESCE((SELECT MAX(queued_at) FROM runs WHERE queued_at IS NOT NULL), 0) + 1), queue_spec = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		types.RunQueued, clock(), spec, now(), id, types.RunPending)
 	if err != nil {
 		return 0, fmt.Errorf("mark run queued: %w", err)
 	}
@@ -1396,6 +1409,13 @@ func (d *DB) MarkRunQueued(id, spec string) (int64, error) {
 		return 0, fmt.Errorf("mark run queued: %w", err)
 	} else if n != 1 {
 		return 0, fmt.Errorf("mark run queued: run %s is not pending", id)
+	}
+	var ts int64
+	if err := tx.QueryRow(`SELECT queued_at FROM runs WHERE id = ?`, id).Scan(&ts); err != nil {
+		return 0, fmt.Errorf("mark run queued: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("mark run queued: %w", err)
 	}
 	return ts, nil
 }

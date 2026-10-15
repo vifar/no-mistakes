@@ -827,20 +827,23 @@ func queuedRowThenBreakListing(t *testing.T, f *faultFixture) string {
 	return run.ID
 }
 
-// A failure to restore the durable queue is reported, restores nothing
-// partially, and never leaves a queued row half-owned.
-func TestRecoverQueuedRunsReportsListingFailure(t *testing.T) {
+// A failure to read the durable queue is reported before anything is
+// registered or changed.
+func TestLoadQueuedRunsReportsListingFailure(t *testing.T) {
 	f := newFaultFixture(t, "1")
-	queuedRowThenBreakListing(t, f)
-	err := f.mgr.recoverQueuedRuns()
+	id := queuedRowThenBreakListing(t, f)
+	runs, err := f.mgr.loadQueuedRuns()
 	if err == nil || !strings.Contains(err.Error(), "list queued runs") {
-		t.Fatalf("recoverQueuedRuns error = %v, want a clear listing failure", err)
+		t.Fatalf("loadQueuedRuns = %v, %v; want a clear listing failure", runs, err)
 	}
 	f.mgr.mu.Lock()
 	owned := len(f.mgr.runs)
 	f.mgr.mu.Unlock()
 	if owned != 0 || f.mgr.sched.stats().Queued != 0 {
-		t.Fatalf("a failed restoration left %d runs owned and %d queued", owned, f.mgr.sched.stats().Queued)
+		t.Fatalf("a failed load left %d runs owned and %d queued", owned, f.mgr.sched.stats().Queued)
+	}
+	if got := f.status(id); got != types.RunQueued {
+		t.Fatalf("a failed load changed the queued row to %s", got)
 	}
 }
 
@@ -905,4 +908,61 @@ func TestAdmissionKeepsEarlierFullCapLaunchAheadOfLaterLaunch(t *testing.T) {
 	f.step.release(earlier)
 	f.waitStarted(later)
 	f.step.release(later)
+}
+
+// Queue validation happens before recovery has any side effect, so when it
+// fails the parked gates are neither resumed nor cancelled by the failure: they
+// stay parked and recoverable, and the next start resumes them.
+func TestFailedQueueRestoreLeavesParkedGatesRecoverable(t *testing.T) {
+	f := newFaultFixture(t, "2")
+	plans := seedRecoveredQueueGates(f)
+	queuedID := queuedRowThenBreakListing(t, f)
+	f.mgr.Shutdown()
+
+	err := RunWithOptions(f.p, f.d, func() []pipeline.Step { return []pipeline.Step{&mockApprovalStep{name: types.StepReview}} })
+	if err == nil || !strings.Contains(err.Error(), "restore queued runs") {
+		t.Fatalf("RunWithOptions error = %v, want the queue restoration failure", err)
+	}
+	for _, plan := range plans {
+		run, err := f.d.GetRun(plan.run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.Status != types.RunRunning || run.AwaitingAgentSince == nil || run.Error != nil {
+			t.Fatalf("parked gate %s after the failed start = status %s awaiting %v error %v; want it untouched", run.ID, run.Status, run.AwaitingAgentSince, run.Error)
+		}
+	}
+
+	// The database recovers: restore the column the fault dropped.
+	raw, err := sql.Open("sqlite", f.p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`ALTER TABLE runs ADD COLUMN queued_at INTEGER`); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+
+	runTestDaemon(t, f.p, f.d, func() []pipeline.Step { return []pipeline.Step{&mockApprovalStep{name: types.StepReview}} }, 30*time.Second)
+	client, err := ipc.Dial(f.p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	for _, plan := range plans {
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			err := client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: plan.run.ID, Step: types.StepReview, Action: types.ActionApprove}, nil)
+			if err == nil {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("recovered gate %s never accepted a response on the next start: %v", plan.run.ID, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	if got := f.status(queuedID); got != types.RunQueued && got != types.RunPending && got != types.RunRunning {
+		t.Fatalf("queued row after the successful start = %s, want it still owned", got)
+	}
 }

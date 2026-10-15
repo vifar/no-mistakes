@@ -2,6 +2,7 @@ package db
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -166,5 +167,39 @@ func TestTerminateActiveRunNeverOverwritesATerminalRun(t *testing.T) {
 		if got.Status != status || got.Error != nil {
 			t.Fatalf("%s run became %s / %v", status, got.Status, got.Error)
 		}
+	}
+}
+
+// The stored queue order follows admission order even when the clock steps
+// backwards between admissions, so a restart restores it unchanged.
+func TestQueuedAtIsMonotonicWhateverTheClockDoes(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	times := []int64{5_000, 1_000, 1_000, 9_000_000, 2}
+	d.queueClock = func() int64 {
+		ts := times[0]
+		times = times[1:]
+		return ts
+	}
+	var want []string
+	var last int64
+	for i := range []int{0, 1, 2, 3, 4} {
+		run, _ := d.InsertRun(repo.ID, "b"+string(rune('a'+i)), "head", "base")
+		ts, err := d.MarkRunQueued(run.ID, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ts <= last {
+			t.Fatalf("admission %d stamped %d after %d: queued_at went backwards", i, ts, last)
+		}
+		last = ts
+		want = append(want, run.ID)
+	}
+	got, err := d.QueuedRunIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("restored queue order = %v, want admission order %v", got, want)
 	}
 }
