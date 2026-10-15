@@ -484,20 +484,42 @@ func assembleDraftPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, test
 	}), section)
 }
 
-// fenceClosedWithin builds a body for budget and guarantees it ends outside a
-// fenced block before the Issues section is appended after it. The truncators
-// already close a fence they cut, so this is a backstop: if a builder still
-// returns an open fence, it is rebuilt with room for the closing line.
+// maxFenceRebuilds bounds the rebuilds fenceClosedWithin makes while chasing
+// the closing line of whichever fence a tighter budget exposes.
+const maxFenceRebuilds = 4
+
+// fenceClosedWithin builds a body for budget and returns it ending outside any
+// fenced block, so the Issues section appended after it is live Markdown. The
+// truncators already close a fence they cut, so this is a backstop for a
+// builder that still returns an open fence.
+//
+// A rebuild under a tighter budget can take a different assembly path (a
+// stricter limit drops Testing, say) and expose a different unmatched fence,
+// with a longer delimiter. So the needed closer is recomputed from every
+// rebuilt body, not carried over from the first, and the loop continues until
+// the body closed by its own current fence fits budget. If it does not settle
+// within maxFenceRebuilds, the last body is returned closed but over budget:
+// the caller's budget validation then rejects it with a clear error instead of
+// publishing an open fence or an oversized body.
 func fenceClosedWithin(budget int, units func(string) int, build func(budget int) string) string {
-	body := build(budget)
-	closer := mdfence.Scan(body).Closer()
-	if closer == "" {
-		return body
+	reserve := 0
+	var closed string
+	for attempt := 0; attempt < maxFenceRebuilds; attempt++ {
+		body := build(budget - reserve)
+		if mdfence.Scan(body).Closer() == "" {
+			return body
+		}
+		closed = mdfence.Close(body)
+		overshoot := units(closed) - budget
+		if overshoot <= 0 {
+			return closed
+		}
+		reserve += overshoot
+		if budget-reserve <= 0 {
+			break
+		}
 	}
-	if tighter := budget - units("\n"+closer); tighter > 0 {
-		body = build(tighter)
-	}
-	return body
+	return closed
 }
 
 const (
@@ -510,27 +532,33 @@ const (
 // rejected, so an operator can see why a reference went missing. The excerpt
 // goes through the PR-content redaction first (home paths) and is capped to the
 // head, a window around the Issues section, and the tail of the body, with the
-// total length. It also reports whether the body ended inside an open fence and
-// whether the Issues section started inside one, the two ways a requested
-// reference ends up in code.
+// total length. For a provider that ignores references inside code it also
+// reports whether the body ended inside an open fence and whether the Issues
+// section started inside one, the two ways a requested reference ends up in
+// code; a raw-text provider is told fences do not matter.
 func logClosingRejection(sctx *pipeline.StepContext, body, missing string) {
 	if sctx == nil || sctx.Log == nil {
 		return
 	}
 	body = mdfence.NormalizeLineEndings(body)
-	endOpen := mdfence.Scan(body).Open()
 	anchor := strings.LastIndex(body, "\n"+issuesSectionHeading)
-	issuesOpen := false
-	if anchor >= 0 {
-		issuesOpen = mdfence.Scan(body[:anchor]).Open()
+	var fenceState string
+	if closingGrammarFor(resolvedProviderForBody(sctx)).codeAware {
+		issuesOpen := false
+		if anchor >= 0 {
+			issuesOpen = mdfence.Scan(body[:anchor]).Open()
+		}
+		fenceState = fmt.Sprintf("ended inside an open fence: %t; Issues section started inside an open fence: %t (this provider ignores references inside fences)", mdfence.Scan(body).Open(), issuesOpen)
+	} else {
+		fenceState = "this provider applies its closing pattern to the raw text, so fences do not matter; the reference was not found in the body"
 	}
 	sanitized := redactPRContent(prContent{Body: body}).Body
 	if anchor >= 0 {
 		// Redaction can shorten the body; keep the anchor on the same line.
 		anchor = strings.LastIndex(sanitized, "\n"+issuesSectionHeading)
 	}
-	sctx.Log(fmt.Sprintf("closing-reference guard rejected the PR body: missing %q; body is %d bytes; ended inside an open fence: %t; Issues section started inside an open fence: %t (references inside fences are ignored)\n%s\n",
-		missing, len(body), endOpen, issuesOpen, closingBodyExcerpt(sanitized, anchor)))
+	sctx.Log(fmt.Sprintf("closing-reference guard rejected the PR body: missing %q; body is %d bytes; %s\n%s\n",
+		missing, len(body), fenceState, closingBodyExcerpt(sanitized, anchor)))
 }
 
 // closingBodyExcerpt returns the head of body, a window around anchor (when

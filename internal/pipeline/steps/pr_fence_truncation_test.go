@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
 	"github.com/kunchenguid/no-mistakes/internal/mdfence"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -305,5 +307,89 @@ func TestVerifyClosingIssuesRejectionLogsSanitizedBody(t *testing.T) {
 	}
 	if len(entry) > closingLogHeadBytes+2*closingLogWindowBytes+closingLogTailBytes+1000 {
 		t.Fatalf("log excerpt is %d bytes, want it capped", len(entry))
+	}
+}
+
+// A tighter rebuild can expose a different unmatched fence with a longer
+// delimiter. The closer is recomputed from the rebuilt body, so the final body
+// still fits and its Closes line is live.
+func TestFenceClosedWithinRecomputesCloserForRebuiltBody(t *testing.T) {
+	t.Parallel()
+	const limit = 200
+	sctx := closingTestContext("39")
+	section := issuesSection(sctx, "")
+	var budgets []int
+	body := fenceClosedWithin(limit-len("\n\n"+section), func(s string) int { return len(s) }, func(budget int) string {
+		budgets = append(budgets, budget)
+		// The first assembly leaves a three-backtick fence open; under any
+		// tighter budget the builder falls back to a path that leaves a
+		// four-backtick fence open instead.
+		if len(budgets) == 1 {
+			return "```text\n" + strings.Repeat("x", budget-len("```text\n"))
+		}
+		return "````\n" + strings.Repeat("y", budget-len("````\n"))
+	})
+	if len(budgets) < 3 {
+		t.Fatalf("builder budgets = %v, want the closer recomputed after the first rebuild", budgets)
+	}
+	got := appendIssuesSection(body, section)
+	if len(got) > limit {
+		t.Fatalf("assembled body is %d bytes, want <= %d", len(got), limit)
+	}
+	if !strings.Contains(got, "\n````\n\n## Issues") {
+		t.Fatalf("want the four-backtick closer before Issues, got:\n%s", got)
+	}
+	if err := verifyClosingIssuesInBody(got, sctx); err != nil {
+		t.Fatalf("%v\n%s", err, got)
+	}
+}
+
+// A builder that cannot be made to fit still returns a closed body, which the
+// caller's budget check then rejects, rather than an open fence.
+func TestFenceClosedWithinNeverReturnsOpenFence(t *testing.T) {
+	t.Parallel()
+	got := fenceClosedWithin(50, func(s string) int { return len(s) }, func(budget int) string {
+		return "```text\n" + strings.Repeat("x", 80)
+	})
+	if mdfence.Scan(got).Open() {
+		t.Fatalf("returned an open fence:\n%s", got)
+	}
+}
+
+func TestRejectionLogExplanationFollowsProviderGrammar(t *testing.T) {
+	t.Parallel()
+	body := "## Testing\n\n```text\noutput\n\n## Issues\n\nCloses #40"
+	for _, tc := range []struct {
+		name     string
+		provider scm.Provider
+		want     []string
+		unwanted []string
+	}{
+		{"github", scm.ProviderGitHub,
+			[]string{"ended inside an open fence: true", "this provider ignores references inside fences"},
+			[]string{"fences do not matter"}},
+		{"gitlab", scm.ProviderGitLab,
+			[]string{"raw text, so fences do not matter", "was not found in the body"},
+			[]string{"ended inside an open fence", "ignores references inside fences"}},
+	} {
+		var logged string
+		sctx := closingTestContext("39")
+		sctx.Repo = &db.Repo{UpstreamURL: "https://example.test/group/project"}
+		sctx.Run = &db.Run{ID: "run-1"}
+		sctx.ForgeContext = &forgecontext.Context{Provider: tc.provider}
+		sctx.Log = func(s string) { logged = s }
+		if err := verifyClosingIssuesInBody(body, sctx); err == nil {
+			t.Fatalf("%s: expected rejection", tc.name)
+		}
+		for _, w := range tc.want {
+			if !strings.Contains(logged, w) {
+				t.Errorf("%s: log missing %q:\n%s", tc.name, w, logged)
+			}
+		}
+		for _, w := range tc.unwanted {
+			if strings.Contains(logged, w) {
+				t.Errorf("%s: log must not contain %q:\n%s", tc.name, w, logged)
+			}
+		}
 	}
 }
