@@ -51,6 +51,7 @@ func (e *Executor) acquireSlot(ctx context.Context) error {
 // run is waiting for a run slot. It carries everything dispatch needs, so a
 // daemon that stops during the wait can re-apply the response after a restart.
 type pendingGateResponse struct {
+	ParkedMS         *int64               `json:"parked_ms,omitempty"`
 	Kind             string               `json:"kind,omitempty"`
 	Action           types.ApprovalAction `json:"action,omitempty"`
 	FindingIDs       []string             `json:"finding_ids,omitempty"`
@@ -61,31 +62,34 @@ type pendingGateResponse struct {
 	AcceptedGaps     *db.AcceptedGaps     `json:"accepted_gaps,omitempty"`
 }
 
-func encodePendingResponse(r approvalResponse) (string, error) {
-	raw, err := json.Marshal(pendingGateResponse{
-		Action:           r.action,
-		FindingIDs:       r.findingIDs,
-		IgnoreFindingIDs: r.ignoreFindingIDs,
-		Instructions:     r.instructions,
-		AddedFindings:    r.addedFindings,
-		ApprovalReason:   r.approvalReason,
-		AcceptedGaps:     r.acceptedGaps,
-	})
+func encodePendingResponse(r *approvalResponse, parkedMS int64) (string, error) {
+	p := pendingGateResponse{Kind: "reconcile", ParkedMS: &parkedMS}
+	if r != nil {
+		p.Kind = ""
+		p.Action = r.action
+		p.FindingIDs = r.findingIDs
+		p.IgnoreFindingIDs = r.ignoreFindingIDs
+		p.Instructions = r.instructions
+		p.AddedFindings = r.addedFindings
+		p.ApprovalReason = r.approvalReason
+		p.AcceptedGaps = r.acceptedGaps
+	}
+	raw, err := json.Marshal(p)
 	return string(raw), err
 }
 
-func decodePendingResponse(raw string) (*approvalResponse, error) {
+func decodePendingResponse(raw string) (*approvalResponse, *int64, error) {
 	var p pendingGateResponse
 	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		return nil, fmt.Errorf("decode recorded gate response: %w", err)
+		return nil, nil, fmt.Errorf("decode recorded gate response: %w", err)
 	}
 	if p.Kind == "reconcile" {
-		return nil, nil
+		return nil, p.ParkedMS, nil
 	}
 	switch p.Action {
 	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAnswer:
 	default:
-		return nil, fmt.Errorf("recorded gate response has unusable action %q", p.Action)
+		return nil, nil, fmt.Errorf("recorded gate response has unusable action %q", p.Action)
 	}
 	return &approvalResponse{
 		action:           p.Action,
@@ -95,7 +99,7 @@ func decodePendingResponse(raw string) (*approvalResponse, error) {
 		addedFindings:    p.AddedFindings,
 		approvalReason:   p.ApprovalReason,
 		acceptedGaps:     p.AcceptedGaps,
-	}, nil
+	}, p.ParkedMS, nil
 }
 
 // answeredActivity is what status surfaces show for a gate whose response is
@@ -140,12 +144,9 @@ func (e *Executor) acceptApprovalGate(resp *approvalResponse) error {
 			return fmt.Errorf("resume answered gate: %w", err)
 		}
 	} else {
-		raw := `{"kind":"reconcile"}`
-		if resp != nil {
-			raw, err = encodePendingResponse(*resp)
-			if err != nil {
-				return fmt.Errorf("record gate response: %w", err)
-			}
+		raw, err := encodePendingResponse(resp, parkedMS)
+		if err != nil {
+			return fmt.Errorf("record gate response: %w", err)
 		}
 		if err := e.db.SetStepPendingResponse(row.ID, raw, answeredActivity); err != nil {
 			return err
@@ -157,10 +158,20 @@ func (e *Executor) acceptApprovalGate(resp *approvalResponse) error {
 	return nil
 }
 
+func (e *Executor) gateParkedMS(parkStart time.Time) int64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.slotWaitStep != "" {
+		return e.answeredParkedMS
+	}
+	return time.Since(parkStart).Milliseconds()
+}
+
 // endGateWait closes the parked-time accounting after a gate wait returns. A
 // response waiting for a slot keeps the gate parked, and its accounting, until
 // dispatch begins (acquireAnsweredGateSlot).
 func (e *Executor) endGateWait(runID string, parkStart time.Time, waitErr error) {
+	parkedMS := e.gateParkedMS(parkStart)
 	e.mu.Lock()
 	waiting := e.slotWaitStep != ""
 	if waitErr != nil {
@@ -170,7 +181,7 @@ func (e *Executor) endGateWait(runID string, parkStart time.Time, waitErr error)
 	if waitErr == nil && waiting {
 		return
 	}
-	if dbErr := e.db.CompleteRunAwaitingAgent(runID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+	if dbErr := e.db.CompleteRunAwaitingAgent(runID, parkedMS); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "run", runID, "error", dbErr)
 	}
 }

@@ -733,14 +733,19 @@ func (e *Executor) RegisterRecoveredGate(run *db.Run) error {
 		// The operator already answered this gate; only the slot wait was
 		// interrupted. Recover it as an answered gate: no new response is
 		// accepted, and the recorded one is re-applied once a slot is granted.
-		recorded, err := decodePendingResponse(*gate.stepResult.PendingResponse)
+		recorded, parkedMS, err := decodePendingResponse(*gate.stepResult.PendingResponse)
 		if err != nil {
 			return err
 		}
 		e.recoveredResponse = recorded
 		e.slotWaitStep = gate.step.Name()
 		e.waitingSince = time.Unix(*run.AwaitingAgentSince, 0)
-		e.answeredParkedMS = time.Since(e.waitingSince).Milliseconds()
+		e.answeredParkedMS = 0
+		if parkedMS != nil {
+			e.answeredParkedMS = max(0, *parkedMS)
+		} else if gate.stepResult.LastActivityAt != nil {
+			e.answeredParkedMS = max(0, (*gate.stepResult.LastActivityAt-*run.AwaitingAgentSince)*1000)
+		}
 		return nil
 	}
 	e.waiting = true
@@ -783,7 +788,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		}
 		e.clearApprovalGate()
 		if run.AwaitingAgentSince != nil {
-			if err := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(time.Unix(*run.AwaitingAgentSince, 0)).Milliseconds()); err != nil {
+			if err := e.db.CompleteRunAwaitingAgent(run.ID, e.gateParkedMS(parkStart)); err != nil {
 				slog.Warn("failed to complete cancelled recovery awaiting-agent state", "run", run.ID, "error", err)
 			}
 		}
@@ -805,7 +810,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, err, ctx)
 	}
 	if restartIndex >= 0 {
-		if err := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); err != nil {
+		if err := e.db.CompleteRunAwaitingAgent(run.ID, e.gateParkedMS(parkStart)); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("record recovered parked duration: %w", err), ctx)
 		}
 		e.clearApprovalGate()
@@ -888,6 +893,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if gate.stepResult.PendingResponse != nil && e.recoveredResponse == nil {
 		_, resolved, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, true, true)
 		if err != nil {
+			e.endGateWait(run.ID, parkStart, err)
 			return e.failRun(run, repo, err, ctx)
 		}
 		if err := e.acquireAnsweredGateSlot(ctx, run.ID, gate.stepResult.ID); err != nil {

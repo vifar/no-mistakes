@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -793,8 +795,14 @@ func TestExecutorReconciliationWaitsDurablyForCapacity(t *testing.T) {
 				t.Fatal("accepted reconciliation did not wait for capacity")
 			}
 			rows, err := database.GetStepsByRun(run.ID)
-			if err != nil || len(rows) != 1 || !rows[0].AnsweredWaitingForSlot() || rows[0].PendingResponse == nil || *rows[0].PendingResponse != `{"kind":"reconcile"}` {
+			if err != nil || len(rows) != 1 || !rows[0].AnsweredWaitingForSlot() || rows[0].PendingResponse == nil {
 				t.Fatalf("reconciliation must remain durably marked before dispatch: %+v, %v", rows, err)
+			}
+			var pending struct {
+				Kind string `json:"kind"`
+			}
+			if err := json.Unmarshal([]byte(*rows[0].PendingResponse), &pending); err != nil || pending.Kind != "reconcile" {
+				t.Fatalf("pending reconciliation = %+v, %v", pending, err)
 			}
 			if status != "" && step.calls.Load() != 0 {
 				t.Fatal("recovered reconciliation ran before admission")
@@ -822,5 +830,81 @@ func TestExecutorReconciliationWaitsDurablyForCapacity(t *testing.T) {
 				t.Fatalf("pending reconciliation survived dispatch: %+v, %v", rows, err)
 			}
 		})
+	}
+}
+
+func TestRecoveredGateKeepsAcceptanceParkedDuration(t *testing.T) {
+	for _, reconcile := range []bool{false, true} {
+		for _, cancelled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("reconcile=%t/cancelled=%t", reconcile, cancelled), func(t *testing.T) {
+				database, p, run, repo := setupTest(t)
+				workDir := completionFixture(t, database, run)
+				if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+					t.Fatal(err)
+				}
+				row, err := database.InsertStepResult(run.ID, types.StepCI)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.StartStep(row.ID); err != nil {
+					t.Fatal(err)
+				}
+				findings := `{"findings":[],"summary":"closed PR"}`
+				if _, err := database.InsertStepRound(row.ID, 1, "initial", &findings, nil, 1); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.ParkStepForApproval(run.ID, row.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+					t.Fatal(err)
+				}
+				step := &reconcilingApprovalStep{name: types.StepCI}
+				step.resolved.Store(true)
+				original := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+				original.SetRunSlot(&recordingSlot{})
+				original.waitingStep = types.StepCI
+				original.waitingStepResultID = row.ID
+				original.waitingSince = time.Now().Add(-10 * time.Second)
+				var response *approvalResponse
+				if !reconcile {
+					response = &approvalResponse{action: types.ActionApprove}
+				}
+				original.mu.Lock()
+				err = original.acceptApprovalGate(response)
+				original.mu.Unlock()
+				if err != nil {
+					t.Fatal(err)
+				}
+				persisted, err := database.GetStepResult(row.ID)
+				if err != nil || persisted.PendingResponse == nil {
+					t.Fatalf("pending acceptance: %+v, %v", persisted, err)
+				}
+				var pending struct {
+					ParkedMS int64 `json:"parked_ms"`
+				}
+				if err := json.Unmarshal([]byte(*persisted.PendingResponse), &pending); err != nil || pending.ParkedMS < 10000 || pending.ParkedMS >= 11000 {
+					t.Fatalf("ten-second acceptance duration = %+v, %v", pending, err)
+				}
+				run, err = database.GetRun(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				parkedAt := time.Now().Add(-120 * time.Second).Unix()
+				run.AwaitingAgentSince = &parkedAt
+				recovered := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+				recovered.SetRunSlot(&recordingSlot{})
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				if cancelled {
+					cancel()
+				}
+				err = recovered.Resume(ctx, run, repo, workDir)
+				if (err != nil) != cancelled {
+					t.Fatalf("Resume error = %v, cancelled = %t", err, cancelled)
+				}
+				current, err := database.GetRun(run.ID)
+				if err != nil || current.ParkedMS != pending.ParkedMS || current.AwaitingAgentSince != nil {
+					t.Fatalf("recovered accounting = %+v, %v; want frozen %dms", current, err, pending.ParkedMS)
+				}
+			})
+		}
 	}
 }
