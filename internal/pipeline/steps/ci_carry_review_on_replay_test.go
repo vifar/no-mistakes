@@ -362,10 +362,10 @@ func TestCIStep_CarryReviewOnReplay_NeverResurrectsARevokedApproval(t *testing.T
 	}
 }
 
-// End to end through the CI monitor: a green PR GitHub reports BEHIND takes
-// the rebase repair, and with the flag on a clean replay restarts at Test with
-// the approval on the rebased head instead of restarting at Review.
-func TestCIStep_CarryReviewOnReplay_BehindPRRestartsAtTest(t *testing.T) {
+// End to end through the CI monitor: a green PR GitHub reports BEHIND and
+// takes the rebase repair. A pinned PR comparison is a custody boundary, so
+// even with carry enabled the changed comparison restarts at Review.
+func TestCIStep_CarryReviewOnReplay_BehindPRRestartsAtReview(t *testing.T) {
 	t.Parallel()
 	var prompts []string
 	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -374,11 +374,13 @@ func TestCIStep_CarryReviewOnReplay_BehindPRRestartsAtTest(t *testing.T) {
 		gitCmd(t, opts.CWD, "rebase", "origin/main")
 		return &agent.Result{}, nil
 	}}
-	sctx, logs := behindBaseContext(t, ag, "MERGEABLE BEHIND")
+	sctx, logs, upstream := behindBaseContext(t, ag, "MERGEABLE BEHIND")
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx.PRTarget = &pipeline.PRTargetSelection{PRURL: prURL, SourceRepo: "test/repo", SourceBranch: "feature", ForgeHeadSHA: sctx.Run.HeadSHA, TargetBranch: "main"}
 	sctx.Config.CI.CarryReviewOnReplay = true
 	originalHead := sctx.Run.HeadSHA
 	other := t.TempDir()
-	gitCmd(t, other, "clone", "-b", "main", sctx.Repo.UpstreamURL, ".")
+	gitCmd(t, other, "clone", "-b", "main", upstream, ".")
 	gitCmd(t, other, "config", "user.name", "test")
 	gitCmd(t, other, "config", "user.email", "test@test.com")
 	writeFile(t, other, "base-advance.txt", "x")
@@ -408,8 +410,8 @@ func TestCIStep_CarryReviewOnReplay_BehindPRRestartsAtTest(t *testing.T) {
 	if len(prompts) != 1 {
 		t.Fatalf("rebase repair ran %d times, want once; logs: %v", len(prompts), *logs)
 	}
-	if outcome == nil || outcome.RestartFrom != types.StepTest {
-		t.Fatalf("outcome = %+v, want a restart from Test; logs: %v", outcome, *logs)
+	if outcome == nil || outcome.RestartFrom != types.StepReview {
+		t.Fatalf("outcome = %+v, want a restart from Review; logs: %v", outcome, *logs)
 	}
 	newHead := gitCmd(t, sctx.WorkDir, "rev-parse", "HEAD")
 	if newHead == originalHead || sctx.Run.HeadSHA != newHead {
@@ -419,8 +421,8 @@ func TestCIStep_CarryReviewOnReplay_BehindPRRestartsAtTest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != newHead {
-		t.Fatalf("review approval = %v, want it carried to %s", run.ReviewApprovedHeadSHA, newHead)
+	if run.ReviewApprovedHeadSHA != nil && *run.ReviewApprovedHeadSHA == newHead {
+		t.Fatalf("review approval was carried across the pinned PR comparison to %s", newHead)
 	}
 	if remote := gitCmd(t, sctx.WorkDir, "ls-remote", "origin", "refs/heads/feature"); !strings.HasPrefix(remote, originalHead) {
 		t.Fatalf("rebased head was pushed before Test ran; remote = %q", remote)

@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -18,7 +19,7 @@ const behindBaseGreenChecks = `[{"name":"build","state":"SUCCESS","bucket":"pass
 
 // behindBaseContext is a GitHub PR with green checks whose mergeability is
 // the given `<mergeable> <mergeStateStatus>` answer, with ci.rebase_behind on.
-func behindBaseContext(t *testing.T, ag *mockAgent, mergeable string) (*pipeline.StepContext, *[]string) {
+func behindBaseContext(t *testing.T, ag *mockAgent, mergeable string) (*pipeline.StepContext, *[]string, string) {
 	t.Helper()
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -36,6 +37,9 @@ func behindBaseContext(t *testing.T, ag *mockAgent, mergeable string) (*pipeline
 	gitCmd(t, dir, "commit", "-m", "initial")
 	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	prRepoURL := "https://github.com/test/repo"
+	gitCmd(t, dir, "config", "url."+upstream+".insteadOf", prRepoURL)
+	gitCmd(t, dir, "remote", "set-url", "origin", prRepoURL)
 	gitCmd(t, dir, "push", "origin", "main")
 	gitCmd(t, dir, "checkout", "-b", "feature")
 	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature"), 0o644); err != nil {
@@ -51,14 +55,15 @@ func behindBaseContext(t *testing.T, ag *mockAgent, mergeable string) (*pipeline
 	recordReviewApproval(t, sctx, headSHA)
 	sctx.Env = fakeCIGHMergeable(t, "OPEN", behindBaseGreenChecks, mergeable)
 	sctx.Run.PRURL = &prURL
-	sctx.Repo.UpstreamURL = upstream
+	sctx.Repo.UpstreamURL = prRepoURL
 	sctx.Run.Branch = "refs/heads/feature"
+	stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
 	sctx.Config.CITimeout = 30 * time.Second
 	sctx.Config.AutoFix = config.AutoFix{CI: 3}
 	sctx.Config.CI.RebaseBehind = true
 	logs := &[]string{}
 	sctx.Log = func(s string) { *logs = append(*logs, s) }
-	return sctx, logs
+	return sctx, logs, upstream
 }
 
 func countLogs(logs []string, line string) int {
@@ -84,11 +89,11 @@ func TestCIStep_GreenBehindPRTakesTheRebaseRepairOnceAfterTheBaseSettles(t *test
 		gitCmd(t, opts.CWD, "rebase", "origin/main")
 		return &agent.Result{}, nil
 	}}
-	sctx, logs := behindBaseContext(t, ag, "MERGEABLE BEHIND")
+	sctx, logs, upstream := behindBaseContext(t, ag, "MERGEABLE BEHIND")
 	originalHead := sctx.Run.HeadSHA
 	// The real upstream base advances after the push, which is what makes the PR BEHIND.
 	other := t.TempDir()
-	gitCmd(t, other, "clone", "-b", "main", sctx.Repo.UpstreamURL, ".")
+	gitCmd(t, other, "clone", "-b", "main", upstream, ".")
 	gitCmd(t, other, "config", "user.name", "test")
 	gitCmd(t, other, "config", "user.email", "test@test.com")
 	if err := os.WriteFile(filepath.Join(other, "base-advance.txt"), []byte("x"), 0o644); err != nil {
@@ -162,7 +167,7 @@ func TestCIStep_GreenBehindPRTakesTheRebaseRepairOnceAfterTheBaseSettles(t *test
 // one auto-fix finding the executor routes into the rebase repair.
 func TestCIStep_GreenBehindPRObservationIsOneBehindBaseFinding(t *testing.T) {
 	t.Parallel()
-	sctx, logs := behindBaseContext(t, &mockAgent{name: "test"}, "MERGEABLE BEHIND")
+	sctx, logs, _ := behindBaseContext(t, &mockAgent{name: "test"}, "MERGEABLE BEHIND")
 	polls := 0
 	step := &CIStep{
 		baseBranchTip: func(context.Context) (string, bool) { return "base-tip-1", true },
@@ -199,7 +204,7 @@ func TestCIStep_GreenBehindPROnAMovingBaseIsNotRebased(t *testing.T) {
 		t.Error("agent ran while the base kept moving")
 		return &agent.Result{}, nil
 	}}
-	sctx, logs := behindBaseContext(t, ag, "MERGEABLE BEHIND")
+	sctx, logs, _ := behindBaseContext(t, ag, "MERGEABLE BEHIND")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sctx.Ctx = ctx
@@ -236,7 +241,7 @@ func TestCIStep_GreenPRThatIsNotBehindIsNeverRebased(t *testing.T) {
 				t.Error("agent ran for a PR that is not BEHIND")
 				return &agent.Result{}, nil
 			}}
-			sctx, logs := behindBaseContext(t, ag, mergeable)
+			sctx, logs, _ := behindBaseContext(t, ag, mergeable)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			sctx.Ctx = ctx
@@ -268,7 +273,7 @@ func TestCIStep_GreenBehindPRReportsChecksPassedWhenRebaseBehindIsOff(t *testing
 		t.Error("agent ran for a BEHIND PR with ci.rebase_behind off")
 		return &agent.Result{}, nil
 	}}
-	sctx, logs := behindBaseContext(t, ag, "MERGEABLE BEHIND")
+	sctx, logs, _ := behindBaseContext(t, ag, "MERGEABLE BEHIND")
 	sctx.Config.CI.RebaseBehind = false // the default when unset
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
