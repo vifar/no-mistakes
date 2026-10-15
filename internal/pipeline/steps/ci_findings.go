@@ -335,22 +335,6 @@ func reviewBotCommentsAlways(sctx *pipeline.StepContext) bool {
 	return sctx.Config != nil && sctx.Config.CI.ReviewBotComments == config.CIReviewBotCommentsAlways
 }
 
-// greenReviewBotChecks returns the registered review-bot checks that
-// completed without failing, plus a nameless entry for every registered bot
-// with no check on this head at all: a bot that has not registered its check
-// on a new head yet can still have unresolved comments from an earlier one. A
-// pending or cancelled bot check is excluded: its review may still be
-// posting, and reading comments before the check completes would race it.
-// Externally excluded checks still establish presence, so an excluded bot cannot
-// return through the absent-check fallback.
-// reviewBotPresenceMarkers returns the scope-excluded checks that keep a review
-// bot out of the absent-bot fallback: every external check, the configured
-// external bots that have not registered yet, and cancelled informational bot
-// checks. A cancelled bot check means the bot's review on this head never
-// completed, so its earlier comments are stale or partial and must not be read
-// as though the bot were absent. Informational bot checks that passed or
-// failed are left out so review_bot_comments: always still collects their
-// comments; pending ones are held by the settled-set rule instead.
 func reviewBotPresenceMarkers(scoped scm.ScopedChecks, externalBots []scm.Check) []scm.Check {
 	markers := make([]scm.Check, 0, len(scoped.External)+len(externalBots))
 	markers = append(markers, scoped.External...)
@@ -359,7 +343,7 @@ func reviewBotPresenceMarkers(scoped scm.ScopedChecks, externalBots []scm.Check)
 		if _, ok := scm.ReviewBotForCheck(check); !ok {
 			continue
 		}
-		if check.Bucket != scm.CheckBucketCancel {
+		if !check.Pending() {
 			continue
 		}
 		markers = append(markers, check)

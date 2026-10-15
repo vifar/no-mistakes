@@ -411,22 +411,65 @@ func TestCIScopePendingExternalBotCheckDoesNotBlockReadiness(t *testing.T) {
 	}
 }
 
-// A cancelled review-bot check outside the required scope is still the bot's
-// presence on this head. Under review_bot_comments: always it must not be read
-// as an absent bot, whose fallback would treat stale comments as a green review.
-func TestCIScopeCancelledInformationalBotIsNotTreatedAsAbsent(t *testing.T) {
+func TestCIScopeCancelledInformationalBotCommentsParkUnderAlways(t *testing.T) {
 	const checks = `[{"name":"build","state":"SUCCESS","bucket":"pass","app":"github-actions"},{"name":"Greptile Review","state":"CANCELLED","bucket":"cancel","app":"greptile-apps"}]`
 	env := append(fakeCIGH(t, "OPEN", checks), greenGreptileCommentJSON, `FAKE_CLI_PROTECTION_JSON={"contexts":["build"]}`, `FAKE_CLI_RULES_JSON=[]`)
 	sctx, ag, _, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsAlways, env)
 	step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error { return context.Canceled })
 	outcome, err := step.Execute(sctx)
-	if !errors.Is(err, context.Canceled) || outcome != nil || !*ready {
-		t.Fatalf("a cancelled informational bot was read as absent: %+v %v ready=%v", outcome, err, *ready)
+	if err != nil || outcome == nil || !outcome.NeedsApproval || outcome.AutoFixable || *ready {
+		t.Fatalf("cancelled informational bot comments must park: %+v %v ready=%v", outcome, err, *ready)
 	}
-	if reason, err := step.VerifyApprovalOverride(sctx); err != nil || reason != "" {
-		t.Fatalf("a cancelled informational bot blocked approval: %q %v", reason, err)
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil || len(findings.Items) != 1 || findings.Items[0].Category != types.FindingCategoryCIReviewBot || findings.Items[0].Action != types.ActionAskUser || findings.Items[0].File != "src/commands/api.test.ts" {
+		t.Fatalf("expected the unresolved bot comment: %+v %v", findings, err)
+	}
+	if reason, err := step.VerifyApprovalOverride(sctx); err != nil || !strings.Contains(reason, "need a decision") {
+		t.Fatalf("approval over cancelled bot comments must record an override: %q %v", reason, err)
 	}
 	if len(ag.calls) != 0 {
 		t.Fatal("repair dispatched")
+	}
+}
+
+func TestCIScopePendingInformationalBotDoesNotDelayBuildRepair(t *testing.T) {
+	const failedBuild = `{"name":"build","state":"FAILURE","bucket":"fail","app":"github-actions"}`
+	const passedBuild = `{"name":"build","state":"SUCCESS","bucket":"pass","app":"github-actions"}`
+	const pendingBot = `{"name":"Greptile Review","state":"PENDING","bucket":"pending","app":"greptile-apps"}`
+	const doneBot = `{"name":"Greptile Review","state":"SUCCESS","bucket":"pass","app":"greptile-apps"}`
+	sequence := []string{
+		"[" + failedBuild + "," + pendingBot + "]",
+		"[" + failedBuild + "," + pendingBot + "]",
+		"[" + failedBuild + "," + pendingBot + "]",
+		"[" + passedBuild + "," + pendingBot + "]",
+		"[" + passedBuild + "," + doneBot + "]",
+	}
+	env := append(fakeCIGHSequence(t, "OPEN", sequence), greenGreptileCommentJSON, `FAKE_CLI_PROTECTION_JSON={"contexts":["build"]}`, `FAKE_CLI_RULES_JSON=[]`)
+	sctx, ag, _, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsAlways, env)
+	polls := 0
+	step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error {
+		polls++
+		if polls > 1 || *ready {
+			t.Fatal("expected only the pending review to defer readiness after build repair")
+		}
+		return nil
+	})
+	outcome, err := step.Execute(sctx)
+	if err != nil || outcome == nil || !outcome.AutoFixable || polls != 0 {
+		t.Fatalf("build failure must immediately reach repair: %+v %v polls=%d", outcome, err, polls)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil || len(findings.Items) != 1 || findings.Items[0].Category != types.FindingCategoryCICheck || findings.Items[0].Check != "build" || findings.Items[0].Action != types.ActionAutoFix {
+		t.Fatalf("pending bot must not emit older comments beside build: %+v %v", findings, err)
+	}
+	sctx.Fixing = true
+	sctx.PreviousFindings = outcome.Findings
+	outcome, err = step.Execute(sctx)
+	if err != nil || outcome == nil || !outcome.NeedsApproval || outcome.AutoFixable || polls != 1 || len(ag.calls) != 1 || *ready {
+		t.Fatalf("expected build repair then completed bot comments: %+v %v polls=%d repairs=%d ready=%v", outcome, err, polls, len(ag.calls), *ready)
+	}
+	findings, err = types.ParseFindingsJSON(outcome.Findings)
+	if err != nil || len(findings.Items) != 1 || findings.Items[0].Category != types.FindingCategoryCIReviewBot || findings.Items[0].Action != types.ActionAskUser || findings.Items[0].File != "src/commands/api.test.ts" {
+		t.Fatalf("completed bot must report its unresolved comment: %+v %v", findings, err)
 	}
 }
