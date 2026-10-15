@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
@@ -41,7 +42,7 @@ func TestStopThenStartRefreshesManagedExecutable(t *testing.T) {
 				t.Fatal(err)
 			}
 			running, stopped, started := true, false, false
-			daemonHealthCheck = func(*paths.Paths) (bool, error) { return running, nil }
+			daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return running, nil }
 			serviceCommandRunner = func(name string, args ...string) ([]byte, error) {
 				command := name + " " + strings.Join(args, " ")
 				if strings.Contains(command, "launchctl bootout ") || command == "systemctl --user stop "+systemdServiceName(p) {
