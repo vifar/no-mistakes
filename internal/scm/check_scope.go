@@ -428,6 +428,12 @@ func (s *CheckScope) classifyIdentity(c Check, required []RequiredCheck, derived
 }
 
 func (s *CheckScope) satisfies(c Check, want RequiredCheck, workflow string, required []RequiredCheck, derived bool) bool {
+	// A green workflow-level result reports the run, not its jobs: it cannot
+	// stand in for a job that shares its name, which stays missing until it
+	// reports. A failing one still blocks through its own identity.
+	if c.WorkflowRun && (c.Bucket == CheckBucketPass || c.Bucket == CheckBucketSkip) {
+		return false
+	}
 	if s.classifyIdentity(c, required, derived) == CheckRoleRequired && want.satisfiedBy(c) && (workflow == "" || c.Workflow == workflow) {
 		return true
 	}

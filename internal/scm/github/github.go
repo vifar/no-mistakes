@@ -829,6 +829,16 @@ func (h *Host) collapseLatestByName(checks []scm.Check) []scm.Check {
 				i++
 				continue
 			}
+			// A skipped workflow run ran nothing: it never replaces a
+			// meaningful result, and one is never replaced by it.
+			if checkSkippedRun(check) != checkSkippedRun(other) {
+				if checkSkippedRun(check) {
+					keep = false
+					break
+				}
+				collapsed = append(collapsed[:i], collapsed[i+1:]...)
+				continue
+			}
 			after, ordered := h.attemptAfter(check, other)
 			if !ordered {
 				i++
@@ -928,6 +938,10 @@ func attemptStart(c scm.Check) time.Time {
 		return c.AttemptStartedAt
 	}
 	return c.StartedAt
+}
+
+func checkSkippedRun(c scm.Check) bool {
+	return c.WorkflowRun && c.Bucket == scm.CheckBucketSkip
 }
 
 func (h *Host) sameCheckReplacementGroup(a, b scm.Check) bool {

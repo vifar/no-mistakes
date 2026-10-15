@@ -747,8 +747,13 @@ func TestGetChecksGreenJoblessAttemptDoesNotInheritRetiredIdentities(t *testing.
 			`{"id":7,"workflow_id":10,"run_attempt":2,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/7"},` +
 			`{"id":8,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"` + conclusion + `","run_started_at":"2026-10-14T12:00:00Z","html_url":"https://github.com/test/repo/actions/runs/8"}]}]`
 		checks := checksForAttempts(t, "["+job7+"]", runs)
-		if len(checks) != 1 || checks[0].RunID != 8 || len(checks[0].Supersedes) != 0 {
+		// A passing run 8 retires run 7 without standing for build; a skipped
+		// run 8 retires nothing, so run 7's failure keeps standing for it.
+		if conclusion == "success" && (len(checks) != 1 || checks[0].RunID != 8 || len(checks[0].Supersedes) != 0) {
 			t.Fatalf("%s: checks = %+v; want run 8 alone, standing for no job", conclusion, checks)
+		}
+		if conclusion == "skipped" && (len(checks) != 1 || checks[0].RunID != 7 || checks[0].Bucket != scm.CheckBucketFail || len(checks[0].Supersedes) != 1) {
+			t.Fatalf("%s: checks = %+v; want run 7's failure, still standing for build", conclusion, checks)
 		}
 		scope := scm.NewCheckScope(nil, scm.CheckScopePolicy{Resolved: &scm.CheckScopeResolution{Required: []scm.RequiredCheck{{Context: "build"}}, Derived: true}}, "main", nil)
 		if scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks); scoped.Ready() {
@@ -775,9 +780,11 @@ func TestGetChecksSkippedSuccessorDoesNotRetireAFailure(t *testing.T) {
 
 // Every sequence of up to three attempts of one workflow (same event and
 // branch, distinct runs started in order) with each outcome must give the same
-// readiness for a required build as GitHub's newest meaningful attempt: ready
-// exactly when the newest attempt that was not skipped reported a passing
-// build job.
+// readiness for the required job as GitHub's newest meaningful attempt: ready
+// exactly when the newest attempt that was not skipped reported a passing job.
+// When that attempt failed, a failing check must remain to repair. The job is
+// named build, and also CI like its workflow, whose workflow-level results then
+// share its name.
 func TestGetChecksAttemptSequencesJudgeTheNewestMeaningfulAttempt(t *testing.T) {
 	t.Parallel()
 	outcomes := []string{"jobs-pass", "jobs-fail", "jobless-fail", "jobless-pass", "jobless-skip", "pending"}
@@ -795,48 +802,71 @@ func TestGetChecksAttemptSequencesJudgeTheNewestMeaningfulAttempt(t *testing.T) 
 		}
 	}
 	build(nil)
-	for _, seq := range sequences {
-		var jobs, runs []string
-		for i, outcome := range seq {
-			id := i + 1
-			start := fmt.Sprintf("2026-10-14T1%d:00:00Z", id)
-			status, conclusion := "completed", "success"
-			switch outcome {
-			case "jobs-fail", "jobless-fail":
-				conclusion = "failure"
-			case "jobless-skip":
-				conclusion = "skipped"
-			case "pending":
-				status, conclusion = "in_progress", ""
-			}
-			conclusionJSON := `"conclusion":null`
-			if conclusion != "" {
-				conclusionJSON = fmt.Sprintf(`"conclusion":%q`, conclusion)
-			}
-			runs = append(runs, fmt.Sprintf(`{"id":%d,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":%q,%s,"run_started_at":%q,"html_url":"https://github.com/test/repo/actions/runs/%d"}`, id, status, conclusionJSON, start, id))
-			if strings.HasPrefix(outcome, "jobs-") || outcome == "pending" {
-				jobConclusion, jobStatus := "SUCCESS", "COMPLETED"
-				if outcome == "jobs-fail" {
-					jobConclusion = "FAILURE"
+	for _, jobName := range []string{"build", "CI"} {
+		for _, seq := range sequences {
+			var jobs, runs []string
+			for i, outcome := range seq {
+				id := i + 1
+				start := fmt.Sprintf("2026-10-14T1%d:00:00Z", id)
+				status, conclusion := "completed", "success"
+				switch outcome {
+				case "jobs-fail", "jobless-fail":
+					conclusion = "failure"
+				case "jobless-skip":
+					conclusion = "skipped"
+				case "pending":
+					status, conclusion = "in_progress", ""
 				}
-				if outcome == "pending" {
-					jobStatus, jobConclusion = "IN_PROGRESS", ""
+				conclusionJSON := `"conclusion":null`
+				if conclusion != "" {
+					conclusionJSON = fmt.Sprintf(`"conclusion":%q`, conclusion)
 				}
-				jobs = append(jobs, fmt.Sprintf(`{"__typename":"CheckRun","databaseId":%d,"name":"build","status":%q,"conclusion":%q,"startedAt":%q,"completedAt":"2026-10-14T1%d:05:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/%d/job/%d","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`, 100+id, jobStatus, jobConclusion, start, id, id, 100+id))
+				runs = append(runs, fmt.Sprintf(`{"id":%d,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":%q,%s,"run_started_at":%q,"html_url":"https://github.com/test/repo/actions/runs/%d"}`, id, status, conclusionJSON, start, id))
+				if strings.HasPrefix(outcome, "jobs-") || outcome == "pending" {
+					jobConclusion, jobStatus := "SUCCESS", "COMPLETED"
+					if outcome == "jobs-fail" {
+						jobConclusion = "FAILURE"
+					}
+					if outcome == "pending" {
+						jobStatus, jobConclusion = "IN_PROGRESS", ""
+					}
+					jobs = append(jobs, fmt.Sprintf(`{"__typename":"CheckRun","databaseId":%d,"name":%q,"status":%q,"conclusion":%q,"startedAt":%q,"completedAt":"2026-10-14T1%d:05:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/%d/job/%d","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`, 100+id, jobName, jobStatus, jobConclusion, start, id, id, 100+id))
+				}
 			}
-		}
-		want := false
-		for i := len(seq) - 1; i >= 0; i-- {
-			if seq[i] == "jobless-skip" {
-				continue
+			newest := ""
+			for i := len(seq) - 1; i >= 0; i-- {
+				if seq[i] != "jobless-skip" {
+					newest = seq[i]
+					break
+				}
 			}
-			want = seq[i] == "jobs-pass"
-			break
-		}
-		checks := checksForAttempts(t, "["+strings.Join(jobs, ",")+"]", fmt.Sprintf(`[{"total_count":%d,"workflow_runs":[`, len(runs))+strings.Join(runs, ",")+`]}]`)
-		scope := scm.NewCheckScope(nil, scm.CheckScopePolicy{Resolved: &scm.CheckScopeResolution{Required: []scm.RequiredCheck{{Context: "build"}}, Derived: true}}, "main", nil)
-		if got := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks).Ready(); got != want {
-			t.Errorf("%v: ready = %v, want %v; checks = %+v", seq, got, want, checks)
+			checks := checksForAttempts(t, "["+strings.Join(jobs, ",")+"]", fmt.Sprintf(`[{"total_count":%d,"workflow_runs":[`, len(runs))+strings.Join(runs, ",")+`]}]`)
+			scope := scm.NewCheckScope(nil, scm.CheckScopePolicy{Resolved: &scm.CheckScopeResolution{Required: []scm.RequiredCheck{{Context: jobName}}, Derived: true}}, "main", nil)
+			scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks)
+			if got, want := scoped.Ready(), newest == "jobs-pass"; got != want {
+				t.Errorf("%s %v: ready = %v, want %v; checks = %+v", jobName, seq, got, want, checks)
+			}
+			// A failure must stay repairable when something ties it to the
+			// job: the job was reported at some point, or it shares its
+			// workflow's name. A workflow that never reported the job leaves
+			// it missing, which still blocks.
+			reported := jobName == "CI"
+			for _, outcome := range seq {
+				if strings.HasPrefix(outcome, "jobs-") || outcome == "pending" {
+					reported = true
+				}
+			}
+			if reported && (newest == "jobs-fail" || newest == "jobless-fail") {
+				repairable := false
+				for _, c := range scoped.Relevant {
+					if c.Bucket == scm.CheckBucketFail && !c.ExpectedMissing {
+						repairable = true
+					}
+				}
+				if !repairable {
+					t.Errorf("%s %v: no failing check left to repair; relevant = %+v", jobName, seq, scoped.Relevant)
+				}
+			}
 		}
 	}
 }
