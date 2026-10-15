@@ -1064,6 +1064,7 @@ Changes apply to the next run, and to a run recovered after a daemon restart, wh
 ### commit.fix_message
 
 Template for the subject of commits created by the Review, Test, Document, Lint, and CI repair paths, plus repository gate repairs.
+When set to a non-default template, it also formats the Push step's catch-all commit with `Step` set to `push` and `Summary` set to `apply agent fixes`. An unset or built-in default template keeps Push's historical subject, `no-mistakes: apply agent fixes`.
 
 | | |
 | --- | --- |

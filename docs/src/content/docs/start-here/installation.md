@@ -89,8 +89,9 @@ This fork's source build uses its release-please version baseline and records th
   - `NO_MISTAKES_BITBUCKET_EMAIL` and `NO_MISTAKES_BITBUCKET_API_TOKEN` (Bitbucket Cloud)
   - `az` CLI with the `azure-devops` extension (Azure DevOps)
   - `tea` CLI (Gitea)
-  - `origin` CLI (Cursor Origin)
   - or a configured [provider plugin](/no-mistakes/reference/global-config/#provider_plugins) for custom hosts
+
+The Cursor Origin adapter requires the `origin` CLI, but [Origin network runs remain unavailable](/no-mistakes/guides/provider-integration/#cursor-origin) until the adapter supplies complete PR facts.
 
 Run `no-mistakes doctor` to check native agents, ACP aliases such as `cursor` and `devin`, provider tools, configured provider plugins, and whether the configured global runner can start a validation gate.
 Every validation gate requires a runnable pipeline agent and otherwise fails before its first pipeline step.

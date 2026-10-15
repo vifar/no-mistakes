@@ -911,9 +911,9 @@ GitHub reports `BEHIND` only when the base branch requires branches to be up to 
 A PR that is behind a base without that rule reads `CLEAN`, merges as it is, and is unaffected by this key.
 
 - **`false` (default)** keeps the monitor's behavior from before the key existed: the PR reports `checks-passed` and waits for a human to bring it up to date.
-- **`true`** withholds `checks-passed` from such a PR. Once a second poll still sees it green and `BEHIND` at the same base tip, it takes the merge-conflict repair: rebase onto the PR base, revalidate from Review, and re-push through Push. A base that moves between those polls keeps the monitor waiting instead.
+- **`true`** withholds `checks-passed` from such a PR. Once a second poll still sees it green and `BEHIND` at the same base tip, it takes the merge-conflict repair: rebase onto the PR base, revalidate, and re-push through Push. A base that moves between those polls keeps the monitor waiting instead.
 
-Off by default because every rebase rewrites the head, so it always revalidates from Review (see [`ci.revalidate_repairs`](#cirevalidate_repairs)) and costs another full Review, Test, Document, and Lint pass each time the base advances.
+Off by default because every rebase rewrites the head and normally costs another full Review, Test, Document, and Lint pass each time the base advances. [`ci.carry_review_on_replay`](#cicarry_review_on_replay) owns the narrow exception that restarts at Test; it never applies to a run with a fixed comparison or strict shipping.
 Each one also spends an [`auto_fix.ci`](#auto_fix) attempt.
 Other providers never report `BEHIND`, so the key only has an effect on GitHub.
 

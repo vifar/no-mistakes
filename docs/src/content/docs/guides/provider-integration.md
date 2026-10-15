@@ -54,7 +54,7 @@ pushes to the configured target:
 - create or update the PR automatically
 - keep polling hosted CI until the PR is merged, closed, declined, or the configured `ci_timeout` idle window elapses
 - fetch failing job logs for the CI auto-fix loop when the provider exposes them
-- on GitHub, GitLab, Forgejo, Azure DevOps, Cursor Origin, and provider plugins that declare `mergeable_state`, watch mergeability and fix merge conflicts when possible
+- watch mergeability and fix merge conflicts on the providers listed in the table above
 
 Draft PR and MR creation is configurable for supported providers. The [global](/no-mistakes/reference/global-config/#providersgithubdraft_pull_requests) and [per-repo](/no-mistakes/reference/repo-config/#providersgithubdraft_pull_requests) config references own provider support and behavior.
 
@@ -183,7 +183,7 @@ Get an API token from [Bitbucket account settings](https://bitbucket.org/account
 - PR mergeability polling
 - Merge-conflict auto-fix
 
-These are GitHub, GitLab, Forgejo, Azure DevOps, Cursor Origin, and provider plugins (declaring `mergeable_state`) only right now.
+See the [provider capability table](#what-each-step-needs) for hosts that support these operations.
 
 ## Azure DevOps
 
@@ -274,7 +274,7 @@ Gitea Actions shipped in Gitea 1.19 (2023); older instances have no Actions API 
 
 ### Self-hosted Gitea
 
-Nearly every real Gitea instance is self-hosted at an arbitrary hostname with no `gitea` marker in it at all, so detection cannot use a substring match the way `gitlab.com`/`github.com` do. Instead, `no-mistakes` consults `tea`'s own config and treats the upstream as Gitea if its host matches a tea 0.x login's `url` or `ssh_host` in `config.yml` (under `$XDG_CONFIG_HOME/tea` or `~/.config/tea`), or a tea 1.0 instance's URL or `ssh_host` in `hosts.yml` (under `$TEA_CONFIG_DIR`, else the same directory).
+Nearly every real Gitea instance is self-hosted at an arbitrary hostname with no `gitea` marker in it at all, so detection cannot use a substring match the way `gitlab.com`/`github.com` do. Instead, `no-mistakes` consults `tea`'s own config and matches the upstream host to a configured URL or `ssh_host`. The environment reference owns the [tea 0.x and 1.0 config locations](/no-mistakes/reference/environment/#xdg_config_home) and [`TEA_CONFIG_DIR`](/no-mistakes/reference/environment/#tea_config_dir) precedence.
 
 Logging in as shown above is enough to make detection succeed; if `tea` has no login for the host, detection fails closed and the upstream is treated as unsupported. Two tea 1.0 instances on one hostname (different ports or base paths) are ambiguous and also fail closed.
 
@@ -297,20 +297,17 @@ origin auth status
 
 **Adapter operations available:**
 
-- PR creation and update (`origin pr create` / `origin pr edit`). The Origin CLI
-  defaults new changes to draft; no-mistakes always passes `--status` explicitly
-  (`open` unless `providers.origin.draft_pull_requests` is true).
+- PR creation and update (`origin pr create` / `origin pr edit`); the
+  [Origin draft setting](/no-mistakes/reference/global-config/#providersorigindraft_pull_requests)
+  owns draft behavior.
 - CI check polling through `origin pr checks`.
 - Mergeability reads from `origin pr view --json mergeability`.
 
 **Network pipeline limitation:**
 
-The current Origin adapter does not implement the PR facts reader needed to
-resolve and verify the PR source branch, target branch, and full head SHA.
-Therefore ordinary and strict network runs fail closed at pipeline admission;
-PR creation, CI polling, and mergeability operations do not make an Origin run
-eligible. Do not use Origin for a complete guarded network pipeline until that
-comparison-facts support exists.
+The [pipeline admission requirements](/no-mistakes/reference/pipeline-steps/)
+exclude Origin network runs until its adapter supplies complete PR facts.
+Installing and authenticating the CLI does not remove that restriction.
 
 **Other unavailable operations:**
 
