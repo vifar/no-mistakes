@@ -38,7 +38,9 @@ func Open(root string) (*Store, error) {
 	if err := os.MkdirAll(cases, 0o755); err != nil {
 		return nil, fmt.Errorf("create eval cases directory: %w", err)
 	}
-	database, err := sql.Open("sqlite", filepath.Join(root, "registry.sqlite")+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
+	// Take the write lock before transaction reads so concurrent CLI and daemon
+	// writers wait through busy_timeout instead of failing a WAL lock upgrade.
+	database, err := sql.Open("sqlite", filepath.Join(root, "registry.sqlite")+"?_txlock=immediate&_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open eval registry: %w", err)
 	}
