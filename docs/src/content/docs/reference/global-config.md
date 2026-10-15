@@ -929,6 +929,7 @@ Without a limit, many sessions launching at once ran every pipeline concurrently
 **Agents.** `max_concurrent_agents` is a separate, optional cap on agent subprocess invocations across all runs. It bounds the heaviest work even when `max_concurrent_runs` is raised or unlimited; the invocation waits for a free agent slot before it starts, and its timeouts begin only then.
 
 **Changing the limits without a restart.** The daemon checks the global config file's modification time and size at scheduling decisions and every two seconds, and reloads all three settings when either changes. An unreadable or invalid config keeps the last good limits. [`no-mistakes daemon set max-concurrent-runs N`](/no-mistakes/reference/cli/#no-mistakes-daemon-set-max-concurrent-runs) applies a change immediately. Lowering a cap never kills or pauses running work; it holds back new admissions until usage is below the cap. Raising a cap admits waiting work up to the new limit.
+Turning `hold_slot_while_parked` off releases slots held by already parked gates and CI monitors. Turning it on does not reclaim slots already released.
 
 **Seeing usage.** The CLI reference owns [`axi` scheduling output](/no-mistakes/reference/cli/#no-mistakes-axi) and [`doctor` slot usage](/no-mistakes/reference/cli/#no-mistakes-doctor).
 

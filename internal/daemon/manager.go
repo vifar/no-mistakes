@@ -376,6 +376,8 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 // failRunSetup preserves cancellation over the error from interrupted setup.
 // Its conditional write leaves terminal outcomes alone, and subscribers see
 // the saved verdict rather than a competing local failure reason.
+// started must become true once worktree creation succeeds: only failures before
+// that boundary can release custody without inspecting a managed worktree head.
 func (m *RunManager) failRunSetup(ctx context.Context, runID string, started bool, reason string) {
 	m.mu.Lock()
 	status := types.RunFailed
