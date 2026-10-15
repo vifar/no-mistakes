@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -15,42 +17,57 @@ import (
 func TestQueuedCancellationReleasesBranchCustody(t *testing.T) {
 	for _, action := range []string{"abort", "supersede"} {
 		t.Run(action, func(t *testing.T) {
-			f := newFaultFixture(t, "1")
-			holder := f.push("holder")
+			f := newSchedFixture(t, "daemon:\n  max_concurrent_runs: 1\n")
+			holder, _ := f.push("holder")
 			f.waitStarted(holder)
-			id := f.push("queued")
+			id, _ := f.push("queued")
 			if f.status(id) != types.RunQueued {
 				t.Fatal("run did not queue behind the occupied slot")
 			}
-			repo, err := f.d.GetRepo("fault-repo")
+			repo, err := f.d.GetRepo(f.repoID)
 			if err != nil {
 				t.Fatal(err)
 			}
 			gitCmd(t, repo.WorkingPath, "checkout", "-b", "queued")
-			if action == "abort" {
-				err = f.mgr.HandleCancel(id)
-			} else {
-				err = f.mgr.cancelActiveRuns(repo.ID, "queued")
+			cancelled := []string{id}
+			latest := id
+			if action == "supersede" {
+				latest, _ = f.push("queued")
+				cancelled = append(cancelled, latest)
+				f.assertQueued(latest, 1, 1)
+				if got := f.status(id); got != types.RunCancelled {
+					t.Fatalf("superseded run status = %s, want cancelled", got)
+				}
 			}
-			if err != nil {
+			// Cancel the replacement too: a released latest run must not hide
+			// an older, superseded run that incorrectly retained custody.
+			if err := f.client.Call(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: latest}, nil); err != nil {
 				t.Fatal(err)
 			}
-			run, err := f.d.GetRun(id)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if run.Status != types.RunCancelled || run.HeadSHA != f.head || run.TerminalHeadVerifiedAt == nil || run.LastPushedSHA != nil || run.PushGeneration != nil || run.PushActive {
-				t.Fatalf("never-started cancellation lost its release proof: %+v", run)
+			for _, cancelledID := range cancelled {
+				run, err := f.d.GetRun(cancelledID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if run.Status != types.RunCancelled || run.HeadSHA != f.head || run.TerminalHeadVerifiedAt == nil || run.LastPushedSHA != nil || run.PushGeneration != nil || run.PushActive {
+					t.Fatalf("never-started cancellation lost its release proof: %+v", run)
+				}
+				f.assertNoWorktree(cancelledID)
+				for _, startedID := range f.step.startedIDs() {
+					if startedID == cancelledID {
+						t.Fatal("cancelled queued run executed")
+					}
+				}
 			}
 			svc := branchsync.Service{DB: f.d, Repo: repo, WorkDir: repo.WorkingPath, Paths: f.p, GateDir: f.p.RepoDir(repo.ID)}
 			state := svc.InspectCached(context.Background())
-			if state.State != branchsync.StateUserOwned || state.Safety != "user_owned" || state.NextAction != nil || state.Pipeline.RunID != id {
+			if state.State != branchsync.StateUserOwned || state.Safety != "user_owned" || state.NextAction != nil || state.Pipeline.RunID != latest {
 				t.Fatalf("cancelled queued branch was not released: %+v", state)
 			}
-			if f.started(id) {
-				t.Fatal("cancelled queued run executed")
-			}
+			wire, _ := json.MarshalIndent(state, "", "  ")
+			t.Logf("branch_sync after live %s of never-started queued runs:\n%s", action, wire)
 			f.step.release(holder)
+			f.waitStatus(holder, types.RunCompleted)
 		})
 	}
 }
