@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -44,26 +45,45 @@ func (e *Executor) acquireSlot(ctx context.Context) error {
 	return e.slot.Acquire(ctx)
 }
 
-func (e *Executor) acquireAnsweredGateSlot(ctx context.Context, run *db.Run, repo *db.Repo, step types.StepName, stepID string) error {
-	e.mu.Lock()
-	if e.slot != nil {
-		e.slotWaitStep = step
+func (e *Executor) acceptApprovalGate() error {
+	row, err := e.db.GetStepResult(e.waitingStepResultID)
+	if err != nil {
+		return err
 	}
-	e.mu.Unlock()
+	if row == nil {
+		return fmt.Errorf("cannot read the parked step")
+	}
+	run, err := e.db.GetRun(row.RunID)
+	if err != nil {
+		return err
+	}
+	if run == nil {
+		return fmt.Errorf("cannot read the parked run")
+	}
+	activity := "gate resumed"
+	if e.slot != nil {
+		activity = "already answered; waiting for a run slot"
+	}
+	parkedMS := int64(0)
+	if !e.waitingSince.IsZero() {
+		parkedMS = time.Since(e.waitingSince).Milliseconds()
+	}
+	if err := e.db.ResumeStepFromApproval(run.ID, row.ID, activity, parkedMS); err != nil {
+		return fmt.Errorf("resume answered gate: %w", err)
+	}
+	if e.slot != nil {
+		e.slotWaitStep = e.waitingStep
+	}
+	e.emitStepEvent(ipc.EventStepStarted, run, &db.Repo{ID: run.RepoID}, e.waitingStep, string(types.StepStatusRunning))
+	return nil
+}
+
+func (e *Executor) acquireAnsweredGateSlot(ctx context.Context, stepID string) error {
 	defer func() {
 		e.mu.Lock()
 		e.slotWaitStep = ""
 		e.mu.Unlock()
 	}()
-	if err := e.db.UpdateStepStatus(stepID, types.StepStatusRunning); err != nil {
-		return fmt.Errorf("resume answered gate: %w", err)
-	}
-	if e.slot != nil {
-		if err := e.db.TouchStepActivity(stepID, "already answered; waiting for a run slot"); err != nil {
-			return err
-		}
-	}
-	e.emitStepEvent(ipc.EventStepStarted, run, repo, step, string(types.StepStatusRunning))
 	if err := e.acquireSlot(ctx); err != nil {
 		return err
 	}

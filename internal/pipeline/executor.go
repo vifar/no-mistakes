@@ -97,6 +97,7 @@ type Executor struct {
 	// wherever e.waiting is.
 	waitingFindings     string
 	waitingStepResultID string
+	waitingSince        time.Time
 	// waitingRoundID is the round the parked gate belongs to. The response path
 	// records the decision against it before the caller is told what was
 	// recorded, so an echo never claims a decision that is not durable.
@@ -421,8 +422,11 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 		dispositions.Fixed = combineSelectedFindingIDs(idsInPayloadOrder(response.findingIDs, findingIDsInPayloadOrder(e.waitingFindings)), normalized)
 		dispositions.Kept = excludeFindingIDs(split.Kept, restoredGateIDs)
 	}
-	if e.slot != nil && action != types.ActionAbort {
-		e.slotWaitStep = step
+	if action != types.ActionAbort {
+		if err := e.acceptApprovalGate(); err != nil {
+			e.mu.Unlock()
+			return RespondDispositions{}, err
+		}
 	}
 	e.waiting = false
 	e.waitingFindings = ""
@@ -727,6 +731,7 @@ func (e *Executor) RegisterRecoveredGate(run *db.Run) error {
 	e.waitingFindings = gate.findings
 	e.waitingStepResultID = gate.stepResult.ID
 	e.waitingRoundID = gate.lastRoundID
+	e.waitingSince = time.Unix(*run.AwaitingAgentSince, 0)
 	return nil
 }
 
@@ -744,6 +749,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	e.mu.Lock()
 	gate := e.recoveryGate
+	parkStart := e.waitingSince
 	e.mu.Unlock()
 	if ctx.Err() != nil {
 		select {
@@ -773,7 +779,6 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	e.initializeRunScopes(run.ID)
 
-	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	// A recovered gate may have been parked while the PR base or its target
 	// moved. Revalidate before its old findings can reconcile or be approved.
 	restartIndex, err := e.checkPRContext(ctx, run, repo, workDir, gate.step.Name(), gate.index, true)
@@ -781,10 +786,13 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, err, ctx)
 	}
 	if restartIndex >= 0 {
-		if err := e.db.AddRunParkedDuration(run.ID, time.Since(parkStart).Milliseconds()); err != nil {
+		if err := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("record recovered parked duration: %w", err), ctx)
 		}
 		e.clearApprovalGate()
+		e.mu.Lock()
+		e.slotWaitStep = ""
+		e.mu.Unlock()
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, gate.step.Name())
 	}
 	duration := recoveredStepDuration(gate.stepResult)
@@ -857,16 +865,22 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		LogChunk: func(string) {},
 		LogFile:  func(string) {},
 	}
-	e.emitStepEventWithFindingsAndError(
-		ipc.EventStepCompleted,
-		run,
-		repo,
-		gate.step.Name(),
-		string(gate.stepResult.Status),
-		gate.findings,
-		"",
-		gate.stepResult.DurationMS,
-	)
+
+	e.mu.Lock()
+	waiting := e.waiting
+	e.mu.Unlock()
+	if waiting {
+		e.emitStepEventWithFindingsAndError(
+			ipc.EventStepCompleted,
+			run,
+			repo,
+			gate.step.Name(),
+			string(gate.stepResult.Status),
+			gate.findings,
+			"",
+			gate.stepResult.DurationMS,
+		)
+	}
 
 	e.yieldSlot()
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, true)
@@ -882,7 +896,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
 	}
 	if err == nil {
-		err = e.acquireAnsweredGateSlot(ctx, run, repo, gate.step.Name(), gate.stepResult.ID)
+		err = e.acquireAnsweredGateSlot(ctx, gate.stepResult.ID)
 	}
 	if err != nil {
 		if dbErr := e.db.FailStep(gate.stepResult.ID, err.Error(), duration); dbErr != nil {
@@ -1862,19 +1876,18 @@ rounds:
 			e.waitingFindings = effectiveFindings
 			e.waitingStepResultID = sr.ID
 			e.waitingRoundID = currentRoundID
-			e.mu.Unlock()
 
 			// Parking starts before the gate becomes observable. This includes the
 			// small handoff from publishing the gate to receiving a response, and
 			// prevents a prompt response from being omitted from the parked total.
 			parkStart := time.Now()
+			e.waitingSince = parkStart
 
 			// Surface the park as a pollable, run-level signal so a supervisor can
 			// tell in one `axi status` read that the run is waiting for the agent
 			// to drive this gate (versus actively running/fixing/ci). Observability
 			// only: it does not change the wait below. Cleared once the wait ends.
 			if dbErr := e.db.ParkStepForApproval(run.ID, sr.ID, approvalStatus, finalExitCode, executionMS, findingsPtr); dbErr != nil {
-				e.mu.Lock()
 				e.waiting = false
 				e.waitingStep = ""
 				e.waitingFindings = ""
@@ -1882,6 +1895,7 @@ rounds:
 				e.mu.Unlock()
 				return false, "", fmt.Errorf("persist %s approval gate: %w", stepName, dbErr)
 			}
+			e.mu.Unlock()
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
 
 			e.yieldSlot()
@@ -1898,7 +1912,7 @@ rounds:
 				return false, "", fmt.Errorf("step %s: aborted by user", stepName)
 			}
 			if err == nil {
-				err = e.acquireAnsweredGateSlot(ctx, run, repo, stepName, sr.ID)
+				err = e.acquireAnsweredGateSlot(ctx, sr.ID)
 			}
 			if err != nil {
 				if dbErr := e.db.FailStep(sr.ID, err.Error(), executionMS); dbErr != nil {
@@ -2515,7 +2529,9 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 			// race guard reconciliation uses: an operator response that landed
 			// first wins.
 			if action, resume, err := e.resumeApprovalGate(ctx, step, sctx, findings); resume {
-				if e.claimGateReconciliation() {
+				if claimed, err := e.claimGateReconciliation(); err != nil {
+					return approvalResponse{}, false, err
+				} else if claimed {
 					return approvalResponse{action: action}, false, nil
 				}
 				return <-e.approvalCh, false, nil
@@ -2528,7 +2544,9 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 			}
 			resolved, err := e.reconcileApprovalGate(ctx, step, sctx, findings)
 			if resolved {
-				if e.claimGateReconciliation() {
+				if claimed, err := e.claimGateReconciliation(); err != nil {
+					return approvalResponse{}, false, err
+				} else if claimed {
 					return approvalResponse{}, true, nil
 				}
 				return <-e.approvalCh, false, nil
@@ -2563,17 +2581,20 @@ func (e *Executor) clearApprovalGate() {
 	}
 }
 
-func (e *Executor) claimGateReconciliation() bool {
+func (e *Executor) claimGateReconciliation() (bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if !e.waiting {
-		return false
+		return false, nil
+	}
+	if err := e.acceptApprovalGate(); err != nil {
+		return false, err
 	}
 	e.waiting = false
 	e.waitingStep = ""
 	e.waitingFindings = ""
 	e.waitingStepResultID = ""
-	return true
+	return true, nil
 }
 
 // resumeApprovalGate asks a step whether its parked gate is now answerable.

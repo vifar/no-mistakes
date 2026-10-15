@@ -226,6 +226,26 @@ func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, 
 	return nil
 }
 
+func (d *DB) ResumeStepFromApproval(runID, stepID, activity string, parkedMS int64) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE step_results SET status = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`, types.StepStatusRunning, now(), activity, stepID); err != nil {
+		return err
+	}
+	if parkedMS < 0 {
+		parkedMS = 0
+	}
+	if _, err := tx.Exec(`UPDATE runs SET awaiting_agent_since = NULL,
+		parked_ms = COALESCE(parked_ms, 0) + CASE WHEN awaiting_agent_since IS NOT NULL THEN ? ELSE 0 END,
+		updated_at = ? WHERE id = ?`, parkedMS, now(), runID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // StartStep marks a step as running with a started_at timestamp.
 func (d *DB) StartStep(id string) error {
 	return d.StartStepWithAutoFixLimit(id, 0)
@@ -282,13 +302,13 @@ func (d *DB) SetStepOverrideReason(id string, reason string) error {
 // SetTestApprovalReason preserves the operator's explanation without changing
 // the command failure marker or its PR-enforcement policy.
 func (d *DB) SetTestApprovalReason(id, reason string) error {
-	result, err := d.sql.Exec(`UPDATE step_results SET approval_reason = ? WHERE id = ? AND step_name = ? AND status IN (?, ?)`,
-		reason, id, types.StepTest, types.StepStatusAwaitingApproval, types.StepStatusFixReview)
+	result, err := d.sql.Exec(`UPDATE step_results SET approval_reason = ? WHERE id = ? AND step_name = ? AND status IN (?, ?, ?)`,
+		reason, id, types.StepTest, types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusRunning)
 	if err != nil {
 		return fmt.Errorf("record Test approval reason: %w", err)
 	}
 	if n, err := result.RowsAffected(); err != nil || n != 1 {
-		return fmt.Errorf("record Test approval reason: parked Test step not found")
+		return fmt.Errorf("record Test approval reason: active Test step not found")
 	}
 	return nil
 }

@@ -504,44 +504,85 @@ func TestClaimedCancellationDoesNotRequireDatabaseAccess(t *testing.T) {
 }
 
 func TestRecoveredGateWaitingForSlotAcceptsResponses(t *testing.T) {
-	for _, action := range []types.ApprovalAction{types.ActionAbort, types.ActionApprove} {
-		t.Run(string(action), func(t *testing.T) {
-			f := newFaultFixture(t, "1")
-			plans := seedRecoveredQueueGates(f)
-			f.mgr.resumeRecoveredRuns(plans)
-			queued := f.push("new")
-			waitingID := plans[1].run.ID
-			info := &ipc.RunInfo{ID: waitingID}
-			f.mgr.annotateQueue(info)
-			if !info.WaitingForSlot || info.QueuePosition != 1 {
-				t.Fatalf("recovered run did not wait behind the held slot: %+v", info)
+	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+		t.Run(string(status), func(t *testing.T) {
+			for _, action := range []types.ApprovalAction{types.ActionAbort, types.ActionApprove} {
+				t.Run(string(action), func(t *testing.T) {
+					f := newFaultFixture(t, "1")
+					plans := seedRecoveredQueueGates(f)
+					rows, err := f.d.GetStepsByRun(plans[1].run.ID)
+					if err != nil || len(rows) != 1 {
+						t.Fatalf("recovered step: %v, %v", rows, err)
+					}
+					if err := f.d.UpdateStepStatus(rows[0].ID, status); err != nil {
+						t.Fatal(err)
+					}
+					f.mgr.resumeRecoveredRuns(plans)
+					queued := f.push("new")
+					waitingID := plans[1].run.ID
+					info := &ipc.RunInfo{ID: waitingID}
+					f.mgr.annotateQueue(info)
+					if !info.WaitingForSlot || info.QueuePosition != 1 {
+						t.Fatalf("recovered run did not wait behind the held slot: %+v", info)
+					}
+					sub, err := f.mgr.Subscribe(waitingID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer sub.Close()
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					if _, ok := sub.Next(ctx); !ok {
+						t.Fatal("missing initial stream gap")
+					}
+					if err := f.mgr.HandleRespond(waitingID, types.StepReview, action, nil); err != nil {
+						t.Fatalf("respond before admission: %v", err)
+					}
+					if action == types.ActionAbort {
+						f.waitFor("waiting gate to abort without capacity", func() bool { return f.status(waitingID) == types.RunCancelled })
+						run, err := f.d.GetRun(waitingID)
+						if err != nil || run.AwaitingAgentSince != nil {
+							t.Fatalf("aborted recovery remained parked: run=%+v error=%v", run, err)
+						}
+					} else {
+						row, err := f.d.GetStepResult(rows[0].ID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if row.Status != types.StepStatusRunning || row.LastActivity == nil || *row.LastActivity != "already answered; waiting for a run slot" {
+							t.Fatalf("answered step still advertises a gate: %+v", row)
+						}
+						run, err := f.d.GetRun(waitingID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if run.Status != types.RunRunning || run.AwaitingAgentSince != nil {
+							t.Fatalf("answered run still parked: %+v", run)
+						}
+						if err := f.mgr.HandleRespond(waitingID, types.StepReview, action, nil); err == nil || !strings.Contains(err.Error(), "already answered; waiting for a run slot") {
+							t.Fatalf("duplicate response: %v", err)
+						}
+						event, ok := sub.Next(ctx)
+						if !ok || event.Type != ipc.EventStepStarted || event.Status == nil || *event.Status != string(types.StepStatusRunning) {
+							t.Fatalf("answered gate event: %+v, %v", event, ok)
+						}
+					}
+					if st := f.mgr.sched.stats(); st.Active != 1 {
+						t.Fatalf("recovered admission exceeded cap: %+v", st)
+					}
+					if f.started(queued) {
+						t.Fatal("new work overtook recovered gates")
+					}
+					if err := f.mgr.HandleRespond(plans[0].run.ID, types.StepReview, types.ActionApprove, nil); err != nil {
+						t.Fatal(err)
+					}
+					if action == types.ActionApprove {
+						f.waitFor("early approval to complete after admission", func() bool { return f.status(waitingID) == types.RunCompleted })
+					}
+					f.waitStarted(queued)
+					f.step.release(queued)
+				})
 			}
-			if err := f.mgr.HandleRespond(waitingID, types.StepReview, action, nil); err != nil {
-				t.Fatalf("respond before admission: %v", err)
-			}
-			if action == types.ActionAbort {
-				f.waitFor("waiting gate to abort without capacity", func() bool { return f.status(waitingID) == types.RunCancelled })
-				run, err := f.d.GetRun(waitingID)
-				if err != nil || run.AwaitingAgentSince != nil {
-					t.Fatalf("aborted recovery remained parked: run=%+v error=%v", run, err)
-				}
-			} else if got := f.status(waitingID); got != types.RunRunning {
-				t.Fatalf("approval ran without capacity: %s", got)
-			}
-			if st := f.mgr.sched.stats(); st.Active != 1 {
-				t.Fatalf("recovered admission exceeded cap: %+v", st)
-			}
-			if f.started(queued) {
-				t.Fatal("new work overtook recovered gates")
-			}
-			if err := f.mgr.HandleRespond(plans[0].run.ID, types.StepReview, types.ActionApprove, nil); err != nil {
-				t.Fatal(err)
-			}
-			if action == types.ActionApprove {
-				f.waitFor("early approval to complete after admission", func() bool { return f.status(waitingID) == types.RunCompleted })
-			}
-			f.waitStarted(queued)
-			f.step.release(queued)
 		})
 	}
 }
