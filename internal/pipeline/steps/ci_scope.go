@@ -68,15 +68,28 @@ func recordCIChecksScope(sctx *pipeline.StepContext, scope *scm.CheckScope) erro
 	return nil
 }
 
+// retainedCICheckIncluded reports whether retained work (a selected finding or
+// an outstanding rerun) still names an in-scope check. A selection naming an
+// observed check itself is judged by that check's role, including the jobs it
+// supersedes; a selection naming a job that a workflow-level check now stands
+// for is judged as that job alone, so an excluded job never reaches the fixer
+// because a sibling it was superseded with is required.
 func retainedCICheckIncluded(sctx *pipeline.StepContext, scope *scm.CheckScope, pr *scm.PR, checks []scm.Check, name, id string) bool {
 	matched := false
 	for _, check := range checks {
 		if id != "" && check.ProviderID != id {
 			continue
 		}
-		identities := checkIdentitiesNamed(check, name)
+		if name == "" || check.Name == name || check.DisplayName() == name {
+			matched = true
+			if scope.Includes(sctx.Ctx, pr, check) {
+				return true
+			}
+			continue
+		}
+		identities := supersededIdentitiesNamed(check, name)
 		if len(identities) == 0 && id != "" {
-			check.Supersedes = nil
+			// The ID names this check, under a name it no longer carries.
 			identities = []scm.Check{check}
 		}
 		for _, identity := range identities {
@@ -96,15 +109,17 @@ func retainedCICheckIncluded(sctx *pipeline.StepContext, scope *scm.CheckScope, 
 	return !matched && scope.Includes(sctx.Ctx, pr, identity)
 }
 
-func checkIdentitiesNamed(check scm.Check, name string) []scm.Check {
+// supersededIdentitiesNamed returns the job identities check stands for that
+// carry name, each without the identities it superseded in turn.
+func supersededIdentitiesNamed(check scm.Check, name string) []scm.Check {
 	var identities []scm.Check
-	if check.Name == name || check.DisplayName() == name {
-		identity := check
-		identity.Supersedes = nil
-		identities = append(identities, identity)
-	}
 	for _, identity := range check.Supersedes {
-		identities = append(identities, checkIdentitiesNamed(identity, name)...)
+		if identity.Name == name || identity.DisplayName() == name {
+			own := identity
+			own.Supersedes = nil
+			identities = append(identities, own)
+		}
+		identities = append(identities, supersededIdentitiesNamed(identity, name)...)
 	}
 	return identities
 }

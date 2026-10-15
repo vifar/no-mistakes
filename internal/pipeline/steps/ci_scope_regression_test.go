@@ -689,7 +689,10 @@ func TestCIScopeRetainedWorkUsesMatchedIdentity(t *testing.T) {
 				if err := scopeRetainedCIFindings(sctx, scope, &scm.PR{}, checks); err != nil {
 					t.Fatal(err)
 				}
-				want := name == "build" || name == "CI / build"
+				// A selection naming the replacement itself keeps its aggregate
+				// role (it stands for required build); one naming a job it
+				// superseded is judged as that job alone.
+				want := name == "build" || name == "CI / build" || name == "CI"
 				for _, got := range []string{sctx.PreviousFindings, sctx.DeferredFindings} {
 					if (got != "") != want {
 						t.Fatalf("retained findings = %q, want included=%v", got, want)
