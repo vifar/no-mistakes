@@ -343,11 +343,35 @@ func reviewBotCommentsAlways(sctx *pipeline.StepContext) bool {
 // posting, and reading comments before the check completes would race it.
 // Externally excluded checks still establish presence, so an excluded bot cannot
 // return through the absent-check fallback.
+// reviewBotPresenceMarkers returns the scope-excluded checks that keep a review
+// bot out of the absent-bot fallback: every external check, the configured
+// external bots that have not registered yet, and cancelled informational bot
+// checks. A cancelled bot check means the bot's review on this head never
+// completed, so its earlier comments are stale or partial and must not be read
+// as though the bot were absent. Informational bot checks that passed or
+// failed are left out so review_bot_comments: always still collects their
+// comments; pending ones are held by the settled-set rule instead.
+func reviewBotPresenceMarkers(scoped scm.ScopedChecks, externalBots []scm.Check) []scm.Check {
+	markers := make([]scm.Check, 0, len(scoped.External)+len(externalBots))
+	markers = append(markers, scoped.External...)
+	markers = append(markers, externalBots...)
+	for _, check := range scoped.Informational {
+		if _, ok := scm.ReviewBotForCheck(check); !ok {
+			continue
+		}
+		if check.Bucket != scm.CheckBucketCancel {
+			continue
+		}
+		markers = append(markers, check)
+	}
+	return markers
+}
+
 func greenReviewBotChecks(checks []scm.Check, excluded ...scm.Check) []reviewBotCheck {
 	var green []reviewBotCheck
 	present := map[string]bool{}
 	for _, check := range excluded {
-		if bot, ok := scm.ReviewBotForApp(check.App); ok {
+		if bot, ok := scm.ReviewBotForCheck(check); ok {
 			present[bot.AppSlug] = true
 		}
 	}

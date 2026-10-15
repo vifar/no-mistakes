@@ -410,3 +410,23 @@ func TestCIScopePendingExternalBotCheckDoesNotBlockReadiness(t *testing.T) {
 		t.Fatalf("an external bot check blocked readiness: %+v %v ready=%v", outcome, err, *ready)
 	}
 }
+
+// A cancelled review-bot check outside the required scope is still the bot's
+// presence on this head. Under review_bot_comments: always it must not be read
+// as an absent bot, whose fallback would treat stale comments as a green review.
+func TestCIScopeCancelledInformationalBotIsNotTreatedAsAbsent(t *testing.T) {
+	const checks = `[{"name":"build","state":"SUCCESS","bucket":"pass","app":"github-actions"},{"name":"Greptile Review","state":"CANCELLED","bucket":"cancel","app":"greptile-apps"}]`
+	env := append(fakeCIGH(t, "OPEN", checks), greenGreptileCommentJSON, `FAKE_CLI_PROTECTION_JSON={"contexts":["build"]}`, `FAKE_CLI_RULES_JSON=[]`)
+	sctx, ag, _, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsAlways, env)
+	step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error { return context.Canceled })
+	outcome, err := step.Execute(sctx)
+	if !errors.Is(err, context.Canceled) || outcome != nil || !*ready {
+		t.Fatalf("a cancelled informational bot was read as absent: %+v %v ready=%v", outcome, err, *ready)
+	}
+	if reason, err := step.VerifyApprovalOverride(sctx); err != nil || reason != "" {
+		t.Fatalf("a cancelled informational bot blocked approval: %q %v", reason, err)
+	}
+	if len(ag.calls) != 0 {
+		t.Fatal("repair dispatched")
+	}
+}
