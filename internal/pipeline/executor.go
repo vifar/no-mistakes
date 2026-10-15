@@ -775,31 +775,32 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	gate := e.recoveryGate
 	parkStart := e.waitingSince
 	e.mu.Unlock()
+	duration := recoveredStepDuration(gate.stepResult)
+	failRecoveredGate := func(err error) error {
+		e.endGateWait(run.ID, parkStart, err)
+		e.clearApprovalGate()
+		if dbErr := e.db.FailStep(gate.stepResult.ID, err.Error(), duration); dbErr != nil {
+			slog.Warn("failed to mark recovered step as failed in db", "step", gate.step.Name(), "error", dbErr)
+		}
+		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", err.Error(), &duration)
+		return e.failRun(run, repo, err, ctx)
+	}
 	if ctx.Err() != nil {
 		select {
 		case response := <-e.approvalCh:
 			if response.action == types.ActionAbort {
 				e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
-				if err := e.db.FailStep(gate.stepResult.ID, "aborted by user", recoveredStepDuration(gate.stepResult)); err != nil {
-					slog.Warn("failed to mark recovered step as aborted", "step", gate.step.Name(), "error", err)
-				}
 			}
 		default:
 		}
-		e.clearApprovalGate()
-		if run.AwaitingAgentSince != nil {
-			if err := e.db.CompleteRunAwaitingAgent(run.ID, e.gateParkedMS(parkStart)); err != nil {
-				slog.Warn("failed to complete cancelled recovery awaiting-agent state", "run", run.ID, "error", err)
-			}
-		}
-		return e.failRun(run, repo, context.Cause(ctx), ctx)
+		return failRecoveredGate(context.Cause(ctx))
 	}
 	logDir := e.paths.RunLogDir(run.ID)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
+		return failRecoveredGate(fmt.Errorf("create log dir: %w", err))
 	}
 	if err := recordCommandConfiguration(logDir, "resume", e.config); err != nil {
-		return e.failRun(run, repo, err)
+		return failRecoveredGate(err)
 	}
 	e.initializeRunScopes(run.ID)
 
@@ -807,11 +808,11 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	// moved. Revalidate before its old findings can reconcile or be approved.
 	restartIndex, err := e.checkPRContext(ctx, run, repo, workDir, gate.step.Name(), gate.index, true)
 	if err != nil {
-		return e.failRun(run, repo, err, ctx)
+		return failRecoveredGate(err)
 	}
 	if restartIndex >= 0 {
 		if err := e.db.CompleteRunAwaitingAgent(run.ID, e.gateParkedMS(parkStart)); err != nil {
-			return e.failRun(run, repo, fmt.Errorf("record recovered parked duration: %w", err), ctx)
+			return failRecoveredGate(fmt.Errorf("record recovered parked duration: %w", err))
 		}
 		e.clearApprovalGate()
 		e.mu.Lock()
@@ -819,7 +820,6 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		e.mu.Unlock()
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, gate.step.Name())
 	}
-	duration := recoveredStepDuration(gate.stepResult)
 	completeRecoveredGate := func() error {
 		if gate.step.Name() == types.StepReview {
 			if run.Shipping != nil {
@@ -852,13 +852,13 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 
 		restartIndex, err := e.checkPRContext(ctx, run, repo, workDir, gate.step.Name(), gate.index, true)
 		if err != nil {
-			return e.failRun(run, repo, err, ctx)
+			return failRecoveredGate(err)
 		}
 		if restartIndex >= 0 {
 			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, gate.step.Name())
 		}
 		if err := completeRecoveredGate(); err != nil {
-			return e.failRun(run, repo, fmt.Errorf("complete reconciled step %s: %w", gate.step.Name(), err), ctx)
+			return failRecoveredGate(fmt.Errorf("complete reconciled step %s: %w", gate.step.Name(), err))
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, "")
@@ -893,11 +893,10 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if gate.stepResult.PendingResponse != nil && e.recoveredResponse == nil {
 		_, resolved, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, true, true)
 		if err != nil {
-			e.endGateWait(run.ID, parkStart, err)
-			return e.failRun(run, repo, err, ctx)
+			return failRecoveredGate(err)
 		}
 		if err := e.acquireAnsweredGateSlot(ctx, run.ID, gate.stepResult.ID); err != nil {
-			return e.failRun(run, repo, err, ctx)
+			return failRecoveredGate(err)
 		}
 		if resolved {
 			return completeReconciledGate()
@@ -937,28 +936,20 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.endGateWait(run.ID, parkStart, err)
 	if err == nil && !reconciled && response.action == types.ActionAbort {
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
-		if dbErr := e.db.FailStep(gate.stepResult.ID, "aborted by user", duration); dbErr != nil {
-			slog.Warn("failed to mark recovered step as aborted", "step", gate.step.Name(), "error", dbErr)
-		}
-		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "aborted by user", &duration)
-		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
+		return failRecoveredGate(fmt.Errorf("step %s: aborted by user", gate.step.Name()))
 	}
 	if err == nil {
 		err = e.acquireAnsweredGateSlot(ctx, run.ID, gate.stepResult.ID)
 	}
 	if err != nil {
-		if dbErr := e.db.FailStep(gate.stepResult.ID, err.Error(), duration); dbErr != nil {
-			slog.Warn("failed to mark recovered step as failed in db", "step", gate.step.Name(), "error", dbErr)
-		}
-		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", err.Error(), &duration)
-		return e.failRun(run, repo, fmt.Errorf("step %s: waiting for approval: %w", gate.step.Name(), err), ctx)
+		return failRecoveredGate(fmt.Errorf("step %s: waiting for approval: %w", gate.step.Name(), err))
 	}
 	if reconciled {
 		return completeReconciledGate()
 	}
 	restartIndex, err = e.checkPRContext(ctx, run, repo, workDir, gate.step.Name(), gate.index, true)
 	if err != nil {
-		return e.failRun(run, repo, err, ctx)
+		return failRecoveredGate(err)
 	}
 	if restartIndex >= 0 {
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, gate.step.Name())
@@ -981,17 +972,17 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	case types.ActionApprove:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if err := e.applyApprovalOverride(gate.step, reconcileCtx, gate.stepResult.ID, response.approvalReason, response.acceptedGaps); err != nil {
-			return e.failRun(run, repo, err, ctx)
+			return failRecoveredGate(err)
 		}
 		if err := completeRecoveredGate(); err != nil {
-			return e.failRun(run, repo, fmt.Errorf("complete recovered step %s: %w", gate.step.Name(), err), ctx)
+			return failRecoveredGate(fmt.Errorf("complete recovered step %s: %w", gate.step.Name(), err))
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, "")
 	case types.ActionSkip:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusSkipped, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
-			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err), ctx)
+			return failRecoveredGate(fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err))
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusSkipped), "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, "")
@@ -1034,7 +1025,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 				state.skipFixExecution = true
 			}
 			if dbErr := e.db.UpdateStepStatus(gate.stepResult.ID, types.StepStatusRunning); dbErr != nil {
-				return e.failRun(run, repo, fmt.Errorf("return recovered step %s to running: %w", gate.step.Name(), dbErr), ctx)
+				return failRecoveredGate(fmt.Errorf("return recovered step %s to running: %w", gate.step.Name(), dbErr))
 			}
 			e.emitStepEvent(ipc.EventStepStarted, run, repo, gate.step.Name(), string(types.StepStatusRunning))
 		} else {
@@ -1053,7 +1044,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 				selectedOutstandingIDs = combineFindingIDLists(gate.selectedOutstandingIDs, newSelectedIDs)
 			}
 			if dbErr := e.db.StartStepFixRound(gate.stepResult.ID, e.autoFixLimit(gate.step.Name())); dbErr != nil {
-				return e.failRun(run, repo, fmt.Errorf("mark recovered step %s fixing: %w", gate.step.Name(), dbErr), ctx)
+				return failRecoveredGate(fmt.Errorf("mark recovered step %s fixing: %w", gate.step.Name(), dbErr))
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFixing), "", "", nil)
 			state.fixing = true

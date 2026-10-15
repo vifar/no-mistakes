@@ -3,7 +3,12 @@ package pipeline
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -67,5 +72,126 @@ func TestAnsweredGateDispatchFailureClearsTheParkedState(t *testing.T) {
 	}
 	if step.PendingResponse != nil {
 		t.Fatalf("failed step kept its pending response: %q", *step.PendingResponse)
+	}
+}
+
+func TestRecoveredGateFailuresClearPendingState(t *testing.T) {
+	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+		for _, marker := range []string{`{"action":"approve","parked_ms":10000}`, `{"kind":"reconcile","parked_ms":10000}`} {
+			for _, failure := range []string{"cancelled", "log-directory", "log-configuration", "comparison", "dispatch", "retry-cancel", "fatal-reconcile"} {
+				if (failure == "retry-cancel" || failure == "fatal-reconcile") && !strings.Contains(marker, `"kind"`) {
+					continue
+				}
+				t.Run(string(status)+"/"+marker+"/"+failure, func(t *testing.T) {
+					database, p, run, repo := setupTest(t)
+					workDir := completionFixture(t, database, run)
+					if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+						t.Fatal(err)
+					}
+					row, err := database.InsertStepResult(run.ID, types.StepCI)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := database.StartStep(row.ID); err != nil {
+						t.Fatal(err)
+					}
+					findings := `{"findings":[],"summary":"closed PR"}`
+					if _, err := database.InsertStepRound(row.ID, 1, "initial", &findings, nil, 1); err != nil {
+						t.Fatal(err)
+					}
+					if err := database.ParkStepForApproval(run.ID, row.ID, status, 0, 1, &findings); err != nil {
+						t.Fatal(err)
+					}
+					if err := database.SetStepPendingResponse(row.ID, marker, answeredActivity); err != nil {
+						t.Fatal(err)
+					}
+					run, err = database.GetRun(run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					step := &reconcilingApprovalStep{name: types.StepCI}
+					step.resolved.Store(true)
+					slot := &recordingSlot{}
+					exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+					exec.SetRunSlot(slot)
+					exec.SetGateReconcileTimings(time.Hour, time.Second)
+					ctx, cancel := context.WithCancelCause(context.Background())
+					defer cancel(context.Canceled)
+					switch failure {
+					case "cancelled":
+						cancel(errors.New(types.RunCancelReasonAbortedByUser))
+					case "log-directory":
+						if err := os.MkdirAll(filepath.Dir(p.RunLogDir(run.ID)), 0755); err != nil {
+							t.Fatal(err)
+						}
+						if err := os.WriteFile(p.RunLogDir(run.ID), nil, 0600); err != nil {
+							t.Fatal(err)
+						}
+					case "log-configuration":
+						if err := os.MkdirAll(filepath.Join(p.RunLogDir(run.ID), commandConfigurationFile), 0755); err != nil {
+							t.Fatal(err)
+						}
+					case "comparison":
+						exec.SetPRContextGuard(func(*StepContext, types.StepName) (PRContextDecision, error) {
+							return PRContextDecision{}, errors.New("comparison read failed")
+						})
+					case "dispatch":
+						control, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
+						if err != nil {
+							t.Fatal(err)
+						}
+						defer control.Close()
+						if _, err := control.Exec(`CREATE TRIGGER fail_recovered_dispatch BEFORE UPDATE OF status ON step_results WHEN NEW.status = 'running' BEGIN SELECT RAISE(FAIL, 'dispatch write failed'); END`); err != nil {
+							t.Fatal(err)
+						}
+					case "retry-cancel":
+						transient := error(errors.New("temporary GetPRState failure"))
+						step.err.Store(&transient)
+					case "fatal-reconcile":
+						fatal := error(ErrFatalGateReconciliation)
+						step.err.Store(&fatal)
+					}
+					done := make(chan error, 1)
+					go func() { done <- exec.Resume(ctx, run, repo, workDir) }()
+					if failure == "retry-cancel" {
+						deadline := time.After(3 * time.Second)
+						for len(slot.log()) == 0 {
+							select {
+							case <-deadline:
+								t.Fatal("reconciliation never yielded for retry")
+							case <-time.After(time.Millisecond):
+							}
+						}
+						cancel(errors.New(types.RunCancelReasonAbortedByUser))
+					}
+					select {
+					case err := <-done:
+						if err == nil {
+							t.Fatal("recovery succeeded despite injected failure")
+						}
+					case <-time.After(5 * time.Second):
+						t.Fatal("recovery did not stop")
+					}
+					persisted, err := database.GetStepResult(row.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if persisted.Status != types.StepStatusFailed || persisted.PendingResponse != nil || persisted.AnsweredWaitingForSlot() {
+						t.Fatalf("stopped recovery left an active gate: %+v", persisted)
+					}
+					current, err := database.GetRun(run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					wantStatus := types.RunFailed
+					if failure == "cancelled" || failure == "retry-cancel" {
+						wantStatus = types.RunCancelled
+					}
+					if current.Status != wantStatus || current.AwaitingAgentSince != nil || current.ParkedMS != 10000 {
+						t.Fatalf("stopped recovery = %+v; want %s, no park, and 10000ms parked", current, wantStatus)
+					}
+				})
+			}
+		}
 	}
 }
