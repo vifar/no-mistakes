@@ -341,7 +341,7 @@ func reviewBotCommentsAlways(sctx *pipeline.StepContext) bool {
 // on a new head yet can still have unresolved comments from an earlier one. A
 // pending or cancelled bot check is excluded: its review may still be
 // posting, and reading comments before the check completes would race it.
-// Excluded checks still establish presence, so an out-of-scope bot cannot
+// Externally excluded checks still establish presence, so an excluded bot cannot
 // return through the absent-check fallback.
 func greenReviewBotChecks(checks []scm.Check, excluded ...scm.Check) []reviewBotCheck {
 	var green []reviewBotCheck
