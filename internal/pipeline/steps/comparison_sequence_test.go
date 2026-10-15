@@ -62,6 +62,7 @@ func TestTestRepairCommitRestartsThroughReview(t *testing.T) {
 	}}
 	var ex *pipeline.Executor
 	fixes := 0
+	responseDone := make(chan error, 1)
 	ex = pipeline.NewExecutor(c.DB, p, c.Config, c.Agent, []pipeline.Step{review, &TestStep{}}, func(e ipc.Event) {
 		if e.StepName != nil && *e.StepName == types.StepTest && e.Status != nil && (*e.Status == string(types.StepStatusAwaitingApproval) || *e.Status == string(types.StepStatusFixReview)) {
 			fixes++
@@ -85,9 +86,9 @@ func TestTestRepairCommitRestartsThroughReview(t *testing.T) {
 						selected = append(selected, finding.ID)
 					}
 				}
-				if err := ex.Respond(types.StepTest, types.ActionFix, selected); err != nil {
-					t.Error(err)
-				}
+				// Answer from another goroutine, as the daemon's IPC does: the
+				// park is published under the lock that accepts responses.
+				go func() { responseDone <- ex.Respond(types.StepTest, types.ActionFix, selected) }()
 			}
 		}
 	})
@@ -97,6 +98,9 @@ func TestTestRepairCommitRestartsThroughReview(t *testing.T) {
 	err := ex.Execute(ctx, c.Run, c.Repo, dir)
 	if err != nil || calls < 2 {
 		t.Fatalf("Test repair failed before requested Review restart: review calls=%d, fixes=%d, error=%v", calls, fixes, err)
+	}
+	if err := <-responseDone; err != nil {
+		t.Fatal(err)
 	}
 }
 

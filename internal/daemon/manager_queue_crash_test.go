@@ -204,6 +204,12 @@ func TestSeededLimitsSurviveAMissingOrUnreadableConfig(t *testing.T) {
 			if err := os.Remove(f.p.ConfigFile()); err != nil {
 				t.Fatal(err)
 			}
+			// Without the config the launch resolves agent "auto" from PATH;
+			// put the mock agent first so the result does not depend on which
+			// agents the machine has installed.
+			agentDir := t.TempDir()
+			writeMockClaude(t, agentDir)
+			t.Setenv("PATH", agentDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 			first := f.push("first")
 			f.waitStarted(first)
 			second := f.push("second")
