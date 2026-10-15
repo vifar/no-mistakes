@@ -871,7 +871,7 @@ ci:
 ```
 
 - **`on_failure` (default)** reads them only when the bot's own in-scope check failed. A green bot check is green, whatever comments it left. This is the behavior before the key existed.
-- **`always`** also reads comments from green or absent bot checks under the conditions below, since the bot's threads from an earlier head can still be unresolved. Each unresolved comment becomes the same `ask-user` finding a red bot check produces, anchored to the comment's file and line, so the step parks for a decision instead of reporting `checks-passed`. A green bot with nothing unresolved is still green.
+- **`always`** also reads comments from informational, green or absent bot checks under the conditions below, since the bot's threads from an earlier head can still be unresolved. Each unresolved comment becomes the same `ask-user` finding a red bot check produces, anchored to the comment's file and line, so the step parks for a decision instead of reporting `checks-passed`. A green bot with nothing unresolved is still green.
 
 A review bot can conclude its check `success` while leaving an unresolved comment. The comment most likely to be missed that way is the one on the pipeline's own CI repair commit, which no human has reviewed yet.
 
@@ -880,11 +880,11 @@ Where the comments come from, and how the bot is identified, is provider-specifi
 Under `always`:
 
 - Green or absent bot checks have their comments read when the CI step handles a settled observation or verifies readiness. A pending or cancelled in-scope bot check is not treated as green, so a review still being posted is not raced. `always` explicitly includes unresolved bot comments whether the bot check is absent, informational, or required. Only an explicit [`ci.external_checks`](#ciexternal_checks) match silences a bot, including retained findings selected before the scope changed. A head with no checks at all under trusted [`no_ci: true`](#no_ci) has comments read the same way before it is reported ready. Only unresolved threads count, and the same per-gate bound applies as for a red check. A GitLab note counts only when it is resolvable, unresolved, not a system note, and authored by a registered bot, so an ordinary merge request comment is never a finding. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns when failures escalate.
-- A cancelled informational bot check still has its unresolved comments read and reported as `ask-user` findings. Only an explicit external exclusion silences those comments.
+- A failed or cancelled informational bot check still has its unresolved comments read and reported as `ask-user` findings. Its check conclusion alone does not block readiness when no comments remain unresolved. Only an explicit external exclusion silences those comments.
 - A pending supported bot check keeps readiness unsettled even when the check is informational, so comments are read after the review is posted. A pending informational bot does not delay repair of other in-scope failures, and its older unresolved comments are withheld until it settles. This readiness rule applies to monitoring, approval verification, and strict `ci-ready` receipts. External bot checks never wait. For this readiness rule, a reported app identifies the bot; a known check name is used only when no app is reported. A job published by another app, such as `github-actions`, is not treated as a bot merely because it is named `Greptile Review`.
 - The findings never spend an `auto_fix.ci` attempt. A human decides: approve, skip, or select comments for a fix round.
 - Approving over them records the CI step as passed with an override naming the comments, never as a clean pass.
-- A comment list that cannot be read is not treated as empty: `checks-passed` is withheld, and a read that keeps failing parks for a decision.
+- A comment list that cannot be read is not treated as empty: `checks-passed` is withheld, and a read that keeps failing parks for a decision. Strict `ci-ready` receipt export uses the same comment verification with the run's recorded policy and refuses export on any unresolved comment or comment-read error, even if readiness was previously recorded.
 - Each green poll costs one more provider read for the comments.
 
 Forges that cannot supply review comments skip comment collection under either value. Because only GitHub can attribute a *check* to a review bot, `on_failure` reads nothing on GitLab: a GitLab run needs `always` for the bot's unresolved discussions to become findings.
