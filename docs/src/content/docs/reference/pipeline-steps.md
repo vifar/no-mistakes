@@ -448,7 +448,7 @@ Each step progresses through these statuses:
 | Status | Meaning |
 | --- | --- |
 | `pending` | Not yet started |
-| `running` | Currently executing |
+| `running` | Executing, monitoring CI, or waiting for a run slot after an accepted gate response |
 | `fixing` | Agent is auto-fixing issues |
 | `awaiting_approval` | Paused, waiting for user action |
 | `fix_review` | Paused after a fix cycle, showing results for review |
@@ -456,8 +456,10 @@ Each step progresses through these statuses:
 | `skipped` | Pre-skipped for the run, skipped by the user, or skipped automatically by the pipeline |
 | `failed` | Step failed; the step log includes the returned error message so command stderr and provider errors are visible in the per-step log, not only in the daemon log |
 
-When a non-terminal run has a step in `awaiting_approval` or `fix_review`, AXI run objects also expose `awaiting_agent: parked <duration>` as a run-level observability signal.
-The signal clears as soon as the approval wait ends, including `axi respond` and cancellation, and does not change how gates resolve.
+When a non-terminal run has an unanswered step in `awaiting_approval` or `fix_review`, AXI run objects also expose `awaiting_agent: parked <duration>` as a run-level observability signal.
+When a gate response is accepted, it is saved in `step_results.pending_response` before any wait for a run slot. The step remains durably parked and retains `runs.awaiting_agent_since` until dispatch, so a daemon restart can recover the accepted response. Status, AXI, and the TUI report the answered step as `running` and suppress the gate and parked signal while it waits for capacity. Further responses are refused; reattach with `axi run` to follow progress. This applies to live and recovered gates, including `fix_review`, and to automatic reconciliation claims, which save a pending reconciliation marker through the same acceptance boundary.
+At dispatch, the saved step changes to `running`, the pending record and parked marker are cleared, and the frozen duration is added to the run's local parked-time total in one transaction. Parked time stops at acceptance: the pending record preserves that duration across a restart, excluding both capacity waits and downtime after acceptance. Cancellation also clears the parked signal. A recovered gate that is cancelled or fails before dispatch is marked `failed`, its pending record and parked signal are cleared, and its parked time is finalized using the saved acceptance duration when present. The signal does not change how gates resolve.
+The global [`daemon` configuration](/no-mistakes/reference/global-config/#daemon) owns slot admission and priority; the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-axi) owns queue and activity output.
 For the `active_steps` status fields, including active-round timing and compatibility with older runs, see [`axi status`](/no-mistakes/reference/cli/#no-mistakes-axi-status).
 If the latest activity is older than `step_quiet_warning`, AXI prefixes it with `quiet` to make possible wedges visible without changing the run state.
 Step logs also record native subprocess start, exit, and retry lifecycle lines plus explicit auto-fix and user-fix round markers.

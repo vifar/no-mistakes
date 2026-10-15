@@ -56,11 +56,11 @@ That is a core design choice, not an implementation detail.
 2. The gate repo's `pre-receive` hook asks the daemon to admit the update before Git changes any gate ref. An active validation-step descendant is refused, including a direct push that bypasses the CLI.
 3. Git writes an admitted push into the local bare gate repo.
 4. The gate repo's `post-receive` hook notifies the daemon.
-5. The daemon creates a detached worktree for this run.
+5. The daemon records the run and creates its detached worktree once admitted; see [daemon scheduling](/no-mistakes/reference/global-config/#daemon) for queueing and slot rules.
 6. The nine core steps run in order: `intent -> rebase -> review -> test -> document -> lint -> push -> pr -> ci`. Repository gates, when configured, run immediately after their anchors.
 7. If a step pauses, you can attach with the TUI or use `no-mistakes axi respond` to approve, fix, or skip.
    Use `no-mistakes axi abort` only when you mean to cancel the whole run.
-   AXI run objects show `awaiting_agent: parked <duration>` while a non-terminal run is parked at that gate, so a supervising agent can distinguish a waiting run from active work in one status read.
+   The [step-status contract](/no-mistakes/reference/pipeline-steps/#step-statuses) distinguishes unanswered gates from accepted responses waiting for capacity.
    While a step is actively running or fixing, AXI run objects can also show `active_steps` with the active duration, latest activity, native agent PID, and current execution or fix round.
 8. After local checks pass, the push step forwards the branch to the configured push target only after verifying that the update will not discard unincorporated commits already on that target, and the PR step creates or updates the pull request.
    For GitHub fork routing, the push target is the fork and the PR base repository is the parent from `origin`.
@@ -306,9 +306,7 @@ branch, marking the remaining steps as skipped.
 3. If blocking findings remain, any finding has `action: ask-user`, or Review has a selected finding still awaiting positive rereview verification, pause and wait for user action. The Review carry-forward rule is detailed in the [pipeline-step reference](/no-mistakes/reference/pipeline-steps/#review).
 4. `action: no-op` findings are informational only unless a Review finding was selected for fixing and remains outstanding; the user can approve, fix selected findings, skip, or cancel the run when the step pauses
 
-While the executor is paused at an approval or fix-review gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
-That timestamp is observability only and does not alter approval behavior.
-When the wait ends, it atomically clears the marker and adds the elapsed wall time to the run's local parked-time total, so a crash cannot leave that time undercounted.
+The [step-status contract](/no-mistakes/reference/pipeline-steps/#step-statuses) owns the awaiting-agent signal, parked-time accounting, and the transition after an accepted gate response.
 While a step is running or fixing, the executor also records the latest meaningful step activity from log lines and native subprocess lifecycle events.
 AXI renders that activity in `active_steps`, including a quiet prefix when no activity has arrived for longer than the configured `step_quiet_warning`.
 
@@ -326,7 +324,7 @@ Intent stores the summary, source, session ID, and match score on each run when 
 An agent-supplied AXI intent is stored directly on the run.
 Raw transcript text is not stored in this database.
 Legacy `user_fix` rounds are still read as `auto-fix` for backward compatibility.
-Run records also store the nullable `awaiting_agent_since` timestamp used only to render the AXI parked signal while a gate is waiting for the driving agent, plus accumulated `parked_ms` for local performance reporting. For version-specific debugging, inspect `runs.no_mistakes_version` and `runs.no_mistakes_build_sha`: each new run records the version returned by `internal/buildinfo.CurrentVersion()` and the `internal/buildinfo.Commit` build SHA embedded through release `-ldflags`, the same identity shown by `no-mistakes --version`. Historical rows remain `NULL`.
+Run records also store gate timing under the [step-status contract](/no-mistakes/reference/pipeline-steps/#step-statuses). For version-specific debugging, inspect `runs.no_mistakes_version` and `runs.no_mistakes_build_sha`: each new run records the version returned by `internal/buildinfo.CurrentVersion()` and the `internal/buildinfo.Commit` build SHA embedded through release `-ldflags`, the same identity shown by `no-mistakes --version`. Historical rows remain `NULL`.
 Each agent invocation records local-only purpose, provider/model metadata, session mode and a truncated session-identity hash, timing, failure category, and token usage; prompts, outputs, diffs, and credentials are never stored there.
 Use `no-mistakes stats --agents` for aggregates or `no-mistakes stats --run <id>` for a run timeline and parked time.
 Repo records store the parent `upstream_url` and an optional `fork_url`; branch pushes use `fork_url` when present, while PR and CI provider context stays anchored to the parent.

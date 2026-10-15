@@ -71,6 +71,15 @@ func (s *IntentStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.Step
 
 	sctx.Log("scanning recent agent transcripts...")
 
+	ag, release, admissionErr := sctx.AcquireAgent(sctx.Ctx)
+	if admissionErr != nil {
+		return nil, admissionErr
+	}
+	defer release()
+	admitted := *sctx
+	admitted.Agent = ag
+	sctx = &admitted
+
 	ctx, cancel := context.WithTimeout(sctx.Ctx, intentExtractTimeout)
 	defer cancel()
 

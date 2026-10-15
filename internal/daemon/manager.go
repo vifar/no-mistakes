@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -48,16 +49,38 @@ var fetchRecoveredDefaultBranchSHA = fetchTrustedDefaultBranchSHA
 // RunManager tracks active pipeline executors and manages run lifecycle.
 type RunManager struct {
 	mu           sync.Mutex
-	executors    map[string]*pipeline.Executor      // runID → executor
-	cancels      map[string]context.CancelCauseFunc // runID → cancel function with cause
-	dones        map[string]chan struct{}           // runID → closed when goroutine exits
-	wg           sync.WaitGroup                     // tracks background run goroutines
-	shuttingDown atomic.Bool                        // prevents new runs during shutdown
+	runs         map[string]*managedRun
+	wg           sync.WaitGroup // tracks background run goroutines
+	shuttingDown atomic.Bool    // prevents new runs during shutdown
 	db           *db.DB
 	paths        *paths.Paths
 	steps        StepFactory
 
 	branchLocks sync.Map // repoID+"/"+branch → *sync.Mutex
+
+	// sched enforces daemon.max_concurrent_runs and owns the start order of
+	// queued runs; limitsMu/limitsCache memoise the live global config it reads.
+	sched *slotScheduler
+	// claimQueued moves a dispatched queued run to pending; beforeQueuedRegister
+	// runs between the shutdown pre-check and handle registration. Both exist
+	// so tests can inject faults and pauses.
+	claimQueued          func(runID string) (bool, error)
+	markQueued           func(runID, spec string) (int64, error)
+	beforeQueuedRegister func()
+	// afterSupersedeSnapshot runs between supersession's snapshot of a branch's
+	// runs and the cancellation of each; a test seam for that race.
+	afterSupersedeSnapshot func()
+	// afterFullDecision runs inside admission, between "the cap is full" and the
+	// queue insertion. A test seam for the admission race.
+	afterFullDecision func()
+	// afterExecute and whileFinishing run when a run's Execute returns: before
+	// and after it is marked finishing.
+	afterExecute   func(runID string)
+	whileFinishing func(runID string)
+	watchOnce      sync.Once
+	watchStop      chan struct{}
+	limitsMu       sync.Mutex
+	limitsCache    runLimits
 
 	// evalCaptureMu serializes automatic eval collection. Concurrent runs
 	// finishing together would otherwise write the same per-repository object
@@ -78,6 +101,33 @@ type RunManager struct {
 	completedOrder []string                   // insertion order for FIFO eviction
 }
 
+type runOwnership uint8
+
+const (
+	// ownershipQueued: durable row, no executor; position lives in the scheduler.
+	ownershipQueued runOwnership = iota
+	// ownershipClaimed: a cancel handle is registered and the run is launching
+	// or executing.
+	ownershipClaimed
+	// ownershipRecoveringGate: a recovered parked gate that is registered with
+	// its executor and cancel handle before it holds (or waits for) a slot.
+	ownershipRecoveringGate
+	// ownershipFinishing: Execute/Resume has returned and the run's outcome is
+	// decided; eval collection and cleanup are still running. Abort and
+	// supersede leave it alone so they can never rewrite its terminal status.
+	ownershipFinishing
+)
+
+// managedRun is the one in-memory record of a run's ownership. RunManager.mu
+// guards the table and every state transition; abort, supersede, respond and
+// shutdown consult it before the database.
+type managedRun struct {
+	run      *db.Run
+	state    runOwnership
+	handle   *runHandle
+	executor *pipeline.Executor
+}
+
 // maxSubscribersPerRun bounds the global mailbox footprint: queued bytes can
 // never exceed activeRuns × maxSubscribersPerRun × mailboxMaxBytes. Refusing
 // past the cap is an ordinary error, never unbounded growth.
@@ -88,10 +138,8 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 	if stepFactory == nil {
 		stepFactory = func() []pipeline.Step { return steps.AllSteps() }
 	}
-	return &RunManager{
-		executors:     make(map[string]*pipeline.Executor),
-		cancels:       make(map[string]context.CancelCauseFunc),
-		dones:         make(map[string]chan struct{}),
+	m := &RunManager{
+		runs:          make(map[string]*managedRun),
 		db:            database,
 		paths:         p,
 		steps:         stepFactory,
@@ -99,6 +147,431 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		stateRevs:     make(map[string]int64),
 		completedRuns: make(map[string]bool),
 	}
+	m.limitsCache = runLimits{max: config.DefaultMaxConcurrentRuns}
+	m.claimQueued = database.ClaimQueuedRun
+	m.markQueued = database.MarkRunQueued
+	m.sched = newSlotScheduler(m.liveLimits, &m.mu)
+	m.sched.start = m.startQueuedRun
+	return m
+}
+
+// runLimits is the scheduling slice of the global config.
+type runLimits struct {
+	loaded  bool
+	modTime time.Time
+	size    int64
+	max     int
+	hold    bool
+}
+
+// SeedLimits installs the limits from the validated startup configuration
+// before any recovery or admission. A config file that is later missing or
+// unreadable then keeps these accepted limits instead of falling back to the
+// built-in defaults.
+func (m *RunManager) SeedLimits(cfg *config.GlobalConfig) {
+	if cfg == nil {
+		return
+	}
+	m.limitsMu.Lock()
+	m.limitsCache = runLimits{max: cfg.Daemon.MaxConcurrentRuns, hold: cfg.Daemon.HoldSlotWhileParked}
+	m.limitsMu.Unlock()
+	pipeline.SetMaxConcurrentAgents(cfg.Daemon.MaxConcurrentAgents)
+	m.sched.refresh()
+}
+
+// liveLimits returns the current daemon.max_concurrent_runs and
+// daemon.hold_slot_while_parked. The global file is re-parsed only when its
+// mtime or size changes (parsing logs deprecation warnings, and this runs on
+// every slot yield), so an edit applies to the next scheduling decision. An
+// unreadable file keeps the last good limits.
+func (m *RunManager) liveLimits() (int, bool) {
+	m.limitsMu.Lock()
+	defer m.limitsMu.Unlock()
+	path := m.paths.ConfigFile()
+	info, err := os.Stat(path)
+	if err != nil {
+		// A file that vanished (or cannot be inspected) keeps the limits last
+		// accepted: parsing a missing file would yield the built-in defaults and
+		// silently replace what the operator configured.
+		return m.limitsCache.max, m.limitsCache.hold
+	}
+	if m.limitsCache.loaded && info.ModTime().Equal(m.limitsCache.modTime) && info.Size() == m.limitsCache.size {
+		return m.limitsCache.max, m.limitsCache.hold
+	}
+	cfg, loadErr := config.LoadGlobal(path)
+	if loadErr != nil || cfg == nil {
+		if loadErr != nil {
+			slog.Warn("failed to load global config for run limits; keeping previous limits", "error", loadErr)
+		}
+		return m.limitsCache.max, m.limitsCache.hold
+	}
+	m.limitsCache = runLimits{loaded: err == nil, max: cfg.Daemon.MaxConcurrentRuns, hold: cfg.Daemon.HoldSlotWhileParked}
+	if err == nil {
+		m.limitsCache.modTime, m.limitsCache.size = info.ModTime(), info.Size()
+	}
+	pipeline.SetMaxConcurrentAgents(cfg.Daemon.MaxConcurrentAgents)
+	return m.limitsCache.max, m.limitsCache.hold
+}
+
+// limitWatchInterval is how often the daemon notices an edited global config
+// and applies a changed run limit without waiting for the next launch or run
+// exit. A variable so tests can shorten it.
+var limitWatchInterval = 2 * time.Second
+
+// StartLimitWatcher applies edits to daemon.max_concurrent_runs and
+// daemon.hold_slot_while_parked without a restart: it re-checks the global
+// config file's mtime on a short interval and drains the queue, so a raised
+// cap starts queued runs promptly. Lowering the cap never touches a running
+// run; it only holds back new admissions until usage drops below it. The
+// watcher stops with Shutdown.
+func (m *RunManager) StartLimitWatcher() {
+	m.watchOnce.Do(func() {
+		m.watchStop = make(chan struct{})
+		m.wg.Add(1)
+		go func() {
+			defer m.wg.Done()
+			ticker := time.NewTicker(limitWatchInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-m.watchStop:
+					return
+				case <-ticker.C:
+					m.sched.dispatch()
+				}
+			}
+		}()
+	})
+}
+
+// ReloadLimits re-reads the scheduling limits from the global config now,
+// starts whatever queued runs the new cap admits, and returns the resulting
+// slot usage. It is what `daemon set` calls over IPC.
+func (m *RunManager) ReloadLimits() ipc.SlotsResult {
+	m.limitsMu.Lock()
+	m.limitsCache.loaded = false
+	m.limitsMu.Unlock()
+	m.sched.dispatch()
+	return m.SlotUsage()
+}
+
+// SlotUsage reports the current cap and slot usage.
+func (m *RunManager) SlotUsage() ipc.SlotsResult {
+	m.sched.refresh()
+	st := m.sched.stats()
+	return ipc.SlotsResult{
+		MaxConcurrentRuns:   st.Max,
+		HoldSlotWhileParked: st.Hold,
+		InUse:               st.Active,
+		Queued:              st.Queued,
+		ParkedReleased:      st.Yielded,
+	}
+}
+
+func (m *RunManager) startQueuedRun(runID string, slot *runSlot) (func(), bool) {
+	if m.shuttingDown.Load() {
+		return slot.Release, true
+	}
+	if m.beforeQueuedRegister != nil {
+		m.beforeQueuedRegister()
+	}
+	if m.shuttingDown.Load() {
+		return slot.Release, true
+	}
+	claimed, err := m.claimQueued(runID)
+	if err != nil {
+		slog.Error("failed to claim queued run; leaving it in place", "run_id", runID, "error", err)
+		m.sched.retrying = true
+		m.wg.Add(1)
+		return func() {
+			go func() {
+				defer m.wg.Done()
+				<-time.After(claimRetryDelay)
+				m.mu.Lock()
+				m.sched.retrying = false
+				m.mu.Unlock()
+				m.sched.dispatch()
+			}()
+		}, false
+	}
+	if !claimed {
+		delete(m.runs, runID)
+		return slot.Release, true
+	}
+	runCtx, cancel := context.WithCancelCause(context.Background())
+	handle := &runHandle{cancel: cancel, runCtx: runCtx, done: make(chan struct{})}
+	m.runs[runID].state = ownershipClaimed
+	m.runs[runID].handle = handle
+	m.wg.Add(1)
+	return func() {
+		go func() {
+			defer m.wg.Done()
+			m.launchQueuedRun(runID, slot, handle)
+		}()
+	}, true
+}
+
+// launchQueuedRun finishes the launch of a run taken off the queue, rebuilding
+// everything from its row. Setup failures use failRunSetup to preserve a prior
+// cancellation cause; there is no caller left to return them to.
+func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHandle) {
+	defer func() {
+		// launchRun transfers the handle to the run goroutine once the
+		// executor exists; any earlier exit must unregister it here.
+		if r := recover(); r != nil {
+			slog.Error("panic launching queued run", "run_id", runID, "panic", r)
+			m.failRunSetup(handle.runCtx, runID, false, fmt.Sprintf("internal panic: %v", r))
+		}
+		if !handle.consumed {
+			m.mu.Lock()
+			if owned := m.runs[runID]; owned != nil && owned.handle == handle {
+				delete(m.runs, runID)
+			}
+			m.mu.Unlock()
+			handle.cancel(nil)
+			close(handle.done)
+			// Once consumed, the run goroutine owns the slot and frees it.
+			slot.Release()
+		}
+	}()
+	if cause := context.Cause(handle.runCtx); cause != nil {
+		m.failRunSetup(handle.runCtx, runID, false, cause.Error())
+		return
+	}
+	run, err := m.db.GetRun(runID)
+	if err != nil || run == nil {
+		slog.Error("queued run is unreadable", "run_id", runID, "error", err)
+		m.failRunSetup(handle.runCtx, runID, false, "queued run is unreadable")
+		return
+	}
+	fail := func(msg string) {
+		slog.Error("queued run cannot start", "run_id", runID, "error", msg)
+		m.failRunSetup(handle.runCtx, runID, false, msg)
+	}
+	repo, err := m.db.GetRepo(run.RepoID)
+	if err != nil || repo == nil {
+		fail("queued run repository is missing")
+		return
+	}
+	var spec queueSpec
+	raw, err := m.db.GetRunQueueSpec(runID)
+	if err != nil {
+		fail(fmt.Sprintf("read queued run spec: %s", err))
+		return
+	}
+	if raw != "" {
+		if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+			fail(fmt.Sprintf("decode queued run spec: %s", err))
+			return
+		}
+	}
+	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		fail(fmt.Sprintf("load config: %s", err))
+		return
+	}
+	_, _ = m.launchRun(handle.runCtx, repo, run, globalCfg, spec.Trigger, spec.SkipSteps, slot, handle)
+}
+
+// failRunSetup preserves cancellation over the error from interrupted setup.
+// Its conditional write leaves terminal outcomes alone, and subscribers see
+// the saved verdict rather than a competing local failure reason.
+// started must become true once worktree creation succeeds: only failures before
+// that boundary can release custody without inspecting a managed worktree head.
+func (m *RunManager) failRunSetup(ctx context.Context, runID string, started bool, reason string) {
+	m.mu.Lock()
+	status := types.RunFailed
+	cause := context.Cause(ctx)
+	if owned := m.runs[runID]; owned != nil && owned.handle != nil {
+		if original := context.Cause(owned.handle.runCtx); original != nil {
+			cause = original
+		}
+	}
+	if cause != nil {
+		status, reason = types.RunCancelled, cause.Error()
+	}
+	terminate := m.db.TerminateActiveRun
+	if !started {
+		terminate = m.db.TerminateUnstartedRun
+	}
+	_, err := terminate(runID, reason, status)
+	run, readErr := m.db.GetRun(runID)
+	m.mu.Unlock()
+	if err != nil {
+		slog.Warn("failed to persist run setup failure", "run_id", runID, "error", err)
+	}
+	if readErr != nil {
+		slog.Warn("failed to read run setup outcome", "run_id", runID, "error", readErr)
+		return
+	}
+	if run != nil && !run.Status.Active() {
+		reason = ""
+		if run.Error != nil {
+			reason = *run.Error
+		}
+		m.broadcastTerminal(run, run.Status, reason)
+	}
+}
+
+// claimRetryDelay spaces retries of a queued run whose claim failed, so a
+// persistent database fault cannot spin the queue. A variable for tests.
+var claimRetryDelay = time.Second
+
+// broadcastTerminal tells subscribers a run that never reached its executor
+// ended, and closes its streams.
+func (m *RunManager) broadcastTerminal(run *db.Run, status types.RunStatus, reason string) {
+	s := string(status)
+	m.broadcast(ipc.Event{
+		Type:   ipc.EventRunCompleted,
+		RunID:  run.ID,
+		RepoID: run.RepoID,
+		Status: &s,
+		Branch: &run.Branch,
+		Error:  &reason,
+	})
+	m.closeSubscribers(run.ID)
+}
+
+// markFinishing records that a run's Execute/Resume has returned. Its outcome
+// is decided from here on, so cancellation no longer applies to it.
+// afterExecute and whileFinishing are test seams around the transition.
+func (m *RunManager) markFinishing(runID string) {
+	if m.afterExecute != nil {
+		m.afterExecute(runID)
+	}
+	m.mu.Lock()
+	if owned := m.runs[runID]; owned != nil {
+		owned.state = ownershipFinishing
+	}
+	m.mu.Unlock()
+	if m.whileFinishing != nil {
+		m.whileFinishing(runID)
+	}
+}
+
+// annotateQueue stamps the run's place in the start order onto a snapshot.
+func (m *RunManager) annotateQueue(info *ipc.RunInfo) *ipc.RunInfo {
+	m.sched.annotate(info)
+	return info
+}
+
+// loadQueuedRuns reads and validates the durable queue after a restart. It is
+// read-only and all-or-nothing: either every queued row is returned in start
+// order, or an error is, with no side effect on the database or the manager.
+//
+// Daemon startup runs it BEFORE any recovery work and fails on its error. A
+// queued row that never reaches the ownership table can be neither started nor
+// aborted (abort and supersede consult the table first), so serving without it
+// would strand durable rows; and failing only after parked gates were resumed
+// would cancel them and persist the shutdown as their terminal failure. Failing
+// first leaves every gate parked and recoverable on the next start.
+func (m *RunManager) loadQueuedRuns() ([]*db.Run, error) {
+	ids, err := m.db.QueuedRunIDs()
+	if err != nil {
+		return nil, fmt.Errorf("list queued runs: %w", err)
+	}
+	runs := make([]*db.Run, 0, len(ids))
+	for _, id := range ids {
+		run, err := m.db.GetRun(id)
+		if err != nil {
+			return nil, fmt.Errorf("read queued run %s: %w", id, err)
+		}
+		if run == nil {
+			return nil, fmt.Errorf("queued run %s disappeared", id)
+		}
+		runs = append(runs, run)
+	}
+	return runs, nil
+}
+
+// holdQueue keeps queued runs from starting until releaseQueue. Daemon startup
+// holds it before anything can dispatch.
+func (m *RunManager) holdQueue() {
+	m.mu.Lock()
+	m.sched.held = true
+	m.mu.Unlock()
+}
+
+// restoreQueuedRuns registers loaded queued rows in the ownership table and the
+// scheduler, in start order. Queued runs were never executing, so they stay
+// queued across a restart. It runs after recovered gates are resumed, so those
+// gates are already waiting for (or holding) slots and keep priority over the
+// restored new runs. Nothing is claimed or started here: startup holds the
+// queue until IPC is serving (see releaseQueue).
+func (m *RunManager) restoreQueuedRuns(runs []*db.Run) {
+	if len(runs) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(runs))
+	m.mu.Lock()
+	for _, run := range runs {
+		m.runs[run.ID] = &managedRun{run: run, state: ownershipQueued}
+		ids = append(ids, run.ID)
+	}
+	m.mu.Unlock()
+	slog.Info("restored queued runs", "count", len(ids))
+	m.sched.restoreQueue(ids)
+}
+
+// releaseQueue ends startup's hold: queued runs start, and the config watcher
+// begins. Daemon startup calls it only once IPC has bound and answered health,
+// so a startup that fails earlier leaves every queued row queued for the next.
+func (m *RunManager) releaseQueue() {
+	m.mu.Lock()
+	m.sched.held = false
+	m.mu.Unlock()
+	m.sched.dispatch()
+	m.StartLimitWatcher()
+}
+
+// cancelManagedRun is the single cancellation path for abort and supersede. It
+// consults only the ownership table first:
+//
+//   - queued: the cancellation is persisted first; only on success is the run
+//     dequeued. On error it stays queued in place and abortable.
+//   - claimed or recovering gate: the cancel handle is invoked at once, with no
+//     database access before it, so a failing database cannot keep a run alive
+//     (and a recovering gate needs no slot to be cancelled).
+//   - finishing: the outcome is already decided, so nothing is cancelled or
+//     rewritten.
+//
+// It returns the channel that closes when the cancelled run's workload has
+// stopped, or nil when there is nothing to wait for (a never-started queued run,
+// a finishing run, an unknown id). The state is read and acted on under one
+// hold of the ownership lock, so the channel is always the handle that was
+// actually signalled: a queued run that dispatch claimed a moment earlier is
+// cancelled as claimed, with its new handle and completion channel returned.
+func (m *RunManager) cancelManagedRun(runID, reason string) (<-chan struct{}, error) {
+	m.mu.Lock()
+	owned := m.runs[runID]
+	if owned == nil {
+		m.mu.Unlock()
+		return nil, nil
+	}
+	switch owned.state {
+	case ownershipQueued:
+		cancelled, err := m.db.CancelQueuedRun(runID, reason)
+		if err != nil {
+			m.mu.Unlock()
+			return nil, err
+		}
+		if !cancelled {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("queued run %s could not be cancelled", runID)
+		}
+		m.sched.removeQueuedLocked(runID)
+		delete(m.runs, runID)
+		m.mu.Unlock()
+		m.broadcastTerminal(owned.run, types.RunCancelled, reason)
+		return nil, nil
+	case ownershipFinishing:
+		m.mu.Unlock()
+		return nil, nil
+	}
+	owned.handle.cancel(errors.New(reason))
+	done := owned.handle.done
+	m.mu.Unlock()
+	return done, nil
 }
 
 type recoveredRunPlan struct {
@@ -279,8 +752,8 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	return cfg, nil
 }
 
-// pinnedRunGates reads back the gate list a run resolved at creation. An absent
-// pin means the bare core pipeline - the only sequence a run created before
+// pinnedRunGates reads back the gate list resolved during admitted-run setup.
+// An absent pin means the bare core pipeline - the only sequence a run created before
 // gates were pinned can have had - while an unusable one fails its caller
 // closed with a reason, because silently dropping it would resume the run
 // against a shorter pipeline than the one it recorded.
@@ -419,7 +892,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		return
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
+	slot := &runSlot{s: m.sched, runID: plan.run.ID}
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
+	executor.SetRunSlot(slot)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -431,12 +906,15 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	if hasRebaseCoreStep(plan.steps) {
 		executor.SetPRContextGuard(steps.GuardPRContext)
 	}
+	registerErr := executor.RegisterRecoveredGate(plan.run)
 	done := make(chan struct{})
 	m.mu.Lock()
-	m.executors[plan.run.ID] = executor
-	m.cancels[plan.run.ID] = cancel
-	m.dones[plan.run.ID] = done
+	m.runs[plan.run.ID] = &managedRun{run: plan.run, state: ownershipRecoveringGate, handle: &runHandle{runCtx: runCtx, cancel: cancel, done: done}, executor: executor}
 	m.mu.Unlock()
+	var waiter *slotWaiter
+	if registerErr == nil {
+		waiter = m.sched.requestSlot(plan.run.ID)
+	}
 
 	m.wg.Add(1)
 	go func() {
@@ -444,6 +922,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		defer m.wg.Done()
 		defer close(done)
 		parkedAtShutdown := false
+		defer slot.Release()
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				errMsg := fmt.Sprintf("internal panic: %v", recovered)
@@ -468,22 +947,35 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				m.cleanupRunEvidence(plan.cfg, plan.run.ID)
 			}
 			m.mu.Lock()
-			delete(m.executors, plan.run.ID)
-			delete(m.cancels, plan.run.ID)
-			delete(m.dones, plan.run.ID)
+			delete(m.runs, plan.run.ID)
 			m.mu.Unlock()
 		}()
 
-		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); errors.Is(err, pipeline.ErrParkedAtShutdown) {
+		if waiter != nil {
+			_ = slot.waitForSlot(runCtx, waiter)
+		}
+		m.mu.Lock()
+		m.runs[plan.run.ID].state = ownershipClaimed
+		m.mu.Unlock()
+		resumeErr := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
+		// Mark finishing before releasing: Release dispatches queued runs
+		// synchronously, and a push landing in that window must not treat
+		// this already-decided run as a claimed one to cancel and wait on.
+		m.markFinishing(plan.run.ID)
+		slot.Release()
+		if errors.Is(resumeErr, pipeline.ErrParkedAtShutdown) {
 			parkedAtShutdown = true
 			slog.Info("recovered run left parked for resume after daemon restart", "run_id", plan.run.ID)
 			return
-		} else if err != nil {
+		} else if err := resumeErr; err != nil {
 			if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
 				plan.run.Status = types.RunFailed
+				if runCtx.Err() != nil {
+					plan.run.Status = types.RunCancelled
+				}
 				plan.run.Error = &errMsg
-				if dbErr := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, types.RunFailed); dbErr != nil {
+				if dbErr := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, plan.run.Status); dbErr != nil {
 					slog.Error("failed to mark recovered run failed", "run_id", plan.run.ID, "error", dbErr)
 				}
 			}
@@ -776,8 +1268,8 @@ func branchFromRef(ref string) string {
 }
 
 // loadTrustedRepoConfig reads .no-mistakes.yaml from the trusted
-// default-branch commit (trustedSHA - the exact SHA startRun just fetched and
-// resolved) in the worktree and parses it. Reading at a pinned SHA, rather
+// default-branch commit (trustedSHA - a freshly fetched and resolved SHA)
+// in the worktree and parses it. Reading at a pinned SHA, rather
 // than the origin/<defaultBranch> remote-tracking ref, closes the stale-ref
 // hole: the gate worktree shares refs with the bare repo, so without a fresh
 // fetch + resolve the ref could point at a commit a previous run left behind.
@@ -1451,7 +1943,8 @@ func loadRepoConfigAtSHA(ctx context.Context, dir, sha string) (*config.RepoConf
 	return cfg, nil
 }
 
-// startRun creates a run, sets up a worktree, and launches pipeline execution.
+// startRun records a run for admission; worktree setup and pipeline execution
+// begin only after a slot is granted. A queued launch returns its run ID immediately.
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
 // step uses it instead of inferring from transcripts.
 func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prBaseBranch string, omitIntent bool, externalCIOwner, planID string, closingIssues []string, profiles ...*agentcfg.PiProfile) (string, error) {
@@ -1610,7 +2103,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}
 	}
 	// Cancel any active run for this repo+branch.
-	m.cancelActiveRuns(repo.ID, branch)
+	if err := m.cancelActiveRuns(repo.ID, branch); err != nil {
+		return "", err
+	}
 
 	storedIntent := intent
 	if source != db.RunIntentSourceRerun && launchNonce == "" && plan == nil {
@@ -1642,7 +2137,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	}
 	if inherited := strings.TrimSpace(inheritedPRURL); inherited != "" {
 		if err := m.db.UpdateRunPRURL(run.ID, inherited); err != nil {
-			m.db.UpdateRunError(run.ID, fmt.Sprintf("inherit PR URL: %s", err))
+			m.failRunSetup(ctx, run.ID, false, fmt.Sprintf("inherit PR URL: %s", err))
 			trackStartFailure("inherit_pr_url")
 			return "", fmt.Errorf("inherit PR URL: %w", err)
 		}
@@ -1651,7 +2146,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	if len(closingIssues) > 0 {
 		if err := m.db.UpdateRunClosingIssueRefs(run.ID, closingIssues); err != nil {
 			msg := fmt.Sprintf("persist closing issue references: %s", err)
-			m.db.UpdateRunError(run.ID, msg)
+			m.failRunSetup(ctx, run.ID, false, msg)
 			trackStartFailure("persist_closing_issue_refs")
 			return "", fmt.Errorf("persist closing issue references: %w", err)
 		}
@@ -1660,10 +2155,139 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// Legacy launches retain their existing failed-row diagnostics on a bad
 	// global config. Explicit profiles already resolved before supersession.
 	if globalCfgErr != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", globalCfgErr))
+		m.failRunSetup(ctx, run.ID, false, fmt.Sprintf("load config: %s", globalCfgErr))
 		trackStartFailure("load_global_config")
 		return "", fmt.Errorf("load global config: %w", globalCfgErr)
 	}
+
+	// Admission. The run row is durable from here on. A run that fits under
+	// daemon.max_concurrent_runs starts now, exactly as before. Otherwise it is
+	// recorded as queued and this call returns at once: no worktree, no agent,
+	// no executor. The queue drain (slotScheduler.dispatch) finishes the launch
+	// from the row alone, so a queued run also survives a daemon restart.
+	slot, err := m.admitRun(run, queueSpec{Trigger: trigger, SkipSteps: skipSteps})
+	if err != nil {
+		// The row exists but is neither queued nor owned: end it through the
+		// shared setup-failure path (conditional, and it tells subscribers), so no
+		// orphan is left to block the branch's active-run lookup.
+		m.failRunSetup(ctx, run.ID, false, fmt.Sprintf("queue run: %s", err))
+		trackStartFailure("queue_run")
+		return "", fmt.Errorf("queue run: %w", err)
+	}
+	if slot == nil {
+		telemetry.Track("run", telemetry.Fields{
+			"action":      "queued",
+			"trigger":     trigger,
+			"branch_role": branchRole,
+		})
+		return run.ID, nil
+	}
+	return m.launchRun(ctx, repo, run, globalCfg, trigger, skipSteps, slot, nil)
+}
+
+// queueSpec is what a queued run needs to start that its row does not already
+// carry. Everything else (intent, PR base, pins, closing issues, shipping
+// options) is persisted on the run itself.
+type queueSpec struct {
+	Trigger   string           `json:"trigger"`
+	SkipSteps []types.StepName `json:"skip_steps,omitempty"`
+}
+
+// runHandle is the cancel/done pair registered for a run before its launch
+// setup runs. A queued run's handle is registered when the queue drain picks
+// it, so an abort that arrives during setup still reaches the run.
+type runHandle struct {
+	cancel   context.CancelCauseFunc
+	runCtx   context.Context
+	done     chan struct{}
+	consumed bool
+}
+
+// admitRun decides a new run's admission and, when it does not fit, queues it.
+// The capacity decision and the durable plus in-memory queue insertion happen
+// under one admission lock, so a later launch can never be admitted into a slot
+// that freed while an earlier launch was still on its way into the queue: that
+// later launch waits for the lock, finds the earlier run queued, and queues
+// behind it. A nil slot means the run was queued; otherwise the caller owns the
+// returned slot.
+func (m *RunManager) admitRun(run *db.Run, spec queueSpec) (*runSlot, error) {
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		return nil, err
+	}
+	m.sched.admitMu.Lock()
+	defer m.sched.admitMu.Unlock()
+	if slot, ok := m.sched.tryAdmit(run.ID); ok {
+		return slot, nil
+	}
+	if m.afterFullDecision != nil {
+		m.afterFullDecision()
+	}
+	m.mu.Lock()
+	if _, err := m.markQueued(run.ID, string(raw)); err != nil {
+		m.mu.Unlock()
+		return nil, err
+	}
+	run.Status = types.RunQueued
+	m.runs[run.ID] = &managedRun{run: run, state: ownershipQueued}
+	m.sched.queued = append(m.sched.queued, run.ID)
+	m.mu.Unlock()
+	m.sched.dispatch()
+	return nil, nil
+}
+
+// launchRun performs the setup and background start of a run that already
+// holds slot. handle is nil for a launch that runs inline in the request and
+// non-nil for one the queue drain started. The slot is released on every
+// return that did not hand it to the run goroutine.
+func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, globalCfg *config.GlobalConfig, trigger string, skipSteps []types.StepName, slot *runSlot, handle *runHandle) (runID string, err error) {
+	if handle == nil {
+		runCtx, cancel := context.WithCancelCause(context.Background())
+		handle = &runHandle{runCtx: runCtx, cancel: cancel, done: make(chan struct{})}
+		m.mu.Lock()
+		m.runs[run.ID] = &managedRun{run: run, state: ownershipClaimed, handle: handle}
+		m.mu.Unlock()
+		defer func() {
+			if !handle.consumed {
+				m.mu.Lock()
+				delete(m.runs, run.ID)
+				m.mu.Unlock()
+				handle.cancel(nil)
+				close(handle.done)
+			}
+		}()
+	}
+	setupCtx := ctx
+	stop := context.AfterFunc(setupCtx, func() { handle.cancel(context.Cause(setupCtx)) })
+	defer stop()
+	ctx = handle.runCtx
+	branch, headSHA := run.Branch, run.HeadSHA
+	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
+	trackStartFailure := func(stage string) {
+		telemetry.Track("run", telemetry.Fields{
+			"action":      "start_failed",
+			"trigger":     trigger,
+			"branch_role": branchRole,
+			"stage":       stage,
+		})
+	}
+	storedPRBaseBranch := ""
+	if run.PRBaseBranch != nil {
+		storedPRBaseBranch = *run.PRBaseBranch
+	}
+	bgOwnsSlot := false
+	started := false
+	defer func() {
+		if !bgOwnsSlot {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("internal panic: %v", r)
+			}
+			if err != nil {
+				m.failRunSetup(setupCtx, run.ID, started, err.Error())
+			}
+			slot.Release()
+		}
+	}()
 
 	// Create worktree from the gate bare repo, where this repository's
 	// worktree placement says it belongs (see internal/worktrees). This is the
@@ -1675,26 +2299,24 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	layout := worktrees.New(m.paths, globalCfg.WorktreeRoots)
 	checkouts, err := registeredCheckouts(m.db)
 	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("list registered checkouts: %s", err))
 		trackStartFailure("list_registered_checkouts")
 		return "", fmt.Errorf("list registered checkouts: %w", err)
 	}
 	if err := layout.ValidateCheckout(repo.WorkingPath, checkouts...); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("worktree placement: %s", err))
 		trackStartFailure("invalid_worktree_placement")
 		return "", fmt.Errorf("worktree placement: %w", err)
 	}
 	wtDir := layout.Dir(repo.ID, repo.WorkingPath, run.ID)
 	if err := m.db.SetRunWorktreeDir(run.ID, wtDir); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("record worktree placement: %s", err))
 		trackStartFailure("record_worktree_placement")
 		return "", fmt.Errorf("record worktree placement: %w", err)
 	}
 	if err := git.WorktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)
 	}
+
+	started = true
 
 	// The worktree exists from here on, so cleanup ownership is armed from here
 	// on: every later setup failure returns through this defer, and the
@@ -1709,13 +2331,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	}()
 
 	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("configure worktree git identity: %s", err))
 		trackStartFailure("configure_worktree_identity")
 		return "", fmt.Errorf("configure worktree git identity: %w", err)
 	}
 	if storedPRBaseBranch != "" {
 		if err := steps.VerifyRemoteBranchExists(ctx, wtDir, storedPRBaseBranch); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
 			trackStartFailure("pr_base_branch_missing")
 			return "", err
 		}
@@ -1732,7 +2352,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 
 	repoCfg, err := config.LoadRepo(wtDir)
 	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", err))
 		trackStartFailure("load_repo_config")
 		return "", fmt.Errorf("load repo config: %w", err)
 	}
@@ -1753,7 +2372,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// SECURITY: a trusted-config fetch failure must abort, not silently disable
 	// the disable_project_settings opt-out (see assertGateTrustedConfigReadable).
 	if err := assertGateTrustedConfigReadable(ctx, wtDir, repo.DefaultBranch, trustedSHA); err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("trusted_config_unreadable")
 		return "", err
 	}
@@ -1770,29 +2388,24 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	}
 	cfg := config.MergeForRemote(globalCfg, effectiveRepoCfg, repo.UpstreamURL)
 	if err := cfg.Review.ValidatePathInstructionsBudget(); err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("review_path_instructions_budget")
 		return "", err
 	}
 	if run.PiProfile != nil {
 		if err := cfg.ValidatePiProfileAgents(); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
 			return "", err
 		}
 		if err := cfg.ApplyPiProfile(run.PiProfile); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
 			return "", err
 		}
 	}
 	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("evidence_root")
 		return "", err
 	}
 	cfg.TrustedConfigSHA = trustedSHA
 	if globalCfg.Eval.CaptureProvenance {
 		if err := cfg.EnableEvalProvenance(globalCfg, effectiveRepoCfg); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
 			trackStartFailure("eval_provenance")
 			return "", err
 		}
@@ -1802,7 +2415,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		err = forgecontext.RefuseProviderPluginOverlap(ctx, forgeCtx, cfg.ProviderPlugins, repo.UpstreamURL)
 	}
 	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("resolve forge profile: %s", err))
 		trackStartFailure("resolve_forge_profile")
 		return "", fmt.Errorf("resolve forge profile: %w", err)
 	}
@@ -1812,7 +2424,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// fail-closed check.
 	ag, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forgeCtx))
 	if err != nil {
-		m.db.UpdateRunError(run.ID, err.Error())
 		trackStartFailure("create_agent")
 		return "", err
 	}
@@ -1825,12 +2436,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// its resume at a step sequence it never executed.
 	pinnedGates, err := config.MarshalGates(cfg.Gates)
 	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("record gates: %s", err))
 		trackStartFailure("record_gates")
 		return "", fmt.Errorf("record gates: %w", err)
 	}
 	if err := m.db.SetRunGates(run.ID, pinnedGates); err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("record gates: %s", err))
 		trackStartFailure("record_gates")
 		return "", fmt.Errorf("record gates: %w", err)
 	}
@@ -1846,8 +2455,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	})
 
 	// Create executor with event broadcast.
-	runCtx, cancel := context.WithCancelCause(context.Background())
+	runCtx, cancel := handle.runCtx, handle.cancel
 	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	executor.SetRunSlot(slot)
 	executor.SetForgeContext(forgeCtx)
 	if hasRebaseCoreStep(execSteps) {
 		executor.SetPRContextGuard(steps.GuardPRContext)
@@ -1861,16 +2471,17 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}()
 	})
 
-	// Track executor.
-	done := make(chan struct{})
+	// Attach the executor to the handle registered before setup, so cancellation
+	// keeps the same owner as setup hands off to background execution.
+	done := handle.done
 	m.mu.Lock()
-	m.executors[run.ID] = executor
-	m.cancels[run.ID] = cancel
-	m.dones[run.ID] = done
+	m.runs[run.ID].executor = executor
+	handle.consumed = true
 	m.mu.Unlock()
 
-	// Background goroutine now owns worktree cleanup.
+	// Background goroutine now owns worktree cleanup and the run's slot.
 	bgOwnsWorktree = true
+	bgOwnsSlot = true
 
 	// Launch pipeline in background.
 	m.wg.Add(1)
@@ -1879,6 +2490,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		defer m.wg.Done()
 		defer close(done)
 		parkedAtShutdown := false
+		// Registered before the recover handler below so it runs after it:
+		// whether the pipeline completed, failed, was cancelled or panicked,
+		// the slot is freed and the queue drains.
+		defer slot.Release()
 		defer func() {
 			if r := recover(); r != nil {
 				errMsg := fmt.Sprintf("internal panic: %v", r)
@@ -1924,17 +2539,24 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			}
 			// Remove tracking.
 			m.mu.Lock()
-			delete(m.executors, run.ID)
-			delete(m.cancels, run.ID)
-			delete(m.dones, run.ID)
+			delete(m.runs, run.ID)
 			m.mu.Unlock()
 		}()
 
-		if err := executor.Execute(runCtx, run, repo, wtDir); errors.Is(err, pipeline.ErrParkedAtShutdown) {
+		err := executor.Execute(runCtx, run, repo, wtDir)
+		// The pipeline's own work is over. Mark the run finishing first, so
+		// abort and supersede leave its decided outcome alone even while
+		// Release synchronously dispatches queued runs, then free the slot
+		// before the eval collection below, which is local bookkeeping and
+		// not pipeline load.
+		m.markFinishing(run.ID)
+		slot.Release()
+		if errors.Is(err, pipeline.ErrParkedAtShutdown) {
 			parkedAtShutdown = true
 			slog.Info("run left parked for resume after daemon restart", "run_id", run.ID)
 			return
-		} else if err != nil {
+		}
+		if err != nil {
 			fields := telemetry.Fields{
 				"action":      "finished",
 				"trigger":     trigger,
@@ -2147,6 +2769,25 @@ func telemetryFailedStepName(database *db.DB, runID string) string {
 	return ""
 }
 
+// activeAgentPIDs snapshots live executors without depending on persisted state.
+func (m *RunManager) activeAgentPIDs() []int {
+	m.mu.Lock()
+	var executors []*pipeline.Executor
+	for _, owned := range m.runs {
+		if owned.executor != nil {
+			executors = append(executors, owned.executor)
+		}
+	}
+	m.mu.Unlock()
+	var pids []int
+	for _, exec := range executors {
+		if pid := exec.ActiveAgentPID(); pid > 0 {
+			pids = append(pids, pid)
+		}
+	}
+	return pids
+}
+
 // HandleRespond routes a user approval action to the executor for the given run.
 func (m *RunManager) HandleRespond(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string) error {
 	_, err := m.HandleRespondWithOverrides(runID, step, action, findingIDs, nil, nil, nil, "")
@@ -2164,6 +2805,26 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 // that may carry an owner-accepted Test gap. The pre-check here and the
 // executor's live gate share db.StepResult.AcceptedGapRefusal.
 func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps) (pipeline.RespondDispositions, error) {
+	if action == types.ActionAbort {
+		m.mu.Lock()
+		owned := m.runs[runID]
+		var executor *pipeline.Executor
+		var cancel context.CancelCauseFunc
+		if owned != nil {
+			executor = owned.executor
+			if owned.state == ownershipRecoveringGate {
+				cancel = owned.handle.cancel
+			}
+		}
+		m.mu.Unlock()
+		if executor != nil {
+			result, err := executor.RespondWithOverrides(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason)
+			if err == nil && cancel != nil {
+				cancel(errors.New(types.RunCancelReasonAbortedByUser))
+			}
+			return result, err
+		}
+	}
 	run, err := m.db.GetRun(runID)
 	if err != nil {
 		return pipeline.RespondDispositions{}, err
@@ -2206,10 +2867,18 @@ func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.Step
 		}
 	}
 	m.mu.Lock()
-	exec, ok := m.executors[runID]
+	owned := m.runs[runID]
+	var exec *pipeline.Executor
+	if owned != nil {
+		exec = owned.executor
+	}
 	m.mu.Unlock()
+	ok := exec != nil
 
 	if !ok {
+		if run != nil && run.Status == types.RunQueued {
+			return pipeline.RespondDispositions{}, fmt.Errorf("run %s is queued and has not started; there is no gate to respond to yet", runID)
+		}
 		return pipeline.RespondDispositions{}, fmt.Errorf("no active executor for run %s", runID)
 	}
 
@@ -2253,8 +2922,13 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 	}
 
 	m.mu.Lock()
-	exec, ok := m.executors[runID]
+	owned := m.runs[runID]
+	var exec *pipeline.Executor
+	if owned != nil {
+		exec = owned.executor
+	}
 	m.mu.Unlock()
+	ok := exec != nil
 	if !ok {
 		return nil, fmt.Errorf("no active executor for run %s", runID)
 	}
@@ -2375,11 +3049,21 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 // orphaned goroutines from continuing agent calls and git operations.
 func (m *RunManager) Shutdown() {
 	m.shuttingDown.Store(true)
+	m.watchOnce.Do(func() {}) // no watcher may start after shutdown begins
+	if m.watchStop != nil {
+		select {
+		case <-m.watchStop:
+		default:
+			close(m.watchStop)
+		}
+	}
 
 	m.mu.Lock()
-	cancels := make(map[string]context.CancelCauseFunc, len(m.cancels))
-	for id, cancel := range m.cancels {
-		cancels[id] = cancel
+	cancels := make(map[string]context.CancelCauseFunc, len(m.runs))
+	for id, owned := range m.runs {
+		if owned.handle != nil {
+			cancels[id] = owned.handle.cancel
+		}
 	}
 	m.mu.Unlock()
 
@@ -2403,15 +3087,13 @@ func (m *RunManager) Shutdown() {
 // HandleCancel stops an active run and propagates cancellation to the executor.
 func (m *RunManager) HandleCancel(runID string) error {
 	m.mu.Lock()
-	cancel, ok := m.cancels[runID]
+	owned := m.runs[runID]
 	m.mu.Unlock()
-
-	if !ok {
+	if owned == nil {
 		return fmt.Errorf("no active run %s", runID)
 	}
-
-	cancel(fmt.Errorf(types.RunCancelReasonAbortedByUser))
-	return nil
+	_, err := m.cancelManagedRun(runID, types.RunCancelReasonAbortedByUser)
+	return err
 }
 
 // cancelActiveRuns cancels any in-progress runs for the given repo+branch
@@ -2419,32 +3101,30 @@ func (m *RunManager) HandleCancel(runID string) error {
 // concurrent pushes to upstream.
 // The cancellation cause is propagated to the executor via context.Cause,
 // which uses it as the run's error message in the DB.
-func (m *RunManager) cancelActiveRuns(repoID, branch string) {
-	runs, err := m.db.GetRunsByRepo(repoID)
-	if err != nil {
-		slog.Error("failed to query active runs for cancellation", "repo", repoID, "branch", branch, "error", err)
-		return
+func (m *RunManager) cancelActiveRuns(repoID, branch string) error {
+	m.mu.Lock()
+	var ids []string
+	for id, owned := range m.runs {
+		// A finishing run's outcome is decided and its pipeline is over, so a
+		// new push neither cancels nor waits for it.
+		if owned.run.RepoID == repoID && owned.run.Branch == branch && owned.state != ownershipFinishing {
+			ids = append(ids, id)
+		}
 	}
-
-	var toWait []chan struct{}
-	for _, run := range runs {
-		if run.Branch != branch {
-			continue
+	m.mu.Unlock()
+	if m.afterSupersedeSnapshot != nil {
+		m.afterSupersedeSnapshot()
+	}
+	// The snapshot only names candidates. Each is cancelled by re-reading its
+	// state under the ownership lock (cancelManagedRun), which also hands back
+	// the completion channel of the handle it actually signalled - so a run that
+	// dispatch claimed after the snapshot is waited for like any other.
+	var toWait []<-chan struct{}
+	for _, id := range ids {
+		done, err := m.cancelManagedRun(id, types.RunCancelReasonSuperseded)
+		if err != nil {
+			return err
 		}
-		if run.Status != types.RunPending && run.Status != types.RunRunning {
-			continue
-		}
-
-		m.mu.Lock()
-		cancel, ok := m.cancels[run.ID]
-		done := m.dones[run.ID]
-		m.mu.Unlock()
-		if !ok {
-			continue
-		}
-
-		cancel(fmt.Errorf(types.RunCancelReasonSuperseded))
-		slog.Info("cancelled active run", "run_id", run.ID, "repo_id", repoID, "branch", branch)
 		if done != nil {
 			toWait = append(toWait, done)
 		}
@@ -2456,7 +3136,8 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 		case <-done:
 		case <-timeout:
 			slog.Warn("timed out waiting for cancelled runs to finish")
-			return
+			return fmt.Errorf("timed out waiting for cancelled runs")
 		}
 	}
+	return nil
 }

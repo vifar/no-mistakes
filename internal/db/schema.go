@@ -445,4 +445,17 @@ var migrationStatements = []string{
 	// Set with a CI repair's carried review approval and cleared by the next
 	// publication (UpdateRunHeadSHAWithCarriedReview / UpdateRunPublication).
 	`ALTER TABLE runs ADD COLUMN ci_test_restart_pending INTEGER NOT NULL DEFAULT 0`,
+	// A launch that arrives while the daemon is at daemon.max_concurrent_runs is
+	// recorded with status 'queued' instead of starting. queued_at (unix
+	// nanoseconds) orders the FIFO drain, including after a daemon restart, and
+	// queue_spec holds the start parameters the row does not already carry (the
+	// trigger and skipped steps). Both are NULL for every run that started
+	// without waiting.
+	`ALTER TABLE runs ADD COLUMN queued_at INTEGER`,
+	`ALTER TABLE runs ADD COLUMN queue_spec TEXT`,
+	// The operator's accepted response to a parked gate while the run waits for a
+	// run-concurrency slot (JSON). The step keeps its parked status until the
+	// response is dispatched, so a crash during the wait leaves a recoverable
+	// gate; NULL means no response is pending. Cleared when dispatch begins.
+	`ALTER TABLE step_results ADD COLUMN pending_response TEXT`,
 }

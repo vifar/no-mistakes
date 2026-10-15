@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
@@ -58,6 +59,59 @@ func newIntentStepContext(t *testing.T) *pipeline.StepContext {
 		Log:      func(string) {},
 		LogChunk: func(string) {},
 		LogFile:  func(string) {},
+	}
+}
+
+func TestIntentExtractionBudgetStartsAfterAgentAdmission(t *testing.T) {
+	pipeline.SetMaxConcurrentAgents(1)
+	defer pipeline.SetMaxConcurrentAgents(0)
+	sctx := newIntentStepContext(t)
+	sctx.Agent = agent.NewNoop()
+	_, release, err := sctx.AcquireAgent(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+	entered := make(chan time.Duration, 1)
+	step := &IntentStep{runIntent: func(ctx context.Context, admitted *pipeline.StepContext) (*intent.Result, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return nil, errors.New("extraction has no deadline")
+		}
+		entered <- time.Until(deadline)
+		if _, err := admitted.Agent.Run(ctx, agent.RunOpts{}); err != nil {
+			return nil, err
+		}
+		return &intent.Result{Summary: "admitted intent", AgentName: "noop", SessionID: "s1"}, nil
+	}}
+	done := make(chan error, 1)
+	go func() {
+		outcome, err := step.Execute(sctx)
+		if err == nil && (outcome == nil || outcome.Skipped) {
+			err = errors.New("admitted extraction was skipped")
+		}
+		done <- err
+	}()
+	select {
+	case <-entered:
+		release()
+		<-done
+		t.Fatal("extraction began before admission")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("admitted extraction did not finish")
+	}
+	if remaining := <-entered; remaining < intentExtractTimeout-50*time.Millisecond {
+		t.Fatalf("extraction inherited a spent admission budget: %s", remaining)
 	}
 }
 

@@ -575,7 +575,7 @@ The delivery tail (`push`, `pr`, `ci`) cannot be anchored: a gate that ran after
 
 Gates are inserted into the run's step sequence and never replace, reorder, or remove a core step. Two gates sharing an anchor run in the order they appear in the file. A gate shares its anchor's step order, so a restart that resets from the anchor resets the gate with it.
 
-A run resolves this list once when it starts. Adding or removing a gate on the default branch therefore applies to later runs and never retargets a run already in flight. [Daemon crash recovery](/no-mistakes/concepts/daemon/#crash-recovery) owns how the recorded list is restored after a restart.
+A run resolves this list once during setup after slot admission. A queued run has not pinned its gates yet and uses the trusted list fetched during that setup. Adding or removing a gate on the default branch never retargets a run whose list is already pinned. [Daemon crash recovery](/no-mistakes/concepts/daemon/#crash-recovery) owns how the recorded list is restored after a restart.
 
 #### Failure
 

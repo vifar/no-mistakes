@@ -169,14 +169,22 @@ func TestStepActivityFromLogUsesBoundedAllocationForLargeLogs(t *testing.T) {
 	}
 }
 
-type lifecycleTestAgent struct{}
+type lifecycleTestAgent struct {
+	observe func(int)
+}
 
 func (lifecycleTestAgent) Name() string { return "codex" }
 
-func (lifecycleTestAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+func (a lifecycleTestAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	if opts.OnLifecycle != nil {
 		opts.OnLifecycle(agent.LifecycleEvent{Agent: "codex", Phase: "start", PID: 4242, Message: "codex started pid=4242"})
+		if a.observe != nil {
+			a.observe(4242)
+		}
 		opts.OnLifecycle(agent.LifecycleEvent{Agent: "codex", Phase: "exit", PID: 4242, Message: "codex exited pid=4242 status=success"})
+		if a.observe != nil {
+			a.observe(0)
+		}
 	}
 	return &agent.Result{Text: "ok"}, nil
 }
@@ -197,7 +205,13 @@ func TestExecutor_AgentLifecycleLoggedAndClearsPID(t *testing.T) {
 		},
 	}
 
-	exec := NewExecutor(database, p, nil, lifecycleTestAgent{}, []Step{step}, nil)
+	var exec *Executor
+	ag := lifecycleTestAgent{observe: func(want int) {
+		if got := exec.ActiveAgentPID(); got != want {
+			t.Errorf("live agent PID = %d, want %d from lifecycle", got, want)
+		}
+	}}
+	exec = NewExecutor(database, p, nil, ag, []Step{step}, nil)
 	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
 		t.Fatalf("execute: %v", err)
 	}

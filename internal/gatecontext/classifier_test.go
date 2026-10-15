@@ -161,6 +161,49 @@ func TestInspectorUsesAuthenticatedProcessAncestryAfterCWDChange(t *testing.T) {
 	}
 }
 
+// Live executor ownership must reject agent descendants without a SQLite read;
+// removing that ownership after exit must allow ordinary callers again.
+func TestInspectorLiveAgentPIDsDoNotRequireDatabaseAccess(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	d, err := db.Open(filepath.Join(p.Root(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pids := []int{4100}
+	inspector := gatecontext.Inspector{
+		DB:              d,
+		Paths:           p,
+		ActiveAgentPIDs: func() []int { return pids },
+		ParentPID: func(pid int) (int, error) {
+			if pid == 4200 {
+				return 4100, nil
+			}
+			return 1, nil
+		},
+	}
+	for _, tc := range []struct {
+		peer   int
+		nested bool
+	}{
+		{4100, true},
+		{4200, true},
+		{9000, false},
+	} {
+		got, err := inspector.Inspect(context.Background(), gatecontext.Request{PeerPID: tc.peer})
+		if err != nil || got.Nested != tc.nested || got.AgentDescendant != tc.nested {
+			t.Fatalf("peer %d: result=%+v, error=%v, want nested=%v", tc.peer, got, err, tc.nested)
+		}
+	}
+	pids = nil
+	got, err := inspector.Inspect(context.Background(), gatecontext.Request{PeerPID: 4200})
+	if err != nil || got.Nested {
+		t.Fatalf("released agent: result=%+v, error=%v, want ordinary caller", got, err)
+	}
+}
+
 // TestInspectorAttributesRunInConfiguredWorktreeRoot covers a repository whose
 // run worktrees the operator placed in a directory of their own
 // (worktree_roots): the path no longer spells out <NM_HOME>/worktrees, so

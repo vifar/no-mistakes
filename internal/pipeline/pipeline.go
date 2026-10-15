@@ -52,8 +52,10 @@ type StepContext struct {
 	Log                func(string) // discrete log line (newline-terminated, user-visible + file)
 	LogChunk           func(string) // raw streaming chunk (user-visible + file)
 	LogFile            func(string) // file-only log callback (not shown to user)
-	Fixing             bool         // true when re-executing after a "fix" action
-	SkipFixExecution   bool         // replay an already-completed fix round's review turn only
+	// Slot is the run's daemon concurrency slot (nil: no cap); see RunSlot.
+	Slot             RunSlot
+	Fixing           bool // true when re-executing after a "fix" action
+	SkipFixExecution bool // replay an already-completed fix round's review turn only
 	// EvalReplay marks a review driven directly by `eval replay` rather than by
 	// the executor. Replay scores the review's findings against captured gold
 	// and never consumes the reviewed_paths certification, so ReviewStep skips

@@ -651,3 +651,56 @@ func TestGetStepsByRun_ReadOnlyToleratesPreActivityColumns(t *testing.T) {
 		t.Fatalf("missing columns must read as NULL: %+v", steps[0])
 	}
 }
+
+func TestResumeStepFromApprovalRollsBackOnRunWriteFailure(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/tmp/resume-atomic", "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := d.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusFixReview, 0, 100, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`CREATE TRIGGER deny_resume BEFORE UPDATE OF awaiting_agent_since ON runs BEGIN SELECT RAISE(FAIL, 'run write failed'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ResumeStepFromApproval(run.ID, step.ID, "waiting for slot", 250); err == nil {
+		t.Fatal("accepted a partial gate transition")
+	}
+	gotStep, err := d.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotRun, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotStep.Status != types.StepStatusFixReview || gotRun.AwaitingAgentSince == nil || gotRun.ParkedMS != 0 {
+		t.Fatalf("partial transition: step=%+v run=%+v", gotStep, gotRun)
+	}
+	if _, err := d.sql.Exec(`DROP TRIGGER deny_resume`); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ResumeStepFromApproval(run.ID, step.ID, "waiting for slot", 250); err != nil {
+		t.Fatal(err)
+	}
+	gotStep, err = d.GetStepResult(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotRun, err = d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotStep.Status != types.StepStatusRunning || gotStep.LastActivity == nil || *gotStep.LastActivity != "waiting for slot" || gotRun.AwaitingAgentSince != nil || gotRun.ParkedMS != 250 {
+		t.Fatalf("resumed gate: step=%+v run=%+v", gotStep, gotRun)
+	}
+}

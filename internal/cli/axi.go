@@ -183,6 +183,7 @@ func runAxiHome(cmd *cobra.Command) error {
 		{Key: "current_branch", Value: branchDisplay},
 		{Key: "daemon", Value: daemonState},
 	}
+	fields = append(fields, slotsFields(env.p)...)
 
 	var currentActive *db.Run
 	if branch != "" {

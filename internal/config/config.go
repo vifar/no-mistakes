@@ -223,7 +223,11 @@ type GlobalConfig struct {
 	// survives on this machine. Global-only for the same reason as Eval: it
 	// describes local disk retention, never a repository policy, so no
 	// pushed branch may set it.
-	Worktree                  Worktree      `yaml:"-"`
+	Worktree Worktree `yaml:"-"`
+	// Daemon bounds how much pipeline work the daemon runs at once. It is
+	// global-only for the same reason as Worktree: it describes this machine's
+	// capacity, so no pushed branch may widen or shrink it.
+	Daemon                    Daemon        `yaml:"-"`
 	CITimeout                 time.Duration `yaml:"-"`
 	StepQuietWarning          time.Duration `yaml:"-"`
 	AgentTimeout              time.Duration `yaml:"-"`
@@ -294,6 +298,7 @@ type globalConfigRaw struct {
 	ReviewAgents              map[string]ReviewAgent     `yaml:"review_agents"`
 	WorktreeRoots             map[string]string          `yaml:"worktree_roots"`
 	Worktree                  WorktreeRaw                `yaml:"worktree"`
+	Daemon                    DaemonRaw                  `yaml:"daemon"`
 	CITimeout                 string                     `yaml:"ci_timeout"`
 	DaemonConnectTimeout      string                     `yaml:"daemon_connect_timeout"`
 	BranchSyncRemoteTimeout   string                     `yaml:"branch_sync_remote_timeout"`
@@ -1277,6 +1282,62 @@ type Worktree struct {
 	MaxRuns   int
 }
 
+// DefaultMaxConcurrentRuns is the number of pipeline runs the daemon executes
+// at once when daemon.max_concurrent_runs is unset. Launches beyond it are
+// queued durably and started first-in first-out as slots free.
+const DefaultMaxConcurrentRuns = 3
+
+// DaemonRaw is the YAML representation of the daemon scheduling settings.
+// Pointer fields distinguish "not set" (nil) from an explicit zero.
+type DaemonRaw struct {
+	MaxConcurrentRuns   *int  `yaml:"max_concurrent_runs"`
+	HoldSlotWhileParked *bool `yaml:"hold_slot_while_parked"`
+	MaxConcurrentAgents *int  `yaml:"max_concurrent_agents"`
+}
+
+// Daemon is the resolved daemon scheduling config.
+//
+// MaxConcurrentRuns caps runs holding an execution slot; 0 means unlimited.
+// A run holds a slot only while it executes pipeline work: by default a run
+// parked at a gate (and the CI step's PR monitoring wait) releases it, and the
+// run re-acquires one ahead of every queued new run when it resumes.
+// HoldSlotWhileParked keeps the slot through those waits instead.
+// MaxConcurrentAgents caps agent subprocess invocations across all runs; 0
+// means unlimited.
+type Daemon struct {
+	MaxConcurrentRuns   int
+	HoldSlotWhileParked bool
+	MaxConcurrentAgents int
+}
+
+func daemonDefaults() Daemon {
+	return Daemon{MaxConcurrentRuns: DefaultMaxConcurrentRuns}
+}
+
+// validateDaemonRaw fails the config closed on a negative limit: a typo here
+// would otherwise silently fall back to the default and surprise the operator.
+func validateDaemonRaw(raw DaemonRaw) error {
+	if raw.MaxConcurrentRuns != nil && *raw.MaxConcurrentRuns < 0 {
+		return fmt.Errorf("daemon.max_concurrent_runs must be 0 (unlimited) or greater, got %d", *raw.MaxConcurrentRuns)
+	}
+	if raw.MaxConcurrentAgents != nil && *raw.MaxConcurrentAgents < 0 {
+		return fmt.Errorf("daemon.max_concurrent_agents must be 0 (unlimited) or greater, got %d", *raw.MaxConcurrentAgents)
+	}
+	return nil
+}
+
+func applyDaemonOverrides(dst *Daemon, src *DaemonRaw) {
+	if src.MaxConcurrentRuns != nil {
+		dst.MaxConcurrentRuns = *src.MaxConcurrentRuns
+	}
+	if src.HoldSlotWhileParked != nil {
+		dst.HoldSlotWhileParked = *src.HoldSlotWhileParked
+	}
+	if src.MaxConcurrentAgents != nil {
+		dst.MaxConcurrentAgents = *src.MaxConcurrentAgents
+	}
+}
+
 // retiredJev names exactly the two retired jev subkeys so a global config
 // that still sets one keeps parsing under the strict known-fields rule. Both
 // are pointers so a set key is distinguishable from an absent one and can be
@@ -1570,6 +1631,19 @@ log_level: info
 # root, and it must be outside NM_HOME and outside every checkout.
 # worktree_roots:
 #   /Users/you/src/my-repo: /Users/you/work/my-repo-runs
+
+# How much pipeline work the daemon runs at once. Launches beyond
+# max_concurrent_runs are recorded as "queued" and start first-in first-out as
+# runs finish or park; queued runs survive a daemon restart. 0 means unlimited.
+# A run parked at a gate (and the CI step's PR monitoring wait) gives its slot
+# back by default and re-acquires one, ahead of queued new runs, when it
+# resumes; hold_slot_while_parked: true keeps the slot through those waits.
+# max_concurrent_agents caps agent subprocess invocations across all runs
+# (0 = unlimited). Global-only.
+# daemon:
+#   max_concurrent_runs: 3
+#   hold_slot_while_parked: false
+#   max_concurrent_agents: 0
 
 # A run's own worktree is already removed the instant its pipeline finishes.
 # This bounds what a rare failed removal - or a protected-path refusal that
@@ -2421,6 +2495,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		SessionReuse:            true,
 		Eval:                    evalDefaults(),
 		Worktree:                worktreeDefaults(),
+		Daemon:                  daemonDefaults(),
 	}
 }
 
@@ -2602,6 +2677,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	if err := validateWorktreeRaw(raw.Worktree); err != nil {
+		return nil, fmt.Errorf("parse global config: %w", err)
+	}
+	if err := validateDaemonRaw(raw.Daemon); err != nil {
 		return nil, fmt.Errorf("parse global config: %w", err)
 	}
 	if err := validateRebaseRaw(raw.Rebase); err != nil {
@@ -2801,6 +2879,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Providers = raw.Providers
 	applyEvalOverrides(&cfg.Eval, &raw.Eval)
 	applyWorktreeOverrides(&cfg.Worktree, &raw.Worktree)
+	applyDaemonOverrides(&cfg.Daemon, &raw.Daemon)
 
 	return cfg, nil
 }

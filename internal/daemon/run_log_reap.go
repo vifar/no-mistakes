@@ -25,10 +25,10 @@ import (
 // case (see runAxiLogs), so reaping an old run's directory degrades exactly
 // like evidence retention already does for screenshots - not a new trade-off.
 //
-// The shape mirrors reapEvidence: an entry whose run is still pending/running
-// is never touched (a step may still be appending to its log), a directory
-// older than the retention window is removed, and whatever survives is
-// trimmed to the run ceiling, oldest first. Unlike evidence there is no
+// Like reapEvidence, this uses skipWorktreeCleanup to protect active runs
+// whose steps may still append to their logs. Eligible directories older than
+// the retention window are removed, then survivors are trimmed to the run
+// ceiling, oldest first. Unlike evidence there is no
 // "empty directory" rule - MkdirAll here always precedes at least one step
 // log being opened for append, so an empty log directory is not the dominant
 // case it is for evidence.

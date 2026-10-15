@@ -44,6 +44,7 @@ func newDaemonCmd() *cobra.Command {
 	cmd.AddCommand(newDaemonRunCmd())
 	cmd.AddCommand(newDaemonAdmitPushCmd())
 	cmd.AddCommand(newDaemonNotifyPushCmd())
+	cmd.AddCommand(newDaemonSetCmd())
 
 	return cmd
 }

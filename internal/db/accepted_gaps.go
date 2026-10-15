@@ -181,7 +181,7 @@ func (s *StepResult) ValidAcceptedGaps() *AcceptedGaps {
 	return gaps
 }
 
-// RecordAcceptedGaps validates gaps against the parked Test step and writes
+// RecordAcceptedGaps validates gaps against the active Test step and writes
 // the audit record. It re-reads the row so the record is derived from the
 // findings the step actually holds, never from the caller's description of
 // them. The step status is untouched: it completes normally afterward.
@@ -190,8 +190,8 @@ func (d *DB) RecordAcceptedGaps(id string, gaps AcceptedGaps, strict bool) (Acce
 	if err != nil {
 		return AcceptedGaps{}, err
 	}
-	if row == nil || row.StepName != types.StepTest || row.Status != types.StepStatusAwaitingApproval && row.Status != types.StepStatusFixReview {
-		return AcceptedGaps{}, fmt.Errorf("record accepted gaps: parked Test step not found")
+	if row == nil || row.StepName != types.StepTest || row.Status != types.StepStatusAwaitingApproval && row.Status != types.StepStatusFixReview && row.Status != types.StepStatusRunning {
+		return AcceptedGaps{}, fmt.Errorf("record accepted gaps: active Test step not found")
 	}
 	if refusal := row.AcceptedGapRefusal(strict, gaps); refusal != "" {
 		return AcceptedGaps{}, fmt.Errorf("%s", refusal)
@@ -224,13 +224,13 @@ func (d *DB) RecordAcceptedGaps(id string, gaps AcceptedGaps, strict bool) (Acce
 	if err != nil {
 		return AcceptedGaps{}, err
 	}
-	result, err := d.sql.Exec(`UPDATE step_results SET accepted_gaps_json = ? WHERE id = ? AND step_name = ? AND status IN (?, ?)`,
-		string(raw), id, types.StepTest, types.StepStatusAwaitingApproval, types.StepStatusFixReview)
+	result, err := d.sql.Exec(`UPDATE step_results SET accepted_gaps_json = ? WHERE id = ? AND step_name = ? AND status IN (?, ?, ?)`,
+		string(raw), id, types.StepTest, types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusRunning)
 	if err != nil {
 		return AcceptedGaps{}, fmt.Errorf("record accepted gaps: %w", err)
 	}
 	if n, err := result.RowsAffected(); err != nil || n != 1 {
-		return AcceptedGaps{}, fmt.Errorf("record accepted gaps: parked Test step not found")
+		return AcceptedGaps{}, fmt.Errorf("record accepted gaps: active Test step not found")
 	}
 	return record, nil
 }

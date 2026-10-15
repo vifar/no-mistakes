@@ -21,6 +21,9 @@ var (
 // DB wraps a SQLite database connection.
 type DB struct {
 	sql *sql.DB
+	// queueClock stamps queued_at; nil means the wall clock. A test seam for
+	// proving the stored queue order does not depend on the clock.
+	queueClock func() int64
 }
 
 // Open opens (or creates) the SQLite database at path and runs migrations.

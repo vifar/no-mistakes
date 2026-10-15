@@ -76,9 +76,8 @@ func evidenceRootFor(p *paths.Paths, global *config.GlobalConfig) string {
 //  2. A run directory older than the retention window is removed.
 //  3. Whatever survives is trimmed to the run ceiling, oldest first.
 //
-// A directory whose run row is still pending or running is never touched, at
-// any step - the same active-run guard cleanupOrphanWorktrees uses, for the
-// same reason: only a settled run's leftovers are safe to remove.
+// Every removal passes skipWorktreeCleanup, the same active-run guard used by
+// cleanupOrphanWorktrees: only a settled run's leftovers are safe to remove.
 func reapEvidence(d *db.DB, root string, policy evidenceReapPolicy, now time.Time) {
 	entries, err := os.ReadDir(root)
 	if err != nil {

@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
-	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -108,9 +107,12 @@ func newDoctorCmd() *cobra.Command {
 				}
 
 				if p != nil {
-					alive, _ := daemon.IsRunning(p)
+					alive, _ := daemonIsRunningFn(p)
 					if alive {
 						ok("daemon        ", "running")
+						if slots := fetchSlots(p); slots != nil {
+							ok("run slots     ", slotsSummary(*slots, true))
+						}
 					} else {
 						warn("daemon        ", "stopped")
 					}

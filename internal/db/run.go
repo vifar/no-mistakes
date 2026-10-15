@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
@@ -22,13 +23,12 @@ type Run struct {
 	Branch   string
 	HeadSHA  string
 	BaseSHA  string
-	// WorktreeDir is the directory this run's worktree was created in, resolved
-	// once at run creation from the operator's configured placement (see
-	// internal/worktrees). Every consumer of an existing run's worktree reads
-	// it instead of re-deriving placement, so editing that configuration while
-	// a run exists cannot retarget the run. It is nil only for runs recorded
-	// before the column existed, which worktrees.RecordedDir resolves to the
-	// default placement.
+	// WorktreeDir pins placement when an admitted run creates its worktree (see
+	// internal/worktrees). Consumers read it instead of re-deriving placement,
+	// so later configuration edits cannot retarget that worktree. It is nil
+	// before placement, including while queued; for legacy runs that created a
+	// worktree without recording placement, worktrees.RecordedDir uses the
+	// default directory.
 	WorktreeDir      *string
 	SubmittedHeadSHA *string
 	// NoMistakesVersion and NoMistakesBuildSHA identify the binary that created
@@ -62,10 +62,10 @@ type Run struct {
 	Error             *string
 	// AwaitingAgentSince is the unix-seconds timestamp at which the run parked
 	// at a gate awaiting the driving agent's response (an awaiting_approval or
-	// fix_review step). It is nil whenever the run is not parked: the executor
-	// sets it on gate entry and clears it the moment the agent responds (or the
-	// wait is cancelled). It is observability only and does not affect gate
-	// resolution.
+	// fix_review step). It remains set while a pending response waits for a run
+	// slot, so recovery can validate the durable park; status hides it for an
+	// answered gate. Dispatch or cancellation clears it. It is observability
+	// only and does not affect gate resolution.
 	AwaitingAgentSince *int64
 	// ParkedMS accumulates the run's total parked-at-gate wall time in
 	// milliseconds across every gate wait (local performance telemetry;
@@ -555,7 +555,7 @@ func (d *DB) GetRunsByRepoHead(repoID, branch, headSHA string) ([]*Run, error) {
 	return runs, rows.Err()
 }
 
-// GetActiveRun returns the currently active run (pending or running) for a repo,
+// GetActiveRun returns the currently active run (queued, pending or running) for a repo,
 // if any. When branch is non-empty, only a run on that exact branch is returned
 // - the setup wizard relies on this to decide whether a new run is needed for
 // the current branch. When branch is empty, returns the most recently created
@@ -565,11 +565,11 @@ func (d *DB) GetActiveRun(repoID, branch string) (*Run, error) {
 	var err error
 	if branch == "" {
 		err = scanRun(d.sql.QueryRow(
-			`SELECT `+runColumns+` FROM runs WHERE repo_id = ? AND status IN ('pending', 'running') ORDER BY created_at DESC, id DESC LIMIT 1`, repoID,
+			`SELECT `+runColumns+` FROM runs WHERE repo_id = ? AND status IN ('queued', 'pending', 'running') ORDER BY created_at DESC, id DESC LIMIT 1`, repoID,
 		), r)
 	} else {
 		err = scanRun(d.sql.QueryRow(
-			`SELECT `+runColumns+` FROM runs WHERE repo_id = ? AND branch = ? AND status IN ('pending', 'running') ORDER BY created_at DESC, id DESC LIMIT 1`, repoID, branch,
+			`SELECT `+runColumns+` FROM runs WHERE repo_id = ? AND branch = ? AND status IN ('queued', 'pending', 'running') ORDER BY created_at DESC, id DESC LIMIT 1`, repoID, branch,
 		), r)
 	}
 	if err == sql.ErrNoRows {
@@ -1157,9 +1157,9 @@ func (d *DB) ClaimClosingIssueRefsForPRBody(id string) ([]string, error) {
 }
 
 // SetRunAwaitingAgent marks a run as parked awaiting the driving agent,
-// stamping awaiting_agent_since with the current time. Called by the executor
-// when a step enters a gate (awaiting_approval / fix_review). This is a pollable
-// observability signal only; it does not change gate resolution.
+// stamping awaiting_agent_since with the current time. Executor gate entry uses
+// ParkStepForApproval to persist the step status and this marker atomically.
+// This is an observability signal only; it does not change gate resolution.
 func (d *DB) SetRunAwaitingAgent(id string) error {
 	ts := now()
 	_, err := d.sql.Exec(`UPDATE runs SET awaiting_agent_since = ?, updated_at = ? WHERE id = ?`, ts, ts, id)
@@ -1169,10 +1169,9 @@ func (d *DB) SetRunAwaitingAgent(id string) error {
 	return nil
 }
 
-// ClearRunAwaitingAgent clears the awaiting-agent marker on a run. Called by the
-// executor the moment the agent responds (or the approval wait is cancelled) and
-// the run resumes, so awaiting_agent_since is non-nil exactly while a gate is
-// actually parked.
+// ClearRunAwaitingAgent clears the awaiting-agent marker without recording parked
+// time. Executor gate transitions use ResumeStepFromApproval or
+// CompleteRunAwaitingAgent to preserve that timing atomically.
 func (d *DB) ClearRunAwaitingAgent(id string) error {
 	_, err := d.sql.Exec(`UPDATE runs SET awaiting_agent_since = NULL, updated_at = ? WHERE id = ?`, now(), id)
 	if err != nil {
@@ -1182,7 +1181,7 @@ func (d *DB) ClearRunAwaitingAgent(id string) error {
 }
 
 // AddRunParkedDuration accumulates parked-at-gate wall time onto a run's
-// total. Called by the executor when a gate wait ends.
+// total without clearing its awaiting-agent marker.
 func (d *DB) AddRunParkedDuration(id string, ms int64) error {
 	if ms <= 0 {
 		return nil
@@ -1376,10 +1375,9 @@ func (d *DB) GetRunGates(id string) (string, error) {
 }
 
 // SetRunGates records the repository-declared gates this run executes. The
-// caller writes it once, at run creation, before the executor can record a
-// single step, so the run's step sequence is fixed from the moment anything can
-// observe it and stays fixed even if the trusted default branch's gates change
-// while the run is in flight.
+// caller writes it once during admitted-run setup, before the executor can
+// record a single step. Once pinned, the sequence stays fixed even if the
+// trusted default branch's gates change; a queued run has no pin yet.
 func (d *DB) SetRunGates(id, gates string) error {
 	_, err := d.sql.Exec(`UPDATE runs SET gates_json = ?, updated_at = ? WHERE id = ?`, gates, now(), id)
 	if err != nil {
@@ -1414,4 +1412,143 @@ func (d *DB) SetRunCIRerunState(id, state string) error {
 		return fmt.Errorf("set run ci rerun state: %w", err)
 	}
 	return nil
+}
+
+// MarkRunQueued records that a freshly inserted run was not admitted because
+// the daemon is at its concurrency cap. The run becomes queued, stamped with a
+// nanosecond queued_at that orders the FIFO drain, and spec carries whatever the
+// start needs that the row does not already hold. It applies only to a run that
+// has not started, so a racing status change is never overwritten.
+func (d *DB) MarkRunQueued(id, spec string) (int64, error) {
+	clock := d.queueClock
+	if clock == nil {
+		clock = func() int64 { return time.Now().UnixNano() }
+	}
+	// queued_at orders the FIFO drain after a restart, so it must follow
+	// admission order whatever the wall clock does (a step backwards would
+	// otherwise reorder the queue). The stamp is therefore at least one past
+	// the highest stamp already stored. Callers serialize admission, so the
+	// highest stored stamp is always the previous admission's.
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("mark run queued: %w", err)
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE runs SET status = ?, queued_at = MAX(?, COALESCE((SELECT MAX(queued_at) FROM runs WHERE queued_at IS NOT NULL), 0) + 1), queue_spec = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		types.RunQueued, clock(), spec, now(), id, types.RunPending)
+	if err != nil {
+		return 0, fmt.Errorf("mark run queued: %w", err)
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return 0, fmt.Errorf("mark run queued: %w", err)
+	} else if n != 1 {
+		return 0, fmt.Errorf("mark run queued: run %s is not pending", id)
+	}
+	var ts int64
+	if err := tx.QueryRow(`SELECT queued_at FROM runs WHERE id = ?`, id).Scan(&ts); err != nil {
+		return 0, fmt.Errorf("mark run queued: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("mark run queued: %w", err)
+	}
+	return ts, nil
+}
+
+// ClaimQueuedRun moves a queued run to pending so exactly one caller starts
+// it. It reports false when the run is no longer queued (for example it was
+// aborted first), in which case the caller must not start it.
+func (d *DB) ClaimQueuedRun(id string) (bool, error) {
+	result, err := d.sql.Exec(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		types.RunPending, now(), id, types.RunQueued)
+	if err != nil {
+		return false, fmt.Errorf("claim queued run: %w", err)
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
+// TerminateActiveRun records a terminal status for a run only while it is still
+// pending or running. A cancellation or launch failure that loses a race with
+// completion must never overwrite the completed (or already failed) run, so
+// every daemon-side write that is not the executor's own goes through this
+// conditional update. It reports whether the row changed.
+func (d *DB) TerminateActiveRun(id, errMsg string, status types.RunStatus) (bool, error) {
+	result, err := d.sql.Exec(`UPDATE runs SET error = ?, status = ?, push_active = 0, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ? AND status IN (?, ?)`,
+		errMsg, status, now(), id, types.RunPending, types.RunRunning)
+	if err != nil {
+		return false, fmt.Errorf("terminate active run: %w", err)
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
+// CancelQueuedRun terminalizes a run that never started. It reports false when
+// the run is not queued any more, so a start that won the race is left alone.
+func (d *DB) CancelQueuedRun(id, reason string) (bool, error) {
+	return d.terminateUnstartedRun(id, reason, types.RunCancelled, types.RunQueued)
+}
+
+func (d *DB) TerminateUnstartedRun(id, reason string, status types.RunStatus) (bool, error) {
+	return d.terminateUnstartedRun(id, reason, status, types.RunPending)
+}
+
+func (d *DB) terminateUnstartedRun(id, reason string, status, expected types.RunStatus) (bool, error) {
+	ts := now()
+	result, err := d.sql.Exec(`UPDATE runs SET status = ?, error = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		status, reason, ts, ts, id, expected)
+	if err != nil {
+		return false, fmt.Errorf("terminate unstarted run: %w", err)
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
+// QueuedRunIDs returns every queued run id in start order: oldest queued_at
+// first, ties broken by id (ids are monotonic, so they preserve creation order).
+func (d *DB) QueuedRunIDs() ([]string, error) {
+	rows, err := d.sql.Query(`SELECT id FROM runs WHERE status = ? ORDER BY COALESCE(queued_at, 0), id`, types.RunQueued)
+	if err != nil {
+		return nil, fmt.Errorf("list queued runs: %w", err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan queued run: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// GetRunQueueSpec returns the opaque start parameters recorded when the run
+// was queued, or the empty string.
+func (d *DB) GetRunQueueSpec(id string) (string, error) {
+	var spec sql.NullString
+	err := d.sql.QueryRow(`SELECT queue_spec FROM runs WHERE id = ?`, id).Scan(&spec)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get run queue spec: %w", err)
+	}
+	return spec.String, nil
+}
+
+// QueuePosition reports a queued run's 1-based position among queued runs and
+// the queue length among new queued runs. This is the offline fallback; the
+// daemon overlays live positions that also include resumed waiters ahead of
+// these runs. position is 0 when the run is not queued.
+func (d *DB) QueuePosition(id string) (position, total int, err error) {
+	ids, err := d.QueuedRunIDs()
+	if err != nil {
+		return 0, 0, err
+	}
+	for i, queued := range ids {
+		if queued == id {
+			return i + 1, len(ids), nil
+		}
+	}
+	return 0, len(ids), nil
 }

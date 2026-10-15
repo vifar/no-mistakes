@@ -611,6 +611,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				interval = remaining
 			}
 		}
+		// The wait between polls does no work, and a PR can be monitored for
+		// days: give the run's concurrency slot back for it. The poll itself is
+		// a few forge API calls and goes unslotted; any agent turn the monitor
+		// starts (a CI fix, a conflict repair) re-acquires one in RunAgent.
+		sctx.YieldSlot()
 		waitForNextPoll := s.waitForNextPoll
 		if waitForNextPoll == nil {
 			waitForNextPoll = func(ctx context.Context, interval time.Duration) error {

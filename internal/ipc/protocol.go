@@ -33,6 +33,8 @@ const (
 	MethodSubscribe                 = "subscribe"
 	MethodRespond                   = "respond"
 	MethodAnswerReview              = "answer_review_question"
+	MethodGetSlots                  = "get_slots"
+	MethodReloadSlots               = "reload_slots"
 	MethodCancelRun                 = "cancel_run"
 	MethodGateContext               = "gate_context"
 	MethodAdmitPush                 = "admit_push"
@@ -302,6 +304,21 @@ type RespondParams struct {
 	CoveredBy  string   `json:"covered_by,omitempty"`
 }
 
+// SlotsResult reports the daemon's run-concurrency cap and slot usage.
+// get_slots reads it; reload_slots first re-reads the global config's
+// daemon limits, drains the queue, and then reads it.
+type SlotsResult struct {
+	// MaxConcurrentRuns is daemon.max_concurrent_runs; 0 means unlimited.
+	MaxConcurrentRuns   int  `json:"max_concurrent_runs"`
+	HoldSlotWhileParked bool `json:"hold_slot_while_parked,omitempty"`
+	// InUse is the number of runs holding a slot. Queued counts runs waiting
+	// for one (new queued runs plus resumed runs). ParkedReleased counts live
+	// runs that gave their slot back while parked or waiting on CI.
+	InUse          int `json:"in_use"`
+	Queued         int `json:"queued"`
+	ParkedReleased int `json:"parked_released"`
+}
+
 // CancelRunParams cancels an active pipeline run.
 type CancelRunParams struct {
 	RunID string `json:"run_id"`
@@ -532,9 +549,18 @@ type RunInfo struct {
 	// driving agent's response. AwaitingAgentSince is the unix-seconds time it
 	// parked, so a supervisor can read "parked for N seconds" in one call. Both
 	// are observability only and clear the moment the agent responds.
-	AwaitingAgent      bool             `json:"awaiting_agent,omitempty"`
-	AwaitingAgentSince *int64           `json:"awaiting_agent_since,omitempty"`
-	Steps              []StepResultInfo `json:"steps,omitempty"`
+	AwaitingAgent      bool   `json:"awaiting_agent,omitempty"`
+	AwaitingAgentSince *int64 `json:"awaiting_agent_since,omitempty"`
+	// QueuePosition is the 1-based place of a run that is waiting for an
+	// execution slot (daemon.max_concurrent_runs), out of QueueTotal waiting
+	// runs; it is 0 when the run is not waiting. A new run that has not started
+	// has Status queued. WaitingForSlot is true for a run that resumed from a
+	// parked gate and is waiting to take a slot back (its Status stays running);
+	// resumed runs are ordered ahead of every queued new run.
+	QueuePosition  int              `json:"queue_position,omitempty"`
+	QueueTotal     int              `json:"queue_total,omitempty"`
+	WaitingForSlot bool             `json:"waiting_for_slot,omitempty"`
+	Steps          []StepResultInfo `json:"steps,omitempty"`
 	// CIOverrideReason is non-empty when the CI step in Steps carries an
 	// OverrideReason (see StepResultInfo.OverrideReason). It is derived from
 	// Steps rather than a separate DB column, so a run-level consumer such as
@@ -585,6 +611,10 @@ type StepResultInfo struct {
 	LastActivityAt   *int64   `json:"last_activity_at,omitempty"`
 	LastActivity     *string  `json:"last_activity,omitempty"`
 	AgentPID         *int     `json:"agent_pid,omitempty"`
+	// ResponsePending is true for a step whose gate response was accepted and is
+	// waiting for a run slot to dispatch. Its persisted status is still the parked
+	// one, but it is reported as running: it is answered, not awaiting a decision.
+	ResponsePending bool `json:"response_pending,omitempty"`
 	// OverrideReason is non-empty when a human answered ActionApprove on this
 	// step's gate despite an unresolved external condition (currently: the CI
 	// step's live checks were still failing). See

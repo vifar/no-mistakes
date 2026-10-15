@@ -77,12 +77,11 @@ func TestExecutorParkedApprovalRevalidatesPRTargetBeforeFinalStepCompletes(t *te
 		}},
 	}
 	var executor *Executor
+	responseDone := make(chan error, 1)
 	executor = NewExecutor(database, p, nil, nil, steps, func(event ipc.Event) {
 		if event.Type == ipc.EventStepCompleted && event.StepName != nil && *event.StepName == types.StepReview &&
 			event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
-			if err := executor.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
-				t.Fatal(err)
-			}
+			go func() { responseDone <- executor.Respond(types.StepReview, types.ActionApprove, nil) }()
 		}
 	})
 	checks := 0
@@ -108,6 +107,9 @@ func TestExecutorParkedApprovalRevalidatesPRTargetBeforeFinalStepCompletes(t *te
 	}
 	advanceCompletionFixture(t, database, run, workDir)
 	if err := executor.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-responseDone; err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(observed, []types.StepName{types.StepRebase, types.StepReview, types.StepRebase, types.StepReview}) {
@@ -881,6 +883,7 @@ func TestExecutorRecoveredApprovalRevalidatesMovedPRTargetBeforeUsingParkedVerdi
 		}},
 	}
 	var executor *Executor
+	responseDone := make(chan error, 1)
 	executor = NewExecutor(database, p, nil, nil, steps, func(event ipc.Event) {
 		if event.Type == ipc.EventStepCompleted && event.StepName != nil && *event.StepName == types.StepReview &&
 			event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
@@ -891,9 +894,7 @@ func TestExecutorRecoveredApprovalRevalidatesMovedPRTargetBeforeUsingParkedVerdi
 			if len(rounds) != 2 {
 				t.Fatalf("approval used parked review before revalidation: rounds=%d", len(rounds))
 			}
-			if err := executor.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
-				t.Fatal(err)
-			}
+			go func() { responseDone <- executor.Respond(types.StepReview, types.ActionApprove, nil) }()
 		}
 	})
 	executor.workDir = workDir
@@ -911,6 +912,9 @@ func TestExecutorRecoveredApprovalRevalidatesMovedPRTargetBeforeUsingParkedVerdi
 	// A carried warning may park the fresh review. Answer its gate event above
 	// rather than imposing a wall-clock deadline on the restart's DB writes.
 	if err := executor.Resume(context.Background(), run, repo, workDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-responseDone; err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(observed, []types.StepName{types.StepRebase, types.StepReview}) {

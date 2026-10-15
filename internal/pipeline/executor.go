@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -70,17 +71,29 @@ type Executor struct {
 
 	onEvent EventFunc
 
+	// slot is the run's daemon concurrency slot (nil: no cap). The executor
+	// yields it while a gate is parked and takes it again, ahead of queued new
+	// runs, when the operator's response resumes work.
+	slot RunSlot
+
 	// sessions manages this run's durable review-loop agent sessions; shared
 	// carries run-scoped step-to-step results. Both are created per Execute.
 	sessions *RunSessions
 	shared   *RunShared
 	workDir  string
 
-	mu                     sync.Mutex
-	approvalCh             chan approvalResponse // buffered channel for approval responses
-	waiting                bool                  // true when blocked on approval
-	waitingStep            types.StepName        // which step is currently awaiting approval
-	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	mu             sync.Mutex
+	activeAgentPID atomic.Int64          // live lifecycle ownership, independent of SQLite
+	approvalCh     chan approvalResponse // buffered channel for approval responses
+	waiting        bool                  // true when blocked on approval
+	slotWaitStep   types.StepName
+	// answeredParkedMS is the parked time at acceptance of a response waiting
+	// for a slot; recoveredResponse is a recorded response a recovered gate
+	// re-applies instead of waiting for a new one.
+	answeredParkedMS       int64
+	recoveredResponse      *approvalResponse
+	waitingStep            types.StepName // which step is currently awaiting approval
+	waitingApprovalRefusal string         // non-empty: why Approve is rejected at the waiting gate
 	// waitingFindings and waitingStepResultID describe the parked gate: the
 	// findings payload it showed and the step result whose rounds record what
 	// earlier rounds of this step decided. A fix response is validated against
@@ -89,15 +102,23 @@ type Executor struct {
 	// wherever e.waiting is.
 	waitingFindings     string
 	waitingStepResultID string
+	waitingSince        time.Time
 	// waitingRoundID is the round the parked gate belongs to. The response path
 	// records the decision against it before the caller is told what was
 	// recorded, so an echo never claims a decision that is not durable.
 	waitingRoundID  string
 	waitingShipping *types.ShippingOptions
+	recoveryGate    *recoveredGate
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
 	onPRMerged            func(context.Context, string)
+}
+
+// ActiveAgentPID returns the current agent's PID without accessing the database.
+// The daemon uses it to authorize cancellation even when SQLite is unavailable.
+func (e *Executor) ActiveAgentPID() int {
+	return int(e.activeAgentPID.Load())
 }
 
 // PRContextDecision carries the read-only target selected at a step boundary.
@@ -293,6 +314,10 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 	}
 	e.mu.Lock()
 	if !e.waiting {
+		if e.slotWaitStep == step {
+			e.mu.Unlock()
+			return RespondDispositions{}, fmt.Errorf("step %s already answered; waiting for a run slot", step)
+		}
 		e.mu.Unlock()
 		return RespondDispositions{}, fmt.Errorf("no step awaiting approval")
 	}
@@ -401,6 +426,12 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 		// gate's own order rather than ahead of the ones the response named.
 		dispositions.Fixed = combineSelectedFindingIDs(idsInPayloadOrder(response.findingIDs, findingIDsInPayloadOrder(e.waitingFindings)), normalized)
 		dispositions.Kept = excludeFindingIDs(split.Kept, restoredGateIDs)
+	}
+	if action != types.ActionAbort {
+		if err := e.acceptApprovalGate(&response); err != nil {
+			e.mu.Unlock()
+			return RespondDispositions{}, err
+		}
 	}
 	e.waiting = false
 	e.waitingFindings = ""
@@ -694,6 +725,50 @@ func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
 	return err
 }
 
+func (e *Executor) RegisterRecoveredGate(run *db.Run) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.recoveryGate != nil {
+		return nil
+	}
+	if err := ValidateRecoveredRun(e.db, run, e.steps); err != nil {
+		return err
+	}
+	gate, err := e.recoveredGate(run.ID)
+	if err != nil {
+		return err
+	}
+	e.recoveryGate = gate
+	if gate.stepResult.PendingResponse != nil {
+		// The operator already answered this gate; only the slot wait was
+		// interrupted. Recover it as an answered gate: no new response is
+		// accepted, and the recorded one is re-applied once a slot is granted.
+		recorded, parkedMS, err := decodePendingResponse(*gate.stepResult.PendingResponse)
+		if err != nil {
+			return err
+		}
+		e.recoveredResponse = recorded
+		e.slotWaitStep = gate.step.Name()
+		e.waitingSince = time.Unix(*run.AwaitingAgentSince, 0)
+		e.answeredParkedMS = 0
+		if parkedMS != nil {
+			e.answeredParkedMS = max(0, *parkedMS)
+		} else if gate.stepResult.LastActivityAt != nil {
+			e.answeredParkedMS = max(0, (*gate.stepResult.LastActivityAt-*run.AwaitingAgentSince)*1000)
+		}
+		return nil
+	}
+	e.waiting = true
+	e.waitingStep = gate.step.Name()
+	e.waitingShipping = run.Shipping
+	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
+	e.waitingFindings = gate.findings
+	e.waitingStepResultID = gate.stepResult.ID
+	e.waitingRoundID = gate.lastRoundID
+	e.waitingSince = time.Unix(*run.AwaitingAgentSince, 0)
+	return nil
+}
+
 // Resume restores a run that was durably parked at an approval gate when the
 // daemon stopped. It only accepts a fully recorded gate and otherwise returns
 // an error so startup recovery can fail the run rather than guessing.
@@ -703,36 +778,58 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if repo == nil {
 		return fmt.Errorf("recovered run has no repository")
 	}
-	if err := ValidateRecoveredRun(e.db, run, e.steps); err != nil {
+	if err := e.RegisterRecoveredGate(run); err != nil {
 		return err
 	}
-	gate, err := e.recoveredGate(run.ID)
-	if err != nil {
-		return err
+	e.mu.Lock()
+	gate := e.recoveryGate
+	parkStart := e.waitingSince
+	e.mu.Unlock()
+	duration := recoveredStepDuration(gate.stepResult)
+	failRecoveredGate := func(err error) error {
+		e.endGateWait(run.ID, parkStart, err)
+		e.clearApprovalGate()
+		if dbErr := e.db.FailStep(gate.stepResult.ID, err.Error(), duration); dbErr != nil {
+			slog.Warn("failed to mark recovered step as failed in db", "step", gate.step.Name(), "error", dbErr)
+		}
+		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", err.Error(), &duration)
+		return e.failRun(run, repo, err, ctx)
+	}
+	if ctx.Err() != nil {
+		select {
+		case response := <-e.approvalCh:
+			if response.action == types.ActionAbort {
+				e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
+			}
+		default:
+		}
+		return failRecoveredGate(context.Cause(ctx))
 	}
 	logDir := e.paths.RunLogDir(run.ID)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
+		return failRecoveredGate(fmt.Errorf("create log dir: %w", err))
 	}
 	if err := recordCommandConfiguration(logDir, "resume", e.config); err != nil {
-		return e.failRun(run, repo, err)
+		return failRecoveredGate(err)
 	}
 	e.initializeRunScopes(run.ID)
 
-	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
 	// A recovered gate may have been parked while the PR base or its target
 	// moved. Revalidate before its old findings can reconcile or be approved.
 	restartIndex, err := e.checkPRContext(ctx, run, repo, workDir, gate.step.Name(), gate.index, true)
 	if err != nil {
-		return e.failRun(run, repo, err, ctx)
+		return failRecoveredGate(err)
 	}
 	if restartIndex >= 0 {
-		if err := e.db.AddRunParkedDuration(run.ID, time.Since(parkStart).Milliseconds()); err != nil {
-			return e.failRun(run, repo, fmt.Errorf("record recovered parked duration: %w", err), ctx)
+		if err := e.db.CompleteRunAwaitingAgent(run.ID, e.gateParkedMS(parkStart)); err != nil {
+			return failRecoveredGate(fmt.Errorf("record recovered parked duration: %w", err))
 		}
+		e.clearApprovalGate()
+		e.mu.Lock()
+		e.slotWaitStep = ""
+		e.mu.Unlock()
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, gate.step.Name())
 	}
-	duration := recoveredStepDuration(gate.stepResult)
 	completeRecoveredGate := func() error {
 		if gate.step.Name() == types.StepReview {
 			if run.Shipping != nil {
@@ -765,13 +862,13 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 
 		restartIndex, err := e.checkPRContext(ctx, run, repo, workDir, gate.step.Name(), gate.index, true)
 		if err != nil {
-			return e.failRun(run, repo, err, ctx)
+			return failRecoveredGate(err)
 		}
 		if restartIndex >= 0 {
 			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, gate.step.Name())
 		}
 		if err := completeRecoveredGate(); err != nil {
-			return e.failRun(run, repo, fmt.Errorf("complete reconciled step %s: %w", gate.step.Name(), err), ctx)
+			return failRecoveredGate(fmt.Errorf("complete reconciled step %s: %w", gate.step.Name(), err))
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, "")
@@ -786,7 +883,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		ForgeContext: e.forge,
 		DB:           e.db,
 		StepResultID: gate.stepResult.ID,
-		Agent:        e.agent,
+		Agent:        limitAgent(e.agent, e.slot),
 		Sessions:     e.sessions,
 		Shared:       e.shared,
 		// The same value executeStep supplies. A reconciler or resumer that
@@ -802,65 +899,78 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		LogChunk: func(string) {},
 		LogFile:  func(string) {},
 	}
-	if reconciled, reconcileErr := e.reconcileApprovalGate(ctx, gate.step, reconcileCtx, gate.findings); reconciled {
-		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
-			return e.failRun(run, repo, fmt.Errorf("complete reconciled awaiting-agent state: %w", dbErr), ctx)
+
+	if gate.stepResult.PendingResponse != nil && e.recoveredResponse == nil {
+		_, resolved, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, true, true)
+		if err != nil {
+			return failRecoveredGate(err)
 		}
-		return completeReconciledGate()
-	} else if reconcileErr != nil && ctx.Err() == nil {
-		if errors.Is(reconcileErr, ErrFatalGateReconciliation) {
-			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
-				return e.failRun(run, repo, fmt.Errorf("complete fatal reconciliation awaiting-agent state: %w", dbErr), ctx)
+		if err := e.acquireAnsweredGateSlot(ctx, run.ID, gate.stepResult.ID); err != nil {
+			if errors.Is(err, ErrParkedAtShutdown) {
+				return err
 			}
-			if dbErr := e.db.FailStep(gate.stepResult.ID, reconcileErr.Error(), duration); dbErr != nil {
-				slog.Warn("failed to mark recovered step as failed in db", "step", gate.step.Name(), "error", dbErr)
-			}
-			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", reconcileErr.Error(), &duration)
-			return e.failRun(run, repo, fmt.Errorf("step %s: reconcile approval gate: %w", gate.step.Name(), reconcileErr), ctx)
+			return failRecoveredGate(err)
 		}
-		slog.Warn("could not reconcile recovered approval gate; preserving it", "run_id", run.ID, "step", gate.step.Name(), "error", reconcileErr)
+		if resolved {
+			return completeReconciledGate()
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index, gate.step.Name())
 	}
 
 	e.mu.Lock()
-	e.waiting = true
-	e.waitingStep = gate.step.Name()
-	e.waitingShipping = run.Shipping
-	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
-	e.waitingFindings = gate.findings
-	e.waitingStepResultID = gate.stepResult.ID
-	e.waitingRoundID = gate.lastRoundID
+	if e.waiting {
+		e.emitStepEventWithFindingsAndError(
+			ipc.EventStepCompleted,
+			run,
+			repo,
+			gate.step.Name(),
+			string(gate.stepResult.Status),
+			gate.findings,
+			"",
+			gate.stepResult.DurationMS,
+		)
+	}
 	e.mu.Unlock()
-	e.emitStepEventWithFindingsAndError(
-		ipc.EventStepCompleted,
-		run,
-		repo,
-		gate.step.Name(),
-		string(gate.stepResult.Status),
-		gate.findings,
-		"",
-		gate.stepResult.DurationMS,
-	)
 
-	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
+	var response approvalResponse
+	var reconciled bool
+	e.mu.Lock()
+	recorded := e.recoveredResponse
+	e.mu.Unlock()
+	if recorded != nil {
+		// The operator's response was accepted before the restart and is durably
+		// recorded: re-apply it. The slot admission already granted is kept
+		// rather than yielded, because this run is about to dispatch.
+		response = *recorded
+	} else {
+		e.yieldSlotForGateWait()
+		response, reconciled, err = e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, true, false)
+	}
+	// A daemon shutdown leaves the gate parked for recovery: its awaiting
+	// marker, and any response already recorded, stay as they are.
 	if errors.Is(err, ErrDaemonShutdown) {
 		return ErrParkedAtShutdown
 	}
-	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
-		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
+	e.endGateWait(run.ID, parkStart, err)
+	if err == nil && !reconciled && response.action == types.ActionAbort {
+		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
+		return failRecoveredGate(fmt.Errorf("step %s: aborted by user", gate.step.Name()))
+	}
+	if err == nil {
+		err = e.acquireAnsweredGateSlot(ctx, run.ID, gate.stepResult.ID)
+	}
+	if errors.Is(err, ErrParkedAtShutdown) {
+		return err
 	}
 	if err != nil {
-		if dbErr := e.db.FailStep(gate.stepResult.ID, err.Error(), duration); dbErr != nil {
-			slog.Warn("failed to mark recovered step as failed in db", "step", gate.step.Name(), "error", dbErr)
-		}
-		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", err.Error(), &duration)
-		return e.failRun(run, repo, fmt.Errorf("step %s: waiting for approval: %w", gate.step.Name(), err), ctx)
+		return failRecoveredGate(fmt.Errorf("step %s: waiting for approval: %w", gate.step.Name(), err))
 	}
 	if reconciled {
 		return completeReconciledGate()
 	}
 	restartIndex, err = e.checkPRContext(ctx, run, repo, workDir, gate.step.Name(), gate.index, true)
 	if err != nil {
-		return e.failRun(run, repo, err, ctx)
+		return failRecoveredGate(err)
 	}
 	if restartIndex >= 0 {
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, gate.step.Name())
@@ -883,10 +993,10 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	case types.ActionApprove:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if err := e.applyApprovalOverride(gate.step, reconcileCtx, gate.stepResult.ID, response.approvalReason, response.acceptedGaps); err != nil {
-			return e.failRun(run, repo, err, ctx)
+			return failRecoveredGate(err)
 		}
 		if err := completeRecoveredGate(); err != nil {
-			return e.failRun(run, repo, fmt.Errorf("complete recovered step %s: %w", gate.step.Name(), err), ctx)
+			return failRecoveredGate(fmt.Errorf("complete recovered step %s: %w", gate.step.Name(), err))
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", &duration)
 		// A recovered CI gate may carry a Test restart from a prior approval.
@@ -910,17 +1020,10 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	case types.ActionSkip:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusSkipped, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
-			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err), ctx)
+			return failRecoveredGate(fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err))
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusSkipped), "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, "")
-	case types.ActionAbort:
-		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
-		if dbErr := e.db.FailStep(gate.stepResult.ID, "aborted by user", duration); dbErr != nil {
-			slog.Warn("failed to mark recovered step as aborted", "step", gate.step.Name(), "error", dbErr)
-		}
-		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "aborted by user", &duration)
-		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
 	// A fix round and an answered review question re-enter the same step the
 	// same way; only the bookkeeping before it and the state handed in differ.
 	// An answer is not a verdict, so it records no selection on the round -
@@ -960,7 +1063,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 				state.skipFixExecution = true
 			}
 			if dbErr := e.db.UpdateStepStatus(gate.stepResult.ID, types.StepStatusRunning); dbErr != nil {
-				return e.failRun(run, repo, fmt.Errorf("return recovered step %s to running: %w", gate.step.Name(), dbErr), ctx)
+				return failRecoveredGate(fmt.Errorf("return recovered step %s to running: %w", gate.step.Name(), dbErr))
 			}
 			e.emitStepEvent(ipc.EventStepStarted, run, repo, gate.step.Name(), string(types.StepStatusRunning))
 		} else {
@@ -979,7 +1082,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 				selectedOutstandingIDs = combineFindingIDLists(gate.selectedOutstandingIDs, newSelectedIDs)
 			}
 			if dbErr := e.db.StartStepFixRound(gate.stepResult.ID, e.autoFixLimit(gate.step.Name())); dbErr != nil {
-				return e.failRun(run, repo, fmt.Errorf("mark recovered step %s fixing: %w", gate.step.Name(), dbErr), ctx)
+				return failRecoveredGate(fmt.Errorf("mark recovered step %s fixing: %w", gate.step.Name(), dbErr))
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFixing), "", "", nil)
 			state.fixing = true
@@ -1260,6 +1363,7 @@ func (e *Executor) autoFixLimit(stepName types.StepName) int {
 // Returns whether to skip the remainder, an optional earlier restart step,
 // and any execution error.
 func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult, run *db.Run, repo *db.Repo, workDir, logDir string, state stepExecutionState) (bool, types.StepName, error) {
+	defer e.activeAgentPID.Store(0)
 	stepName := step.Name()
 	logPath := filepath.Join(logDir, string(stepName)+".log")
 	finalExitCode := 0
@@ -1359,10 +1463,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		switch event.Phase {
 		case agent.LifecyclePhaseStart:
 			pid := event.PID
+			e.activeAgentPID.Store(int64(pid))
 			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, &pid); dbErr != nil {
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}
 		case agent.LifecyclePhaseExit:
+			e.activeAgentPID.Store(0)
 			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, nil); dbErr != nil {
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}
@@ -1480,13 +1586,14 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		Repo:              repo,
 		WorkDir:           workDir,
 		GateDir:           e.paths.RepoDir(repo.ID),
-		Agent:             stepAgent,
+		Agent:             limitAgent(stepAgent, e.slot),
 		Config:            e.config,
 		ForgeContext:      e.forge,
 		PRTarget:          e.prTarget,
 		PRContext:         e.prContext,
 		DB:                e.db,
 		StepResultID:      sr.ID,
+		Slot:              e.slot,
 		UserIntent:        userIntent,
 		IntentSource:      userIntentSource,
 		Sessions:          e.sessions,
@@ -1563,7 +1670,17 @@ rounds:
 				return false, "", err
 			}
 		}
-		outcome, err := step.Execute(sctx)
+		// Every step but CI runs on a held slot. CI yields its slot during the
+		// PR monitoring poll and re-acquires only for agent work (RunAgent), so
+		// it must not take one back here just to start monitoring.
+		var outcome *StepOutcome
+		var err error
+		if stepName != types.StepCI {
+			err = e.acquireSlot(ctx)
+		}
+		if err == nil {
+			outcome, err = step.Execute(sctx)
+		}
 		if err == nil && run.Shipping != nil {
 			if outcome.Skipped || outcome.SkipRemaining {
 				err = fmt.Errorf("strict shipping forbids automatic step skips")
@@ -1839,19 +1956,19 @@ rounds:
 			e.waitingFindings = effectiveFindings
 			e.waitingStepResultID = sr.ID
 			e.waitingRoundID = currentRoundID
-			e.mu.Unlock()
 
 			// Parking starts before the gate becomes observable. This includes the
 			// small handoff from publishing the gate to receiving a response, and
 			// prevents a prompt response from being omitted from the parked total.
 			parkStart := time.Now()
+			e.waitingSince = parkStart
 
 			// Surface the park as a pollable, run-level signal so a supervisor can
 			// tell in one `axi status` read that the run is waiting for the agent
 			// to drive this gate (versus actively running/fixing/ci). Observability
-			// only: it does not change the wait below. Cleared once the wait ends.
+			// only: it does not change the wait below. Pending response acceptance
+			// hides it from status; dispatch or cancellation clears the saved marker.
 			if dbErr := e.db.ParkStepForApproval(run.ID, sr.ID, approvalStatus, finalExitCode, executionMS, findingsPtr); dbErr != nil {
-				e.mu.Lock()
 				e.waiting = false
 				e.waitingStep = ""
 				e.waitingFindings = ""
@@ -1860,13 +1977,28 @@ rounds:
 				return false, "", fmt.Errorf("persist %s approval gate: %w", stepName, dbErr)
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
+			e.mu.Unlock()
 
-			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
+			e.yieldSlotForGateWait()
+			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true, false)
+			// A daemon shutdown leaves the gate parked for recovery.
 			if errors.Is(err, ErrDaemonShutdown) {
 				return false, "", ErrParkedAtShutdown
 			}
-			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
-				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
+			e.endGateWait(run.ID, parkStart, err)
+			if err == nil && !reconciled && response.action == types.ActionAbort {
+				e.recordDeclinedRound(currentRoundID, effectiveFindings, stepName, roundNum)
+				if dbErr := e.db.FailStep(sr.ID, "aborted by user", executionMS); dbErr != nil {
+					slog.Warn("failed to mark step as aborted", "step", stepName, "error", dbErr)
+				}
+				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "aborted by user", &executionMS)
+				return false, "", fmt.Errorf("step %s: aborted by user", stepName)
+			}
+			if err == nil {
+				err = e.acquireAnsweredGateSlot(ctx, run.ID, sr.ID)
+			}
+			if errors.Is(err, ErrParkedAtShutdown) {
+				return false, "", err
 			}
 			if err != nil {
 				if dbErr := e.db.FailStep(sr.ID, err.Error(), executionMS); dbErr != nil {
@@ -1955,14 +2087,6 @@ rounds:
 				}
 				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusSkipped), "", "", &executionMS)
 				return false, "", nil
-
-			case types.ActionAbort:
-				e.recordDeclinedRound(currentRoundID, effectiveFindings, stepName, roundNum)
-				if dbErr := e.db.FailStep(sr.ID, "aborted by user", executionMS); dbErr != nil {
-					slog.Warn("failed to mark step as aborted", "step", stepName, "error", dbErr)
-				}
-				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", "aborted by user", &executionMS)
-				return false, "", fmt.Errorf("step %s: aborted by user", stepName)
 
 			case types.ActionFix:
 				telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(effectiveFindings, response.findingIDs), 0))
@@ -2458,21 +2582,8 @@ func pluralize(n int, singular, plural string) string {
 // cancelled. Reconciliation runs synchronously under a bounded child context,
 // so no watcher goroutine can outlive approval, cancellation, or shutdown.
 // The caller must set e.waiting and e.waitingStep before calling this method.
-func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sctx *StepContext, findings string, immediate bool) (approvalResponse, bool, error) {
-	defer func() {
-		e.mu.Lock()
-		e.waiting = false
-		e.waitingStep = ""
-		e.waitingFindings = ""
-		e.waitingStepResultID = ""
-		e.mu.Unlock()
-		// Drain any stale response that arrived after context cancellation or
-		// raced with an external reconciliation.
-		select {
-		case <-e.approvalCh:
-		default:
-		}
-	}()
+func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sctx *StepContext, findings string, immediate, pendingReconciliation bool) (approvalResponse, bool, error) {
+	defer e.clearApprovalGate()
 
 	_, reconciles := step.(ApprovalGateReconciler)
 	_, resumes := step.(ApprovalGateResumer)
@@ -2498,26 +2609,40 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 		case <-ctx.Done():
 			return approvalResponse{}, false, context.Cause(ctx)
 		case <-timer.C:
+			if pendingReconciliation {
+				if err := e.acquireSlot(ctx); err != nil {
+					return approvalResponse{}, false, err
+				}
+			}
 			// A resumer runs first and returns a RESPONSE rather than a
 			// completion, so the gate re-enters its step exactly as it would
 			// for an operator's own action. Claiming the gate here is the same
 			// race guard reconciliation uses: an operator response that landed
 			// first wins.
-			if action, resume, err := e.resumeApprovalGate(ctx, step, sctx, findings); resume {
-				if e.claimGateReconciliation() {
-					return approvalResponse{action: action}, false, nil
-				}
-				return <-e.approvalCh, false, nil
-			} else if err != nil && ctx.Err() == nil {
-				if sctx != nil && sctx.Log != nil {
-					sctx.Log(fmt.Sprintf("warning: could not re-check parked %s gate; preserving it: %v", step.Name(), err))
-				} else {
-					slog.Warn("could not re-check parked approval gate; preserving it", "step", step.Name(), "error", err)
+			if !pendingReconciliation {
+				if action, resume, err := e.resumeApprovalGate(ctx, step, sctx, findings); resume {
+					if claimed, err := e.claimGateReconciliation(&approvalResponse{action: action}); err != nil {
+						return approvalResponse{}, false, err
+					} else if claimed {
+						return approvalResponse{action: action}, false, nil
+					}
+					return <-e.approvalCh, false, nil
+				} else if err != nil && ctx.Err() == nil {
+					if sctx != nil && sctx.Log != nil {
+						sctx.Log(fmt.Sprintf("warning: could not re-check parked %s gate; preserving it: %v", step.Name(), err))
+					} else {
+						slog.Warn("could not re-check parked approval gate; preserving it", "step", step.Name(), "error", err)
+					}
 				}
 			}
 			resolved, err := e.reconcileApprovalGate(ctx, step, sctx, findings)
+			if pendingReconciliation && err == nil {
+				return approvalResponse{}, resolved, nil
+			}
 			if resolved {
-				if e.claimGateReconciliation() {
+				if claimed, err := e.claimGateReconciliation(nil); err != nil {
+					return approvalResponse{}, false, err
+				} else if claimed {
 					return approvalResponse{}, true, nil
 				}
 				return <-e.approvalCh, false, nil
@@ -2532,22 +2657,43 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 					slog.Warn("could not reconcile parked approval gate; preserving it", "step", step.Name(), "error", err)
 				}
 			}
+			if pendingReconciliation {
+				e.yieldSlot()
+			}
 			timer.Reset(e.gateReconcileInterval)
 		}
 	}
 }
 
-func (e *Executor) claimGateReconciliation() bool {
+func (e *Executor) clearApprovalGate() {
+	e.mu.Lock()
+	e.waiting = false
+	e.waitingStep = ""
+	e.waitingFindings = ""
+	e.waitingStepResultID = ""
+	e.mu.Unlock()
+	// Drain any stale response that arrived after context cancellation or
+	// raced with an external reconciliation.
+	select {
+	case <-e.approvalCh:
+	default:
+	}
+}
+
+func (e *Executor) claimGateReconciliation(response *approvalResponse) (bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if !e.waiting {
-		return false
+		return false, nil
+	}
+	if err := e.acceptApprovalGate(response); err != nil {
+		return false, err
 	}
 	e.waiting = false
 	e.waitingStep = ""
 	e.waitingFindings = ""
 	e.waitingStepResultID = ""
-	return true
+	return true, nil
 }
 
 // resumeApprovalGate asks a step whether its parked gate is now answerable.

@@ -39,7 +39,7 @@ func answerFixtureWithConversation(t *testing.T, conversation bool) (*RunManager
 	cfg := &config.Config{Review: config.Review{Conversation: conversation}}
 	exec := pipeline.NewExecutor(database, p, cfg, nil, nil, nil)
 	m.mu.Lock()
-	m.executors[runID] = exec
+	m.runs[runID] = &managedRun{executor: exec}
 	m.mu.Unlock()
 	return m, p, runID
 }
@@ -303,7 +303,7 @@ func liveParkedGateFixture(t *testing.T) (*RunManager, *paths.Paths, string, *pi
 
 	m := NewRunManager(database, p, nil)
 	m.mu.Lock()
-	m.executors[run.ID] = exec
+	m.runs[run.ID] = &managedRun{run: run, executor: exec}
 	m.mu.Unlock()
 
 	done := make(chan error, 1)

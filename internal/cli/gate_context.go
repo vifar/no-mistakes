@@ -44,6 +44,11 @@ func guardGateControl(cmd *cobra.Command) error {
 }
 
 func mutatesPipelineControl(cmd *cobra.Command) bool {
+	for parent := cmd; parent != nil; parent = parent.Parent() {
+		if parent.CommandPath() == "no-mistakes daemon set" {
+			return true
+		}
+	}
 	path := cmd.CommandPath()
 	switch path {
 	case "no-mistakes", "no-mistakes init", "no-mistakes eject", "no-mistakes rerun",

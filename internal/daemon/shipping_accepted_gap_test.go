@@ -51,7 +51,7 @@ func TestAcceptedGapApprovalManagerAndExecutor(t *testing.T) {
 					}
 				})
 				manager := NewRunManager(database, p, nil)
-				manager.executors[run.ID] = executor
+				manager.runs[run.ID] = &managedRun{run: run, executor: executor}
 				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 				defer cancel()
 				done := make(chan error, 1)
@@ -236,7 +236,7 @@ func TestAcceptedGapSurvivesACrashBetweenRecordAndCompletion(t *testing.T) {
 				}
 			})
 			manager := NewRunManager(database, p, nil)
-			manager.executors[run.ID] = executor
+			manager.runs[run.ID] = &managedRun{run: run, executor: executor}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
 			done := make(chan error, 1)
