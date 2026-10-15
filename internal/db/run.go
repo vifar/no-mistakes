@@ -1121,9 +1121,9 @@ func (d *DB) ClaimClosingIssueRefsForPRBody(id string) ([]string, error) {
 }
 
 // SetRunAwaitingAgent marks a run as parked awaiting the driving agent,
-// stamping awaiting_agent_since with the current time. Called by the executor
-// when a step enters a gate (awaiting_approval / fix_review). This is a pollable
-// observability signal only; it does not change gate resolution.
+// stamping awaiting_agent_since with the current time. Executor gate entry uses
+// ParkStepForApproval to persist the step status and this marker atomically.
+// This is an observability signal only; it does not change gate resolution.
 func (d *DB) SetRunAwaitingAgent(id string) error {
 	ts := now()
 	_, err := d.sql.Exec(`UPDATE runs SET awaiting_agent_since = ?, updated_at = ? WHERE id = ?`, ts, ts, id)
@@ -1133,10 +1133,9 @@ func (d *DB) SetRunAwaitingAgent(id string) error {
 	return nil
 }
 
-// ClearRunAwaitingAgent clears the awaiting-agent marker on a run. Called by the
-// executor the moment the agent responds (or the approval wait is cancelled) and
-// the run resumes, so awaiting_agent_since is non-nil exactly while a gate is
-// actually parked.
+// ClearRunAwaitingAgent clears the awaiting-agent marker without recording parked
+// time. Executor gate transitions use ResumeStepFromApproval or
+// CompleteRunAwaitingAgent to preserve that timing atomically.
 func (d *DB) ClearRunAwaitingAgent(id string) error {
 	_, err := d.sql.Exec(`UPDATE runs SET awaiting_agent_since = NULL, updated_at = ? WHERE id = ?`, now(), id)
 	if err != nil {
@@ -1146,7 +1145,7 @@ func (d *DB) ClearRunAwaitingAgent(id string) error {
 }
 
 // AddRunParkedDuration accumulates parked-at-gate wall time onto a run's
-// total. Called by the executor when a gate wait ends.
+// total without clearing its awaiting-agent marker.
 func (d *DB) AddRunParkedDuration(id string, ms int64) error {
 	if ms <= 0 {
 		return nil
@@ -1340,10 +1339,9 @@ func (d *DB) GetRunGates(id string) (string, error) {
 }
 
 // SetRunGates records the repository-declared gates this run executes. The
-// caller writes it once, at run creation, before the executor can record a
-// single step, so the run's step sequence is fixed from the moment anything can
-// observe it and stays fixed even if the trusted default branch's gates change
-// while the run is in flight.
+// caller writes it once during admitted-run setup, before the executor can
+// record a single step. Once pinned, the sequence stays fixed even if the
+// trusted default branch's gates change; a queued run has no pin yet.
 func (d *DB) SetRunGates(id, gates string) error {
 	_, err := d.sql.Exec(`UPDATE runs SET gates_json = ?, updated_at = ? WHERE id = ?`, gates, now(), id)
 	if err != nil {

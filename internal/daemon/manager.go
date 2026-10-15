@@ -697,8 +697,8 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	return cfg, nil
 }
 
-// pinnedRunGates reads back the gate list a run resolved at creation. An absent
-// pin means the bare core pipeline - the only sequence a run created before
+// pinnedRunGates reads back the gate list resolved during admitted-run setup.
+// An absent pin means the bare core pipeline - the only sequence a run created before
 // gates were pinned can have had - while an unusable one fails its caller
 // closed with a reason, because silently dropping it would resume the run
 // against a shorter pipeline than the one it recorded.
