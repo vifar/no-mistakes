@@ -38,7 +38,9 @@ func Open(root string) (*Store, error) {
 	if err := os.MkdirAll(cases, 0o755); err != nil {
 		return nil, fmt.Errorf("create eval cases directory: %w", err)
 	}
-	database, err := sql.Open("sqlite", filepath.Join(root, "registry.sqlite")+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
+	// Keep the database's journal mode: switching to WAL on each connection
+	// can itself race another opener before migration acquires its writer lock.
+	database, err := sql.Open("sqlite", filepath.Join(root, "registry.sqlite")+"?_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open eval registry: %w", err)
 	}
@@ -55,10 +57,23 @@ func (s *Store) migrate() error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("eval registry is closed")
 	}
-	if err := s.dropParkPassSchema(); err != nil {
+	ctx := context.Background()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("connect eval migration: %w", err)
+	}
+	defer conn.Close()
+	// CLI capture can race daemon auto-capture. Take the writer lock before
+	// inspecting any schema: a deferred read transaction cannot safely upgrade
+	// after another opener has migrated, even with a busy timeout.
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("begin eval migration: %w", err)
+	}
+	defer conn.ExecContext(ctx, "ROLLBACK")
+	if err := dropParkPassSchema(ctx, conn); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(`
+	_, err = conn.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS cases (
     id TEXT PRIMARY KEY,
     source_run_id TEXT NOT NULL,
@@ -117,35 +132,30 @@ CREATE TABLE IF NOT EXISTS diversified_pins (
 		return fmt.Errorf("migrate eval registry: %w", err)
 	}
 	var reservationLeaseColumn int
-	if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('replay_case_reservations') WHERE name = 'reserved_until'`).Scan(&reservationLeaseColumn); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('replay_case_reservations') WHERE name = 'reserved_until'`).Scan(&reservationLeaseColumn); err != nil {
 		return fmt.Errorf("inspect eval replay reservation schema: %w", err)
 	}
 	if reservationLeaseColumn == 0 {
-		if _, err := s.db.Exec(`ALTER TABLE replay_case_reservations ADD COLUMN reserved_until INTEGER NOT NULL DEFAULT 0`); err != nil {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE replay_case_reservations ADD COLUMN reserved_until INTEGER NOT NULL DEFAULT 0`); err != nil {
 			return fmt.Errorf("migrate eval replay reservations: %w", err)
 		}
 	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin eval cache migration: %w", err)
-	}
-	defer tx.Rollback()
 	cacheColumnsAdded := false
 	for _, column := range []string{"cache_read_tokens", "cache_write_tokens"} {
 		var cacheTokenColumn int
-		if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('evaluations') WHERE name = ?`, column).Scan(&cacheTokenColumn); err != nil {
+		if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('evaluations') WHERE name = ?`, column).Scan(&cacheTokenColumn); err != nil {
 			return fmt.Errorf("inspect eval evaluation schema: %w", err)
 		}
 		if cacheTokenColumn == 0 {
 			// A historical payload may be unavailable; NULL keeps its cost unknown.
-			if _, err := tx.Exec(`ALTER TABLE evaluations ADD COLUMN ` + column + ` INTEGER`); err != nil {
+			if _, err := conn.ExecContext(ctx, `ALTER TABLE evaluations ADD COLUMN `+column+` INTEGER`); err != nil {
 				return fmt.Errorf("migrate eval evaluation schema: %w", err)
 			}
 			cacheColumnsAdded = true
 		}
 	}
 	if cacheColumnsAdded {
-		rows, err := tx.Query(`SELECT id, path, candidate FROM evaluations`)
+		rows, err := conn.QueryContext(ctx, `SELECT id, path, candidate FROM evaluations`)
 		if err != nil {
 			return fmt.Errorf("list eval cache payloads: %w", err)
 		}
@@ -186,7 +196,7 @@ CREATE TABLE IF NOT EXISTS diversified_pins (
 			if disjointInput {
 				inputAdjustment = evaluation.CacheReadTokens + evaluation.CacheWriteTokens
 			}
-			if _, err := tx.Exec(`UPDATE evaluations SET cache_read_tokens = ?, cache_write_tokens = ?,
+			if _, err := conn.ExecContext(ctx, `UPDATE evaluations SET cache_read_tokens = ?, cache_write_tokens = ?,
 input_tokens = CASE WHEN tokens_reported = 1 THEN input_tokens + ? ELSE input_tokens END,
 fresh_input_tokens = CASE WHEN tokens_reported != 1 THEN fresh_input_tokens
     WHEN ? THEN input_tokens ELSE MAX(input_tokens - ? - ?, 0) END
@@ -197,21 +207,21 @@ WHERE path = ?`,
 			}
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit eval cache migration: %w", err)
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("commit eval migration: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) dropParkPassSchema() error {
+func dropParkPassSchema(ctx context.Context, conn *sql.Conn) error {
 	var parkColumn int
-	if err := s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('cases') WHERE name = 'verdict_should_park'`).Scan(&parkColumn); err != nil {
+	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM pragma_table_info('cases') WHERE name = 'verdict_should_park'`).Scan(&parkColumn); err != nil {
 		return fmt.Errorf("inspect eval case schema: %w", err)
 	}
 	if parkColumn == 0 {
 		return nil
 	}
-	_, err := s.db.Exec(`
+	_, err := conn.ExecContext(ctx, `
 DROP TABLE IF EXISTS evaluations;
 DROP TABLE IF EXISTS replay_case_reservations;
 DROP TABLE IF EXISTS pending_case_deletions;
