@@ -712,8 +712,12 @@ func (h *Host) repoSlug() string {
 // checkSuite.workflowRun.runAttempt is the parent's current attempt, not the
 // job's attempt. On reruns, membership in currentAttemptJobs decides which
 // jobs are current; timestamps cannot distinguish stale jobs from successes
-// carried over by a partial rerun. Without that membership data, an unfinished
-// run makes its jobs pending and earlier completions are retired otherwise.
+// carried over by a partial rerun. A first attempt preserves each job's own
+// state; only an unknown attempt number makes represented jobs pending while
+// the run is unfinished and not held for approval. Without membership data,
+// completions predating the attempt are retired otherwise. Only check runs
+// participate: a commit status linking to an Actions run is still independent
+// evidence and must not be changed or retired with that run's jobs.
 //
 // Attempts of one trigger - the same workflow, event, and head branch - are
 // then judged as GitHub's newest meaningful attempt, ordered by when each
@@ -932,8 +936,8 @@ func jobIdentity(c scm.Check) scm.Check {
 }
 
 // collapseLatestByName collapses orderable same-name reruns of one workflow
-// to the most recently started one. Independent workflows and records whose
-// provider metadata cannot establish an order remain visible. GitHub's raw
+// to the newest attempt, ordered by attemptAfter. Independent workflows and
+// records whose provider metadata cannot establish an order remain visible. GitHub's raw
 // commit statusCheckRollup returns every check run ever attached to the commit,
 // including runs a later same-named run has
 // already superseded - e.g. a CI monitor's auto-fix push re-triggers the
@@ -941,11 +945,10 @@ func jobIdentity(c scm.Check) scm.Check {
 // SUCCESS forever. Without this collapse the superseded failure stays
 // visible even after the later run at the same head turns green, which
 // manufactures an unrecoverable auto-fix loop (see "CI Monitor Lifecycle" in
-// .agents/skills/ci-monitor/SKILL.md). This restores the semantics `gh pr checks` already applies
-// (collapse by startedAt) to the commit-rollup path, which never had it.
+// .agents/skills/ci-monitor/SKILL.md).
 //
 // Must run AFTER appendUnrepresentedWorkflowRuns, never before: that call
-// dedupes by Actions run ID against the FULL uncollapsed rollup. Collapsing
+// reconciles by Actions run ID against the FULL uncollapsed rollup. Collapsing
 // first would drop a superseded run's ID out of the "represented" set the
 // union checks against, letting the union re-add the same stale run under
 // its own workflow run name - resurrecting exactly the failure this is

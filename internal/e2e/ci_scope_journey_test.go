@@ -67,8 +67,16 @@ type forgeThread struct {
 	Body   string `json:"body"`
 }
 
+type forgeStatus struct {
+	ID        string `json:"id,omitempty"`
+	Context   string `json:"context"`
+	State     string `json:"state"`
+	TargetURL string `json:"target_url,omitempty"`
+}
+
 type forgeState struct {
 	Checks           []forgeCheck       `json:"checks,omitempty"`
+	Statuses         []forgeStatus      `json:"statuses,omitempty"`
 	Protection       *forgeEndpoint     `json:"protection,omitempty"`
 	Rules            *forgeRules        `json:"rules,omitempty"`
 	Runs             []json.RawMessage  `json:"runs,omitempty"`
@@ -257,6 +265,7 @@ func (j *scopeJourney) expectWaiting(branch, want string) *ipc.RunInfo {
 	if info.CIReady || ci.Status != types.StepStatusRunning || ci.FindingsJSON != nil && *ci.FindingsJSON != "" {
 		j.t.Fatalf("run %s should be monitoring without readiness: ready=%v ci=%s findings=%s\nlog:\n%s", run.ID, info.CIReady, ci.Status, deref(ci.FindingsJSON), j.ciLog(run.ID))
 	}
+	j.t.Logf("CI waiting on %s (ready=false):\n%s", branch, j.ciLog(run.ID))
 	return info
 }
 
@@ -268,6 +277,7 @@ func (j *scopeJourney) expectReady(branch string, timeout time.Duration) *ipc.Ru
 	for time.Now().Before(deadline) {
 		info := j.h.RunInfo(run.ID)
 		if info.CIReady {
+			j.t.Logf("CI ready on %s:\n%s", branch, j.ciLog(run.ID))
 			return info
 		}
 		ci, _ := findStep(info.Steps, types.StepCI)
@@ -292,6 +302,7 @@ func (j *scopeJourney) expectGate(branch string) (*ipc.RunInfo, []string) {
 	if run.CIReady {
 		j.t.Fatalf("run %s parked at a CI gate while reporting readiness", run.ID)
 	}
+	j.t.Logf("CI gate on %s (ready=false), findings=%s:\n%s", branch, deref(ci.FindingsJSON), j.ciLog(run.ID))
 	return run, findingChecks(j.t, ci.FindingsJSON)
 }
 
@@ -411,12 +422,132 @@ func (j *scopeJourney) strictRun(branch string) (string, *ipc.RunInfo, string) {
 	if err != nil {
 		j.t.Fatalf("strict axi run: %v\n%s", err, out)
 	}
+	j.t.Logf("strict axi run on %s:\n%s", branch, out)
 	return wt, j.runFor(branch), out
 }
 
 func (j *scopeJourney) receipt(wt, runID string) (string, error) {
 	j.t.Helper()
-	return j.h.RunInDir(wt, "axi", "review-receipt", "--run", runID, "--phase", "ci-ready")
+	out, err := j.h.RunInDir(wt, "axi", "review-receipt", "--run", runID, "--phase", "ci-ready")
+	j.t.Logf("ci-ready receipt for %s (error=%v):\n%s", runID, err, out)
+	return out, err
+}
+
+// A completed required job on attempt 1 owns its result even while an external
+// approval job keeps the workflow running. A success must ship; a failure must
+// reach the repair gate instead of being converted back to pending.
+func TestCIScopeFirstAttemptKeepsCompletedRequiredJob(t *testing.T) {
+	j := newScopeJourney(t, SetupOpts{Agent: "claude"})
+	j.setTrusted("ci:\n  external_checks:\n    - approve\n")
+	j.init()
+	for _, conclusion := range []string{"SUCCESS", "FAILURE"} {
+		t.Run(conclusion, func(t *testing.T) {
+			branch := "feature/scope-first-attempt-" + strings.ToLower(conclusion)
+			build := actionsCheck("build", conclusion)
+			build.DatabaseID, build.Workflow = 5, "CI"
+			build.DetailsURL = "https://github.com/example/closes/actions/runs/7/job/5"
+			approval := runningCheck("approve")
+			approval.DatabaseID, approval.Workflow = 6, "CI"
+			approval.DetailsURL = "https://github.com/example/closes/actions/runs/7/job/6"
+			forge := forgeState{
+				Protection: protectionJSON("build@15368"),
+				Checks:     []forgeCheck{build, approval},
+				Runs:       []json.RawMessage{json.RawMessage(fmt.Sprintf(`{"id":7,"workflow_id":10,"run_attempt":1,"name":"CI","event":"push","head_branch":%q,"status":"in_progress","run_started_at":"2026-10-15T10:00:00Z","html_url":"https://github.com/example/closes/actions/runs/7"}`, branch))},
+			}
+			j.setForge(forge)
+			if conclusion == "SUCCESS" {
+				wt, run, out := j.strictRun(branch)
+				if !run.CIReady || !strings.Contains(out, "outcome: checks-passed") {
+					t.Fatalf("completed first-attempt build did not establish readiness: %s", out)
+				}
+				if _, err := j.receipt(wt, run.ID); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				j.push(branch)
+				run, checks := j.expectGate(branch)
+				if !sameSet(checks, "build") {
+					t.Fatalf("completed first-attempt failure must name only build, got %v", checks)
+				}
+				forge.Checks[0].Conclusion = "SUCCESS"
+				j.setForge(forge)
+				j.h.Respond(run.ID, types.StepCI, types.ActionApprove)
+				done := j.h.WaitForRun(branch, scopeCheckWaitTime)
+				if done.Status != types.RunCompleted || done.CIOverrideReason != "" {
+					t.Fatalf("approval after build passed: status=%s override=%q", done.Status, done.CIOverrideReason)
+				}
+				t.Logf("approval after the first-attempt build passed: status=%s override=%q", done.Status, done.CIOverrideReason)
+			}
+			j.finish(branch)
+		})
+	}
+}
+
+// A commit status is independent of the Actions run its URL happens to name.
+// Both attempt reconciliation and retirement must retain a failing must-pass
+// status for monitoring, approval verification, and live receipt checks.
+func TestCIScopeActionsLinkedStatusStillBlocksReadiness(t *testing.T) {
+	j := newScopeJourney(t, SetupOpts{Agent: "claude"})
+	j.setTrusted("ci:\n  must_pass:\n    - audit-*\n")
+	j.init()
+	for _, retirement := range []bool{false, true} {
+		t.Run(fmt.Sprintf("retirement=%v", retirement), func(t *testing.T) {
+			variant := "reconciliation"
+			if retirement {
+				variant = "retirement"
+			}
+			forgeFor := func(branch, status string) forgeState {
+				build := greenCheck("build")
+				build.DatabaseID, build.Workflow = 5, "CI"
+				build.DetailsURL = "https://github.com/example/closes/actions/runs/7/job/5"
+				run := func(id, attempt int, started string) json.RawMessage {
+					return json.RawMessage(fmt.Sprintf(`{"id":%d,"workflow_id":10,"run_attempt":%d,"name":"CI","event":"push","head_branch":%q,"status":"completed","conclusion":"success","run_started_at":%q,"html_url":"https://github.com/example/closes/actions/runs/%d"}`, id, attempt, branch, started, id))
+				}
+				forge := forgeState{
+					Protection:  protectionJSON("build@15368"),
+					Checks:      []forgeCheck{build},
+					Statuses:    []forgeStatus{{ID: "audit", Context: "audit-status", State: status, TargetURL: "https://github.com/example/closes/actions/runs/7"}},
+					Runs:        []json.RawMessage{run(7, 2, "2026-10-15T10:00:00Z")},
+					AttemptJobs: map[string][]int64{"7/2": {5}},
+				}
+				if retirement {
+					newBuild := build
+					newBuild.DatabaseID = 6
+					newBuild.DetailsURL = "https://github.com/example/closes/actions/runs/8/job/6"
+					forge.Checks = append(forge.Checks, newBuild)
+					forge.Runs = []json.RawMessage{run(7, 1, "2026-10-15T10:00:00Z"), run(8, 1, "2026-10-15T11:00:00Z")}
+				}
+				return forge
+			}
+
+			branch := "feature/scope-status-" + variant
+			j.setForge(forgeFor(branch, "FAILURE"))
+			j.push(branch)
+			run, checks := j.expectGate(branch)
+			if !sameSet(checks, "audit-status") {
+				t.Fatalf("independent failing status must survive %s, findings=%v", variant, checks)
+			}
+			j.h.Respond(run.ID, types.StepCI, types.ActionApprove)
+			done := j.h.WaitForRun(branch, scopeCheckWaitTime)
+			if done.Status != types.RunCompleted || !strings.Contains(done.CIOverrideReason, "audit-status") {
+				t.Fatalf("approval must record the failing status: status=%s override=%q", done.Status, done.CIOverrideReason)
+			}
+			t.Logf("approval over the independent failing status: status=%s override=%q", done.Status, done.CIOverrideReason)
+
+			strictBranch := branch + "-receipt"
+			j.setForge(forgeFor(strictBranch, "SUCCESS"))
+			wt, strict, out := j.strictRun(strictBranch)
+			if !strict.CIReady || !strings.Contains(out, "outcome: checks-passed") {
+				t.Fatalf("baseline green status did not establish readiness: %s", out)
+			}
+			j.setForge(forgeFor(strictBranch, "FAILURE"))
+			receipt, err := j.receipt(wt, strict.ID)
+			if err == nil || !strings.Contains(receipt, "strict readiness requires all live checks green") {
+				t.Fatalf("receipt ignored the independent failing status: err=%v\n%s", err, receipt)
+			}
+			j.finish(strictBranch)
+		})
+	}
 }
 
 // TestCIScopeStrictReadinessIgnoresNonRequiredAndExternalChecks (scenario 1): a
@@ -560,6 +691,31 @@ func TestCIScopeAutoDiscovery(t *testing.T) {
 	j := newScopeJourney(t, SetupOpts{Agent: "claude"})
 	j.init()
 
+	t.Run("classic protection absent leaves rulesets authoritative", func(t *testing.T) {
+		const branch = "feature/scope-ruleset-only"
+		j.setForge(forgeState{
+			Rules:  &forgeRules{Pages: []json.RawMessage{rulesetPage("ruleset-check")}},
+			Checks: []forgeCheck{redCheck("ruleset-check"), redCheck("unrelated")},
+		})
+		j.push(branch)
+		_, checks := j.expectGate(branch)
+		if !sameSet(checks, "ruleset-check") {
+			t.Fatalf("explicit no-protection 404 must leave rulesets authoritative, findings=%v", checks)
+		}
+		j.finish(branch)
+	})
+
+	t.Run("required empty set still evaluates every non-external check", func(t *testing.T) {
+		const branch = "feature/scope-empty-required"
+		j.setForge(forgeState{Protection: protectionJSON(), Checks: []forgeCheck{greenCheck("build"), redCheck("docs")}})
+		j.push(branch)
+		_, checks := j.expectGate(branch)
+		if !sameSet(checks, "docs") {
+			t.Fatalf("empty requirements must fail safe to every check, findings=%v", checks)
+		}
+		j.finish(branch)
+	})
+
 	t.Run("protection and a later ruleset page are unioned", func(t *testing.T) {
 		const branch = "feature/scope-union"
 		j.setForge(forgeState{
@@ -607,6 +763,8 @@ func TestCIScopeAutoDiscovery(t *testing.T) {
 	}{
 		{"forbidden protection", forgeState{Protection: &forgeEndpoint{Status: 403, Message: "Resource not accessible by integration"}}},
 		{"forbidden rules", forgeState{Protection: protectionJSON("build"), Rules: &forgeRules{Status: 403, Message: "Resource not accessible by integration"}}},
+		{"bare protection not found", forgeState{Protection: &forgeEndpoint{Status: 404, Message: "Not Found"}}},
+		{"bare rules not found", forgeState{Protection: protectionJSON("build"), Rules: &forgeRules{Status: 404, Message: "Not Found"}}},
 		{"protection server error", forgeState{Protection: &forgeEndpoint{Status: 500, Message: "Server Error"}}},
 	} {
 		t.Run("unreadable requirements fall back to every check: "+tc.name, func(t *testing.T) {
@@ -632,6 +790,28 @@ func TestCIScopeAutoDiscovery(t *testing.T) {
 func TestCIScopeExternalOverridesAndAllExcludedRestriction(t *testing.T) {
 	j := newScopeJourney(t, SetupOpts{Agent: "claude"})
 	j.init()
+
+	t.Run("qualified glob exclusions cover an absent required approval context", func(t *testing.T) {
+		const branch = "feature/scope-qualified-external"
+		j.setTrusted("ci:\n  must_pass:\n    - 'CI / audit-*'\n  external_checks:\n    - 'Review / approval-*'\n")
+		checks := []forgeCheck{greenCheck("build"), redCheck("audit-123")}
+		checks[1].Workflow = "CI"
+		j.setForge(forgeState{Protection: protectionJSON("build", "approval-123"), Checks: checks})
+		j.push(branch)
+		_, findings := j.expectGate(branch)
+		if !sameSet(findings, "audit-123") {
+			t.Fatalf("qualified must-pass must retain audit and external must exclude absent approval: findings=%v", findings)
+		}
+		checks[1].Conclusion = "SUCCESS"
+		j.setForge(forgeState{Protection: protectionJSON("build", "approval-123"), Checks: checks})
+		run := j.runFor(branch)
+		j.h.Respond(run.ID, types.StepCI, types.ActionApprove)
+		done := j.h.WaitForRun(branch, scopeCheckWaitTime)
+		if done.Status != types.RunCompleted || done.CIOverrideReason != "" {
+			t.Fatalf("absent external approval blocked clean verification: status=%s override=%q", done.Status, done.CIOverrideReason)
+		}
+		t.Logf("qualified audit passed with required approval-123 still absent: status=%s override=%q", done.Status, done.CIOverrideReason)
+	})
 
 	t.Run("external outranks must_pass and the required set", func(t *testing.T) {
 		const branch = "feature/scope-external-outranks"
