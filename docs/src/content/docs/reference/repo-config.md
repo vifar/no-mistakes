@@ -950,13 +950,14 @@ Any git error while checking also counts as not a pure replay. The check is deli
 
 The carry applies only when the repaired head's own commits are exactly the reviewed commits. If any commit was added after Review approved the head (a Test, Document, or Lint auto-fix commit, or an earlier published CI repair), the repair is not a pure replay of the reviewed commits and Review re-runs as it does with the key off.
 
-This setting applies only to ordinary runs. Strict shipping requires a fresh Review receipt for its exact pinned comparison and never carries Review approval through a replay or changed comparison, regardless of this value.
+This setting applies only to ordinary runs without a fixed pull request comparison. When a run uses a fixed comparison, it repeats the full Review after a rebase, even if the replay is pure. Current guarded network runs use a fixed comparison, so enabling this setting does not transfer their Review approval. Strict shipping also requires a fresh Review receipt for its exact pinned comparison and never carries Review approval through a replay or changed comparison, regardless of this value.
 
 The key has no effect when:
 
 - [`ci.revalidate_repairs`](#cirevalidate_repairs) is `true`, which keeps meaning that every repair re-passes Review.
 - The run has a repository [gate](#gates) anchored `after: review`. Restarting at Test would skip that gate for the new head, so the repair revalidates from Review instead.
 - The repair is not a rebase (an ordinary failing-check repair takes the [`ci.revalidate_repairs`](#cirevalidate_repairs) path unchanged).
+- The run uses a fixed pull request comparison, which requires a full Review after the replay.
 
 The approval is moved only from the approval the check was made against: an approval that was revoked or replaced in the meantime is never carried. Nothing is published early; the replayed head stays local until the Push step republishes it after Test.
 
