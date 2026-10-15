@@ -8,7 +8,7 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `staging_exclude`, `max_file_size_bytes`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `staging_exclude`, `max_file_size_bytes`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `ci.required_checks`, `ci.must_pass`, `ci.external_checks`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
@@ -88,6 +88,9 @@ ci:
   review_bot_comments: on_failure # or: always
   rebase_behind: false
   carry_review_on_replay: false
+  required_checks: auto # or: all
+  must_pass: []
+  external_checks: [] # e.g. ["Final Approval / approve*", "approval-status"]
 
 # How a base branch that moved under your branch is integrated.
 # Read only from the trusted default branch.
@@ -202,11 +205,11 @@ Declare that this repository intentionally has no CI.
 | Type | `bool` |
 | Default | `false` |
 
-For ordinary runs, when `true` and the forge reports **zero** checks on the PR head, the CI monitor treats that empty result as all-checks-passed and `axi run` may return `outcome: checks-passed`. The monitor log names the declaration (`no_ci: true`) so the positive evidence stays inspectable rather than silently equating every empty forge response with green. [Strict shipping](/no-mistakes/reference/cli/#strict-shipping-and-review-receipts) requires nonempty live checks even with this declaration.
+For ordinary runs, when `true` and the forge reports **zero** checks on the PR head, with no unmet in-scope requirement under the [check-scope rules](#cirequired_checks), the CI monitor treats that empty result as all-checks-passed and `axi run` may return `outcome: checks-passed`. The monitor log names the declaration (`no_ci: true`) so the positive evidence stays inspectable rather than silently equating every empty forge response with green. [Strict shipping](/no-mistakes/reference/cli/#strict-shipping-and-review-receipts) requires observed live checks even with this declaration; those checks may all be excluded by `ci.external_checks`.
 
-Absence of this field means CI is expected. A zero-length check result then stays not-ready for as long as the forge reports no checks - elapsed time, grace periods, workflow-file presence or absence, prior check history, and branch names are not evidence.
+Absence of this field means CI is expected. Except for the [pipeline self-status requirement](#cirequired_checks), a zero-length check result stays not-ready for as long as the forge reports no checks - elapsed time, grace periods, workflow-file presence or absence, prior check history, and branch names are not evidence.
 
-If checks still appear on a declared no-CI repository, their actual states are processed normally. The declaration never waives a registered pending or failing check.
+If checks still appear on a declared no-CI repository, their actual states are processed under the [check-scope rules](#cirequired_checks). The declaration never waives a pending or failing check that is in scope.
 
 This field is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.
 A feature branch cannot self-declare `no_ci: true` to bypass checks, and cannot clear a trusted declaration either.
@@ -872,8 +875,8 @@ ci:
   review_bot_comments: always
 ```
 
-- **`on_failure` (default)** reads them only when the bot's own check failed. A green bot check is green, whatever comments it left. This is the behavior before the key existed.
-- **`always`** also reads them when the bot's check completed green on the current head, or has not registered on it yet once every other check is green, since the bot's threads from an earlier head can still be unresolved. Each unresolved comment becomes the same `ask-user` finding a red bot check produces, anchored to the comment's file and line, so the step parks for a decision instead of reporting `checks-passed`. A green bot with nothing unresolved is still green.
+- **`on_failure` (default)** reads them only when the bot's own in-scope check failed. A green bot check is green, whatever comments it left. This is the behavior before the key existed.
+- **`always`** also reads comments from informational, green or absent bot checks under the conditions below, since the bot's threads from an earlier head can still be unresolved. Each unresolved comment becomes the same `ask-user` finding a red bot check produces, anchored to the comment's file and line, so the step parks for a decision instead of reporting `checks-passed`. A green bot with nothing unresolved is still green.
 
 A review bot can conclude its check `success` while leaving an unresolved comment. The comment most likely to be missed that way is the one on the pipeline's own CI repair commit, which no human has reviewed yet.
 
@@ -881,13 +884,15 @@ Where the comments come from, and how the bot is identified, is provider-specifi
 
 Under `always`:
 
-- Comments are read only once every check on the current head has completed green, the bot's included when it has registered one, so a review still being posted is not raced. A bot that has not registered a check on the head yet has its comments read too, since its threads from an earlier head can still be unresolved. A head with no checks at all under trusted [`no_ci: true`](#no_ci) has them read the same way before it is reported ready. Only unresolved threads count, and the same per-gate bound applies as for a red check. A GitLab note counts only when it is resolvable, unresolved, not a system note, and authored by a registered bot, so an ordinary merge request comment is never a finding.
+- Green or absent bot checks have their comments read when the CI step handles a settled observation or verifies readiness. A pending or cancelled in-scope bot check is not treated as green, so a review still being posted is not raced. `always` explicitly includes unresolved bot comments whether the bot check is absent, informational, or required. Only an explicit [`ci.external_checks`](#ciexternal_checks) match silences a bot, including retained findings selected before the scope changed. A head with no checks at all under trusted [`no_ci: true`](#no_ci) has comments read the same way before it is reported ready. Only unresolved threads count, and the same per-gate bound applies as for a red check. A GitLab note counts only when it is resolvable, unresolved, not a system note, and authored by a registered bot, so an ordinary merge request comment is never a finding. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns when failures escalate.
+- A failed or cancelled informational bot check still has its unresolved comments read and reported as `ask-user` findings. Its check conclusion alone does not block readiness when no comments remain unresolved. Only an explicit external exclusion silences those comments.
+- A pending supported bot check keeps readiness unsettled even when the check is informational, so comments are read after the review is posted. A pending informational bot does not delay repair of other in-scope failures, and its older unresolved comments are withheld until it settles. This readiness rule applies to monitoring, approval verification, and strict `ci-ready` receipts. External bot checks never wait. For this readiness rule, a reported app identifies the bot; a known check name is used only when no app is reported. A job published by another app, such as `github-actions`, is not treated as a bot merely because it is named `Greptile Review`.
 - The findings never spend an `auto_fix.ci` attempt. A human decides: approve, skip, or select comments for a fix round.
 - Approving over them records the CI step as passed with an override naming the comments, never as a clean pass.
-- A comment list that cannot be read is not treated as empty: `checks-passed` is withheld, and a read that keeps failing parks for a decision.
+- A comment list that cannot be read is not treated as empty: `checks-passed` is withheld, and a read that keeps failing parks for a decision. Strict `ci-ready` receipt export uses the same comment verification with the run's recorded policy and refuses export on any unresolved comment or comment-read error, even if readiness was previously recorded.
 - Each green poll costs one more provider read for the comments.
 
-Forges that cannot supply review comments are unaffected by either value. Because only GitHub can attribute a *check* to a review bot, `on_failure` reads nothing on GitLab: a GitLab run needs `always` for the bot's unresolved discussions to become findings.
+Forges that cannot supply review comments skip comment collection under either value. Because only GitHub can attribute a *check* to a review bot, `on_failure` reads nothing on GitLab: a GitLab run needs `always` for the bot's unresolved discussions to become findings.
 
 This value is read only from the trusted default-branch copy of this file, like the rest of the `ci` block: a pushed branch cannot silence a green bot's comments on itself, and cannot opt itself in either.
 A value set here wins over the operator's own [`ci.review_bot_comments`](/no-mistakes/reference/global-config/#cireview_bot_comments).
@@ -965,6 +970,72 @@ The restart at Test is recorded with the carried approval, in the same write, an
 
 This value is read only from the trusted default-branch copy of this file, like the rest of the `ci` block: a pushed branch cannot let its own rebases skip Review.
 A value set here wins over the operator's own [`ci.carry_review_on_replay`](/no-mistakes/reference/global-config/#cicarry_review_on_replay) in both directions.
+
+### ci.required_checks
+
+Which checks on the PR head decide CI readiness and repair.
+
+| | |
+|---|---|
+| Type | `string` (`auto` or `all`) |
+| Default | `auto` |
+| Trust | Read only from the trusted default branch |
+
+```yaml
+ci:
+  required_checks: auto
+```
+
+- **`auto` (default)** evaluates only the status checks the target branch requires, read from branch protection (`required_status_checks`) and repository rulesets (`required_status_checks` rules) and unioned. A failing check outside that set is reported as informational: it does not block `checks-passed`, `ci_ready`, or the strict `ci-ready` receipt, and it is never handed to the fix agent. A required check that is failing, pending, or not reported yet still blocks and follows normal CI failure handling. When the target has no required checks, either source cannot be read (HTTP 404, 403, or any other read error), or the provider has no equivalent, the step falls back to all checks and logs the reason, naming the unreadable source when applicable. A readable source never substitutes for an unreadable one. The exception is GitHub's own answer that the branch has no classic protection, or none requiring status checks (`Branch not protected` or `Required status checks not enabled`, HTTP 404): branch protection then contributes nothing and the rulesets decide alone. A bare `Not Found`, which can also hide protection from a token without admin access, stays unreadable. Only GitHub reads required checks today.
+- **`all`** evaluates every check on the head, whatever the target branch requires, subject to `external_checks` below.
+
+In either mode, precedence is [`external_checks`](#ciexternal_checks), then [`must_pass`](#cimust_pass), then the required set or all-check fallback. External exclusions still apply when required checks cannot be read.
+
+Review-bot comments follow [`ci.review_bot_comments`](#cireview_bot_comments), including its explicit opt-in for comments from informational checks.
+
+The target follows [PR target precedence](#prbase_branch). An ordinary run re-reads the PR's live target on every poll before classifying checks; when it changes, the step rebuilds the scope, re-records it (failing the step if it cannot be recorded), and re-reads the new target's requirements, and an unreadable target skips the poll rather than classifying against a stale one. Strict runs pin and verify their target instead. The first conclusive required-check read is cached until the live target changes or the CI step executes again; an interrupted read is retried. Required contexts are matched exactly against the check name. A requirement bound to an application (branch protection `app_id`, ruleset `integration_id`) is satisfied only by a check from that application, so a same-named check or status from another producer leaves it missing and blocking; `-1`, null, or no binding keeps name-only matching, subject to the self-status rule below. Rulesets are read across every page. A ruleset holding a `workflows` (required workflows), `code_scanning`, or `required_deployments` rule also gates merging on results that name no check context, so the required set cannot be derived completely: the step logs the rule type and evaluates every check, exactly as when the rules are unreadable. Other rule types, such as `deletion` or `pull_request`, do not affect the required set. On GitHub, an unfinished workflow run makes every job check attributed to that run pending, regardless of an older passing conclusion, so a queued or running rerun cannot leave readiness green. On a rerun, a job check is current only when the run's current attempt lists it among its own jobs, read from the provider; a rerun of failed jobs gives each successful job it leaves untouched a new record that keeps its original, earlier times, so timing alone cannot tell a carried-over success from a stale result. A run on its first attempt has no stale jobs, and a failed read of the attempt's jobs fails the observation closed. The attempts of one trigger - the same workflow, event, and head branch on the commit - are judged by the newest meaningful one: attempts are ordered by when each current attempt started, not by a job's own start or the run ID, because a job can start late and a rerun keeps its ID, and a skipped attempt ran nothing and never counts. Only that attempt's current jobs remain; every older attempt's jobs and run-level results, and its own stale jobs, are retired. For each retired job it has not reported yet, a failing or unfinished newest attempt's run-level result stands for that job, so a rerun that fails before creating jobs, or after reporting only some of them, still blocks an in-scope requirement and can be repaired. A passing newest attempt leaves such a job missing until it reports, and its run-level result never satisfies a requirement by its own name, so a job named like its workflow also stays missing until it reports. A failing or unfinished attempt whose reported jobs all passed keeps its run-level result as well. An unknown event does not prove a retry; independently triggered runs, such as `pull_request` and `workflow_dispatch`, remain separate triggers, and their same-named jobs are never collapsed into one another. The scope classifies the workflow-level check's own identity and each superseded job identity separately, preserving job names, workflow names, and application bindings. External exclusions take precedence for each identity. The replacement is external only when all its identities are external; otherwise, any non-external required or `must_pass` identity makes it required, and the remaining case is informational. It satisfies or blocks each non-external requirement it covers, including literal or wildcard `must_pass` matches on its own name. A failing required replacement becomes an actionable failure rather than a missing-check placeholder. If the step cannot record the scope it runs under, the execution fails before raising any gate rather than leaving a stale record to judge it. Once the required set is resolved, the record also carries it, including the all-check fallback after an unreadable read. Approval verification uses the live target and every policy field the CI step recorded when it raised the gate, including `review_bot_comments` and that resolved set, so a read that succeeds by approval time cannot narrow the scope the gate was raised under. Later configuration edits cannot reclassify checks or silence unresolved bot comments and turn an override into a plain pass. A run that recorded no scope uses the legacy all-check policy for both approval verification and strict receipts. The strict `ci-ready` receipt re-reads live checks using the recorded policy and resolved required set (reading requirements only if no resolution was recorded), and the recorded policy is part of the authority the export brackets, so a scope re-recorded while it runs fails the export closed.
+
+For requirements from either protection or rulesets named `no-mistakes`, only the [pipeline's own commit status](/no-mistakes/reference/pipeline-steps/#push) is excluded. An app-bound requirement still requires that app's check run and blocks if it is missing or failing. An unbound requirement counts any same-named check run: a failing run blocks readiness. With no such check run, the unbound requirement is treated as the pipeline's own status and creates no missing-check placeholder, avoiding a wait on the pipeline itself. When it is the only requirement apart from external ones, an ordinary run is ready even though collection leaves no other check observed; strict shipping and strict receipts still require an observed rollup.
+
+When observed checks are all external or informational, readiness requires either a known required set or trusted [`no_ci: true`](#no_ci), including for strict shipping, approval verification, and strict receipts. Any missing or pending in-scope requirement still blocks. Without either condition, the monitor waits for registration to avoid declaring readiness before real CI registers. A rollup with no observed checks follows the [`no_ci` contract](#no_ci), subject to the self-status exception above; strict shipping still requires an observed rollup.
+
+A value set here wins over the operator's own [`ci.required_checks`](/no-mistakes/reference/global-config/#cirequired_checks). An unrecognized value fails the config.
+
+### ci.must_pass
+
+Extra check contexts that are always required, in addition to the target branch's required checks.
+
+| | |
+|---|---|
+| Type | list of glob patterns |
+| Default | `[]` |
+| Trust | Read only from the trusted default branch |
+
+```yaml
+ci:
+  must_pass: ["lint (*)", "e2e"]
+```
+
+Patterns are glob-style (`*` matches any run of characters including `/`, `?` matches one character, matching is case-sensitive). Bare patterns match the check name. A qualified `<workflow> / <job-pattern>` matches both the workflow and job when the workflow is known, or just the job when the identity has no workflow metadata. A matching failing check blocks and is repaired like any required check. A pattern without wildcards also blocks readiness while no check of that name has been reported. `external_checks` outranks `must_pass`. A required context that has not registered yet carries no workflow name, so a pattern of the form `<workflow> / <job-pattern>` is also tested by its job part against the bare context; this also applies to retained findings and reruns. A literal qualified `must_pass` entry requires that exact workflow and job, and its missing placeholder retains the workflow even when the bare job is already required. A passing job from another workflow does not satisfy that literal. A job part that does not match still leaves the missing context blocking. A list set here replaces the operator's [`ci.must_pass`](/no-mistakes/reference/global-config/#cimust_pass); `[]` clears it.
+
+### ci.external_checks
+
+Check contexts that pass only after an outside party acts, and so are never evaluated.
+
+| | |
+|---|---|
+| Type | list of glob patterns |
+| Default | `[]` |
+| Trust | Read only from the trusted default branch |
+
+```yaml
+ci:
+  external_checks:
+    - "Final Approval / approve*"
+    - "approval-status"
+```
+
+An external approval app, such as a GitHub App job that approves the exact head after an outside reviewer signs off, cannot pass until the head has been published and reviewed externally. Waiting on it, or trying to repair it, deadlocks the run; in strict shipping the failing context would park the CI step as an actionable finding that can be neither approved nor skipped. A check classified as external under the [scope rules](#cirequired_checks) is reported in the step log as `external (awaiting outside approval)`, is never waited on, never repaired, and never becomes a finding, even when the target branch requires it. `external_checks` outranks `must_pass` and the required set. Patterns use the same glob syntax and name forms as [`ci.must_pass`](#cimust_pass), including the job-part rule for a required context that has not registered yet: with the branch requiring `approve`, `Final Approval / approve*` excludes it before it appears, so it never becomes a pending placeholder. An explicit pattern matching a supported review bot's check name (`Greptile Review`) silences that bot's comments even under [`ci.review_bot_comments: always`](#cireview_bot_comments), whether its check is absent, informational, or required. Informational classification alone does not silence comments under `always`. A list set here replaces the operator's [`ci.external_checks`](/no-mistakes/reference/global-config/#ciexternal_checks); `[]` clears it.
 
 ### rebase.strategy
 

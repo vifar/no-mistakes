@@ -182,7 +182,7 @@ func TestReviewBotFindings_BoundsAndEmptyCase(t *testing.T) {
 	bot, _ := scm.ReviewBotForApp(check.App)
 
 	empty := reviewBotFindings(scm.ProviderGitHub, []reviewBotCheck{{check: check, bot: bot}}, nil)
-	if len(empty) != 1 || empty[0].Action != types.ActionAskUser || empty[0].Check != check.Name || !strings.Contains(empty[0].Description, "no unresolved review comments") {
+	if len(empty) != 1 || empty[0].Action != types.ActionAskUser || empty[0].Check != check.Name || empty[0].CheckApp != "greptile-apps" || !strings.Contains(empty[0].Description, "no unresolved review comments") {
 		t.Fatalf("empty-case findings = %+v, want one ask-user finding for the check", empty)
 	}
 
@@ -199,6 +199,9 @@ func TestReviewBotFindings_BoundsAndEmptyCase(t *testing.T) {
 	}
 	totalBytes := 0
 	for _, finding := range bounded {
+		if finding.CheckApp != "greptile-apps" {
+			t.Fatalf("bounded finding lost bot identity: %+v", finding)
+		}
 		raw, _ := json.Marshal(finding)
 		totalBytes += len(raw)
 	}

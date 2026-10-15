@@ -77,6 +77,11 @@ type Payload struct {
 	Review           Review `json:"review"`
 	Steps            []Step `json:"steps"`
 	TestOverride     any    `json:"test_override"`
+	// checkScope is the CI check scope recorded for the run when a ci-ready
+	// proof is built. It is not part of the emitted receipt; it is authority
+	// the proof was judged under, so both bracketing snapshots carry it and any
+	// movement while the export runs fails it closed.
+	checkScope string
 }
 
 func Sign(payload []byte, input io.Reader) ([]byte, error) {
@@ -169,13 +174,26 @@ func Export(ctx context.Context, database *db.DB, repo *db.Repo, runID, phase st
 		if pr.HeadSHA != first.LocalHeadSHA {
 			return nil, fmt.Errorf("PR head moved during readiness observation")
 		}
-		if len(checks) == 0 {
+		// Readiness is judged on the same checks the CI step judged it on:
+		// the scope it recorded for this run, not every context on the head.
+		policy, err := parseRecordedCheckScope(first.checkScope)
+		if err != nil {
+			return nil, err
+		}
+		scope := scm.NewCheckScope(host, policy, first.TargetBranch, nil)
+		scoped := scope.Apply(ctx, pr, checks)
+		if len(checks) == 0 || len(scoped.Relevant) == 0 && !scoped.Ready() {
 			return nil, fmt.Errorf("strict readiness requires live checks")
 		}
-		for _, check := range checks {
-			if check.Bucket != scm.CheckBucketPass && check.Bucket != scm.CheckBucketSkip {
-				return nil, fmt.Errorf("strict readiness requires all live checks green")
-			}
+		if !scoped.Ready() {
+			return nil, fmt.Errorf("strict readiness requires all live checks green")
+		}
+		comments, err := scm.ReadReadinessReviewBotComments(ctx, host, pr, policy, scoped.Relevant, scoped.ReviewBotPresenceMarkers(scope.ExternalReviewBotChecks())...)
+		if err != nil {
+			return nil, fmt.Errorf("could not verify review bot comments: %w", err)
+		}
+		if len(comments) > 0 {
+			return nil, fmt.Errorf("strict readiness requires no unresolved review bot comments")
 		}
 	}
 	afterFacts, err := reader.GetPRFacts(ctx, pr)
@@ -207,6 +225,21 @@ func Export(ctx context.Context, database *db.DB, repo *db.Repo, runID, phase st
 		return nil, fmt.Errorf("review receipt exceeds payload limit")
 	}
 	return out, nil
+}
+
+// parseRecordedCheckScope interprets the check-scope record the proof's
+// authority snapshot carried. A run that recorded none predates check scoping,
+// so it keeps the legacy behavior of judging every check rather than the auto
+// default.
+func parseRecordedCheckScope(raw string) (scm.CheckScopePolicy, error) {
+	var policy scm.CheckScopePolicy
+	if raw == "" {
+		return scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAll}, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
+		return policy, fmt.Errorf("invalid recorded CI check scope")
+	}
+	return policy, nil
 }
 
 func durablePayload(database *db.DB, runID, phase string) (Payload, error) {
@@ -315,7 +348,13 @@ func durablePayload(database *db.DB, runID, phase string) (Payload, error) {
 		}
 	}
 	findingBytes, _ := json.Marshal(reviewFindings)
-	p = Payload{SchemaVersion: 1, RunID: runID, Phase: phase, SourceRepo: c.SourceRepo, SourceBranch: c.SourceBranch, SubmittedHeadSHA: *r.SubmittedHeadSHA, LocalHeadSHA: r.HeadSHA, ForgeHeadSHA: r.HeadSHA, PRURL: *r.PRURL, TargetBranch: c.TargetBranch, TargetSHA: c.TargetSHA, MergeBaseSHA: c.MergeBaseSHA, DiffDigest: c.DiffDigest, Generation: c.Generation, IntentDigest: Digest([]byte(*r.Intent)), ShippingMode: r.Shipping.Mode, Draft: p.Draft, Review: Review{"completed", r.HeadSHA, Digest(findingBytes), reviewFindings}, Steps: proofSteps}
+	checkScope := ""
+	if phase == "ci-ready" {
+		if checkScope, err = database.GetRunCheckScope(runID); err != nil {
+			return p, err
+		}
+	}
+	p = Payload{SchemaVersion: 1, RunID: runID, Phase: phase, SourceRepo: c.SourceRepo, SourceBranch: c.SourceBranch, SubmittedHeadSHA: *r.SubmittedHeadSHA, LocalHeadSHA: r.HeadSHA, ForgeHeadSHA: r.HeadSHA, PRURL: *r.PRURL, TargetBranch: c.TargetBranch, TargetSHA: c.TargetSHA, MergeBaseSHA: c.MergeBaseSHA, DiffDigest: c.DiffDigest, Generation: c.Generation, IntentDigest: Digest([]byte(*r.Intent)), ShippingMode: r.Shipping.Mode, Draft: p.Draft, Review: Review{"completed", r.HeadSHA, Digest(findingBytes), reviewFindings}, Steps: proofSteps, checkScope: checkScope}
 	return p, nil
 }
 

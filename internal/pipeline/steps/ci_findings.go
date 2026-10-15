@@ -35,8 +35,8 @@ type reviewBotCheck struct {
 }
 
 // ciIssues is one settled observation of the pull request: what the monitor
-// concluded is wrong with the head once every check finished and every
-// authorized transient rerun was spent. It is the input to the classifier
+// concluded is wrong with the head once no in-scope check is executing and
+// every authorized transient rerun was spent. It is the input to the classifier
 // that turns each issue into a finding carrying its action.
 type ciIssues struct {
 	provider scm.Provider
@@ -62,7 +62,8 @@ type ciIssues struct {
 	// greenBots asks the classifier to also read the registered review bots
 	// whose check completed green or has not registered on the head yet
 	// (ci.review_bot_comments: always).
-	greenBots bool
+	greenBots      bool
+	excludedChecks []scm.Check
 }
 
 // ciObservationFindings converts one settled observation into findings, one
@@ -111,7 +112,7 @@ func ciObservationFindings(issues ciIssues) Findings {
 		})
 	}
 	if issues.greenBots {
-		botChecks = append(botChecks, greenReviewBotChecks(issues.checks)...)
+		botChecks = append(botChecks, greenReviewBotChecks(issues.checks, issues.excludedChecks...)...)
 	}
 	items = append(items, reviewBotFindings(issues.provider, botChecks, issues.botComments)...)
 	if issues.mergeConflict {
@@ -249,6 +250,7 @@ func reviewBotFindings(provider scm.Provider, checks []reviewBotCheck, comments 
 				Category:    types.FindingCategoryCIReviewBot,
 				Check:       checked.check.Name,
 				CheckID:     checked.check.ProviderID,
+				CheckApp:    checked.bot.AppSlug,
 				File:        comment.Path,
 				Line:        comment.Line,
 				Description: fmt.Sprintf("%s: %s", strings.TrimSpace(comment.Author), body),
@@ -272,6 +274,7 @@ func reviewBotFindings(provider scm.Provider, checks []reviewBotCheck, comments 
 			Category:    types.FindingCategoryCIReviewBot,
 			Check:       checked.check.Name,
 			CheckID:     checked.check.ProviderID,
+			CheckApp:    checked.bot.AppSlug,
 			Description: description,
 		})
 	}
@@ -300,6 +303,7 @@ func reviewBotFindings(provider scm.Provider, checks []reviewBotCheck, comments 
 		Category:    types.FindingCategoryCIReviewBot,
 		Check:       checks[0].check.Name,
 		CheckID:     checks[0].check.ProviderID,
+		CheckApp:    checks[0].bot.AppSlug,
 		Description: fmt.Sprintf("%d more review-bot findings were omitted from this gate; read them on the pull request", omitted),
 	}
 	for len(items) > 0 && (len(items) >= maxReviewBotCommentFindings || bytesUsed+findingSize(marker) > maxReviewBotObservationBytes) {
@@ -347,29 +351,11 @@ func reviewBotCommentsAlways(sctx *pipeline.StepContext) bool {
 	return sctx.Config != nil && sctx.Config.CI.ReviewBotComments == config.CIReviewBotCommentsAlways
 }
 
-// greenReviewBotChecks returns the registered review-bot checks that
-// completed without failing, plus a nameless entry for every registered bot
-// with no check on this head at all: a bot that has not registered its check
-// on a new head yet can still have unresolved comments from an earlier one. A
-// pending or cancelled bot check is excluded: its review may still be
-// posting, and reading comments before the check completes would race it.
-func greenReviewBotChecks(checks []scm.Check) []reviewBotCheck {
+func greenReviewBotChecks(checks []scm.Check, excluded ...scm.Check) []reviewBotCheck {
 	var green []reviewBotCheck
-	present := map[string]bool{}
-	for _, check := range checks {
-		bot, ok := scm.ReviewBotForApp(check.App)
-		if !ok {
-			continue
-		}
-		present[bot.AppSlug] = true
-		if check.Bucket == scm.CheckBucketPass || check.Bucket == scm.CheckBucketSkip {
-			green = append(green, reviewBotCheck{check: check, bot: bot, green: true})
-		}
-	}
-	for _, bot := range scm.ReviewBots {
-		if !present[bot.AppSlug] {
-			green = append(green, reviewBotCheck{bot: bot, green: true})
-		}
+	for _, check := range scm.ReviewBotCommentChecks(checks, excluded...) {
+		bot, _ := scm.ReviewBotForApp(check.App)
+		green = append(green, reviewBotCheck{check: check, bot: bot, green: true})
 	}
 	return green
 }
@@ -397,8 +383,8 @@ func readReviewBotComments(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 // can supply them. It is best effort: an unreadable comment list leaves the
 // bot's check finding without its comments rather than failing the
 // observation.
-func reviewBotComments(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, checks []scm.Check) []scm.ReviewComment {
-	wanted := reviewBotCommentsAlways(sctx) && len(greenReviewBotChecks(checks)) > 0
+func reviewBotComments(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, checks []scm.Check, excluded ...scm.Check) []scm.ReviewComment {
+	wanted := reviewBotCommentsAlways(sctx) && len(greenReviewBotChecks(checks, excluded...)) > 0
 	for _, check := range checks {
 		if _, ok := scm.ReviewBotForApp(check.App); ok && check.Failing() {
 			wanted = true
@@ -416,27 +402,21 @@ func reviewBotComments(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, ch
 	return comments
 }
 
-// greenReviewBotFindings is the observation for an all-green head under
-// ci.review_bot_comments: always: the unresolved comments of every registered
-// review bot whose check completed green or has not registered on this head
-// yet, through the same classifier a red bot check uses. Empty when the policy
-// is on_failure or the bots left nothing unresolved. Unlike reviewBotComments it
-// returns the read error, because the caller would otherwise report
-// checks-passed over comments it never read.
-func (s *CIStep) greenReviewBotFindings(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, checks []scm.Check) (Findings, error) {
-	if !reviewBotCommentsAlways(sctx) || len(greenReviewBotChecks(checks)) == 0 {
-		return Findings{}, nil
-	}
-	comments, err := readReviewBotComments(sctx, host, pr)
+// greenReviewBotFindings applies the shared readiness comment policy and
+// translates unresolved comments into CI findings. Unlike reviewBotComments,
+// it propagates read errors so unread comments cannot establish readiness.
+func (s *CIStep) greenReviewBotFindings(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, policy scm.CheckScopePolicy, checks []scm.Check, excluded ...scm.Check) (Findings, error) {
+	comments, err := scm.ReadReadinessReviewBotComments(sctx.Ctx, host, pr, policy, checks, excluded...)
 	if err != nil {
 		return Findings{}, err
 	}
 	return ciObservationFindings(ciIssues{
-		provider:    host.Provider(),
-		checks:      checks,
-		reruns:      s.transientReruns.used,
-		botComments: comments,
-		greenBots:   true,
+		provider:       host.Provider(),
+		checks:         checks,
+		reruns:         s.transientReruns.used,
+		botComments:    comments,
+		greenBots:      true,
+		excludedChecks: excluded,
 	}), nil
 }
 

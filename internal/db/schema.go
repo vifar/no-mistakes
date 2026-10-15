@@ -464,4 +464,9 @@ var migrationStatements = []string{
 	// Give pre-nonce unanswered parks an identity once on upgrade. Legacy pending
 	// responses lack a binding and recovery refuses them rather than replaying.
 	`UPDATE step_results SET gate_nonce = lower(hex(randomblob(16))), gate_round_id = (SELECT id FROM step_rounds WHERE step_result_id = step_results.id ORDER BY round DESC LIMIT 1) WHERE status IN ('awaiting_approval', 'fix_review') AND gate_nonce IS NULL`,
+	// The check scope (ci.required_checks, must_pass, external_checks) the CI
+	// step last evaluated this run's checks under, as opaque JSON. The strict
+	// ci-ready receipt re-reads live checks outside the daemon and must apply
+	// exactly the scope the CI step used; NULL means none was recorded.
+	`ALTER TABLE runs ADD COLUMN check_scope_json TEXT`,
 }

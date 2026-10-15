@@ -256,13 +256,11 @@ Run the pipeline and decide on its findings as they come up:
       awaiting approval. You rarely need this; omit it to answer the active gate.
 3. Repeat step 2 until the output has an ` + "`outcome:`" + ` instead of a ` + "`gate:`" + `. The
    outcomes are:
-   - ` + "`checks-passed`" + ` - the change is validated and CI is green (or the
-     trusted default-branch config declares ` + "`no_ci: true`" + ` and no checks are
-     registered - the help line names that declaration when it applies), but
+   - ` + "`checks-passed`" + ` - the change is validated and CI meets the
+     [readiness rules](https://kunchenguid.github.io/no-mistakes/reference/pipeline-steps/#ci), but
      the PR is not merged yet. **You are done driving the pipeline.** Do not
      wait for the merge: tell the user the PR is ready and ask them to review
-     and merge it (the PR link is in the ` + "`help`" + ` line). A generic empty forge
-     check list without that declaration is not ready. no-mistakes keeps
+     and merge it (the PR link is in the ` + "`help`" + ` line). no-mistakes keeps
      monitoring the PR in the background until it is merged, closed, or its
      configured idle timeout elapses, so a human can watch it in the TUI.
    - ` + "`passed`" + ` - the pipeline completed under the requested steps, including any
@@ -318,8 +316,8 @@ After synchronization, commit the follow-up on top and re-run ` + "`no-mistakes 
 This preserves every prior gate-fix commit regardless of its configured subject.
 
 The CI step deliberately keeps watching the PR after checks pass, so
-` + "`axi run`" + ` returns ` + "`checks-passed`" + ` the moment checks are green (or a trusted
-` + "`no_ci: true`" + ` declaration covers a zero-check repository) rather than
+` + "`axi run`" + ` returns ` + "`checks-passed`" + ` when the
+[CI readiness rules](https://kunchenguid.github.io/no-mistakes/reference/pipeline-steps/#ci) are met rather than
 blocking on the human merge. Never poll or re-run waiting for the merge yourself.
 Never treat "no CI checks reported" alone as green.
 

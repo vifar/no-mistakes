@@ -422,6 +422,7 @@ func transientRerunCandidates(checks []scm.Check, budget *checkRerunBudget, limi
 	if limit <= 0 {
 		return nil
 	}
+	checks = foldRunCoveredJobs(checks)
 	var candidates []scm.Check
 	// reserved counts what this selection has already promised to spend.
 	// Two terminally failed checks can carry the same name - the same job name
@@ -453,6 +454,32 @@ func transientRerunCandidates(checks []scm.Check, budget *checkRerunBudget, limi
 		}
 	}
 	return candidates
+}
+
+// foldRunCoveredJobs drops a cancelled job whose Actions run also reports a
+// cancelled run-level result. That result stands for the run's unreported
+// jobs, and rerunning the run also reruns its cancelled jobs, so the run's
+// entry represents the job in rerun selection and cancellation handling on
+// every poll: one rerun per run, and a job is never rerun or reported apart
+// from the run that covers it.
+func foldRunCoveredJobs(checks []scm.Check) []scm.Check {
+	cancelledRuns := map[int64]bool{}
+	for _, c := range checks {
+		if c.WorkflowRun && c.RunID != 0 && c.Bucket == scm.CheckBucketCancel {
+			cancelledRuns[c.RunID] = true
+		}
+	}
+	if len(cancelledRuns) == 0 {
+		return checks
+	}
+	folded := make([]scm.Check, 0, len(checks))
+	for _, c := range checks {
+		if !c.WorkflowRun && c.RunID != 0 && c.Bucket == scm.CheckBucketCancel && cancelledRuns[c.RunID] {
+			continue
+		}
+		folded = append(folded, c)
+	}
+	return folded
 }
 
 // mergeCheckNames appends the names in extra that base does not already carry.

@@ -619,7 +619,86 @@ func fakeCIGHFactsListAPI(args []string) {
 	}
 }
 
+// fakeCIGHRequiredChecksAPI answers the branch-protection and branch-rules
+// reads behind required-check scoping. FAKE_CLI_PROTECTION_JSON and
+// FAKE_CLI_RULES_JSON are the response bodies; an unset one answers HTTP 404
+// (no protection, no rules) and the literal value "403" answers HTTP 403.
+// fakeCIPRBase is the PR's current target branch: FAKE_CLI_PR_BASE_FILE, when
+// set, is re-read on every call so a test can retarget the PR mid-run.
+func fakeCIPRBase() string {
+	if path := os.Getenv("FAKE_CLI_PR_BASE_FILE"); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			if strings.TrimSpace(string(data)) == "ERROR" {
+				fmt.Fprintln(os.Stderr, "target branch read failed")
+				os.Exit(1)
+			}
+			return strings.TrimSpace(string(data))
+		}
+	}
+	return os.Getenv("FAKE_CLI_PR_BASE")
+}
+
+func fakeCIGHRequiredChecksAPI(args []string) {
+	if len(args) == 0 || args[0] != "api" {
+		return
+	}
+	var env string
+	for _, arg := range args[1:] {
+		switch {
+		case strings.Contains(arg, "/protection/required_status_checks"):
+			env = "FAKE_CLI_PROTECTION_JSON"
+			// FAKE_CLI_PROTECTION_JSON_<BRANCH> answers for one branch.
+			if _, rest, ok := strings.Cut(arg, "/branches/"); ok {
+				branch, _, _ := strings.Cut(rest, "/protection/")
+				key := strings.Map(func(r rune) rune {
+					if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+						return r
+					}
+					return '_'
+				}, strings.ToUpper(branch))
+				if _, set := os.LookupEnv("FAKE_CLI_PROTECTION_JSON_" + key); set {
+					env = "FAKE_CLI_PROTECTION_JSON_" + key
+				}
+			}
+		case strings.Contains(arg, "/rules/branches/"):
+			env = "FAKE_CLI_RULES_JSON"
+		}
+	}
+	if env == "" {
+		return
+	}
+	// FAKE_CLI_PROTECTION_JSON_<BRANCH> answers for one target branch only.
+	if env == "FAKE_CLI_PROTECTION_JSON" {
+		for _, arg := range args[1:] {
+			if _, rest, ok := strings.Cut(arg, "/branches/"); ok {
+				branch, _, _ := strings.Cut(rest, "/protection")
+				key := env + "_" + strings.ToUpper(strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(branch))
+				if _, set := os.LookupEnv(key); set {
+					env = key
+				}
+			}
+		}
+	}
+	switch body := os.Getenv(env); body {
+	case "":
+		fmt.Fprintln(os.Stderr, "gh: Not Found (HTTP 404)")
+		os.Exit(1)
+	case "403":
+		fmt.Fprintln(os.Stderr, "gh: Resource not accessible by integration (HTTP 403)")
+		os.Exit(1)
+	default:
+		// gh api --paginate --slurp wraps each page in an outer array; the
+		// body is a single page.
+		if env == "FAKE_CLI_RULES_JSON" && strings.Contains(strings.Join(args, " "), "--slurp") {
+			body = "[" + body + "]"
+		}
+		fmt.Print(body)
+		os.Exit(0)
+	}
+}
+
 func fakeCIGHFactsAPI(args []string) {
+	fakeCIGHRequiredChecksAPI(args)
 	fakeCIGHFactsListAPI(args)
 	if len(args) == 0 || args[0] != "api" || !strings.HasPrefix(args[len(args)-1], "repos/test/repo/pulls/") {
 		return
@@ -654,6 +733,10 @@ func fakeCIGHReconcileHandler(args []string) {
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
 	}
+	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json baseRefName") {
+		fmt.Println(fakeCIPRBase())
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "api --method GET repos/test/repo/pulls ") {
 		if created {
 			fmt.Printf(`[[{"number":42,"html_url":"https://github.com/test/repo/pull/42","state":"open","merged":false,"head":{"ref":"feature","sha":%q,"repo":{"full_name":"test/repo"}},"base":{"ref":"main"}}]]`, fakePRHeadSHA())
@@ -678,6 +761,10 @@ func fakeCIGHReconcileHandler(args []string) {
 			}
 		}
 		fmt.Println("https://github.com/test/repo/pull/42")
+		os.Exit(0)
+	}
+	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json baseRefName") {
+		fmt.Println("main")
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json state") {
@@ -805,7 +892,7 @@ func fakeCIGHHandler(args []string) {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json baseRefName") {
-		fmt.Println(os.Getenv("FAKE_CLI_PR_BASE"))
+		fmt.Println(fakeCIPRBase())
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json headRefOid") {
@@ -907,6 +994,10 @@ func fakeCIGHSequenceHandler(args []string) {
 		fmt.Println(mergeable)
 		os.Exit(0)
 	}
+	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json baseRefName") {
+		fmt.Println(fakeCIPRBase())
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json state") {
 		fmt.Println(state)
 		os.Exit(0)
@@ -941,6 +1032,10 @@ func fakeCIGHSequenceHandler(args []string) {
 			os.Exit(1)
 		}
 		fmt.Println(entries[index])
+		os.Exit(0)
+	}
+	if strings.Contains(joined, "api") && strings.Contains(joined, "graphql") && strings.Contains(joined, "reviewThreads") {
+		printFakeReviewThreads(os.Getenv("FAKE_CLI_REVIEW_COMMENTS"))
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "api") && strings.Contains(joined, "graphql") {
@@ -1276,6 +1371,10 @@ func printFakeCommitChecks(raw string, args []string) {
 		// App is the check suite's app slug, rendered the way GitHub's
 		// GraphQL rollup reports it (checkSuite.app.slug). Empty omits it.
 		App string `json:"app"`
+		// Workflow is the emitting workflow's name (checkSuite.workflowRun.workflow.name).
+		Workflow string `json:"workflow"`
+		// AppID is the producing app's numeric ID (checkSuite.app.databaseId).
+		AppID int64 `json:"appId"`
 	}
 	if err := json.Unmarshal([]byte(raw), &checks); err != nil {
 		fmt.Println(raw)
@@ -1315,8 +1414,19 @@ func printFakeCommitChecks(raw string, args []string) {
 			"__typename": "CheckRun", "name": check.Name, "status": status,
 			"conclusion": conclusion, "completedAt": check.CompletedAt, "detailsUrl": link,
 		}
-		if check.App != "" {
-			node["checkSuite"] = map[string]any{"app": map[string]any{"slug": check.App}}
+		if check.App != "" || check.Workflow != "" || check.AppID != 0 {
+			suite := map[string]any{}
+			if check.App != "" || check.AppID != 0 {
+				app := map[string]any{"slug": check.App}
+				if check.AppID != 0 {
+					app["databaseId"] = check.AppID
+				}
+				suite["app"] = app
+			}
+			if check.Workflow != "" {
+				suite["workflowRun"] = map[string]any{"workflow": map[string]any{"name": check.Workflow}}
+			}
+			node["checkSuite"] = suite
 		}
 		nodes = append(nodes, node)
 	}

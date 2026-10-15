@@ -38,23 +38,13 @@ func hasFailingChecks(checks []scm.Check) bool {
 	return false
 }
 
-// hasPendingChecks returns true if any CI check is still running or queued.
-func hasPendingChecks(checks []scm.Check) bool {
-	for _, c := range checks {
-		if c.Pending() {
-			return true
-		}
-	}
-	return false
-}
-
 // hasExecutingPendingChecks returns true if any CI check is still running or
 // queued on its own. A check the provider holds for maintainer approval is
-// pending but will not finish without a human, so it never defers escalation
-// of the other checks' failures.
+// pending but will not finish without a human; a synthetic missing requirement
+// has not started at all. Neither defers escalation of other checks' failures.
 func hasExecutingPendingChecks(checks []scm.Check) bool {
 	for _, c := range checks {
-		if c.Pending() && !c.AwaitingApproval {
+		if c.Pending() && !c.AwaitingApproval && !c.ExpectedMissing {
 			return true
 		}
 	}
@@ -70,29 +60,6 @@ func hasAwaitingApprovalChecks(checks []scm.Check) bool {
 	return false
 }
 
-func hasUnresolvedChecks(checks []scm.Check) bool {
-	for _, c := range checks {
-		switch c.Bucket {
-		case scm.CheckBucketPass, scm.CheckBucketFail, scm.CheckBucketSkip:
-		default:
-			return true
-		}
-	}
-	return false
-}
-
-func allChecksPassed(checks []scm.Check) bool {
-	if len(checks) == 0 {
-		return false
-	}
-	for _, c := range checks {
-		if c.Bucket != scm.CheckBucketPass && c.Bucket != scm.CheckBucketSkip {
-			return false
-		}
-	}
-	return true
-}
-
 // failingCheckNames returns the names of failing checks.
 func failingCheckNames(checks []scm.Check) []string {
 	var names []string
@@ -105,7 +72,7 @@ func failingCheckNames(checks []scm.Check) []string {
 }
 
 // unresolvedCheckNames returns "name (bucket)" for every check that does not
-// count toward allChecksPassed - i.e. everything but CheckBucketPass and
+// count toward ScopedChecks.Ready - i.e. everything but CheckBucketPass and
 // CheckBucketSkip. Unlike failingCheckNames, this also surfaces pending,
 // cancelled, and any other non-terminal-pass bucket, so a caller reporting an
 // approval override can name pending/unknown checks, not just failing ones.
@@ -205,11 +172,11 @@ func pendingCheckMatchesLastFixed(checks []scm.Check, lastFixedChecks string) bo
 	}
 
 	if len(issues.Checks) == 0 {
-		return issues.MergeConflict && hasPendingChecks(checks)
+		return issues.MergeConflict && hasExecutingPendingChecks(checks)
 	}
 
 	for _, c := range checks {
-		if !c.Pending() {
+		if !c.Pending() || c.AwaitingApproval || c.ExpectedMissing {
 			continue
 		}
 		for _, target := range issues.Checks {

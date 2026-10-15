@@ -331,8 +331,8 @@ func TestGetChecksCollapsesSupersededSameNameCheckToLatestAtOneHead(t *testing.T
 		},
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
 			stdout: `[{"total_count":2,"workflow_runs":[
-				{"id":101,"workflow_id":1001,"name":"gate","status":"completed","conclusion":"failure","run_started_at":"2026-08-26T08:25:50Z"},
-				{"id":102,"workflow_id":1001,"name":"gate","status":"completed","conclusion":"success","run_started_at":"2026-08-26T08:39:44Z"}
+				{"id":101,"workflow_id":1001,"event":"pull_request","head_branch":"feature","name":"gate","status":"completed","conclusion":"failure","run_started_at":"2026-08-26T08:25:50Z"},
+				{"id":102,"workflow_id":1001,"event":"pull_request","head_branch":"feature","name":"gate","status":"completed","conclusion":"success","run_started_at":"2026-08-26T08:39:44Z"}
 			]}]` + "\n",
 		},
 	}), nil, "", "test/repo")
@@ -376,8 +376,8 @@ func TestGetChecksCollapseOrderingDoesNotLetWorkflowRunUnionResurrectSupersededC
 		},
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
 			stdout: `[{"total_count":2,"workflow_runs":[
-				{"id":101,"workflow_id":1001,"name":"gate - synchronize - event 1 (run 101)","status":"completed","conclusion":"failure"},
-				{"id":102,"workflow_id":1001,"name":"gate - edited - event 2 (run 102)","status":"completed","conclusion":"success"}
+				{"id":101,"workflow_id":1001,"event":"pull_request","head_branch":"feature","name":"gate - synchronize - event 1 (run 101)","status":"completed","conclusion":"failure"},
+				{"id":102,"workflow_id":1001,"event":"pull_request","head_branch":"feature","name":"gate - edited - event 2 (run 102)","status":"completed","conclusion":"success"}
 			]}]` + "\n",
 		},
 	}), nil, "", "test/repo")
@@ -406,8 +406,8 @@ func TestGetChecksPreservesIndependentSameNameWorkflows(t *testing.T) {
 		},
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
 			stdout: `[{"total_count":2,"workflow_runs":[
-				{"id":102,"workflow_id":1002,"name":"build","status":"completed","conclusion":"success","run_started_at":"2026-08-26T08:39:44Z"},
-				{"id":103,"workflow_id":1003,"name":"build","status":"completed","conclusion":"failure","run_started_at":"2026-08-26T08:25:50Z"}
+				{"id":102,"workflow_id":1002,"event":"pull_request","head_branch":"feature","name":"build","status":"completed","conclusion":"success","run_started_at":"2026-08-26T08:39:44Z"},
+				{"id":103,"workflow_id":1003,"event":"pull_request","head_branch":"feature","name":"build","status":"completed","conclusion":"failure","run_started_at":"2026-08-26T08:25:50Z"}
 			]}]` + "\n",
 		},
 	}), nil, "", "test/repo")
@@ -441,7 +441,7 @@ func TestGetChecksPreservesSameNameJobsWithinOneWorkflowRun(t *testing.T) {
 		},
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
 			stdout: `[{"total_count":1,"workflow_runs":[
-				{"id":102,"workflow_id":1001,"name":"build","status":"completed","conclusion":"failure","run_started_at":"2026-08-26T08:25:50Z"}
+				{"id":102,"workflow_id":1001,"event":"pull_request","head_branch":"feature","name":"build","status":"completed","conclusion":"failure","run_started_at":"2026-08-26T08:25:50Z"}
 			]}]` + "\n",
 		},
 	}), nil, "", "test/repo")
@@ -508,8 +508,8 @@ func TestGetChecksCollapseComparesNewestRunWithEverySameNameCandidate(t *testing
 		},
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
 			stdout: `[{"total_count":2,"workflow_runs":[
-				{"id":101,"workflow_id":1001,"name":"gate","status":"completed","conclusion":"failure","run_started_at":"2026-08-26T08:25:50Z"},
-				{"id":102,"workflow_id":1001,"name":"gate","status":"completed","conclusion":"success","run_started_at":"2026-08-26T08:39:44Z"}
+				{"id":101,"workflow_id":1001,"event":"pull_request","head_branch":"feature","name":"gate","status":"completed","conclusion":"failure","run_started_at":"2026-08-26T08:25:50Z"},
+				{"id":102,"workflow_id":1001,"event":"pull_request","head_branch":"feature","name":"gate","status":"completed","conclusion":"success","run_started_at":"2026-08-26T08:39:44Z"}
 			]}]` + "\n",
 		},
 	}), nil, "", "test/repo")
@@ -576,8 +576,8 @@ func TestGetChecksKeepsQueuedReplacementWithEqualStartTime(t *testing.T) {
 		},
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
 			stdout: `[{"total_count":2,"workflow_runs":[
-				{"id":101,"workflow_id":1001,"name":"CI","status":"completed","conclusion":"failure","created_at":"2026-08-26T08:25:45Z","updated_at":"2026-08-26T08:25:56Z"},
-				{"id":102,"workflow_id":1001,"name":"CI","status":"queued","conclusion":null,"created_at":"2026-08-26T08:25:50Z","updated_at":"2026-08-26T08:25:50Z"}
+				{"id":101,"workflow_id":1001,"event":"pull_request","head_branch":"feature","name":"CI","status":"completed","conclusion":"failure","created_at":"2026-08-26T08:25:45Z","updated_at":"2026-08-26T08:25:56Z"},
+				{"id":102,"workflow_id":1001,"event":"pull_request","head_branch":"feature","name":"CI","status":"queued","conclusion":null,"created_at":"2026-08-26T08:25:50Z","updated_at":"2026-08-26T08:25:50Z"}
 			]}]` + "\n",
 		},
 	}), nil, "", "test/repo")
@@ -654,8 +654,8 @@ func TestGetChecksUsesWorkflowRunStartTimeWhenCollapsingSameNameChecks(t *testin
 				},
 				"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
 					stdout: `[{"total_count":2,"workflow_runs":[
-						{"id":101,"workflow_id":1001,"name":"CI","status":"completed","conclusion":"success","run_started_at":"2026-08-26T08:25:50Z","updated_at":"2026-08-26T08:25:56Z"},
-						{"id":102,"workflow_id":1001,"name":"CI","status":"completed","conclusion":"failure",` + tc.timestamp + `,"updated_at":"2026-08-26T08:39:50Z"}
+						{"id":101,"workflow_id":1001,"event":"pull_request","head_branch":"feature","name":"CI","status":"completed","conclusion":"success","run_started_at":"2026-08-26T08:25:50Z","updated_at":"2026-08-26T08:25:56Z"},
+						{"id":102,"workflow_id":1001,"event":"pull_request","head_branch":"feature","name":"CI","status":"completed","conclusion":"failure",` + tc.timestamp + `,"updated_at":"2026-08-26T08:39:50Z"}
 					]}]` + "\n",
 				},
 			}), nil, "", "test/repo")

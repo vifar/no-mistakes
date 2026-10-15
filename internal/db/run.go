@@ -1386,6 +1386,31 @@ func (d *DB) SetRunGates(id, gates string) error {
 	return nil
 }
 
+// GetRunCheckScope returns the check-scope policy the CI step last evaluated
+// this run under, or the empty string when none was recorded. The payload is
+// opaque here: the CI step owns its shape (scm.CheckScopePolicy as JSON).
+func (d *DB) GetRunCheckScope(id string) (string, error) {
+	var scope sql.NullString
+	err := d.sql.QueryRow(`SELECT check_scope_json FROM runs WHERE id = ?`, id).Scan(&scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("get run check scope: %w", err)
+	}
+	return scope.String, nil
+}
+
+// SetRunCheckScope records the check-scope policy the CI step evaluates this
+// run's checks under, so the strict readiness receipt applies the same one.
+func (d *DB) SetRunCheckScope(id, scope string) error {
+	_, err := d.sql.Exec(`UPDATE runs SET check_scope_json = ?, updated_at = ? WHERE id = ?`, scope, now(), id)
+	if err != nil {
+		return fmt.Errorf("set run check scope: %w", err)
+	}
+	return nil
+}
+
 // GetRunCIRerunState returns the CI step's persisted rerun budget for a run, or
 // the empty string when the run has never spent one. The payload is opaque
 // here: the CI step owns its shape, and the database only guarantees that what

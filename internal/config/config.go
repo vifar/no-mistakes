@@ -19,6 +19,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"github.com/kunchenguid/no-mistakes/internal/worktrees"
@@ -129,10 +130,13 @@ const (
 	// CIReviewBotCommentsOnFailure reads a registered review bot's unresolved
 	// comments only when that bot's check failed.
 	CIReviewBotCommentsOnFailure = "on_failure"
-	// CIReviewBotCommentsAlways also reads them when the bot's check completed
-	// green on the current head, or has not registered on it yet once every
-	// other check is green.
+	// CIReviewBotCommentsAlways enables the broader comment policy documented
+	// at docs/src/content/docs/reference/repo-config.md#cireview_bot_comments.
 	CIReviewBotCommentsAlways = "always"
+	// CIRequiredChecksAuto and CIRequiredChecksAll are the ci.required_checks
+	// policies; see CI.RequiredChecks.
+	CIRequiredChecksAuto = scm.RequiredChecksAuto
+	CIRequiredChecksAll  = scm.RequiredChecksAll
 	// DefaultCIReviewBotComments is the policy the CI step uses when
 	// ci.review_bot_comments is unset. It is "on_failure" because reading a
 	// green check's comments makes an unresolved bot comment block
@@ -471,14 +475,15 @@ type RepoConfig struct {
 	// or a YAML/JSON null is falsy and preserves current loading.
 	DisableProjectSettings bool `yaml:"disable_project_settings"`
 	// NoCI declares that this repository intentionally has no CI. When true and
-	// the forge reports zero checks, the CI monitor treats that empty result as
-	// all-checks-passed. It is a readiness boundary honored ONLY from the trusted
-	// default-branch copy of .no-mistakes.yaml (see EffectiveRepoConfig): a
+	// the forge reports zero checks with no unmet in-scope requirements, the
+	// ordinary CI monitor treats that empty result as all-checks-passed. Strict
+	// shipping still requires an observed rollup. It is honored ONLY from the
+	// trusted default-branch copy of .no-mistakes.yaml (see EffectiveRepoConfig): a
 	// contributor's pushed branch must not self-declare no-CI and bypass checks.
 	// Default false - absence means CI is expected, and an unproven empty check
 	// list remains not-ready regardless of elapsed time. If checks still appear,
-	// their actual states are processed normally; the declaration never waives a
-	// registered pending or failing check. No inference from workflow files,
+	// their states are processed under CI.CheckScopePolicy; the declaration never
+	// waives an in-scope pending or failing check. No inference from workflow files,
 	// prior history, branch names, or grace-period expiry.
 	NoCI bool `yaml:"no_ci"`
 }
@@ -738,6 +743,12 @@ type CIRaw struct {
 	RebaseBehind *bool `yaml:"rebase_behind"`
 	// CarryReviewOnReplay is a pointer for the same reason as RevalidateRepairs.
 	CarryReviewOnReplay *bool `yaml:"carry_review_on_replay"`
+	// RequiredChecks is "" when unset; see CI.RequiredChecks.
+	RequiredChecks string `yaml:"required_checks"`
+	// MustPass and ExternalChecks are nil when unset, so an explicit empty
+	// list in a later source can clear an earlier one.
+	MustPass       []string `yaml:"must_pass"`
+	ExternalChecks []string `yaml:"external_checks"`
 }
 
 // CI holds the resolved CI-step settings.
@@ -777,17 +788,8 @@ type CI struct {
 	RevalidateRepairs bool
 	// ReviewBotComments selects when the CI step reads a registered review
 	// bot's (scm.ReviewBots) unresolved review comments.
-	//
-	// "on_failure" (default): only when the bot's check failed, so a green
-	// bot check never blocks checks-passed.
-	//
-	// "always": also when the bot's check completed green on the current
-	// head, or has not registered on it yet once every other check is green.
-	// Its unresolved comments then become the same ask-user findings a
-	// red check produces, and the step parks for a decision instead of
-	// reporting checks-passed. A review bot can conclude its check success
-	// while leaving an unresolved comment, most often on the pipeline's own
-	// CI repair commit, which no human has reviewed yet.
+	// Policy semantics and check-scope interactions are owned by
+	// docs/src/content/docs/reference/repo-config.md#cireview_bot_comments.
 	ReviewBotComments string
 	// RebaseBehind opts the CI monitor into rebasing a green GitHub PR that
 	// reports mergeStateStatus BEHIND (its base requires branches to be up to
@@ -804,6 +806,40 @@ type CI struct {
 	// exclusions are owned by ci.carry_review_on_replay in
 	// docs/src/content/docs/reference/repo-config.md.
 	CarryReviewOnReplay bool
+	// RequiredChecks selects which checks on the PR head decide readiness and
+	// repair.
+	//
+	// "auto" (default): the status checks the target branch requires (branch
+	// protection and rulesets), when the provider reports them. A failing
+	// check outside that set is informational: it does not block readiness
+	// and is never sent to the fix agent. When the provider reports no
+	// required checks, or they cannot be read, every check is evaluated.
+	//
+	// "all": every check on the head, regardless of branch protection, subject
+	// to ExternalChecks below.
+	RequiredChecks string
+	// MustPass lists glob patterns ('*' and '?') for check contexts that are
+	// always required, whatever the target branch requires. A pattern without
+	// wildcards also blocks readiness while no such check has been reported.
+	MustPass []string
+	// ExternalChecks lists glob patterns for check contexts that pass only
+	// after an outside party acts, such as an approval app that approves the
+	// exact head after external review. They are reported, never waited on and
+	// never repaired, and they outrank MustPass and the required set. A
+	// pattern matches the context name and, for GitHub check runs, the
+	// "workflow / job" display form.
+	ExternalChecks []string
+}
+
+// CheckScopePolicy is the CI step's check-scope settings in the form the
+// provider layer applies.
+func (c CI) CheckScopePolicy() scm.CheckScopePolicy {
+	return scm.CheckScopePolicy{
+		RequiredChecks:    c.RequiredChecks,
+		ReviewBotComments: c.ReviewBotComments,
+		MustPass:          append([]string(nil), c.MustPass...),
+		ExternalChecks:    append([]string(nil), c.ExternalChecks...),
+	}
 }
 
 // RebaseRaw is the YAML representation of rebase-step settings.
@@ -911,8 +947,7 @@ type Config struct {
 	// closed if the resolved harness has no verified suppression knob.
 	DisableProjectSettings bool
 	// NoCI is the resolved, trusted-only declaration that this repository
-	// intentionally has no CI (see the RepoConfig field). When true and the
-	// forge reports zero checks, the CI monitor treats that as all-checks-passed.
+	// intentionally has no CI; see RepoConfig.NoCI for the readiness boundary.
 	NoCI bool
 	// Providers holds the resolved provider-specific settings.
 	Providers Providers
@@ -1690,13 +1725,10 @@ ci:
   # repository that sets ci.revalidate_repairs on its own default branch
   # overrides this value.
   revalidate_repairs: false
-  # When the CI step reads a registered review bot's (Greptile's) unresolved
-  # review comments. "on_failure" (default) reads them only when the bot's
-  # check failed. "always" also reads them when the bot's check completed green
-  # on the current head, or has not registered on it yet once every other check
-  # is green, so an unresolved bot comment parks the step for a decision
-  # instead of reporting checks-passed. A repository that sets
-  # ci.review_bot_comments on its own default branch overrides this value.
+  # When unresolved review-bot comments block CI readiness ("on_failure" or
+  # "always"). Policy semantics and check-scope interactions:
+  # https://kunchenguid.github.io/no-mistakes/reference/repo-config/#cireview_bot_comments
+  # A repository setting this key on its default branch overrides this value.
   review_bot_comments: on_failure
   # Whether the CI monitor rebases a green GitHub PR that GitHub reports BEHIND
   # because its base requires branches to be up to date. Defaults to false: the
@@ -1715,6 +1747,22 @@ ci:
   # repository that sets ci.carry_review_on_replay on its own default branch
   # overrides this value.
   carry_review_on_replay: false
+  # Which checks on the PR head decide CI readiness and repair. "auto"
+  # (default) evaluates only the status checks the target branch requires
+  # (branch protection and rulesets) when the provider reports them, and every
+  # check otherwise; a failing check outside that set is informational and is
+  # neither waited on nor repaired. "all" evaluates every check. A repository
+  # that sets ci.required_checks on its own default branch overrides this value.
+  required_checks: auto
+  # Glob patterns ('*' and '?') for check contexts that always count as
+  # required, in addition to the target branch's required checks.
+  must_pass: []
+  # Glob patterns for check contexts that pass only after an outside party
+  # acts, such as an approval app that approves the exact head after external
+  # review (for example "Final Approval / approve*"). They are reported as
+  # external, never waited on and never repaired, and they outrank must_pass
+  # and the required set.
+  external_checks: []
 
 # Auto-fix commit subject template. Available variables: {{.Step}}, {{.Summary}}, and {{.Branch}}.
 # When set to anything but the default, it also renders the Push step's
@@ -3702,6 +3750,7 @@ func ciDefaults() CI {
 		RerunTransient:    DefaultCIRerunTransient,
 		RevalidateRepairs: DefaultCIRevalidateRepairs,
 		ReviewBotComments: DefaultCIReviewBotComments,
+		RequiredChecks:    CIRequiredChecksAuto,
 	}
 }
 
@@ -3755,6 +3804,30 @@ func applyCIOverrides(dst *CI, src *CIRaw) {
 	if src.CarryReviewOnReplay != nil {
 		dst.CarryReviewOnReplay = *src.CarryReviewOnReplay
 	}
+	if v := strings.ToLower(strings.TrimSpace(src.RequiredChecks)); v != "" {
+		dst.RequiredChecks = v
+	}
+	if src.MustPass != nil {
+		dst.MustPass = cleanCheckPatterns(src.MustPass)
+	}
+	if src.ExternalChecks != nil {
+		dst.ExternalChecks = cleanCheckPatterns(src.ExternalChecks)
+	}
+}
+
+// cleanCheckPatterns trims patterns and drops empty and duplicate entries.
+func cleanCheckPatterns(patterns []string) []string {
+	out := make([]string, 0, len(patterns))
+	seen := make(map[string]bool, len(patterns))
+	for _, p := range patterns {
+		p = strings.TrimSpace(p)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // validateCIRaw fails the config closed on an unrecognized
@@ -3764,9 +3837,15 @@ func applyCIOverrides(dst *CI, src *CIRaw) {
 func validateCIRaw(c CIRaw) error {
 	switch strings.TrimSpace(c.ReviewBotComments) {
 	case "", CIReviewBotCommentsOnFailure, CIReviewBotCommentsAlways:
-		return nil
+	default:
+		return fmt.Errorf("ci.review_bot_comments: %q is not a valid policy (want %q or %q)", c.ReviewBotComments, CIReviewBotCommentsOnFailure, CIReviewBotCommentsAlways)
 	}
-	return fmt.Errorf("ci.review_bot_comments: %q is not a valid policy (want %q or %q)", c.ReviewBotComments, CIReviewBotCommentsOnFailure, CIReviewBotCommentsAlways)
+	switch strings.ToLower(strings.TrimSpace(c.RequiredChecks)) {
+	case "", CIRequiredChecksAuto, CIRequiredChecksAll:
+	default:
+		return fmt.Errorf("ci.required_checks: %q is not a valid policy (want %q or %q)", c.RequiredChecks, CIRequiredChecksAuto, CIRequiredChecksAll)
+	}
+	return nil
 }
 
 // applyAutoFixOverrides applies non-nil raw values onto resolved defaults.

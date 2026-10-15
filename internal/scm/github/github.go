@@ -491,7 +491,14 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 		if err != nil {
 			return nil, err
 		}
-		checks = h.appendUnrepresentedWorkflowRuns(checks, runs)
+		attemptJobs, err := h.currentAttemptJobs(ctx, runs)
+		if err != nil {
+			return nil, err
+		}
+		checks = h.appendUnrepresentedWorkflowRuns(checks, runs, attemptJobs)
+		// Reconcile attempts before collapsing: a job named like its workflow
+		// would otherwise collapse into the newer workflow-level check and
+		// drop the identity that check must carry.
 		checks = h.collapseLatestByName(checks)
 		for i := range checks {
 			checks[i].HeadSHA = headSHA
@@ -552,7 +559,7 @@ func (h *Host) getPRChecks(ctx context.Context, selector string) ([]scm.Check, e
 // carries its check suite's app slug: that is the structural identity the CI
 // step uses to tell a third-party review bot's check (scm.ReviewBots) from the
 // repository's own Actions jobs, without matching check names.
-const commitChecksQuery = `query($owner:String!,$name:String!,$oid:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$oid){... on Commit{statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{databaseId name status conclusion completedAt startedAt detailsUrl checkSuite{app{slug}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}`
+const commitChecksQuery = `query($owner:String!,$name:String!,$oid:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$oid){... on Commit{statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{databaseId name status conclusion completedAt startedAt detailsUrl checkSuite{app{slug databaseId} workflowRun{workflow{name}}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}`
 
 const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved comments(first:100){nodes{databaseId body path line url createdAt author{login}}}} pageInfo{hasNextPage endCursor}}}}}`
 
@@ -596,8 +603,14 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 									DetailsURL  string `json:"detailsUrl"`
 									CheckSuite  *struct {
 										App *struct {
-											Slug string `json:"slug"`
+											Slug       string `json:"slug"`
+											DatabaseID int64  `json:"databaseId"`
 										} `json:"app"`
+										WorkflowRun *struct {
+											Workflow *struct {
+												Name string `json:"name"`
+											} `json:"workflow"`
+										} `json:"workflowRun"`
 									} `json:"checkSuite"`
 									Context   string `json:"context"`
 									State     string `json:"state"`
@@ -643,6 +656,12 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 				check.Link = strings.TrimSpace(node.DetailsURL)
 				if node.CheckSuite != nil && node.CheckSuite.App != nil {
 					check.App = strings.TrimSpace(node.CheckSuite.App.Slug)
+					check.AppID = node.CheckSuite.App.DatabaseID
+				}
+				if node.CheckSuite != nil && node.CheckSuite.WorkflowRun != nil {
+					if node.CheckSuite.WorkflowRun.Workflow != nil {
+						check.Workflow = strings.TrimSpace(node.CheckSuite.WorkflowRun.Workflow.Name)
+					}
 				}
 				if parsed, parseErr := time.Parse(time.RFC3339, node.CompletedAt); parseErr == nil {
 					check.CompletedAt = parsed
@@ -688,30 +707,223 @@ func (h *Host) repoSlug() string {
 	return repo
 }
 
-func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.Check {
+// appendUnrepresentedWorkflowRuns reconciles the rollup's jobs with the REST
+// workflow runs for the head. GitHub reuses the run ID for reruns, and
+// checkSuite.workflowRun.runAttempt is the parent's current attempt, not the
+// job's attempt: an unfinished run makes its jobs pending, and a job completed
+// before its run's current attempt started is stale.
+//
+// Attempts of one trigger - the same workflow, event, and head branch - are
+// then judged as GitHub's newest meaningful attempt, ordered by when each
+// current attempt started (a rerun keeps its run ID). A skipped attempt ran
+// nothing and never counts. Only the newest attempt's current jobs remain;
+// every older attempt's jobs and run-level results, and the newest attempt's
+// own stale jobs, are retired. Each retired job name the newest attempt has not
+// reported yet is then owned by how that attempt stands: a failing or
+// unfinished attempt's run-level result stands for it (blocking, and
+// repairable when failed), while a passing attempt leaves it missing until
+// the current job registers. A failing or unfinished attempt whose reported
+// jobs all passed also keeps its run-level result. Runs of an unknown event,
+// and runs triggered independently, are separate triggers.
+func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check, attemptJobs map[int64]map[string]bool) []scm.Check {
 	represented := make(map[string][]int, len(checks))
 	for i, check := range checks {
 		if runID := h.actionsRunID(check.Link); runID != "" {
 			represented[runID] = append(represented[runID], i)
 		}
 	}
+	drop := make(map[int]bool)
+	type attempt struct {
+		run       scm.Check
+		current   []int
+		displaced []scm.Check
+	}
+	attempts := make([]attempt, 0, len(runs))
 	for _, run := range runs {
-		runID := h.actionsRunID(run.Link)
-		if indices := represented[runID]; runID != "" && len(indices) > 0 {
-			for _, i := range indices {
-				if checks[i].StartedAt.IsZero() && !run.StartedAt.IsZero() {
-					checks[i].StartedAt = run.StartedAt
+		a := attempt{run: run}
+		if runID := h.actionsRunID(run.Link); runID != "" {
+			for _, i := range represented[runID] {
+				check := &checks[i]
+				if check.StartedAt.IsZero() && !run.StartedAt.IsZero() {
+					check.StartedAt = run.StartedAt
 				}
-				checks[i].WorkflowID = run.WorkflowID
+				check.WorkflowID = run.WorkflowID
+				check.RunID = run.RunID
+				check.AttemptStartedAt = run.StartedAt
+				check.WorkflowEvent = run.WorkflowEvent
+				check.WorkflowBranch = run.WorkflowBranch
+				if current, known := attemptJobs[run.RunID]; known {
+					// The provider lists the current attempt's jobs, including
+					// the records it copies for successful jobs a partial rerun
+					// left untouched (which keep their original, earlier
+					// times). Membership, not timing, decides currency.
+					if !current[check.ProviderID] {
+						drop[i] = true
+						a.displaced = append(a.displaced, jobIdentity(*check))
+						continue
+					}
+				} else if run.Bucket == scm.CheckBucketPending && !run.AwaitingApproval {
+					check.Bucket = scm.CheckBucketPending
+					check.State = run.State
+					check.CompletedAt = time.Time{}
+				} else if !check.CompletedAt.IsZero() && !run.StartedAt.IsZero() && check.CompletedAt.Before(run.StartedAt) {
+					drop[i] = true
+					a.displaced = append(a.displaced, jobIdentity(*check))
+					continue
+				}
+				a.current = append(a.current, i)
+			}
+		}
+		attempts = append(attempts, a)
+	}
+
+	trigger := func(run scm.Check) string {
+		if run.WorkflowID == 0 || run.WorkflowEvent == "" {
+			return fmt.Sprintf("run:%d", run.RunID)
+		}
+		return fmt.Sprintf("%d\x00%s\x00%s", run.WorkflowID, run.WorkflowEvent, run.WorkflowBranch)
+	}
+	var order []string
+	groups := map[string][]int{}
+	for i, a := range attempts {
+		key := trigger(a.run)
+		if _, seen := groups[key]; !seen {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], i)
+	}
+	for _, key := range order {
+		members := groups[key]
+		newest := -1
+		for _, i := range members {
+			if attempts[i].run.Bucket == scm.CheckBucketSkip {
+				continue
+			}
+			if newest < 0 {
+				newest = i
+				continue
+			}
+			if after, ordered := h.attemptAfter(attempts[i].run, attempts[newest].run); ordered && after {
+				newest = i
+			}
+		}
+		if newest < 0 {
+			// Every attempt was skipped: nothing ran, and each stands alone.
+			for _, i := range members {
+				if len(attempts[i].current) == 0 {
+					checks = append(checks, attempts[i].run)
+				}
 			}
 			continue
 		}
-		checks = append(checks, run)
-		if runID != "" {
-			represented[runID] = []int{len(checks) - 1}
+		latest := attempts[newest]
+		retired := append([]scm.Check(nil), latest.displaced...)
+		for _, i := range members {
+			if i == newest {
+				continue
+			}
+			for _, j := range attempts[i].current {
+				drop[j] = true
+				retired = append(retired, jobIdentity(checks[j]))
+			}
+			retired = append(retired, attempts[i].displaced...)
+		}
+		reported := map[string]bool{}
+		explained := false
+		for _, j := range latest.current {
+			reported[checks[j].Name] = true
+			if b := checks[j].Bucket; b != scm.CheckBucketPass && b != scm.CheckBucketSkip {
+				explained = true
+			}
+		}
+		var uncovered []scm.Check
+		for _, identity := range retired {
+			if reported[identity.Name] {
+				continue
+			}
+			reported[identity.Name] = true
+			uncovered = append(uncovered, identity)
+		}
+		run := latest.run
+		green := run.Bucket == scm.CheckBucketPass || run.Bucket == scm.CheckBucketSkip
+		if !green {
+			run.Supersedes = append(run.Supersedes, uncovered...)
+		}
+		// The run-level result is reported when it is the attempt's only
+		// result, when it stands for retired jobs, and when it failed or is
+		// unfinished while every job it reported passed: that outcome comes
+		// from a job not reported yet and must not disappear.
+		if len(latest.current) == 0 || !green && (len(uncovered) > 0 || !explained) {
+			checks = append(checks, run)
 		}
 	}
-	return checks
+	kept := make([]scm.Check, 0, len(checks)-len(drop))
+	for i, check := range checks {
+		if !drop[i] {
+			kept = append(kept, check)
+		}
+	}
+	return kept
+}
+
+// currentAttemptJobs reads, for each run on a rerun attempt, the provider IDs
+// of the jobs its current attempt owns. A rerun keeps its run ID, and a partial
+// rerun gives each successful job it leaves untouched a new job record that
+// keeps the original start and completion times, so neither run identity nor
+// timing can tell a carried-over success from a stale result; only the
+// attempt's own job list can. A failed read fails the observation closed.
+func (h *Host) currentAttemptJobs(ctx context.Context, runs []scm.Check) (map[int64]map[string]bool, error) {
+	attemptJobs := map[int64]map[string]bool{}
+	repo := h.repoSlug()
+	if repo == "" {
+		repo = "{owner}/{repo}"
+	}
+	for _, run := range runs {
+		if run.RunAttempt <= 1 || run.RunID == 0 {
+			continue
+		}
+		args := []string{"api"}
+		if h.host != "" {
+			args = append(args, "--hostname", h.host)
+		}
+		args = append(args, "--method", "GET", fmt.Sprintf("repos/%s/actions/runs/%d/attempts/%d/jobs", repo, run.RunID, run.RunAttempt),
+			"-f", "per_page=100", "--paginate", "--slurp")
+		out, err := h.cmd(ctx, "gh", args...).CombinedOutput()
+		if err != nil {
+			return nil, fmt.Errorf("gh api jobs for run %d attempt %d: %s: %w", run.RunID, run.RunAttempt, strings.TrimSpace(string(out)), err)
+		}
+		var pages []struct {
+			TotalCount *int `json:"total_count"`
+			Jobs       []struct {
+				ID int64 `json:"id"`
+			} `json:"jobs"`
+		}
+		if err := json.Unmarshal(out, &pages); err != nil {
+			return nil, fmt.Errorf("parse jobs for run %d attempt %d: %w", run.RunID, run.RunAttempt, err)
+		}
+		ids := map[string]bool{}
+		total := -1
+		for _, page := range pages {
+			if page.TotalCount == nil {
+				return nil, fmt.Errorf("jobs for run %d attempt %d carry no total_count", run.RunID, run.RunAttempt)
+			}
+			total = *page.TotalCount
+			for _, job := range page.Jobs {
+				ids[fmt.Sprintf("github-check-run:%d", job.ID)] = true
+			}
+		}
+		if total < 0 || len(ids) != total {
+			return nil, fmt.Errorf("jobs for run %d attempt %d returned %d unique jobs, want %d", run.RunID, run.RunAttempt, len(ids), total)
+		}
+		attemptJobs[run.RunID] = ids
+	}
+	return attemptJobs, nil
+}
+
+// jobIdentity is the identity a run-level result stands for when it owns a
+// retired job.
+func jobIdentity(c scm.Check) scm.Check {
+	return scm.Check{Name: c.Name, ProviderID: c.ProviderID, Workflow: c.Workflow, Kind: c.Kind, App: c.App, AppID: c.AppID}
 }
 
 // collapseLatestByName collapses orderable same-name reruns of one workflow
@@ -743,7 +955,17 @@ func (h *Host) collapseLatestByName(checks []scm.Check) []scm.Check {
 				i++
 				continue
 			}
-			after, ordered := h.checkStartedAfter(check, other)
+			// A skipped workflow run ran nothing: it never replaces a
+			// meaningful result, and one is never replaced by it.
+			if checkSkippedRun(check) != checkSkippedRun(other) {
+				if checkSkippedRun(check) {
+					keep = false
+					break
+				}
+				collapsed = append(collapsed[:i], collapsed[i+1:]...)
+				continue
+			}
+			after, ordered := h.attemptAfter(check, other)
 			if !ordered {
 				i++
 				continue
@@ -761,6 +983,34 @@ func (h *Host) collapseLatestByName(checks []scm.Check) []scm.Check {
 	return collapsed
 }
 
+// attemptAfter orders two attempts by execution: the current attempt's start
+// first, since a rerun keeps its run ID, and the run ID only when the start
+// times cannot decide.
+func (h *Host) attemptAfter(a, b scm.Check) (bool, bool) {
+	aStart, bStart := attemptStart(a), attemptStart(b)
+	if !aStart.IsZero() && !bStart.IsZero() && !aStart.Equal(bStart) {
+		return aStart.After(bStart), true
+	}
+	if a.RunID != 0 && b.RunID != 0 && a.RunID != b.RunID {
+		return a.RunID > b.RunID, true
+	}
+	return h.checkStartedAfter(a, b)
+}
+
+// attemptStart is when the attempt behind c started: its run's current
+// attempt for a job, the run itself for a workflow-level check, and the
+// check's own start when the provider reported no run.
+func attemptStart(c scm.Check) time.Time {
+	if !c.AttemptStartedAt.IsZero() {
+		return c.AttemptStartedAt
+	}
+	return c.StartedAt
+}
+
+func checkSkippedRun(c scm.Check) bool {
+	return c.WorkflowRun && c.Bucket == scm.CheckBucketSkip
+}
+
 func (h *Host) sameCheckReplacementGroup(a, b scm.Check) bool {
 	if a.Kind != scm.CheckKindRun || b.Kind != scm.CheckKindRun || a.Name != b.Name {
 		return false
@@ -769,6 +1019,12 @@ func (h *Host) sameCheckReplacementGroup(a, b scm.Check) bool {
 	// Missing workflow/run identities may be independent external checks, while
 	// equal run identities may be independent same-name jobs within one run.
 	// Collapsing either case could hide a failing requirement.
+	// Only runs of one workflow triggered by the same known event for the
+	// same branch replace each other; runs of different or unknown triggers
+	// are independent results, as in attempt reconciliation.
+	if a.WorkflowEvent == "" || a.WorkflowEvent != b.WorkflowEvent || a.WorkflowBranch != b.WorkflowBranch {
+		return false
+	}
 	aRunID := h.actionsRunID(a.Link)
 	bRunID := h.actionsRunID(b.Link)
 	return a.WorkflowID != 0 && a.WorkflowID == b.WorkflowID &&
@@ -839,6 +1095,9 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 		CreatedAt    string `json:"created_at"`
 		UpdatedAt    string `json:"updated_at"`
 		HTMLURL      string `json:"html_url"`
+		Event        string `json:"event"`
+		HeadBranch   string `json:"head_branch"`
+		RunAttempt   int    `json:"run_attempt"`
 	}
 	var pages []struct {
 		TotalCount   *int          `json:"total_count"`
@@ -912,6 +1171,10 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 		if state == "" {
 			state = strings.ToUpper(strings.TrimSpace(run.Status))
 		}
+		if !strings.EqualFold(strings.TrimSpace(run.Status), "completed") {
+			bucket = scm.CheckBucketPending
+			state = strings.ToUpper(strings.TrimSpace(run.Status))
+		}
 		// GitHub holds a first-time contributor's workflows for maintainer
 		// approval by concluding the run ACTION_REQUIRED without running a
 		// single job. That hold is a wait on a human, not a verdict on the
@@ -942,7 +1205,7 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 			}
 			link = fmt.Sprintf("https://%s/%s/actions/runs/%d", host, repo, run.ID)
 		}
-		checks = append(checks, scm.Check{Name: name, ProviderID: fmt.Sprintf("github-workflow-run:%d", run.ID), Bucket: bucket, Kind: scm.CheckKindRun, State: state, CompletedAt: completedAt, StartedAt: startedAt, WorkflowID: run.WorkflowID, Link: link, AwaitingApproval: awaitingApproval})
+		checks = append(checks, scm.Check{Name: name, ProviderID: fmt.Sprintf("github-workflow-run:%d", run.ID), Bucket: bucket, Kind: scm.CheckKindRun, State: state, CompletedAt: completedAt, StartedAt: startedAt, WorkflowID: run.WorkflowID, RunID: run.ID, RunAttempt: run.RunAttempt, WorkflowEvent: strings.TrimSpace(run.Event), WorkflowBranch: strings.TrimSpace(run.HeadBranch), WorkflowRun: true, Link: link, AwaitingApproval: awaitingApproval})
 	}
 	return checks, nil
 }

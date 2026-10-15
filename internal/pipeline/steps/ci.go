@@ -54,17 +54,16 @@ const (
 // Execute has the same shape as the review step's: when the executor
 // re-executes it as a fix round (sctx.Fixing), it first repairs the findings
 // selected for that round (sctx.PreviousFindings), then it monitors. Each
-// settled observation - every check finished, every authorized transient
-// rerun spent, at least one issue present - returns one finding per issue
+// settled observation - no in-scope check still executing, every authorized
+// transient rerun spent, at least one issue present - returns one finding per issue
 // carrying its action (ciObservationFindings), and the executor decides what
 // happens next: auto-fix findings enter the auto_fix.ci loop as fix rounds,
 // ask-user findings park for a decision. The step never counts or limits fix
 // rounds itself; the executor does, durably, from the round history.
 //
-// Empty check lists are never treated as green unless the resolved config
-// carries the trusted default-branch `no_ci: true` declaration (config.Config.NoCI).
-// A feature branch cannot self-declare that value. When checks exist, their
-// actual states are always processed normally - even on a declared no-CI repo.
+// Readiness uses scm.CheckScope so an entirely excluded observed rollup is
+// distinguished from an unobserved empty one. Excluded contexts must not
+// re-enter findings or repairs through retained selections or rerun state.
 type CIStep struct {
 	lastFixedChecks      string                    // encoded targets of the last published repair, so a poll that still shows them is not re-escalated
 	lastFixedCompletedAt map[string]checkFreshness // terminally failed check freshness at the observation the last repair targeted
@@ -84,6 +83,9 @@ type CIStep struct {
 	// set only for the duration of that repair's recording. recordRepair
 	// proves a pure replay against exactly this commit and nothing else.
 	replayBase string
+	// recordCheckScope persists the scope this execution evaluates under.
+	// Overridable for testing; defaults to recordCIChecksScope.
+	recordCheckScope func(*pipeline.StepContext, *scm.CheckScope) error
 }
 
 // SetPollIntervalOverride is a test hook; production leaves the override unset.
@@ -194,15 +196,13 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 // VerifyApprovalOverride implements pipeline.ApprovalOverrideVerifier. It
 // re-polls the live checks once, synchronously, at the moment a human answers
 // ActionApprove on a CI gate raised by ciFailureOutcome, so an approval over
-// checks that are not genuinely all green can never be silently reported as a
-// plain "outcome=passed" - see the interface doc for the incident this exists
-// for. Resolution uses allChecksPassed - the same trusted all-green semantics
-// the CI step's own polling loop uses (see its allChecksPassed callsite) -
-// rather than the narrower !hasFailingChecks, because an empty check list or
-// a check still pending/cancelled/otherwise unresolved is not evidence of a
-// clean pass either; !hasFailingChecks previously treated all of those as
-// clean. Read-only: unlike Execute and ReconcileApprovalGate, it never fixes,
-// reruns, or pushes anything, and it never blocks the approval itself - it
+// checks that do not satisfy the shared scope can never be silently reported
+// as a plain "outcome=passed" - see the interface doc for the incident this exists
+// for. Resolution uses scm.ScopedChecks.Ready, as the polling loop does,
+// rather than !hasFailingChecks: pending, cancelled, missing, and otherwise
+// unresolved in-scope checks cannot prove a clean pass. Read-only: unlike
+// Execute and ReconcileApprovalGate, it never fixes, reruns, or pushes
+// anything, and it never blocks the approval itself - it
 // only decides how the resulting completion is recorded.
 func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, error) {
 	ctx := sctx.Ctx
@@ -251,14 +251,41 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		}
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
-	if allChecksPassed(checks) {
+	targetBranch, err := currentPRTargetBranch(sctx)
+	if err != nil {
+		return fmt.Sprintf("could not verify live CI target: %v", err), nil
+	}
+	pr.BaseBranch = targetBranch
+	// A parked gate is verified under the scope it was raised with, not the
+	// configuration loaded now: a later edit to external_checks must not
+	// reclassify the failure the operator is approving over. A run that
+	// recorded nothing predates check scoping (for example a gate parked by an
+	// older build); like the strict receipt, it keeps the legacy behavior of
+	// judging every check rather than the live configuration, which may be
+	// less strict than the gate's original evaluation.
+	policy, recorded, err := recordedCIChecksScope(sctx)
+	if err != nil {
+		return fmt.Sprintf("could not verify live CI scope: %v", err), nil
+	}
+	if !recorded {
+		policy = scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAll}
+	}
+	overrideScope := scm.NewCheckScope(host, policy, targetBranch, func(msg string) {
+		if sctx.Log != nil {
+			sctx.Log(msg)
+		}
+	})
+	scoped := overrideScope.Apply(ctx, pr, checks)
+	excludedChecks := scoped.ReviewBotPresenceMarkers(overrideScope.ExternalReviewBotChecks())
+	checks = scoped.Relevant
+	if scoped.Ready() {
 		if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
 			return fmt.Sprintf("could not verify live CI comparison: %v", err), nil
 		}
 		// A green head can still carry a green review bot's unresolved
 		// comments under ci.review_bot_comments: always; approving over
 		// them is an override, not a clean pass.
-		botFindings, err := s.greenReviewBotFindings(sctx, host, pr, checks)
+		botFindings, err := s.greenReviewBotFindings(sctx, host, pr, policy, checks, excludedChecks...)
 		if err != nil {
 			return fmt.Sprintf("could not verify review bot comments: %v", err), nil
 		}
@@ -512,7 +539,60 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 	}
 	pr.BaseBranch = baseBranch
+	// Reuse the scope until the live target changes. Retarget handling below
+	// replaces it before classifying checks against the new target.
+	checkScope := newCIChecksScope(sctx, host, baseBranch)
+	// The recorded scope is what approval verification and the strict receipt
+	// read later. An execution that cannot record the policy it runs under
+	// must not raise a gate under it: the stale record would judge that gate.
+	record := s.recordCheckScope
+	if record == nil {
+		record = recordCIChecksScope
+	}
+	if err := record(sctx, checkScope); err != nil {
+		clearCIMonitorReady(sctx)
+		return nil, err
+	}
+	// Re-record once the scope resolves its required set, before anything
+	// classified under it can raise a gate.
+	resolutionRecorded := false
+	recordResolution := func() error {
+		if resolutionRecorded {
+			return nil
+		}
+		if _, ok := checkScope.Resolution(); !ok {
+			return nil
+		}
+		if err := record(sctx, checkScope); err != nil {
+			clearCIMonitorReady(sctx)
+			return err
+		}
+		resolutionRecorded = true
+		return nil
+	}
 	if repairRequested {
+		pr.HeadSHA = sctx.Run.HeadSHA
+		checks, err := host.GetChecks(ctx, pr)
+		if err != nil {
+			return nil, fmt.Errorf("scope retained CI findings: %w", err)
+		}
+		if headErr := scm.ValidateCheckHeads(checks, pr.HeadSHA); headErr != nil {
+			// A carried replay awaiting its Test restart is not published
+			// yet, so no live check belongs to the run's head: retained work
+			// is scoped by the identity it names against the target's
+			// requirements alone. Any other mismatch still fails closed.
+			carryPending, pendingErr := sctx.DB.RunTestRestartPending(sctx.Run.ID)
+			if pendingErr != nil || !carryPending {
+				return nil, headErr
+			}
+			checks = nil
+		}
+		if err := scopeRetainedCIFindings(sctx, checkScope, pr, checks); err != nil {
+			return nil, err
+		}
+		if err := recordResolution(); err != nil {
+			return nil, err
+		}
 		repairOutcome, err := s.repairFromFindings(sctx, host, pr)
 		if err != nil {
 			return nil, err
@@ -588,6 +668,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	var timeoutFailingChecks []scm.CheckTarget
 	timeoutMergeConflict := false
 	lastMonitorLog := ""
+	lastScopeLog := ""
 	consecutiveCheckErrs := 0
 	consecutiveBotCommentErrs := 0
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
@@ -607,7 +688,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		interval = ciPollInterval(sctx, now().Sub(started), interval)
 		if !unlimited {
 			remaining := timeout - now().Sub(timeoutAnchor)
-			if remaining < interval {
+			if remaining > 0 && remaining < interval {
 				interval = remaining
 			}
 		}
@@ -634,6 +715,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		if !unlimited && now().Sub(timeoutAnchor) >= timeout {
+			return timeoutOutcome()
+		}
 		if sctx.Run.Shipping != nil {
 			if err := verifyStrictPRBaseBranch(ctx, sctx, host, pr); err != nil {
 				clearCIMonitorReady(sctx)
@@ -642,6 +726,53 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		botCommentReadFailed := false
 		behindObserved := false
+
+		// The target a PR points at decides which checks are required of it,
+		// and it can change while this step monitors. Re-read it before any
+		// check is classified, and rebuild the scope for the new target so a
+		// requirement of the new base is never treated as informational and a
+		// failure only the old base required is never dispatched. Strict runs
+		// pin their target and verify it above.
+		if sctx.Run.Shipping == nil {
+			if reader, ok := host.(scm.PRBaseBranchReader); ok {
+				live, readErr := reader.GetPRBaseBranch(ctx, pr)
+				if readErr != nil && pluginPollFailsStep(readErr) {
+					clearCIMonitorReady(sctx)
+					return nil, readErr
+				}
+				if readErr != nil {
+					// An unreadable target cannot be classified against; wait
+					// for the next poll instead of using a possibly stale one.
+					sctx.Log(fmt.Sprintf("warning: could not read the PR target branch: %v", readErr))
+					clearCIMonitorReady(sctx)
+					lastMonitorLog = ""
+					if err := waitForPoll(); err != nil {
+						return nil, err
+					}
+					continue
+				}
+				if live = strings.TrimSpace(live); live != "" && live != baseBranch {
+					sctx.Log(fmt.Sprintf("PR target changed from %s to %s, re-reading its required checks", baseBranch, live))
+					baseBranch = live
+					pr.BaseBranch = live
+					checkScope = newCIChecksScope(sctx, host, live)
+					// Timeout evidence judged the old target; it must not be
+					// reported before a poll under the new scope replaces it.
+					timeoutFailingChecks = nil
+					timeoutMergeConflict = false
+					lastScopeLog = ""
+					lastMonitorLog = ""
+					clearCIMonitorReady(sctx)
+					// Re-record the scope this poll classifies under, and stop
+					// if it cannot be: nothing may be classified or repaired
+					// under a scope the approval and receipt paths do not see.
+					resolutionRecorded = false
+					if err := record(sctx, checkScope); err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
 
 		if !unlimited && now().Sub(timeoutAnchor) >= timeout {
 			return timeoutOutcome()
@@ -744,7 +875,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		}
 
-		// Check CI status - wait for all checks to complete before escalating
+		// Check CI status - wait for in-scope executions before escalating
 		pr.HeadSHA = sctx.Run.HeadSHA
 		checks, err := host.GetChecks(ctx, pr)
 		if err == nil {
@@ -786,6 +917,31 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		} else {
 			consecutiveCheckErrs = 0
+			// Scope repair work before classifying failures. Informational and
+			// external checks are logged separately; ScopedChecks.Settled and
+			// reviewBotPresenceMarkers preserve the review-bot comment policy.
+			rollupObserved := len(checks) > 0
+			scoped := checkScope.Apply(ctx, pr, checks)
+			if err := recordResolution(); err != nil {
+				return nil, err
+			}
+			checks = scoped.Relevant
+			excludedChecks := append(scoped.External, scoped.Informational...)
+			if err := s.scopeRetainedCIReruns(sctx, checkScope, pr, checks, excludedChecks); err != nil {
+				return nil, err
+			}
+			if err := scopeRetainedCIFindings(sctx, checkScope, pr, append(append([]scm.Check(nil), checks...), excludedChecks...)); err != nil {
+				return nil, err
+			}
+			// A configured exclusion of a review bot's check also covers the bot
+			// before it registers one, so the absent-bot fallback stays off.
+			excludedChecks = scoped.ReviewBotPresenceMarkers(checkScope.ExternalReviewBotChecks())
+			if summary := scoped.Summary(); summary != lastScopeLog {
+				lastScopeLog = summary
+				if summary != "" {
+					sctx.Log("CI checks not evaluated: " + summary)
+				}
+			}
 			// A failure the provider produced before the repository's own steps
 			// ran (a setup/action-resolution outage) is infrastructure, not a
 			// verdict on the code. Re-bucket those into the transient path before
@@ -803,7 +959,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			// readinessPending is deliberately broader: any state that is not a
 			// conclusive pass, failure, or skip must keep the PR non-ready. This
 			// includes cancelled, held, and unknown provider states.
-			readinessPending := hasPendingChecks(checks) || hasUnresolvedChecks(checks)
+			readinessPending := !scoped.Settled()
 			failing := failingCheckNames(checks)
 
 			// A rerun the provider has answered is no longer outstanding. This
@@ -851,7 +1007,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			// published yet is neither, so the monitor keeps waiting for it.
 			var unresolvedCancelled, awaitingRerun []string
 			if !rerunIssued {
-				unresolvedCancelled, awaitingRerun = s.transientReruns.cancelledAfterRerun(checks)
+				unresolvedCancelled, awaitingRerun = s.transientReruns.cancelledAfterRerun(foldRunCoveredJobs(checks))
 				// A cancelled check this run never re-ran is just as unresolved,
 				// and just as final: the provider published a conclusion for it,
 				// and with no rerun outstanding nothing this run is waiting on
@@ -870,7 +1026,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				// stays on the wait-then-timeout path rather than being
 				// escalated as a conclusion the provider never reported.
 				if !checksPending {
-					unresolvedCancelled = mergeCheckNames(unresolvedCancelled, s.transientReruns.cancelledWithoutRerun(checks))
+					unresolvedCancelled = mergeCheckNames(unresolvedCancelled, s.transientReruns.cancelledWithoutRerun(foldRunCoveredJobs(checks)))
 				}
 			}
 			sort.Strings(failing)
@@ -915,8 +1071,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// evidence, so the monitor keeps waiting for the re-run.
 					sctx.Log("fix already attempted for these issues, waiting for CI re-run...")
 				} else {
-					// Every check has finished and every authorized rerun is
-					// spent: this poll is a settled observation. Each issue
+					// No in-scope check is still executing and every authorized
+					// rerun is spent: this poll is a settled observation. Each issue
 					// becomes one finding carrying its action, and the
 					// executor's shared findings machinery decides what
 					// happens next - auto-fix findings enter the auto_fix.ci
@@ -935,8 +1091,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						unresolvedCancelled: unresolvedCancelled,
 						mergeConflict:       mergeConflict,
 						reruns:              s.transientReruns.used,
-						botComments:         reviewBotComments(sctx, host, pr, checks),
+						botComments:         reviewBotComments(sctx, host, pr, checks, excludedChecks...),
 						greenBots:           reviewBotCommentsAlways(sctx),
+						excludedChecks:      excludedChecks,
 					})
 					if hasAwaitingApprovalChecks(checks) {
 						sctx.Log(ciChecksAwaitingApprovalMsg)
@@ -957,19 +1114,17 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// previous passed-checks signal instead of looking stale.
 					// The broader readiness state is intentional here: cancelled
 					// and unknown checks must never be promoted as green.
-					// Applies even when no_ci is declared: registered checks are
-					// never waived.
+					// Applies even when no_ci is declared: unresolved in-scope
+					// checks are never waived.
 					lastMonitorLog = logCIMonitorStatus(sctx, ciWaitingMessage(checks), lastMonitorLog)
-				case len(checks) == 0 && (sctx.Config == nil || !sctx.Config.NoCI || sctx.Run.Shipping != nil):
-					// Only ordinary runs may use trusted no_ci: true as evidence
-					// for empty forge results. Strict shipping requires checks.
-					// Otherwise keep waiting - delayed registration
-					// is common and must never look green. Elapsed time is not
-					// evidence; there is no grace-period promotion path.
+				case len(checks) == 0 && (!scoped.Ready() && (sctx.Config == nil || !sctx.Config.NoCI || sctx.Run.Shipping != nil) ||
+					// Strict shipping needs an observed rollup even when the
+					// target requires only the pipeline's own status.
+					!rollupObserved && sctx.Run.Shipping != nil):
 					clearCIMonitorReady(sctx)
 					lastMonitorLog = ""
 					sctx.Log("no CI checks reported yet, waiting for checks to register...")
-				case len(checks) == 0 || allChecksPassed(checks):
+				case len(checks) == 0 || scoped.Ready():
 					// Under ci.review_bot_comments: always, a review bot that
 					// concluded its check green, or has not registered one on
 					// this head yet, may still have left unresolved comments. They are read before the head is
@@ -977,7 +1132,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// red bot check produces, so checks-passed is never reported
 					// over a comment nobody has looked at. A trusted no_ci head
 					// with no checks at all reads them the same way.
-					botFindings, botErr := s.greenReviewBotFindings(sctx, host, pr, checks)
+					botFindings, botErr := s.greenReviewBotFindings(sctx, host, pr, ciCheckScopePolicy(sctx), checks, excludedChecks...)
 					if botErr != nil && pluginPollFailsStep(botErr) {
 						clearCIMonitorReady(sctx)
 						return nil, botErr
@@ -1025,7 +1180,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					}
 					sctx.DeferredFindings = ""
 					passedMsg := ciChecksPassedMsg
-					if len(checks) == 0 {
+					if len(checks) == 0 && !scoped.Ready() {
 						passedMsg = ciNoChecksPassedMsg
 					}
 					lastMonitorLog = logVerifiedCIMonitorStatus(sctx, host, checks, passedMsg, lastMonitorLog)

@@ -239,10 +239,13 @@ type Finding struct {
 	Category string `json:"category,omitempty"`
 	// Check is the provider check name a CI finding was derived from. CheckID
 	// is the provider's opaque identity for that exact check, so same-named
-	// checks remain distinct through selection and repair. Both are empty on
-	// every non-CI finding.
-	Check   string `json:"check,omitempty"`
-	CheckID string `json:"check_id,omitempty"`
+	// checks remain distinct through selection and repair. CheckApp preserves
+	// a review bot's app identity even when it has not registered a check, so
+	// retained findings can follow later scope exclusions. These fields are
+	// empty on every non-CI finding.
+	Check    string `json:"check,omitempty"`
+	CheckID  string `json:"check_id,omitempty"`
+	CheckApp string `json:"check_app,omitempty"`
 	// Support is a typed, untrusted reference for later evidence validation.
 	Support *FindingSupport `json:"support,omitempty"`
 }
@@ -315,6 +318,7 @@ type findingWire struct {
 	Category            string          `json:"category,omitempty"`
 	Check               string          `json:"check,omitempty"`
 	CheckID             string          `json:"check_id,omitempty"`
+	CheckApp            string          `json:"check_app,omitempty"`
 	Support             *FindingSupport `json:"support,omitempty"`
 	RequiresHumanReview *bool           `json:"requires_human_review,omitempty"`
 }
@@ -691,6 +695,7 @@ func (f *Finding) UnmarshalJSON(data []byte) error {
 	f.Category = wire.Category
 	f.Check = wire.Check
 	f.CheckID = wire.CheckID
+	f.CheckApp = wire.CheckApp
 	f.Support = wire.Support
 	if f.Action == "" && wire.RequiresHumanReview != nil {
 		if *wire.RequiresHumanReview {

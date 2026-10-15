@@ -17,6 +17,7 @@ func TestParseFindingsJSON_RoundTripsCICheckFields(t *testing.T) {
 			Category:    FindingCategoryCICheck,
 			Check:       "test (ubuntu-latest)",
 			CheckID:     "github-check-run:42",
+			CheckApp:    "github-actions",
 			Description: "CI check failing: test (ubuntu-latest)",
 		}},
 	})
@@ -31,7 +32,7 @@ func TestParseFindingsJSON_RoundTripsCICheckFields(t *testing.T) {
 		t.Fatalf("items = %+v, want one", parsed.Items)
 	}
 	item := parsed.Items[0]
-	if item.Check != "test (ubuntu-latest)" || item.CheckID != "github-check-run:42" || item.Category != FindingCategoryCICheck {
+	if item.Check != "test (ubuntu-latest)" || item.CheckID != "github-check-run:42" || item.CheckApp != "github-actions" || item.Category != FindingCategoryCICheck {
 		t.Fatalf("item = %+v, want the check name and category preserved", item)
 	}
 

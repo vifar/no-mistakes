@@ -214,11 +214,15 @@ const (
 
 // Check is a single CI check result on a PR.
 type Check struct {
-	Name       string
-	ProviderID string `json:"provider_id,omitempty"`
-	HeadSHA    string
-	Bucket     CheckBucket
-	Kind       CheckKind
+	// ExpectedMissing marks a synthetic placeholder for an unmet requirement,
+	// not a provider execution. It blocks readiness but must never defer repairs
+	// or count as evidence that a check has started running after a repair.
+	ExpectedMissing bool
+	Name            string
+	ProviderID      string `json:"provider_id,omitempty"`
+	HeadSHA         string
+	Bucket          CheckBucket
+	Kind            CheckKind
 	// State is the provider's own outcome string for the check (GitHub
 	// conclusions such as FAILURE, TIMED_OUT, CANCELLED). Buckets collapse
 	// several outcomes into one value, so callers that must tell an
@@ -232,10 +236,32 @@ type Check struct {
 	// commit rollup that keeps every run a commit ever had) down to the
 	// latest one; zero when the provider did not report it.
 	StartedAt time.Time
+	// AttemptStartedAt is when the current attempt of the workflow run behind
+	// this check started; zero when unknown. A job's own start can lag its
+	// attempt's, and a rerun keeps its run ID, so attempts of one workflow are
+	// ordered by this value rather than by job starts or run IDs.
+	AttemptStartedAt time.Time
 	// WorkflowID identifies the provider workflow that emitted the check. It
 	// distinguishes independent same-name workflows while allowing reruns of
 	// one workflow to use latest-wins ordering. Zero when unavailable.
 	WorkflowID int64
+	// RunID is the provider workflow run (GitHub Actions run) that produced the
+	// check, when known. It breaks attempt-order ties; a rerun keeps its ID.
+	RunID int64
+	// RunAttempt is the run's current attempt number for a workflow-level
+	// check; zero when unknown. A rerun keeps its RunID and increments this.
+	RunAttempt int
+	// WorkflowEvent is the event that triggered the workflow run behind the
+	// check (GitHub: push, pull_request, workflow_dispatch, ...). Runs of one
+	// workflow triggered by different events are independent results.
+	WorkflowEvent string
+	// WorkflowBranch is the head branch the workflow run was triggered for.
+	// Retriggers of one workflow only supersede each other on one branch.
+	WorkflowBranch string
+	// WorkflowRun marks a workflow-level check: the run itself, reported
+	// when its current jobs do not fully represent its outcome (for example
+	// a failure before jobs register). Name is the workflow's name.
+	WorkflowRun bool
 	// Link is the provider's details URL for this check. It may identify an
 	// individual job or a provider-side workflow run for targeted reruns. Empty
 	// when the provider reported no link.
@@ -263,6 +289,30 @@ type Check struct {
 	// so the CI step can tell a third-party review bot's verdict from the
 	// repository's own CI without matching names. Empty when unknown.
 	App string
+	// AppID is the numeric ID of the application that produced the check, when
+	// the provider reports one (GitHub: the check suite's app databaseId). A
+	// required check bound to an application is satisfied only by a check
+	// carrying that ID. Zero when unknown, which includes legacy commit
+	// statuses.
+	AppID int64
+	// Supersedes holds retired job identities that a failing or unfinished
+	// workflow-level result stands for until the current attempt reports
+	// those jobs. This includes stale jobs of a rerun with the same run ID;
+	// a passing workflow-level result cannot stand for missing jobs.
+	Supersedes []Check
+	// Workflow is the name of the workflow that emitted the check, when the
+	// provider reports one (GitHub Actions). Together with Name it forms the
+	// "workflow / job" display form that check-scope patterns may match.
+	Workflow string
+}
+
+// DisplayName is the "workflow / job" form of the check's name, or Name when
+// the provider reported no workflow.
+func (c Check) DisplayName() string {
+	if c.Workflow == "" {
+		return c.Name
+	}
+	return c.Workflow + " / " + c.Name
 }
 
 // Failing reports whether the check is in a failed bucket.
@@ -279,13 +329,34 @@ type ReviewBot struct {
 	// Logins are the account logins the bot posts review comments as.
 	Logins       []string
 	GitLabLogins []string
+	// CheckNames are the names the bot's check is published under, so a
+	// configured exclusion of that check applies to the bot even before it
+	// registers one.
+	CheckNames []string
 }
 
 // ReviewBots is the registry of supported review bots. Both halves of the
 // integration - check identity and comment authorship - read it, so adding a
 // bot is one entry here.
 var ReviewBots = []ReviewBot{
-	{AppSlug: "greptile-apps", Logins: []string{"greptile-apps[bot]", "greptile-apps"}, GitLabLogins: []string{"greptileai"}},
+	{AppSlug: "greptile-apps", Logins: []string{"greptile-apps[bot]", "greptile-apps"}, GitLabLogins: []string{"greptileai"}, CheckNames: []string{"Greptile Review"}},
+}
+
+// ReviewBotForCheck returns the registered review bot that published check,
+// identified by its app or, when the provider reported none, by the bot's
+// known check name.
+func ReviewBotForCheck(check Check) (ReviewBot, bool) {
+	if strings.TrimSpace(check.App) != "" {
+		return ReviewBotForApp(check.App)
+	}
+	for _, bot := range ReviewBots {
+		for _, name := range bot.CheckNames {
+			if strings.EqualFold(strings.TrimSpace(check.Name), name) {
+				return bot, true
+			}
+		}
+	}
+	return ReviewBot{}, false
 }
 
 // ReviewBotForApp returns the registered review bot that publishes checks

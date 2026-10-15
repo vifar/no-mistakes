@@ -25,15 +25,15 @@ func TestAllChecksPassedFailsClosed(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			checks := []scm.Check{tt.check}
-			if got := allChecksPassed(checks); got != tt.ready {
-				t.Fatalf("allChecksPassed() = %v, want %v", got, tt.ready)
+			if got := (scm.ScopedChecks{Relevant: checks}).Ready(); got != tt.ready {
+				t.Fatalf("Ready() = %v, want %v", got, tt.ready)
 			}
-			if !tt.ready && !hasUnresolvedChecks(checks) && tt.check.Bucket != scm.CheckBucketFail {
+			if !tt.ready && (scm.ScopedChecks{Relevant: checks}).Settled() && tt.check.Bucket != scm.CheckBucketFail {
 				t.Fatal("non-ready check must be unresolved or failing")
 			}
 		})
 	}
-	if allChecksPassed(nil) {
+	if (scm.ScopedChecks{}).Ready() {
 		t.Fatal("empty checks must not pass")
 	}
 }
@@ -170,5 +170,34 @@ func TestTerminalFailureCompletionTimesStillCoverFailingChecks(t *testing.T) {
 	})
 	if quiet != nil {
 		t.Fatalf("completion times = %v, want nothing recorded for non-failures", quiet)
+	}
+}
+
+func TestMissingChecksDoNotCountAsExecutingOrVerifyRepairs(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name          string
+		check         scm.Check
+		wantExecuting bool
+	}{
+		{"missing", scm.Check{Name: "lint", Bucket: scm.CheckBucketPending, ExpectedMissing: true}, false},
+		{"held", scm.Check{Name: "lint", Bucket: scm.CheckBucketPending, AwaitingApproval: true}, false},
+		{"running", scm.Check{Name: "lint", Bucket: scm.CheckBucketPending}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checks := []scm.Check{tc.check}
+			if hasExecutingPendingChecks(checks) != tc.wantExecuting {
+				t.Fatalf("executing = %v, want %v", hasExecutingPendingChecks(checks), tc.wantExecuting)
+			}
+			if !checks[0].Pending() || (scm.ScopedChecks{Relevant: checks}).Ready() {
+				t.Fatal("pending requirements must block readiness")
+			}
+			for _, targets := range [][]scm.CheckTarget{nil, {{Name: "lint"}}} {
+				lastFixed := encodeLastFixedChecks(targets, true)
+				if got := pendingCheckMatchesLastFixed(checks, lastFixed); got != tc.wantExecuting {
+					t.Fatalf("pending repair evidence = %v, want %v", got, tc.wantExecuting)
+				}
+			}
+		})
 	}
 }

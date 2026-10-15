@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -974,5 +975,36 @@ func TestRetireResolvedRerunsRetriesAfterPersistenceFailure(t *testing.T) {
 	}
 	if recovered.used("build") != 1 {
 		t.Fatalf("successful retry changed spent budget to %d", recovered.used("build"))
+	}
+}
+
+// The newest attempt of run 7 reports a cancelled job and a cancelled
+// run-level result standing for a job it has not reported. One whole-run
+// rerun covers both, and the job stays covered on the next, unchanged poll
+// while that rerun is outstanding: it is neither rerun again nor reported
+// unresolved apart from its run.
+func TestTransientRerunCandidatesCoalesceOneActionsRun(t *testing.T) {
+	t.Parallel()
+	done := time.Date(2026, 10, 14, 10, 5, 0, 0, time.UTC)
+	job := scm.Check{Name: "test", Bucket: scm.CheckBucketCancel, State: "CANCELLED", RunID: 7, CompletedAt: done}
+	run := scm.Check{Name: "CI", Bucket: scm.CheckBucketCancel, State: "CANCELLED", RunID: 7, WorkflowRun: true, CompletedAt: done,
+		Supersedes: []scm.Check{{Name: "build", Workflow: "CI"}}}
+	other := scm.Check{Name: "lint", Bucket: scm.CheckBucketCancel, State: "CANCELLED", RunID: 8, CompletedAt: done}
+	checks := []scm.Check{job, run, other}
+	budget := &checkRerunBudget{spent: map[string]int{}, rollup: map[string]rerunRollupState{}}
+	got := transientRerunCandidates(checks, budget, 1)
+	var names []string
+	for _, c := range got {
+		names = append(names, c.Name)
+		budget.spend(c, checks, "head")
+	}
+	if !reflect.DeepEqual(names, []string{"CI", "lint"}) {
+		t.Fatalf("candidates = %v; want one whole-run rerun for run 7 plus run 8's job", names)
+	}
+	if again := transientRerunCandidates(checks, budget, 1); len(again) != 0 {
+		t.Fatalf("unchanged second poll reran %+v; the covered job must not be rerun apart from its run", again)
+	}
+	if without := budget.cancelledWithoutRerun(foldRunCoveredJobs(checks)); len(without) != 0 {
+		t.Fatalf("covered job reported unresolved apart from its run: %v", without)
 	}
 }

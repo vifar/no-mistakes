@@ -53,3 +53,20 @@ func TestReviewBotLoginsAreProviderScoped(t *testing.T) {
 		}
 	}
 }
+
+func TestReviewBotForCheckHonorsReportedApp(t *testing.T) {
+	for _, tc := range []struct {
+		app, name string
+		want      bool
+	}{
+		{"greptile-apps", "Review", true},
+		{"github-actions", "Greptile Review", false},
+		{"", "Greptile Review", true},
+		{"", "build", false},
+	} {
+		_, got := ReviewBotForCheck(Check{App: tc.app, Name: tc.name})
+		if got != tc.want {
+			t.Fatalf("app=%q name=%q: bot=%v, want %v", tc.app, tc.name, got, tc.want)
+		}
+	}
+}

@@ -207,7 +207,9 @@ func TestCIStep_Execute_FixMode_RemoteAlreadyUpdatedDoesNotReturnManualIntervent
 	stepstest.GitCmd(t, dir, "push", "--force-with-lease", "origin", "HEAD:refs/heads/feature")
 
 	checksJSON := `[{"name":"build","state":"FAILURE","bucket":"fail"}]`
-	env := stepstest.FakeCIGHMergeable(t, "OPEN", checksJSON, "MERGEABLE")
+	// The run still records the head it delivered before the remote moved, and
+	// the checks read that scopes the retained findings must be bound to it.
+	env := append(stepstest.FakeCIGHMergeable(t, "OPEN", checksJSON, "MERGEABLE"), "FAKE_CLI_PR_HEAD_SHA="+originalHeadSHA)
 
 	ag := &stepstest.MockAgent{
 		AgentName: "test",
