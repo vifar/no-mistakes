@@ -541,7 +541,7 @@ func (h *Host) getPRChecks(ctx context.Context, selector string) ([]scm.Check, e
 // carries its check suite's app slug: that is the structural identity the CI
 // step uses to tell a third-party review bot's check (scm.ReviewBots) from the
 // repository's own Actions jobs, without matching check names.
-const commitChecksQuery = `query($owner:String!,$name:String!,$oid:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$oid){... on Commit{statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{databaseId name status conclusion completedAt startedAt detailsUrl checkSuite{app{slug databaseId} workflowRun{runAttempt workflow{name}}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}`
+const commitChecksQuery = `query($owner:String!,$name:String!,$oid:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$oid){... on Commit{statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{databaseId name status conclusion completedAt startedAt detailsUrl checkSuite{app{slug databaseId} workflowRun{workflow{name}}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}`
 
 const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved comments(first:100){nodes{databaseId body path line url createdAt author{login}}}} pageInfo{hasNextPage endCursor}}}}}`
 
@@ -589,8 +589,7 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 											DatabaseID int64  `json:"databaseId"`
 										} `json:"app"`
 										WorkflowRun *struct {
-											RunAttempt int64 `json:"runAttempt"`
-											Workflow   *struct {
+											Workflow *struct {
 												Name string `json:"name"`
 											} `json:"workflow"`
 										} `json:"workflowRun"`
@@ -642,7 +641,6 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 					check.AppID = node.CheckSuite.App.DatabaseID
 				}
 				if node.CheckSuite != nil && node.CheckSuite.WorkflowRun != nil {
-					check.RunAttempt = node.CheckSuite.WorkflowRun.RunAttempt
 					if node.CheckSuite.WorkflowRun.Workflow != nil {
 						check.Workflow = strings.TrimSpace(node.CheckSuite.WorkflowRun.Workflow.Name)
 					}
@@ -693,6 +691,7 @@ func (h *Host) repoSlug() string {
 
 func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.Check {
 	represented := make(map[string][]int, len(checks))
+	drop := make(map[int]bool)
 	for i, check := range checks {
 		if runID := h.actionsRunID(check.Link); runID != "" {
 			represented[runID] = append(represented[runID], i)
@@ -700,30 +699,40 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 	}
 	for _, run := range runs {
 		runID := h.actionsRunID(run.Link)
-		if indices := represented[runID]; runID != "" && len(indices) > 0 {
-			currentAttemptRepresented := run.RunAttempt <= 1
-			for _, i := range indices {
-				if checks[i].StartedAt.IsZero() && !run.StartedAt.IsZero() {
-					checks[i].StartedAt = run.StartedAt
+		currentJobs := false
+		if runID != "" {
+			for _, i := range represented[runID] {
+				check := &checks[i]
+				if check.StartedAt.IsZero() && !run.StartedAt.IsZero() {
+					check.StartedAt = run.StartedAt
 				}
-				if checks[i].RunAttempt >= run.RunAttempt {
-					currentAttemptRepresented = true
+				check.WorkflowID = run.WorkflowID
+				check.RunID = run.RunID
+				check.WorkflowEvent = run.WorkflowEvent
+				check.WorkflowBranch = run.WorkflowBranch
+				if run.Bucket == scm.CheckBucketPending && !run.AwaitingApproval {
+					check.Bucket = scm.CheckBucketPending
+					check.State = run.State
+					check.CompletedAt = time.Time{}
+				} else if !check.CompletedAt.IsZero() && !run.StartedAt.IsZero() && check.CompletedAt.Before(run.StartedAt) {
+					drop[i] = true
+					run.Supersedes = append(run.Supersedes, scm.Check{Name: check.Name, Workflow: check.Workflow, Kind: check.Kind, App: check.App, AppID: check.AppID})
+					continue
 				}
-				checks[i].WorkflowID = run.WorkflowID
-				checks[i].RunID = run.RunID
-				checks[i].WorkflowEvent = run.WorkflowEvent
-				checks[i].WorkflowBranch = run.WorkflowBranch
-			}
-			if currentAttemptRepresented {
-				continue
+				currentJobs = true
 			}
 		}
-		checks = append(checks, run)
-		if runID != "" {
-			represented[runID] = []int{len(checks) - 1}
+		if !currentJobs {
+			checks = append(checks, run)
 		}
 	}
-	return checks
+	kept := make([]scm.Check, 0, len(checks)-len(drop))
+	for i, check := range checks {
+		if !drop[i] {
+			kept = append(kept, check)
+		}
+	}
+	return kept
 }
 
 // collapseLatestByName collapses orderable same-name reruns of one workflow
@@ -808,8 +817,7 @@ func (h *Host) supersedeStaleJobResults(checks []scm.Check) []scm.Check {
 			var after, ordered bool
 			switch {
 			case w.RunID != 0 && w.RunID == j.RunID:
-				// A rerun attempt of the very run that made the job.
-				after, ordered = w.RunAttempt > 1 && w.RunAttempt > j.RunAttempt, true
+				continue
 			case w.RunID != 0 && j.RunID != 0:
 				after, ordered = w.RunID > j.RunID, true
 			default:
@@ -914,7 +922,6 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 		HTMLURL      string `json:"html_url"`
 		Event        string `json:"event"`
 		HeadBranch   string `json:"head_branch"`
-		RunAttempt   int64  `json:"run_attempt"`
 	}
 	var pages []struct {
 		TotalCount   *int          `json:"total_count"`
@@ -988,6 +995,10 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 		if state == "" {
 			state = strings.ToUpper(strings.TrimSpace(run.Status))
 		}
+		if !strings.EqualFold(strings.TrimSpace(run.Status), "completed") {
+			bucket = scm.CheckBucketPending
+			state = strings.ToUpper(strings.TrimSpace(run.Status))
+		}
 		// GitHub holds a first-time contributor's workflows for maintainer
 		// approval by concluding the run ACTION_REQUIRED without running a
 		// single job. That hold is a wait on a human, not a verdict on the
@@ -1018,7 +1029,7 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 			}
 			link = fmt.Sprintf("https://%s/%s/actions/runs/%d", host, repo, run.ID)
 		}
-		checks = append(checks, scm.Check{Name: name, ProviderID: fmt.Sprintf("github-workflow-run:%d", run.ID), Bucket: bucket, Kind: scm.CheckKindRun, State: state, CompletedAt: completedAt, StartedAt: startedAt, WorkflowID: run.WorkflowID, RunID: run.ID, RunAttempt: run.RunAttempt, WorkflowEvent: strings.TrimSpace(run.Event), WorkflowBranch: strings.TrimSpace(run.HeadBranch), WorkflowRun: true, Link: link, AwaitingApproval: awaitingApproval})
+		checks = append(checks, scm.Check{Name: name, ProviderID: fmt.Sprintf("github-workflow-run:%d", run.ID), Bucket: bucket, Kind: scm.CheckKindRun, State: state, CompletedAt: completedAt, StartedAt: startedAt, WorkflowID: run.WorkflowID, RunID: run.ID, WorkflowEvent: strings.TrimSpace(run.Event), WorkflowBranch: strings.TrimSpace(run.HeadBranch), WorkflowRun: true, Link: link, AwaitingApproval: awaitingApproval})
 	}
 	return checks, nil
 }

@@ -392,7 +392,7 @@ func TestSupersedeReplacesSameEventRetrigger(t *testing.T) {
 	}
 }
 
-func TestSupersedeNeedsAKnownEventAndCountsRerunAttempts(t *testing.T) {
+func TestSupersedeNeedsAKnownEventAndDistinctRun(t *testing.T) {
 	t.Parallel()
 	h := New(nil, nil, "", "test/repo")
 	job := scm.Check{Name: "build", Kind: scm.CheckKindRun, Workflow: "CI", WorkflowID: 10, RunID: 7, WorkflowEvent: "push", WorkflowBranch: "feature", Bucket: scm.CheckBucketPass}
@@ -400,12 +400,11 @@ func TestSupersedeNeedsAKnownEventAndCountsRerunAttempts(t *testing.T) {
 		run  scm.Check
 		want bool
 	}{
-		"rerun attempt of the same run": {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 7, RunAttempt: 2, WorkflowEvent: "push", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, true},
-		"first attempt of the same run": {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 7, RunAttempt: 1, WorkflowEvent: "push", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, false},
-		"unknown event":                 {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, Bucket: scm.CheckBucketFail}, false},
-		"different event":               {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, WorkflowEvent: "pull_request", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, false},
-		"same event, other branch":      {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, WorkflowEvent: "push", WorkflowBranch: "other", Bucket: scm.CheckBucketFail}, false},
-		"newer run, same event":         {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, WorkflowEvent: "push", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, true},
+		"same run is handled during collection": {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 7, WorkflowEvent: "push", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, false},
+		"unknown event":                         {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, Bucket: scm.CheckBucketFail}, false},
+		"different event":                       {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, WorkflowEvent: "pull_request", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, false},
+		"same event, other branch":              {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, WorkflowEvent: "push", WorkflowBranch: "other", Bucket: scm.CheckBucketFail}, false},
+		"newer run, same event":                 {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, WorkflowEvent: "push", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, true},
 	} {
 		got := h.supersedeStaleJobResults([]scm.Check{job, tc.run})
 		if superseded := len(got) == 1; superseded != tc.want {
@@ -441,25 +440,36 @@ func (h *fakeRequiredHost) GetRequiredChecks(context.Context, *scm.PR, string) (
 	return h.required, nil
 }
 
-func TestGetChecksSameRunRerunAttemptBlocksStalePass(t *testing.T) {
+func TestGetChecksSameRunRerunBlocksStalePass(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name, status, conclusion string
-		bucket                   scm.CheckBucket
-		jobAttempt               int
+		name, status, conclusion, completed string
+		bucket                              scm.CheckBucket
+		workflow, ready                     bool
 	}{
-		{"queued rerun", "queued", "", scm.CheckBucketPending, 1},
-		{"running rerun", "in_progress", "", scm.CheckBucketPending, 1},
-		{"failed before jobs", "completed", "failure", scm.CheckBucketFail, 1},
-		{"current job remains authoritative", "in_progress", "", scm.CheckBucketFail, 2},
+		{"queued rerun", "queued", "", "2026-10-14T09:00:00Z", scm.CheckBucketPending, false, false},
+		{"queued rerun with stale conclusion", "queued", "success", "2026-10-14T09:00:00Z", scm.CheckBucketPending, false, false},
+		{"running rerun", "in_progress", "", "2026-10-14T09:00:00Z", scm.CheckBucketPending, false, false},
+		{"waiting rerun", "waiting", "", "2026-10-14T09:00:00Z", scm.CheckBucketPending, false, false},
+		{"pending rerun", "pending", "", "2026-10-14T09:00:00Z", scm.CheckBucketPending, false, false},
+		{"failed before jobs", "completed", "failure", "2026-10-14T09:00:00Z", scm.CheckBucketFail, true, false},
+		{"new passing job", "completed", "success", "2026-10-14T11:00:00Z", scm.CheckBucketPass, false, true},
+		{"new failing job", "completed", "failure", "2026-10-14T11:00:00Z", scm.CheckBucketFail, false, false},
+		{"job completed at run start", "completed", "success", "2026-10-14T10:00:00Z", scm.CheckBucketPass, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			conclusion := "SUCCESS"
-			if tc.jobAttempt == 2 {
-				conclusion = "FAILURE"
+			job := fmt.Sprintf(`{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","completedAt":%q,"detailsUrl":"https://github.com/test/repo/actions/runs/7/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"runAttempt":2,"workflow":{"name":"CI"}}}}`, tc.completed)
+			if tc.name == "new failing job" {
+				job = strings.Replace(job, `"conclusion":"SUCCESS"`, `"conclusion":"FAILURE"`, 1)
 			}
-			job := fmt.Sprintf(`{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":%q,"detailsUrl":"https://github.com/test/repo/actions/runs/7/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"runAttempt":%d,"workflow":{"name":"CI"}}}}`, conclusion, tc.jobAttempt)
-			runs := fmt.Sprintf(`[{"total_count":1,"workflow_runs":[{"id":7,"workflow_id":10,"run_attempt":2,"name":"CI","event":"push","head_branch":"feature","status":%q,"conclusion":%q,"html_url":"https://github.com/test/repo/actions/runs/7"}]}]`, tc.status, tc.conclusion)
+			if tc.ready {
+				oldJob := strings.ReplaceAll(job, tc.completed, "2026-10-14T09:00:00Z")
+				oldJob = strings.Replace(oldJob, `"databaseId":5`, `"databaseId":4`, 1)
+				oldJob = strings.Replace(oldJob, "/job/5", "/job/4", 1)
+				job += "," + oldJob
+			}
+
+			runs := fmt.Sprintf(`[{"total_count":1,"workflow_runs":[{"id":7,"workflow_id":10,"run_attempt":2,"name":"CI","event":"push","head_branch":"feature","status":%q,"conclusion":%q,"run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/7"}]}]`, tc.status, tc.conclusion)
 			host := New(githubTestCmdFactory(map[string]githubTestResponse{
 				"gh pr view 5 --repo test/repo --json headRefOid --jq .headRefOid":                                       {stdout: "abc123\n"},
 				githubCommitChecksCommand("", "test/repo", "abc123"):                                                     {stdout: githubCommitChecksResponse("[" + job + "]")},
@@ -469,16 +479,13 @@ func TestGetChecksSameRunRerunAttemptBlocksStalePass(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(checks) != 1 || checks[0].Bucket != tc.bucket || checks[0].RunAttempt != 2 {
-				t.Fatalf("checks = %+v; want attempt 2 %s", checks, tc.bucket)
-			}
-			if checks[0].WorkflowRun != (tc.jobAttempt == 1) {
-				t.Fatalf("current attempt representation = %+v", checks)
+			if len(checks) != 1 || checks[0].Bucket != tc.bucket || checks[0].WorkflowRun != tc.workflow {
+				t.Fatalf("checks = %+v; want bucket %s, workflow=%v", checks, tc.bucket, tc.workflow)
 			}
 			scope := scm.NewCheckScope(&fakeRequiredHost{required: []scm.RequiredCheck{{Context: "build"}}}, scm.CheckScopePolicy{}, "main", nil)
 			scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks)
-			if scoped.Ready() || len(scoped.Relevant) != 1 || scoped.Relevant[0].ExpectedMissing || scoped.Relevant[0].Bucket != tc.bucket {
-				t.Fatalf("required build must be blocked by the rerun, not stale success or a placeholder: %+v", scoped)
+			if scoped.Ready() != tc.ready || len(scoped.Relevant) != 1 || scoped.Relevant[0].ExpectedMissing || scoped.Relevant[0].Bucket != tc.bucket {
+				t.Fatalf("required build must follow the current workflow observation: %+v; want ready=%v", scoped, tc.ready)
 			}
 		})
 	}
