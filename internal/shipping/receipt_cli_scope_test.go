@@ -43,8 +43,16 @@ func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 	const botFail = `{"name":"Greptile Review","state":"FAILURE","bucket":"fail","app":"greptile-apps"}`
 	const botPending = `{"name":"Greptile Review","state":"PENDING","bucket":"pending","app":"greptile-apps"}`
 	const comment = `[{"author":"greptile-apps[bot]","path":"source.txt","line":1,"body":"Unresolved concern"}]`
+	// The newer workflow has no jobs, so the product must retain both its
+	// own identity and the older job's identity when deciding readiness.
+	const ciRerun = `[{"id":1,"workflow_id":10,"name":"CI","status":"completed","conclusion":"success","html_url":"https://github.com/owner/project/actions/runs/1"},{"id":2,"workflow_id":10,"name":"CI","status":"completed","conclusion":"failure","html_url":"https://github.com/owner/project/actions/runs/2"}]`
+	const approvalRerun = `[{"id":1,"workflow_id":20,"name":"Final Approval","status":"completed","conclusion":"success","html_url":"https://github.com/owner/project/actions/runs/1"},{"id":2,"workflow_id":20,"name":"Final Approval","status":"completed","conclusion":"failure","html_url":"https://github.com/owner/project/actions/runs/2"}]`
+	const oldBuild = `{"name":"build","workflow":"CI","state":"SUCCESS","bucket":"pass","app":"github-actions","appId":15368,"link":"https://github.com/owner/project/actions/runs/1/job/5"}`
+	const oldUnit = `{"name":"unit","workflow":"CI","state":"SUCCESS","bucket":"pass","app":"github-actions","appId":15368,"link":"https://github.com/owner/project/actions/runs/1/job/6"}`
+	const oldApproval = `{"name":"approve","workflow":"Final Approval","state":"SUCCESS","bucket":"pass","app":"github-actions","link":"https://github.com/owner/project/actions/runs/1/job/7"}`
 	for _, tc := range []struct {
 		name, checks, protection, rules, comments, refusal string
+		runs                                             string
 		policy                                             scm.CheckScopePolicy
 	}{
 		{name: "auto ignores outside approval failure", checks: buildPass + "," + approveFail},
@@ -69,6 +77,12 @@ func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 		{name: "cancelled informational bot comments refuse", checks: buildPass + `,{"name":"Greptile Review","state":"CANCELLED","bucket":"cancel","app":"greptile-apps"}`, comments: comment, policy: scm.CheckScopePolicy{ReviewBotComments: "always"}, refusal: "no unresolved review bot comments"},
 		{name: "unreadable comments refuse", checks: buildPass + "," + botFail, comments: "invalid JSON", policy: scm.CheckScopePolicy{ReviewBotComments: "always"}, refusal: "could not verify review bot comments"},
 		{name: "explicit external bot comments are excluded", checks: buildPass + "," + botFail, comments: comment, policy: scm.CheckScopePolicy{ReviewBotComments: "always", ExternalChecks: []string{"Greptile Review"}}},
+		{name: "jobless approval rerun retains qualified exclusion", checks: buildPass + "," + oldApproval, runs: approvalRerun, protection: `{"contexts":["build","approve"]}`, policy: scm.CheckScopePolicy{ExternalChecks: []string{"Final Approval / approve*"}}},
+		{name: "all superseding identities external permit readiness", checks: buildPass + "," + oldApproval, runs: approvalRerun, protection: `{"contexts":["build","approve"]}`, policy: scm.CheckScopePolicy{ExternalChecks: []string{"Final Approval", "Final Approval / approve*"}}},
+		{name: "excluded workflow still blocks as required build", checks: oldBuild, runs: ciRerun, policy: scm.CheckScopePolicy{ExternalChecks: []string{"CI"}}, refusal: "all live checks green"},
+		{name: "jobless workflow retains own wildcard must pass", checks: buildPass + "," + oldUnit, runs: ciRerun, policy: scm.CheckScopePolicy{MustPass: []string{"CI*"}}, refusal: "all live checks green"},
+		{name: "jobless workflow retains own literal must pass", checks: buildPass + "," + oldUnit, runs: ciRerun, policy: scm.CheckScopePolicy{MustPass: []string{"CI"}}, refusal: "all live checks green"},
+		{name: "superseded required build retains app binding", checks: oldBuild, runs: ciRerun, protection: `{"checks":[{"context":"build","app_id":99}]}`, refusal: "all live checks green"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newExportFixture(t)
@@ -90,6 +104,7 @@ func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 			if rules == "" {
 				rules = "[]"
 			}
+			t.Logf("recorded scope=%+v; checks=[%s]; protection=%s; rules=%s; workflow runs=%s", tc.policy, tc.checks, protection, rules, tc.runs)
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, cli, "axi", "review-receipt", "--run", f.run.ID, "--phase", "ci-ready")
@@ -97,7 +112,7 @@ func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 			cmd.Env = append(os.Environ(), "NM_HOME="+filepath.Dir(f.dir), "HOME="+root, "XDG_CONFIG_HOME="+root,
 				"PATH="+root+string(os.PathListSeparator)+os.Getenv("PATH"), "GIT_CONFIG_GLOBAL="+filepath.Join(root, "no-global-config"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_COUNT=0",
 				"NO_MISTAKES_TELEMETRY=off", "NO_MISTAKES_NO_UPDATE_CHECK=1", "FAKE_CLI_MODE=ci-gh", "FAKE_CLI_PR_HEAD_SHA="+f.run.HeadSHA,
-				"FAKE_CLI_PR_FACTS_JSON="+string(rawFacts), "FAKE_CLI_CHECKS=["+tc.checks+"]", "FAKE_CLI_PROTECTION_JSON="+protection, "FAKE_CLI_RULES_JSON="+rules, "FAKE_CLI_REVIEW_COMMENTS="+tc.comments)
+				"FAKE_CLI_PR_FACTS_JSON="+string(rawFacts), "FAKE_CLI_CHECKS=["+tc.checks+"]", "FAKE_CLI_PROTECTION_JSON="+protection, "FAKE_CLI_RULES_JSON="+rules, "FAKE_CLI_REVIEW_COMMENTS="+tc.comments, "FAKE_CLI_WORKFLOW_RUNS="+tc.runs)
 			out, runErr := cmd.CombinedOutput()
 			t.Logf("no-mistakes axi review-receipt --phase ci-ready\n%s", out)
 			if tc.refusal != "" {

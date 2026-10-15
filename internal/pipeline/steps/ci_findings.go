@@ -386,13 +386,9 @@ func reviewBotComments(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, ch
 	return comments
 }
 
-// greenReviewBotFindings is the observation for an all-green head under
-// ci.review_bot_comments: always: the unresolved comments of every registered
-// review bot whose check completed green or has not registered on this head
-// yet, through the same classifier a red bot check uses. Empty when the policy
-// is on_failure or the bots left nothing unresolved. Unlike reviewBotComments it
-// returns the read error, because the caller would otherwise report
-// checks-passed over comments it never read.
+// greenReviewBotFindings applies the shared readiness comment policy and
+// translates unresolved comments into CI findings. Unlike reviewBotComments,
+// it propagates read errors so unread comments cannot establish readiness.
 func (s *CIStep) greenReviewBotFindings(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, policy scm.CheckScopePolicy, checks []scm.Check, excluded ...scm.Check) (Findings, error) {
 	comments, err := scm.ReadReadinessReviewBotComments(sctx.Ctx, host, pr, policy, checks, excluded...)
 	if err != nil {
