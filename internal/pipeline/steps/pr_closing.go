@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/closingissues"
+	"github.com/kunchenguid/no-mistakes/internal/mdfence"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/github"
@@ -123,12 +124,12 @@ func closingGrammarFor(provider scm.Provider) closingGrammar {
 func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 	seen := map[string]struct{}{}
 	var lines []string
-	var fence markdownFence
+	var fence mdfence.Fence
 	for _, raw := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
 		if grammar.codeAware {
-			inFence := fence.marker != 0
-			fence.consume(raw)
-			if inFence || fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+			inFence := fence.Open()
+			fence.Consume(raw)
+			if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
 				continue
 			}
 		}
@@ -157,12 +158,12 @@ func neutralizeGitHubClosingReferences(s string) string {
 		return s
 	}
 	lines := strings.Split(s, "\n")
-	var fence markdownFence
+	var fence mdfence.Fence
 	var htmlCode string
 	for i, raw := range lines {
-		inFence := fence.marker != 0
-		fence.consume(raw)
-		if inFence || fence.marker != 0 || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+		inFence := fence.Open()
+		fence.Consume(raw)
+		if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
 			continue
 		}
 		lines[i] = outsideInlineCode(raw, func(text string) string {
@@ -330,7 +331,10 @@ func issuesSection(sctx *pipeline.StepContext, authorText string) string {
 	return issuesSectionHeading + "\n\n" + strings.Join(lines, "\n")
 }
 
-// appendIssuesSection appends section to body as its final block.
+// appendIssuesSection appends section to body as its final block. The section
+// must be live Markdown outside any code, so a body that ends inside an open
+// fence has the fence closed first: a closing reference inside a fence is
+// ignored by the verifier, which is what would fail publication.
 func appendIssuesSection(body, section string) string {
 	if section == "" {
 		return body
@@ -338,7 +342,7 @@ func appendIssuesSection(body, section string) string {
 	if strings.TrimSpace(body) == "" {
 		return section
 	}
-	return body + "\n\n" + section
+	return mdfence.Close(body) + "\n\n" + section
 }
 
 // claimClosingIssueRefs samples the run's --closes references for this PR
@@ -432,6 +436,10 @@ func verifyClosingIssues(ctx context.Context, host scm.Host, pr *scm.PR, sctx *p
 	return verifyClosingIssuesInBody(content.Body, sctx)
 }
 
+// verifyClosingIssuesInBody is the closing-reference guard. It deliberately
+// keeps ignoring references inside code: relaxing it would let a quoted
+// "Closes #N" count as a request. A rejection logs why, because the missing
+// reference is otherwise indistinguishable from a body that never had one.
 func verifyClosingIssuesInBody(body string, sctx *pipeline.StepContext) error {
 	if sctx == nil {
 		return nil
@@ -441,6 +449,7 @@ func verifyClosingIssuesInBody(body string, sctx *pipeline.StepContext) error {
 	targets := closingTargets(extractClosingKeywordLines(body, grammar), prRepository(sctx, provider), grammar)
 	for _, ref := range sctx.ClosingIssueRefs {
 		if _, ok := targets[strings.ToLower(ref)]; !ok {
+			logClosingRejection(sctx, body, closingLine(ref))
 			return fmt.Errorf("verify closing issues: pull request body is missing %s", closingLine(ref))
 		}
 	}
@@ -466,7 +475,97 @@ func assembleDraftPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, test
 			// refuses a body that would drop a closing reference.
 			return assemblePRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit, provider)
 		}
-		return appendIssuesSection(assemblePRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit-reserve, provider), section)
+		return appendIssuesSection(fenceClosedWithin(bodyLimit-reserve, scm.PRBodyLen, func(budget int) string {
+			return assemblePRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, budget, provider)
+		}), section)
 	}
-	return appendIssuesSection(buildPRBodyWithin(whatChanged, riskLine, testingMD, pipelineMD, sctx, provider, maxPullRequestBodyBytes-reserve), section)
+	return appendIssuesSection(fenceClosedWithin(maxPullRequestBodyBytes-reserve, func(s string) int { return len(s) }, func(budget int) string {
+		return buildPRBodyWithin(whatChanged, riskLine, testingMD, pipelineMD, sctx, provider, budget)
+	}), section)
+}
+
+// fenceClosedWithin builds a body for budget and guarantees it ends outside a
+// fenced block before the Issues section is appended after it. The truncators
+// already close a fence they cut, so this is a backstop: if a builder still
+// returns an open fence, it is rebuilt with room for the closing line.
+func fenceClosedWithin(budget int, units func(string) int, build func(budget int) string) string {
+	body := build(budget)
+	closer := mdfence.Scan(body).Closer()
+	if closer == "" {
+		return body
+	}
+	if tighter := budget - units("\n"+closer); tighter > 0 {
+		body = build(tighter)
+	}
+	return body
+}
+
+const (
+	closingLogHeadBytes   = 1000
+	closingLogWindowBytes = 800
+	closingLogTailBytes   = 1500
+)
+
+// logClosingRejection records the assembled body the closing-reference guard
+// rejected, so an operator can see why a reference went missing. The excerpt
+// goes through the PR-content redaction first (home paths) and is capped to the
+// head, a window around the Issues section, and the tail of the body, with the
+// total length. It also reports whether the body ended inside an open fence and
+// whether the Issues section started inside one, the two ways a requested
+// reference ends up in code.
+func logClosingRejection(sctx *pipeline.StepContext, body, missing string) {
+	if sctx == nil || sctx.Log == nil {
+		return
+	}
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	endOpen := mdfence.Scan(body).Open()
+	anchor := strings.LastIndex(body, "\n"+issuesSectionHeading)
+	issuesOpen := false
+	if anchor >= 0 {
+		issuesOpen = mdfence.Scan(body[:anchor]).Open()
+	}
+	sanitized := redactPRContent(prContent{Body: body}).Body
+	if anchor >= 0 {
+		// Redaction can shorten the body; keep the anchor on the same line.
+		anchor = strings.LastIndex(sanitized, "\n"+issuesSectionHeading)
+	}
+	sctx.Log(fmt.Sprintf("closing-reference guard rejected the PR body: missing %q; body is %d bytes; ended inside an open fence: %t; Issues section started inside an open fence: %t (references inside fences are ignored)\n%s\n",
+		missing, len(body), endOpen, issuesOpen, closingBodyExcerpt(sanitized, anchor)))
+}
+
+// closingBodyExcerpt returns the head of body, a window around anchor (when
+// >= 0), and the tail, with gaps marked, on rune boundaries.
+func closingBodyExcerpt(body string, anchor int) string {
+	type span struct{ lo, hi int }
+	spans := []span{{0, closingLogHeadBytes}}
+	if anchor >= 0 {
+		spans = append(spans, span{anchor - closingLogWindowBytes, anchor + closingLogWindowBytes})
+	}
+	spans = append(spans, span{len(body) - closingLogTailBytes, len(body)})
+	var merged []span
+	for _, sp := range spans {
+		sp.lo = utf8BoundaryBefore(body, max(sp.lo, 0))
+		sp.hi = utf8BoundaryBefore(body, min(sp.hi, len(body)))
+		if sp.hi <= sp.lo {
+			continue
+		}
+		if n := len(merged); n > 0 && sp.lo <= merged[n-1].hi {
+			merged[n-1].hi = max(merged[n-1].hi, sp.hi)
+			continue
+		}
+		merged = append(merged, sp)
+	}
+	var b strings.Builder
+	prev := 0
+	for _, sp := range merged {
+		if sp.lo > prev {
+			fmt.Fprintf(&b, "\n[... %d bytes omitted ...]\n", sp.lo-prev)
+		}
+		b.WriteString(body[sp.lo:sp.hi])
+		prev = sp.hi
+	}
+	if prev < len(body) {
+		fmt.Fprintf(&b, "\n[... %d bytes omitted ...]", len(body)-prev)
+	}
+	return b.String()
 }

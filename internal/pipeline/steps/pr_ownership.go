@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/mdfence"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safepath"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -80,39 +81,7 @@ func parsePROwnedBody(body string) (prOwnedBody, error) {
 // This deliberately does not interpret headings or attempt general Markdown
 // rewriting. Four-space-indented lines cannot open a CommonMark fence.
 func markdownFenceOpen(text string) bool {
-	var fence markdownFence
-	for _, line := range strings.Split(text, "\n") {
-		fence.consume(line)
-	}
-	return fence.marker != 0
-}
-
-type markdownFence struct {
-	marker byte
-	width  int
-}
-
-func (f *markdownFence) consume(raw string) {
-	line := strings.TrimLeft(raw, " ")
-	if len(raw)-len(line) > 3 || len(line) < 3 || (line[0] != '`' && line[0] != '~') {
-		return
-	}
-	n := 0
-	for n < len(line) && line[n] == line[0] {
-		n++
-	}
-	if n < 3 {
-		return
-	}
-	if f.marker == 0 {
-		// CommonMark forbids backticks in a backtick fence's info string.
-		if line[0] == '`' && strings.ContainsRune(line[n:], '`') {
-			return
-		}
-		f.marker, f.width = line[0], n
-	} else if line[0] == f.marker && n >= f.width && strings.TrimSpace(line[n:]) == "" {
-		f.marker, f.width = 0, 0
-	}
+	return mdfence.Scan(text).Open()
 }
 
 func wrapPRAppendix(appendix string) string {

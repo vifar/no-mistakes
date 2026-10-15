@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/conventional"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/mdfence"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safepath"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -1287,6 +1288,9 @@ func splitPRBodySections(body string) []string {
 	}
 
 	var starts []int
+	// A "## " line inside a fenced block is code, not a section boundary:
+	// splitting there would hand a section a fence state it did not open.
+	var fence mdfence.Fence
 	for start := 0; start < len(body); {
 		end := strings.IndexByte(body[start:], '\n')
 		lineEnd := len(body)
@@ -1295,9 +1299,11 @@ func splitPRBodySections(body string) []string {
 			lineEnd = start + end
 			next = lineEnd + 1
 		}
-		if isPRBodySectionHeading(body[start:lineEnd]) {
+		line := body[start:lineEnd]
+		if !fence.Open() && isPRBodySectionHeading(line) {
 			starts = append(starts, start)
 		}
+		fence.Consume(line)
 		start = next
 	}
 	if len(starts) == 0 || starts[0] != 0 {
@@ -1342,33 +1348,43 @@ func joinPRBodySections(sections []string) string {
 	return b.String()
 }
 
+// truncateTextAtLineBoundary cuts text to at most maxBytes, preferring a line
+// boundary, and appends marker. A cut that lands inside a fenced code block
+// closes the fence before the marker, and the closing line is part of the
+// budget, so the result both fits and ends outside any fence. Text that already
+// fits is returned unchanged.
 func truncateTextAtLineBoundary(text string, maxBytes int, marker string) string {
-	if maxBytes <= 0 {
-		return ""
-	}
-	if len(text) <= maxBytes {
-		return text
-	}
-	if marker != "" {
-		marker = "\n\n" + marker
-	}
-	available := maxBytes - len(marker)
-	if available <= 0 {
-		if len(marker) <= maxBytes {
-			return strings.TrimLeft(marker, "\n")
+	return truncateFenceAware(text, maxBytes, marker, func(text string, available int) (int, bool) {
+		cut := strings.LastIndex(text[:available], "\n")
+		if cut <= 0 {
+			return available, false
 		}
-		return ""
-	}
-
-	available = utf8BoundaryBefore(text, available)
-	cut := strings.LastIndex(text[:available], "\n")
-	if cut <= 0 {
-		cut = available
-	}
-	return strings.TrimRight(text[:cut], "\n") + marker
+		return cut, true
+	})
 }
 
+// truncatePipelineUpdateAtLineBoundary is truncateTextAtLineBoundary for one
+// pipeline update: a line that ends exactly at the budget is kept whole.
 func truncatePipelineUpdateAtLineBoundary(text string, maxBytes int, marker string) string {
+	return truncateFenceAware(text, maxBytes, marker, func(text string, available int) (int, bool) {
+		searchEnd := available
+		if searchEnd < len(text) && text[searchEnd] == '\n' {
+			searchEnd++
+		}
+		cut := strings.LastIndex(text[:searchEnd], "\n")
+		if cut <= 0 {
+			return available, false
+		}
+		return cut, true
+	})
+}
+
+// truncateFenceAware is the one truncation routine behind the PR-body line
+// truncators. pick chooses the cut for a given budget and reports whether it
+// is a line boundary. When the cut leaves a fence open, the fence's closing line
+// is appended and counted against maxBytes; if that overshoots, the cut moves
+// back (a line at a time at a line boundary) until head, closer and marker fit.
+func truncateFenceAware(text string, maxBytes int, marker string, pick func(text string, available int) (int, bool)) string {
 	if maxBytes <= 0 {
 		return ""
 	}
@@ -1379,23 +1395,23 @@ func truncatePipelineUpdateAtLineBoundary(text string, maxBytes int, marker stri
 		marker = "\n\n" + marker
 	}
 	available := maxBytes - len(marker)
-	if available <= 0 {
-		if len(marker) <= maxBytes {
-			return strings.TrimLeft(marker, "\n")
+	for available > 0 {
+		available = utf8BoundaryBefore(text, available)
+		cut, lineBased := pick(text, available)
+		head := mdfence.Close(strings.TrimRight(text[:cut], "\n"))
+		if len(head)+len(marker) <= maxBytes {
+			return head + marker
 		}
-		return ""
+		if lineBased {
+			available = cut - 1
+		} else {
+			available = cut - (len(head) + len(marker) - maxBytes)
+		}
 	}
-
-	available = utf8BoundaryBefore(text, available)
-	searchEnd := available
-	if searchEnd < len(text) && text[searchEnd] == '\n' {
-		searchEnd++
+	if len(marker) <= maxBytes {
+		return strings.TrimLeft(marker, "\n")
 	}
-	cut := strings.LastIndex(text[:searchEnd], "\n")
-	if cut <= 0 {
-		return strings.TrimRight(text[:available], "\n") + marker
-	}
-	return strings.TrimRight(text[:cut], "\n") + marker
+	return ""
 }
 
 func utf8BoundaryBefore(text string, n int) int {

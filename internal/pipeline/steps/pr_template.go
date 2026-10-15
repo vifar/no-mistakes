@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/mdfence"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
@@ -176,11 +177,11 @@ func validateTemplateStructure(template, body string) error {
 
 func templateStructureLines(text string) []string {
 	var lines []string
-	var fence markdownFence
+	var fence mdfence.Fence
 	for _, raw := range strings.Split(text, "\n") {
-		wasFenced := fence.marker != 0
-		fence.consume(raw)
-		if wasFenced || fence.marker != 0 {
+		wasFenced := fence.Open()
+		fence.Consume(raw)
+		if wasFenced || fence.Open() {
 			continue
 		}
 		line := strings.TrimSpace(raw)

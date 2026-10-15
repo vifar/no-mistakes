@@ -3,6 +3,8 @@ package scm
 import (
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/mdfence"
 )
 
 func TestMaxPRBodyChars(t *testing.T) {
@@ -55,5 +57,21 @@ func TestClampPRBody(t *testing.T) {
 	emoji := ClampPRBody(strings.Repeat("😀", 3000), 4000) // 6000 units in
 	if PRBodyLen(emoji) > 4000 {
 		t.Fatalf("ClampPRBody(emoji) = %d units, want <= 4000", PRBodyLen(emoji))
+	}
+}
+
+func TestClampPRBodyClosesFenceItCuts(t *testing.T) {
+	t.Parallel()
+	for _, open := range []string{"```text", "~~~", "````"} {
+		body := "intro\n\n" + open + "\n" + strings.Repeat("evidence line\n", 500)
+		for _, max := range []int{200, 201, 210, 4000} {
+			got := ClampPRBody(body, max)
+			if PRBodyLen(got) > max {
+				t.Fatalf("%s max %d: %d units, over budget", open, max, PRBodyLen(got))
+			}
+			if mdfence.Scan(got).Open() {
+				t.Fatalf("%s max %d: clamped body ends inside an open fence:\n%s", open, max, got)
+			}
+		}
 	}
 }

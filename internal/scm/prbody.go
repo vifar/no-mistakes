@@ -1,6 +1,6 @@
 package scm
 
-import "strings"
+import "github.com/kunchenguid/no-mistakes/internal/mdfence"
 
 // prBodyTruncationMarker is appended by ClampPRBody when it has to cut a body,
 // so a shortened description is visibly marked rather than ending mid-text.
@@ -58,7 +58,10 @@ func HostMaxPRBodyChars(host Host) int {
 
 // ClampPRBody truncates body to at most max PRBodyLen units, cutting on a rune
 // boundary and appending a truncation marker (kept inside the budget) when it
-// cuts. max <= 0 means unlimited and returns body unchanged. This is the
+// cuts. max <= 0 means unlimited and returns body unchanged. A cut that lands
+// inside a fenced code block closes the fence before the marker, and the
+// closing line is counted against max, so the result never ends in an open
+// fence that would swallow whatever is appended after it. This is the
 // last-resort backstop: callers that can shed whole sections to fit a budget
 // should do so before relying on a blind clamp.
 func ClampPRBody(body string, max int) string {
@@ -69,19 +72,31 @@ func ClampPRBody(body string, max int) string {
 	if budget < 0 {
 		budget = 0
 	}
-	var b strings.Builder
+	for {
+		head := mdfence.Close(prefixWithin(body, budget))
+		if budget == 0 || PRBodyLen(head)+PRBodyLen(prBodyTruncationMarker) <= max {
+			return head + prBodyTruncationMarker
+		}
+		budget -= PRBodyLen(head) + PRBodyLen(prBodyTruncationMarker) - max
+		if budget < 0 {
+			budget = 0
+		}
+	}
+}
+
+// prefixWithin returns the longest rune-aligned prefix of s of at most budget
+// PRBodyLen units.
+func prefixWithin(s string, budget int) string {
 	used := 0
-	for _, r := range body {
+	for i, r := range s {
 		w := 1
 		if r > 0xFFFF {
 			w = 2
 		}
 		if used+w > budget {
-			break
+			return s[:i]
 		}
-		b.WriteRune(r)
 		used += w
 	}
-	b.WriteString(prBodyTruncationMarker)
-	return b.String()
+	return s
 }
