@@ -1238,8 +1238,8 @@ func branchFromRef(ref string) string {
 }
 
 // loadTrustedRepoConfig reads .no-mistakes.yaml from the trusted
-// default-branch commit (trustedSHA - the exact SHA startRun just fetched and
-// resolved) in the worktree and parses it. Reading at a pinned SHA, rather
+// default-branch commit (trustedSHA - a freshly fetched and resolved SHA)
+// in the worktree and parses it. Reading at a pinned SHA, rather
 // than the origin/<defaultBranch> remote-tracking ref, closes the stale-ref
 // hole: the gate worktree shares refs with the bare repo, so without a fresh
 // fetch + resolve the ref could point at a commit a previous run left behind.
@@ -1913,7 +1913,8 @@ func loadRepoConfigAtSHA(ctx context.Context, dir, sha string) (*config.RepoConf
 	return cfg, nil
 }
 
-// startRun creates a run, sets up a worktree, and launches pipeline execution.
+// startRun records a run for admission; worktree setup and pipeline execution
+// begin only after a slot is granted. A queued launch returns its run ID immediately.
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
 // step uses it instead of inferring from transcripts.
 func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prBaseBranch string, omitIntent bool, externalCIOwner, planID string, closingIssues []string, profiles ...*agentcfg.PiProfile) (string, error) {
