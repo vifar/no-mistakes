@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -107,7 +108,9 @@ func (h *Host) GetRequiredChecks(ctx context.Context, _ *scm.PR, branch string) 
 		}
 	}
 
-	return required, nil
+	return slices.DeleteFunc(required, func(check scm.RequiredCheck) bool {
+		return strings.TrimSpace(check.Context) == CommitStatusContext
+	}), nil
 }
 
 func appIDOrZero(id *int64) int64 {

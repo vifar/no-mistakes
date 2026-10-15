@@ -292,3 +292,13 @@ func TestCIStep_MissingRequiredCheckDoesNotDelayBuildRepair(t *testing.T) {
 		t.Fatal("missing lint must keep readiness blocked")
 	}
 }
+
+func TestCIStep_RequiredPipelineStatusDoesNotBlockReadiness(t *testing.T) {
+	t.Parallel()
+	env := []string{
+		`FAKE_CLI_PROTECTION_JSON={"contexts":["build","no-mistakes"],"checks":[{"context":"build"},{"context":"no-mistakes"}]}`,
+		`FAKE_CLI_RULES_JSON=[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"no-mistakes"}]}}]`,
+	}
+	r := runScoped(t, rollup(buildPass), env, config.CI{}, 1)
+	assertReady(t, r)
+}

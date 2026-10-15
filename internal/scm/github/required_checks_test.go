@@ -197,3 +197,27 @@ func TestGetChecksReadsProducingAppID(t *testing.T) {
 		t.Fatalf("app IDs = %v, want build=15368 and the legacy status unattributed", byName)
 	}
 }
+
+func TestGetRequiredChecksExcludesPipelineStatusFromEverySource(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		protection string
+		rules      string
+	}{
+		{"legacy protection", `{"contexts":["build","no-mistakes"]}`, `[[]]`},
+		{"app-bound protection", `{"contexts":["build","no-mistakes"],"checks":[{"context":"no-mistakes","app_id":7}]}`, `[[]]`},
+		{"ruleset", `{"contexts":["build"]}`, `[[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"no-mistakes","integration_id":7}]}}]]`},
+		{"whitespace", `{"contexts":["build"," no-mistakes "]}`, `[[]]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			contexts, err := requiredContexts(t, map[string]githubTestResponse{
+				protectionCmd: {stdout: tc.protection},
+				rulesCmd:      {stdout: tc.rules},
+			})
+			if err != nil || !reflect.DeepEqual(contexts, []string{"build"}) {
+				t.Fatalf("requirements = %v, %v; want only build", contexts, err)
+			}
+		})
+	}
+}
