@@ -1011,3 +1011,72 @@ func TestGetChecksPartialRerunKeepsUntouchedSuccessfulJobs(t *testing.T) {
 		t.Fatalf("the untouched build of a partial rerun was lost: checks = %+v", checks)
 	}
 }
+
+func TestGetChecksFirstAttemptPreservesCompletedJobs(t *testing.T) {
+	t.Parallel()
+	for _, conclusion := range []string{"SUCCESS", "FAILURE"} {
+		t.Run(conclusion, func(t *testing.T) {
+			jobs := fmt.Sprintf(`[
+				{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":%q,"startedAt":"2026-10-14T10:00:00Z","completedAt":"2026-10-14T10:05:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/7/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}},
+				{"__typename":"CheckRun","databaseId":6,"name":"approval","status":"IN_PROGRESS","detailsUrl":"https://github.com/test/repo/actions/runs/7/job/6","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}
+			]`, conclusion)
+			runs := `[{"total_count":1,"workflow_runs":[{"id":7,"workflow_id":10,"run_attempt":1,"name":"CI","event":"pull_request","head_branch":"feature","status":"in_progress","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/7"}]}]`
+			checks := checksForAttempts(t, jobs, runs)
+			wantBucket := scm.CheckBucketPass
+			if conclusion == "FAILURE" {
+				wantBucket = scm.CheckBucketFail
+			}
+			found := false
+			for _, check := range checks {
+				if check.ProviderID == "github-check-run:5" {
+					found = true
+					if check.Bucket != wantBucket || check.State != conclusion || !check.CompletedAt.Equal(time.Date(2026, 10, 14, 10, 5, 0, 0, time.UTC)) {
+						t.Fatalf("completed build lost its verdict: %+v", check)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("completed build disappeared")
+			}
+			scope := scm.NewCheckScope(nil, scm.CheckScopePolicy{Resolved: &scm.CheckScopeResolution{Required: []scm.RequiredCheck{{Context: "build"}}, Derived: true}, ExternalChecks: []string{"approval"}}, "main", nil)
+			if scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks); scoped.Ready() != (conclusion == "SUCCESS") {
+				t.Fatalf("required build verdict was masked by pending approval: %+v", scoped)
+			}
+		})
+	}
+}
+
+func TestGetChecksPreservesActionsLinkedStatusesDuringReconciliation(t *testing.T) {
+	t.Parallel()
+	for _, retirement := range []bool{false, true} {
+		t.Run(fmt.Sprintf("retirement=%v", retirement), func(t *testing.T) {
+			jobs := `[
+				{"__typename":"StatusContext","id":"audit","context":"audit-status","state":"FAILURE","targetUrl":"https://github.com/test/repo/actions/runs/7"},
+				{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/7/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}
+			]`
+			run7 := `{"id":7,"workflow_id":10,"run_attempt":2,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/7"}`
+			runs := `[{"total_count":1,"workflow_runs":[` + run7 + `]}]`
+			if retirement {
+				run7 = strings.Replace(run7, `"run_attempt":2`, `"run_attempt":1`, 1)
+				runs = `[{"total_count":2,"workflow_runs":[` + run7 + `,{"id":8,"workflow_id":10,"run_attempt":1,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"success","run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/8"}]}]`
+			}
+			checks := checksForAttempts(t, jobs, runs, 5)
+			found := false
+			for _, check := range checks {
+				if check.ProviderID == "github-status:audit" {
+					found = true
+					if check.Kind != scm.CheckKindStatus || check.Bucket != scm.CheckBucketFail || check.RunID != 0 || check.WorkflowID != 0 {
+						t.Fatalf("independent status was altered: %+v", check)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("failing status disappeared: %+v", checks)
+			}
+			scope := scm.NewCheckScope(nil, scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAll, MustPass: []string{"audit-*"}}, "main", nil)
+			if scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks).Ready() {
+				t.Fatal("failing must-pass status allowed readiness")
+			}
+		})
+	}
+}

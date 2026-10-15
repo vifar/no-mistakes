@@ -730,6 +730,9 @@ func (h *Host) repoSlug() string {
 func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check, attemptJobs map[int64]map[string]bool) []scm.Check {
 	represented := make(map[string][]int, len(checks))
 	for i, check := range checks {
+		if check.Kind != scm.CheckKindRun {
+			continue
+		}
 		if runID := h.actionsRunID(check.Link); runID != "" {
 			represented[runID] = append(represented[runID], i)
 		}
@@ -764,7 +767,7 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check, attempt
 						a.displaced = append(a.displaced, jobIdentity(*check))
 						continue
 					}
-				} else if run.Bucket == scm.CheckBucketPending && !run.AwaitingApproval {
+				} else if run.RunAttempt == 0 && run.Bucket == scm.CheckBucketPending && !run.AwaitingApproval {
 					check.Bucket = scm.CheckBucketPending
 					check.State = run.State
 					check.CompletedAt = time.Time{}
