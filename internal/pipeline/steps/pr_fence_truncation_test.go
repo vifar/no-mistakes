@@ -187,6 +187,71 @@ func TestAppendIssuesSectionAfterNBSPFenceSuffix(t *testing.T) {
 	}
 }
 
+func TestPRFenceLineEndings(t *testing.T) {
+	t.Parallel()
+	for _, ending := range []string{"\n", "\r\n", "\r"} {
+		for _, suffix := range []string{"", "\t", "\u00a0"} {
+			sctx := closingTestContext("39")
+			body := strings.Join([]string{"```text", "Closes #40", "```" + suffix, "postscript"}, ending)
+			section := issuesSection(sctx, "")
+			want := body
+			if suffix == "\u00a0" {
+				want += "\n```"
+			}
+			want += "\n\n" + section
+			got := appendIssuesSection(body, section)
+			if got != want {
+				t.Fatalf("ending %q suffix %q: assembled = %q, want %q", ending, suffix, got, want)
+			}
+			if err := verifyClosingIssuesInBody(got, sctx); err != nil {
+				t.Fatalf("ending %q suffix %q: %v", ending, suffix, err)
+			}
+			if err := verifyClosingIssuesInBody(body+ending+"Closes #41", closingTestContext("41")); (err != nil) != (suffix == "\u00a0") {
+				t.Fatalf("ending %q suffix %q: unexpected verification result: %v", ending, suffix, err)
+			}
+			neutralized := neutralizeGitHubClosingReferences(body + ending + "Closes #41")
+			wantNeutralized := "```text\nCloses #40\n```" + suffix + "\npostscript\nCloses "
+			if suffix == "\u00a0" {
+				wantNeutralized += "#41"
+			} else {
+				wantNeutralized += "`#41`"
+			}
+			if neutralized != wantNeutralized {
+				t.Fatalf("ending %q suffix %q: neutralized = %q, want %q", ending, suffix, neutralized, wantNeutralized)
+			}
+		}
+		body := strings.Join([]string{"## One", "```text", "## Hidden", "```", "## Two", "text"}, ending)
+		if sections := splitPRBodySections(body); len(sections) != 2 || sections[1] != "## Two\ntext" {
+			t.Fatalf("ending %q: sections = %q", ending, sections)
+		}
+		template := strings.ReplaceAll(body, "## ", "# ")
+		if got := strings.Join(templateStructureLines(template), "\n"); got != "# One\n# Two" {
+			t.Fatalf("ending %q: template headings = %q", ending, got)
+		}
+	}
+}
+
+func TestPRFenceLineEndingsTruncation(t *testing.T) {
+	t.Parallel()
+	for _, ending := range []string{"\n", "\r\n", "\r"} {
+		body := strings.Join([]string{"```text", "output", "```", strings.Repeat("prose"+ending, 200)}, ending)
+		for name, truncate := range map[string]func(string) string{
+			"body":   func(s string) string { return truncateTextAtLineBoundary(s, 300, "truncated") },
+			"update": func(s string) string { return truncatePipelineUpdateAtLineBoundary(s, 300, "truncated") },
+			"clamp":  func(s string) string { return scm.ClampPRBody(s, 300) },
+		} {
+			got := truncate(body)
+			if scm.PRBodyLen(got) > 300 || (name != "clamp" && len(got) > 300) || strings.Count(got, "```") != 2 {
+				t.Fatalf("%s ending %q: truncation changed a balanced fence or exceeded budget: %q", name, ending, got)
+			}
+			sctx := closingTestContext("39")
+			if err := verifyClosingIssuesInBody(appendIssuesSection(got, issuesSection(sctx, "")), sctx); err != nil {
+				t.Fatalf("%s ending %q: %v", name, ending, err)
+			}
+		}
+	}
+}
+
 // The verifier must keep ignoring a closing line that sits inside a fence.
 func TestVerifyClosingIssuesStillRejectsReferenceInsideFence(t *testing.T) {
 	t.Parallel()

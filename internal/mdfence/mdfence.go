@@ -23,6 +23,7 @@ type Fence struct {
 // with a run of the same character at least as long as the opener and nothing
 // after it but whitespace. Four-space-indented lines cannot open a fence.
 func (f *Fence) Consume(raw string) {
+	raw = strings.TrimSuffix(raw, "\r")
 	line := strings.TrimLeft(raw, " ")
 	if len(raw)-len(line) > 3 || len(line) < 3 || (line[0] != '`' && line[0] != '~') {
 		return
@@ -55,10 +56,14 @@ func (f Fence) Closer() string {
 	return strings.Repeat(string(f.marker), f.width)
 }
 
+func NormalizeLineEndings(text string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
+}
+
 // Scan returns the state at the end of text.
 func Scan(text string) Fence {
 	var f Fence
-	for _, line := range strings.Split(text, "\n") {
+	for _, line := range strings.Split(NormalizeLineEndings(text), "\n") {
 		f.Consume(line)
 	}
 	return f
@@ -72,7 +77,7 @@ func Close(text string) string {
 	if closer == "" {
 		return text
 	}
-	if !strings.HasSuffix(text, "\n") {
+	if !strings.HasSuffix(text, "\n") && !strings.HasSuffix(text, "\r") {
 		text += "\n"
 	}
 	return text + closer

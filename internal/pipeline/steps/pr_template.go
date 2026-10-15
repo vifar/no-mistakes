@@ -178,7 +178,7 @@ func validateTemplateStructure(template, body string) error {
 func templateStructureLines(text string) []string {
 	var lines []string
 	var fence mdfence.Fence
-	for _, raw := range strings.Split(text, "\n") {
+	for _, raw := range strings.Split(mdfence.NormalizeLineEndings(text), "\n") {
 		wasFenced := fence.Open()
 		fence.Consume(raw)
 		if wasFenced || fence.Open() {

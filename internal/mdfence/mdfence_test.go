@@ -1,6 +1,9 @@
 package mdfence
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestCloseTable(t *testing.T) {
 	t.Parallel()
@@ -30,5 +33,37 @@ func TestCloseTable(t *testing.T) {
 		if Scan(Close(tc.in)).Open() {
 			t.Errorf("%s: result still ends inside a fence", tc.name)
 		}
+	}
+}
+
+func TestCommonMarkFenceLineEndings(t *testing.T) {
+	t.Parallel()
+	for _, ending := range []string{"\n", "\r\n", "\r"} {
+		for _, marker := range []string{"```", "~~~~"} {
+			open := marker + "text" + ending + "output" + ending
+			if got := Close(open); got != open+marker {
+				t.Fatalf("Close(%q) = %q, want %q", open, got, open+marker)
+			}
+			for _, suffix := range []string{"", "\t", "\u00a0"} {
+				body := strings.Join([]string{marker + "text", "output", marker + suffix, "postscript"}, ending)
+				wantOpen := suffix == "\u00a0"
+				if got := Scan(body).Open(); got != wantOpen {
+					t.Fatalf("Scan(%q).Open() = %t, want %t", body, got, wantOpen)
+				}
+				want := body
+				if wantOpen {
+					want += "\n" + marker
+				}
+				if got := Close(body); got != want {
+					t.Fatalf("Close(%q) = %q, want %q", body, got, want)
+				}
+			}
+		}
+	}
+	var fence Fence
+	fence.Consume("```text\r")
+	fence.Consume("```\t\r")
+	if fence.Open() {
+		t.Fatal("a trailing CR line terminator must not invalidate a tab-suffixed closer")
 	}
 }

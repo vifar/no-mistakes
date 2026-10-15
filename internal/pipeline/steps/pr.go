@@ -1283,6 +1283,7 @@ func largestPRBodySectionIndex(sections []string) int {
 }
 
 func splitPRBodySections(body string) []string {
+	body = mdfence.NormalizeLineEndings(body)
 	if body == "" {
 		return nil
 	}

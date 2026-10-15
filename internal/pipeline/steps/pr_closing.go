@@ -125,7 +125,7 @@ func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 	seen := map[string]struct{}{}
 	var lines []string
 	var fence mdfence.Fence
-	for _, raw := range strings.Split(strings.ReplaceAll(body, "\r\n", "\n"), "\n") {
+	for _, raw := range strings.Split(mdfence.NormalizeLineEndings(body), "\n") {
 		if grammar.codeAware {
 			inFence := fence.Open()
 			fence.Consume(raw)
@@ -157,7 +157,7 @@ func neutralizeGitHubClosingReferences(s string) string {
 	if !closingReferenceInTextPattern.MatchString(s) {
 		return s
 	}
-	lines := strings.Split(s, "\n")
+	lines := strings.Split(mdfence.NormalizeLineEndings(s), "\n")
 	var fence mdfence.Fence
 	var htmlCode string
 	for i, raw := range lines {
@@ -517,7 +517,7 @@ func logClosingRejection(sctx *pipeline.StepContext, body, missing string) {
 	if sctx == nil || sctx.Log == nil {
 		return
 	}
-	body = strings.ReplaceAll(body, "\r\n", "\n")
+	body = mdfence.NormalizeLineEndings(body)
 	endOpen := mdfence.Scan(body).Open()
 	anchor := strings.LastIndex(body, "\n"+issuesSectionHeading)
 	issuesOpen := false
