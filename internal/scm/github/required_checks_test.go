@@ -440,3 +440,46 @@ type fakeRequiredHost struct {
 func (h *fakeRequiredHost) GetRequiredChecks(context.Context, *scm.PR, string) ([]scm.RequiredCheck, error) {
 	return h.required, nil
 }
+
+func TestGetChecksSameRunRerunAttemptBlocksStalePass(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, status, conclusion string
+		bucket                   scm.CheckBucket
+		jobAttempt               int
+	}{
+		{"queued rerun", "queued", "", scm.CheckBucketPending, 1},
+		{"running rerun", "in_progress", "", scm.CheckBucketPending, 1},
+		{"failed before jobs", "completed", "failure", scm.CheckBucketFail, 1},
+		{"current job remains authoritative", "in_progress", "", scm.CheckBucketFail, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conclusion := "SUCCESS"
+			if tc.jobAttempt == 2 {
+				conclusion = "FAILURE"
+			}
+			job := fmt.Sprintf(`{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":%q,"detailsUrl":"https://github.com/test/repo/actions/runs/7/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"runAttempt":%d,"workflow":{"name":"CI"}}}}`, conclusion, tc.jobAttempt)
+			runs := fmt.Sprintf(`[{"total_count":1,"workflow_runs":[{"id":7,"workflow_id":10,"run_attempt":2,"name":"CI","event":"push","head_branch":"feature","status":%q,"conclusion":%q,"html_url":"https://github.com/test/repo/actions/runs/7"}]}]`, tc.status, tc.conclusion)
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh pr view 5 --repo test/repo --json headRefOid --jq .headRefOid":                                       {stdout: "abc123\n"},
+				githubCommitChecksCommand("", "test/repo", "abc123"):                                                     {stdout: githubCommitChecksResponse("[" + job + "]")},
+				"gh api --method GET repos/test/repo/actions/runs -f head_sha=abc123 -f per_page=100 --paginate --slurp": {stdout: runs},
+			}), nil, "", "test/repo")
+			checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "5", HeadSHA: "abc123"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(checks) != 1 || checks[0].Bucket != tc.bucket || checks[0].RunAttempt != 2 {
+				t.Fatalf("checks = %+v; want attempt 2 %s", checks, tc.bucket)
+			}
+			if checks[0].WorkflowRun != (tc.jobAttempt == 1) {
+				t.Fatalf("current attempt representation = %+v", checks)
+			}
+			scope := scm.NewCheckScope(&fakeRequiredHost{required: []scm.RequiredCheck{{Context: "build"}}}, scm.CheckScopePolicy{}, "main", nil)
+			scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks)
+			if scoped.Ready() || len(scoped.Relevant) != 1 || scoped.Relevant[0].ExpectedMissing || scoped.Relevant[0].Bucket != tc.bucket {
+				t.Fatalf("required build must be blocked by the rerun, not stale success or a placeholder: %+v", scoped)
+			}
+		})
+	}
+}

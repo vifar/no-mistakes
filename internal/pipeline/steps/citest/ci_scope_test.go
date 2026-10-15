@@ -3,6 +3,8 @@ package citest
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -301,4 +303,61 @@ func TestCIStep_RequiredPipelineStatusDoesNotBlockReadiness(t *testing.T) {
 	}
 	r := runScoped(t, rollup(buildPass), env, config.CI{}, 1)
 	assertReady(t, r)
+}
+
+func TestCIStep_TargetReadFailuresHonorTimeout(t *testing.T) {
+	for _, expireDuringRead := range []bool{false, true} {
+		t.Run(map[bool]string{false: "repeated errors", true: "deadline expires during read"}[expireDuringRead], func(t *testing.T) {
+			dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
+			env, logFile := stepstest.FakeCIGHLoggedSequence(t, "OPEN", []string{`[{"name":"build","state":"SUCCESS","bucket":"pass"}]`}, "", "")
+			targetFile := filepath.Join(t.TempDir(), "target")
+			if err := os.WriteFile(targetFile, []byte("main"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			sctx := stepstest.NewTestContextWithDBRecords(t, nil, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Env = append(env, "FAKE_CLI_PR_BASE_FILE="+targetFile)
+			stepstest.BindCurrentPRComparison(t, sctx, "https://github.com/test/repo/pull/42", "test/repo", "main")
+			sctx.Config.CITimeout = 10 * time.Second
+			started := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			current := started
+			failures, waits := 0, 0
+			sctx.Log = func(message string) {
+				if strings.Contains(message, "could not read the PR target branch") {
+					failures++
+					if expireDuringRead {
+						current = started.Add(sctx.Config.CITimeout)
+					}
+				}
+			}
+			step := (&steps.CIStep{}).SetNow(func() time.Time { return current }).SetBaseBranchTip(func(context.Context) (string, bool) { return baseSHA, true })
+			step.SetWaitForNextPoll(func(_ context.Context, interval time.Duration) error {
+				waits++
+				if interval <= 0 {
+					t.Fatalf("nonpositive poll wait: %v", interval)
+				}
+				if waits > 4 {
+					return errors.New("target read retry exceeded deadline")
+				}
+				if err := os.WriteFile(targetFile, []byte("ERROR"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				current = current.Add(4 * time.Second)
+				return nil
+			})
+			outcome, err := step.Execute(sctx)
+			if err != nil || outcome == nil || !outcome.NeedsApproval {
+				t.Fatalf("expected timeout approval gate: %+v, %v", outcome, err)
+			}
+			if failures == 0 || failures > 2 || waits > 3 {
+				t.Fatalf("target retries not bounded: failures=%d waits=%d calls=%s", failures, waits, ghLog(t, logFile))
+			}
+			run, err := sctx.DB.GetRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.CIReadyAt != nil {
+				t.Fatal("unreadable target retained readiness")
+			}
+		})
+	}
 }

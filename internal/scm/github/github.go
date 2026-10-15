@@ -541,7 +541,7 @@ func (h *Host) getPRChecks(ctx context.Context, selector string) ([]scm.Check, e
 // carries its check suite's app slug: that is the structural identity the CI
 // step uses to tell a third-party review bot's check (scm.ReviewBots) from the
 // repository's own Actions jobs, without matching check names.
-const commitChecksQuery = `query($owner:String!,$name:String!,$oid:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$oid){... on Commit{statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{databaseId name status conclusion completedAt startedAt detailsUrl checkSuite{app{slug databaseId} workflowRun{workflow{name}}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}`
+const commitChecksQuery = `query($owner:String!,$name:String!,$oid:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$oid){... on Commit{statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{databaseId name status conclusion completedAt startedAt detailsUrl checkSuite{app{slug databaseId} workflowRun{runAttempt workflow{name}}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}`
 
 const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved comments(first:100){nodes{databaseId body path line url createdAt author{login}}}} pageInfo{hasNextPage endCursor}}}}}`
 
@@ -589,7 +589,8 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 											DatabaseID int64  `json:"databaseId"`
 										} `json:"app"`
 										WorkflowRun *struct {
-											Workflow *struct {
+											RunAttempt int64 `json:"runAttempt"`
+											Workflow   *struct {
 												Name string `json:"name"`
 											} `json:"workflow"`
 										} `json:"workflowRun"`
@@ -640,8 +641,11 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 					check.App = strings.TrimSpace(node.CheckSuite.App.Slug)
 					check.AppID = node.CheckSuite.App.DatabaseID
 				}
-				if node.CheckSuite != nil && node.CheckSuite.WorkflowRun != nil && node.CheckSuite.WorkflowRun.Workflow != nil {
-					check.Workflow = strings.TrimSpace(node.CheckSuite.WorkflowRun.Workflow.Name)
+				if node.CheckSuite != nil && node.CheckSuite.WorkflowRun != nil {
+					check.RunAttempt = node.CheckSuite.WorkflowRun.RunAttempt
+					if node.CheckSuite.WorkflowRun.Workflow != nil {
+						check.Workflow = strings.TrimSpace(node.CheckSuite.WorkflowRun.Workflow.Name)
+					}
 				}
 				if parsed, parseErr := time.Parse(time.RFC3339, node.CompletedAt); parseErr == nil {
 					check.CompletedAt = parsed
@@ -697,16 +701,22 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 	for _, run := range runs {
 		runID := h.actionsRunID(run.Link)
 		if indices := represented[runID]; runID != "" && len(indices) > 0 {
+			currentAttemptRepresented := run.RunAttempt <= 1
 			for _, i := range indices {
 				if checks[i].StartedAt.IsZero() && !run.StartedAt.IsZero() {
 					checks[i].StartedAt = run.StartedAt
+				}
+				if checks[i].RunAttempt >= run.RunAttempt {
+					currentAttemptRepresented = true
 				}
 				checks[i].WorkflowID = run.WorkflowID
 				checks[i].RunID = run.RunID
 				checks[i].WorkflowEvent = run.WorkflowEvent
 				checks[i].WorkflowBranch = run.WorkflowBranch
 			}
-			continue
+			if currentAttemptRepresented {
+				continue
+			}
 		}
 		checks = append(checks, run)
 		if runID != "" {
@@ -799,7 +809,7 @@ func (h *Host) supersedeStaleJobResults(checks []scm.Check) []scm.Check {
 			switch {
 			case w.RunID != 0 && w.RunID == j.RunID:
 				// A rerun attempt of the very run that made the job.
-				after, ordered = w.RunAttempt > 1, true
+				after, ordered = w.RunAttempt > 1 && w.RunAttempt > j.RunAttempt, true
 			case w.RunID != 0 && j.RunID != 0:
 				after, ordered = w.RunID > j.RunID, true
 			default:

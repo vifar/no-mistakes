@@ -628,6 +628,10 @@ func fakeCIGHFactsListAPI(args []string) {
 func fakeCIPRBase() string {
 	if path := os.Getenv("FAKE_CLI_PR_BASE_FILE"); path != "" {
 		if data, err := os.ReadFile(path); err == nil {
+			if strings.TrimSpace(string(data)) == "ERROR" {
+				fmt.Fprintln(os.Stderr, "target branch read failed")
+				os.Exit(1)
+			}
 			return strings.TrimSpace(string(data))
 		}
 	}

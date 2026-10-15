@@ -625,7 +625,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		interval = ciPollInterval(sctx, now().Sub(started), interval)
 		if !unlimited {
 			remaining := timeout - now().Sub(timeoutAnchor)
-			if remaining < interval {
+			if remaining > 0 && remaining < interval {
 				interval = remaining
 			}
 		}
@@ -646,6 +646,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if !unlimited && now().Sub(timeoutAnchor) >= timeout {
+			return timeoutOutcome()
 		}
 		if sctx.Run.Shipping != nil {
 			if err := verifyStrictPRBaseBranch(ctx, sctx, host, pr); err != nil {
