@@ -4,9 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"github.com/kunchenguid/no-mistakes/internal/config"
-	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
-	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"os"
 	"strings"
 	"sync"
@@ -14,10 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -423,4 +423,53 @@ func TestRecoveredParkedRunsUseBoundedPriorityAdmission(t *testing.T) {
 	}
 	f.waitStarted(queued)
 	f.step.release(queued)
+}
+
+func TestClaimedCancellationDoesNotRequireDatabaseWrites(t *testing.T) {
+	for _, branch := range []string{"running", "parked"} {
+		for _, action := range []string{"abort", "supersede"} {
+			t.Run(branch+"/"+action, func(t *testing.T) {
+				f := newFaultFixture(t, "1")
+				id := f.push(branch)
+				f.waitStarted(id)
+				if branch == "parked" {
+					f.waitFor("run to park", func() bool {
+						run, err := f.d.GetRun(id)
+						return err == nil && run.AwaitingAgentSince != nil
+					})
+				}
+				readonly, err := db.OpenReadOnly(f.p.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { f.mgr.Shutdown(); readonly.Close() })
+				if _, err := readonly.CancelQueuedRun(id, types.RunCancelReasonAbortedByUser); err == nil {
+					t.Fatal("fixture allowed a write on the read-only connection")
+				}
+				f.mgr.db = readonly
+				reason := types.RunCancelReasonAbortedByUser
+				if action == "abort" {
+					err = f.mgr.HandleCancel(id)
+				} else {
+					reason = types.RunCancelReasonSuperseded
+					err = f.mgr.cancelActiveRuns("fault-repo", branch)
+				}
+				if err != nil {
+					t.Fatalf("cancel claimed run: %v", err)
+				}
+				f.waitFor("claimed run to stop", func() bool { return f.status(id) == types.RunCancelled })
+				run, err := f.d.GetRun(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if run.Error == nil || *run.Error != reason {
+					t.Fatalf("cancellation reason = %v, want %s", run.Error, reason)
+				}
+				f.mgr.wg.Wait()
+				if st := f.mgr.sched.stats(); st.Active != 0 {
+					t.Fatalf("stopped run retained capacity: %+v", st)
+				}
+			})
+		}
+	}
 }

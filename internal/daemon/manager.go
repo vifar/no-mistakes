@@ -283,7 +283,9 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		requeue = m.abandonQueuedLaunch(runID, handle) != nil
 		return
 	}
+	m.mu.Lock()
 	claimed, err := m.claimQueued(runID)
+	m.mu.Unlock()
 	if err != nil {
 		// Transient database trouble must not strand a durable queued run: it
 		// is neither in the start order (dispatch removed it) nor running.
@@ -404,13 +406,18 @@ func (m *RunManager) recoverQueuedRuns() {
 // cancelQueuedRun ends a run that never started. It reports whether this call
 // cancelled it; false means a start won the race (or the run was not queued).
 func (m *RunManager) cancelQueuedRun(runID, reason string) (bool, error) {
+	m.mu.Lock()
+	run, err := m.db.GetRun(runID)
+	if err != nil || run == nil || run.Status != types.RunQueued {
+		m.mu.Unlock()
+		return false, err
+	}
 	cancelled, err := m.db.CancelQueuedRun(runID, reason)
+	cancel := m.cancels[runID]
+	m.mu.Unlock()
 	if err != nil || !cancelled {
 		return false, err
 	}
-	m.mu.Lock()
-	cancel := m.cancels[runID]
-	m.mu.Unlock()
 	if cancel != nil {
 		cancel(errors.New(reason))
 	}
