@@ -737,7 +737,18 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 			}
 		}
 		if !currentJobs {
-			checks = append(checks, run)
+			superseded := false
+			for _, newer := range runs {
+				if run.WorkflowID != 0 && run.WorkflowID == newer.WorkflowID &&
+					run.WorkflowEvent != "" && run.WorkflowEvent == newer.WorkflowEvent &&
+					run.WorkflowBranch == newer.WorkflowBranch && run.RunID != 0 && newer.RunID > run.RunID {
+					superseded = true
+					break
+				}
+			}
+			if !superseded {
+				checks = append(checks, run)
+			}
 		}
 	}
 	kept := make([]scm.Check, 0, len(checks)-len(drop))

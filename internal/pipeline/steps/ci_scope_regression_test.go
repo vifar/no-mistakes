@@ -495,7 +495,9 @@ func TestCIScopeUnrecordableScopeFailsTheExecutionBeforeAnyGate(t *testing.T) {
 	if err := sctx.DB.SetRunCheckScope(sctx.Run.ID, stale); err != nil {
 		t.Fatal(err)
 	}
-	step := &CIStep{recordCheckScope: func(*pipeline.StepContext, *scm.CheckScope) error { return errors.New("record CI check scope: disk full") }}
+	step := &CIStep{recordCheckScope: func(*pipeline.StepContext, *scm.CheckScope) error {
+		return errors.New("record CI check scope: disk full")
+	}}
 	outcome, err := step.Execute(sctx)
 	if err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("Execute() = %+v, %v; want the persistence error", outcome, err)
@@ -663,5 +665,48 @@ func TestCIScopeRetainedFindingMatchesThroughSupersededIdentity(t *testing.T) {
 	}
 	if sctx.PreviousFindings != encoded {
 		t.Fatalf("the selected build repair was dropped: %q", sctx.PreviousFindings)
+	}
+}
+
+func TestCIScopeRetainedWorkUsesMatchedIdentity(t *testing.T) {
+	for _, name := range []string{"approve", "CI / approve", "optional", "CI / optional", "build", "CI / build", "CI"} {
+		for _, id := range []string{"", "old-job", "replacement"} {
+			t.Run(name+"/"+id, func(t *testing.T) {
+				policy := scm.CheckScopePolicy{
+					ExternalChecks: []string{"CI / approve*"},
+					Resolved:       &scm.CheckScopeResolution{Required: []scm.RequiredCheck{{Context: "build"}}, Derived: true},
+				}
+				scope := scm.NewCheckScope(nil, policy, "main", nil)
+				check := scm.Check{Name: "CI", ProviderID: "replacement", WorkflowRun: true, Bucket: scm.CheckBucketFail,
+					Supersedes: []scm.Check{{Name: "approve", Workflow: "CI"}, {Name: "optional", Workflow: "CI"}, {Name: "build", Workflow: "CI"}}}
+				sctx := &pipeline.StepContext{Ctx: context.Background()}
+				encoded, err := types.MarshalFindingsJSON(Findings{Items: []Finding{{ID: "retained", Category: types.FindingCategoryCICheck, Check: name, CheckID: id, Action: types.ActionAutoFix}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				sctx.PreviousFindings, sctx.DeferredFindings = encoded, encoded
+				checks := []scm.Check{check}
+				if err := scopeRetainedCIFindings(sctx, scope, &scm.PR{}, checks); err != nil {
+					t.Fatal(err)
+				}
+				want := name == "build" || name == "CI / build"
+				for _, got := range []string{sctx.PreviousFindings, sctx.DeferredFindings} {
+					if (got != "") != want {
+						t.Fatalf("retained findings = %q, want included=%v", got, want)
+					}
+				}
+				step := &CIStep{}
+				step.transientReruns.spend(scm.Check{Name: name}, nil, "head")
+				if err := step.scopeRetainedCIReruns(sctx, scope, &scm.PR{}, checks, nil); err != nil {
+					t.Fatal(err)
+				}
+				if _, got := step.transientReruns.rollup[name]; got != want || step.transientReruns.used(name) != 1 {
+					t.Fatalf("rerun retained=%v, want %v; budget=%+v", got, want, step.transientReruns)
+				}
+				if scoped := scope.Apply(sctx.Ctx, &scm.PR{}, checks); len(scoped.Relevant) != 1 || scoped.Ready() {
+					t.Fatalf("replacement must still block build: %+v", scoped)
+				}
+			})
+		}
 	}
 }

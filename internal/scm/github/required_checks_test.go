@@ -588,3 +588,60 @@ func TestGetChecksCollapseKeepsJobsOfDifferentTriggers(t *testing.T) {
 		t.Fatalf("checks = %+v; want both triggers' build jobs", checks)
 	}
 }
+
+func TestGetChecksRetiresHistoricalJoblessWorkflowRuns(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, event, branch, status, conclusion string
+		jobs, ready                             bool
+	}{
+		{"passing jobs", "pull_request", "feature", "completed", "success", true, true},
+		{"failing jobs", "pull_request", "feature", "completed", "failure", true, false},
+		{"queued without jobs", "pull_request", "feature", "queued", "", false, false},
+		{"failed without jobs", "pull_request", "feature", "completed", "failure", false, false},
+		{"green without jobs preserves existing job evidence", "pull_request", "feature", "completed", "success", false, true},
+		{"independent event", "workflow_dispatch", "feature", "completed", "success", true, false},
+		{"independent branch", "pull_request", "other", "completed", "success", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, reverse := range []bool{false, true} {
+				job := `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/1/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`
+				if tc.jobs {
+					newJob := strings.ReplaceAll(job, "/runs/1/", "/runs/3/")
+					newJob = strings.ReplaceAll(newJob, `"databaseId":5`, `"databaseId":6`)
+					if tc.conclusion == "failure" {
+						newJob = strings.ReplaceAll(newJob, `"SUCCESS"`, `"FAILURE"`)
+					}
+					job += "," + newJob
+				}
+				runs := []string{
+					`{"id":1,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"success","html_url":"https://github.com/test/repo/actions/runs/1"}`,
+					`{"id":2,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"failure","html_url":"https://github.com/test/repo/actions/runs/2"}`,
+					fmt.Sprintf(`{"id":3,"workflow_id":10,"name":"CI","event":%q,"head_branch":%q,"status":%q,"conclusion":%q,"html_url":"https://github.com/test/repo/actions/runs/3"}`, tc.event, tc.branch, tc.status, tc.conclusion),
+				}
+				if reverse {
+					runs[0], runs[2] = runs[2], runs[0]
+				}
+				host := New(githubTestCmdFactory(map[string]githubTestResponse{
+					"gh pr view 5 --repo test/repo --json headRefOid --jq .headRefOid":                                       {stdout: "abc123\n"},
+					githubCommitChecksCommand("", "test/repo", "abc123"):                                                     {stdout: githubCommitChecksResponse("[" + job + "]")},
+					"gh api --method GET repos/test/repo/actions/runs -f head_sha=abc123 -f per_page=100 --paginate --slurp": {stdout: `[{"total_count":3,"workflow_runs":[` + strings.Join(runs, ",") + `]}]`},
+				}), nil, "", "test/repo")
+				checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "5", HeadSHA: "abc123"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				independent := tc.event != "pull_request" || tc.branch != "feature"
+				for _, check := range checks {
+					if check.WorkflowRun && check.RunID == 2 && !independent {
+						t.Fatalf("obsolete workflow failure survived: %+v", checks)
+					}
+				}
+				scope := scm.NewCheckScope(&fakeRequiredHost{required: []scm.RequiredCheck{{Context: "build"}}}, scm.CheckScopePolicy{}, "main", nil)
+				if scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks); scoped.Ready() != tc.ready {
+					t.Fatalf("readiness = %v, want %v: %+v", scoped.Ready(), tc.ready, scoped)
+				}
+			}
+		})
+	}
+}

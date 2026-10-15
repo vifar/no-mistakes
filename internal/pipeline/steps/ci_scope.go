@@ -71,12 +71,19 @@ func recordCIChecksScope(sctx *pipeline.StepContext, scope *scm.CheckScope) erro
 func retainedCICheckIncluded(sctx *pipeline.StepContext, scope *scm.CheckScope, pr *scm.PR, checks []scm.Check, name, id string) bool {
 	matched := false
 	for _, check := range checks {
-		if id != "" && check.ProviderID != id || id == "" && !checkAnswersToName(check, name) {
+		if id != "" && check.ProviderID != id {
 			continue
 		}
-		matched = true
-		if scope.Includes(sctx.Ctx, pr, check) {
-			return true
+		identities := checkIdentitiesNamed(check, name)
+		if len(identities) == 0 && id != "" {
+			check.Supersedes = nil
+			identities = []scm.Check{check}
+		}
+		for _, identity := range identities {
+			matched = true
+			if scope.Includes(sctx.Ctx, pr, identity) {
+				return true
+			}
 		}
 	}
 	if !matched && id != "" {
@@ -89,19 +96,17 @@ func retainedCICheckIncluded(sctx *pipeline.StepContext, scope *scm.CheckScope, 
 	return !matched && scope.Includes(sctx.Ctx, pr, identity)
 }
 
-// checkAnswersToName reports whether check is, or now stands for, the check a
-// retained finding or rerun named: a workflow-level check that superseded a
-// job carries that job's identity in Supersedes.
-func checkAnswersToName(check scm.Check, name string) bool {
+func checkIdentitiesNamed(check scm.Check, name string) []scm.Check {
+	var identities []scm.Check
 	if check.Name == name || check.DisplayName() == name {
-		return true
+		identity := check
+		identity.Supersedes = nil
+		identities = append(identities, identity)
 	}
 	for _, identity := range check.Supersedes {
-		if checkAnswersToName(identity, name) {
-			return true
-		}
+		identities = append(identities, checkIdentitiesNamed(identity, name)...)
 	}
-	return false
+	return identities
 }
 
 func scopeRetainedCIFindings(sctx *pipeline.StepContext, scope *scm.CheckScope, pr *scm.PR, checks []scm.Check) error {
