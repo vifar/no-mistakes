@@ -110,11 +110,7 @@ func retainedCICheckIncluded(sctx *pipeline.StepContext, scope *scm.CheckScope, 
 		}
 		return retainedCICheckIncluded(sctx, scope, pr, checks, name, "")
 	}
-	identity := scm.Check{Name: name}
-	if workflow, job, qualified := strings.Cut(name, " / "); qualified {
-		identity.Name, identity.Workflow = job, workflow
-	}
-	return !matched && scope.Includes(sctx.Ctx, pr, identity)
+	return !matched && scope.IncludesContext(sctx.Ctx, pr, name)
 }
 
 // supersededIdentityWithID finds the job identity with provider ID id that

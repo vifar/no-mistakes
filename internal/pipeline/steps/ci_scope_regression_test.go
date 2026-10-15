@@ -668,6 +668,60 @@ func TestCIScopeRetainedFindingMatchesThroughSupersededIdentity(t *testing.T) {
 	}
 }
 
+func TestCIScopeRetainedWorkWithoutProducerEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		checks []scm.Check
+		keep   bool
+	}{
+		{name: "build", keep: true},
+		{name: "CI / build", keep: true},
+		{name: "CI / lint-extra", keep: true},
+		{name: "approve"},
+		{name: "CI / approve"},
+		{name: "optional"},
+		{name: "build", checks: []scm.Check{{Name: "build", Kind: scm.CheckKindRun, AppID: 99}}},
+		{name: "build", checks: []scm.Check{{Name: "build", Kind: scm.CheckKindStatus}}},
+		{name: "build", checks: []scm.Check{{Name: "build", Kind: scm.CheckKindRun, AppID: 15368}}, keep: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := scm.CheckScopePolicy{
+				MustPass:       []string{"CI / lint-*"},
+				ExternalChecks: []string{"CI / approve"},
+				Resolved: &scm.CheckScopeResolution{Derived: true, Required: []scm.RequiredCheck{
+					{Context: "build", AppID: 15368}, {Context: "approve", AppID: 15368},
+				}},
+			}
+			scope := scm.NewCheckScope(nil, policy, "main", nil)
+			sctx := &pipeline.StepContext{Ctx: context.Background()}
+			encoded, err := types.MarshalFindingsJSON(Findings{Items: []Finding{{ID: "selected", Check: tc.name, CheckID: "old-job", Category: types.FindingCategoryCICheck, Action: types.ActionAutoFix}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sctx.PreviousFindings, sctx.DeferredFindings = encoded, encoded
+			if err := scopeRetainedCIFindings(sctx, scope, &scm.PR{}, tc.checks); err != nil {
+				t.Fatal(err)
+			}
+			for _, got := range []string{sctx.PreviousFindings, sctx.DeferredFindings} {
+				if (got == encoded) != tc.keep || !tc.keep && got != "" {
+					t.Fatalf("retained findings = %q, want kept=%v", got, tc.keep)
+				}
+			}
+			step := &CIStep{}
+			step.transientReruns.spend(scm.Check{Name: tc.name}, nil, "head")
+			if err := step.scopeRetainedCIReruns(sctx, scope, &scm.PR{}, tc.checks, nil); err != nil {
+				t.Fatal(err)
+			}
+			if _, kept := step.transientReruns.rollup[tc.name]; kept != tc.keep || step.transientReruns.used(tc.name) != 1 {
+				t.Fatalf("rerun kept=%v, want %v with spent budget preserved", kept, tc.keep)
+			}
+			if got := scope.Includes(sctx.Ctx, &scm.PR{}, scm.Check{Name: "build", Kind: scm.CheckKindRun, AppID: 99}); got {
+				t.Fatal("context-only matching weakened observed app identity requirements")
+			}
+		})
+	}
+}
+
 func TestCIScopeRetainedWorkUsesMatchedIdentity(t *testing.T) {
 	for _, name := range []string{"approve", "CI / approve", "optional", "CI / optional", "build", "CI / build", "CI"} {
 		for _, id := range []string{"", "old-job", "replacement"} {

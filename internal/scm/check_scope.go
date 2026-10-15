@@ -317,6 +317,20 @@ func (s *CheckScope) Includes(ctx context.Context, pr *PR, check Check) bool {
 	return s.classify(check, required, derived) == CheckRoleRequired
 }
 
+func (s *CheckScope) IncludesContext(ctx context.Context, pr *PR, name string) bool {
+	required, derived := s.requiredContexts(ctx, pr)
+	required = append([]RequiredCheck(nil), required...)
+	for i := range required {
+		required[i].AppID = 0
+		required[i].SelfStatus = false
+	}
+	identity := Check{Name: name}
+	if workflow, job, qualified := strings.Cut(name, " / "); qualified {
+		identity.Name, identity.Workflow = job, workflow
+	}
+	return s.classify(identity, required, derived) == CheckRoleRequired
+}
+
 func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck, derived bool) ScopedChecks {
 	// An empty observation is ready only with a known required set or trusted
 	// no_ci, and only once something was observed - except when the target

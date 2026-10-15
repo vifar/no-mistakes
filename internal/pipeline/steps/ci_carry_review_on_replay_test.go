@@ -521,7 +521,10 @@ func TestCIStep_CarryReviewOnReplay_AFailedFixRoundStillRestartsAtTest(t *testin
 	t.Parallel()
 	f := newReplayFixture(t, true, false)
 	f.carry(t)
+	f.sctx.Env = append(f.sctx.Env, `FAKE_CLI_PROTECTION_JSON={"checks":[{"context":"test","app_id":15368}]}`, `FAKE_CLI_RULES_JSON=[]`)
+	fixerCalled := false
 	f.sctx.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		fixerCalled = true
 		return nil, errors.New("fixer unavailable")
 	}}
 	f.sctx.Fixing = true
@@ -538,6 +541,9 @@ func TestCIStep_CarryReviewOnReplay_AFailedFixRoundStillRestartsAtTest(t *testin
 	}}).Execute(f.sctx)
 	if err != nil {
 		t.Fatalf("Execute: %v\nlog:\n%s", err, f.log())
+	}
+	if !fixerCalled {
+		t.Fatal("the selected app-bound test repair was dropped while a carry was pending")
 	}
 	if outcome == nil || outcome.RestartFrom != types.StepTest {
 		t.Fatalf("outcome = %+v, want a restart from Test\nlog:\n%s", outcome, f.log())
