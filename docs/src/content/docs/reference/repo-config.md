@@ -674,7 +674,7 @@ Patterns use the same syntax as [`ignore_patterns`](#ignore_patterns). Empty or 
 
 ### max_file_size_bytes
 
-Largest file an automatic commit may stage or a published commit may add or modify.
+Largest file an automatic commit may stage or a published commit may introduce under the [publication range rules](#scratch-safe-automatic-staging).
 
 | | |
 | --- | --- |
@@ -693,7 +693,11 @@ Every automatic commit (the Review, Test, Document, Lint, and CI repair commits,
 - Skipped entries are logged once: add a `.gitignore` entry for them or commit them deliberately.
 - After staging, any added or modified file larger than [`max_file_size_bytes`](#max_file_size_bytes) refuses the whole commit, like a protected path: the index is restored byte for byte, including intent-to-add entries and conflict stages, and the worktree is untouched. The error names up to 20 files and their sizes, with an omitted count, and the step parks at the same explicit-response gate. If the index cannot be snapshotted, staging fails before mutation. Fix by ignoring an untracked file or deleting the file, or raise the limit on the default branch, then use `no-mistakes axi respond --action fix`.
 
-Before publication, including a CI repair push, the policy is checked against the commits that will be pushed (compared with the merge-base with a fresh private fetch of the PR target, never a branch or remote-tracking ref in the worktree, which an agent can move; the run's recorded base or PR comparison merge-base pins it from below and is used alone if the fetch fails or exceeds its two-minute deadline; with no base that is an ancestor of the head, publication fails closed instead of scanning nothing), which covers commits an agent made itself. Publication is refused, with up to 20 entries per offending-path list and totals, when any commit adds or modifies a file over the size limit, or adds a path under a new hidden directory (other than the project-configuration directories above), a new `node_modules/`, or a path matching `staging_exclude`. Existing-directory identity is checked against the range's base tree using the same directory-tree requirement as staging. Every commit in the range is checked, including content deleted or replaced by a later commit and oversized file contents reused from the base. Rewrite or drop the offending commits to remove the content from branch history; adding `.gitignore` alone does not remove committed content.
+Before publication, including a CI repair push, the policy is checked against the commits that will be pushed (compared with the merge-base with a fresh private fetch of the PR target, never a branch or remote-tracking ref in the worktree, which an agent can move; the run's recorded base or PR comparison merge-base pins it from below and is used alone if the fetch fails or exceeds its two-minute deadline; with no base that is an ancestor of the head, publication fails closed instead of scanning nothing), which covers commits an agent made itself.
+
+Ordinary commits are compared with their parent. A merge introduces content only when the path and content pair differs from every parent. Both the size and scratch/`staging_exclude` checks also exclude pairs already present at the same path in the resolved publication base tree, so unchanged target-branch content and exact restorations of base content are allowed. Every commit in the range is checked, including offending side-branch commits and content deleted or replaced by a later commit; inheriting content in a merge does not exempt the commit that introduced it. Reusing an oversized base blob at a different path still faces the size check.
+
+Publication is refused, with up to 20 entries per offending-path list and totals, when introduced content adds or modifies a file over the size limit, or adds a path under a new hidden directory (other than the project-configuration directories above), a new `node_modules/`, or a path matching `staging_exclude`. Existing-directory identity is checked against the range's base tree using the same directory-tree requirement as staging. Rewrite or drop the offending commits to remove the content from branch history; adding `.gitignore` alone does not remove committed content.
 
 ### auto_fix
 
