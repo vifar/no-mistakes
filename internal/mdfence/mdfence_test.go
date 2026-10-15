@@ -9,6 +9,11 @@ func TestCloseTable(t *testing.T) {
 	}{
 		{"outside", "a\nb", "a\nb"},
 		{"closed", "```\nx\n```", "```\nx\n```"},
+		{"NBSP does not close", "```text\noutput\n```\u00a0", "```text\noutput\n```\u00a0\n```"},
+		{"tab suffix closes", "```text\noutput\n```\t", "```text\noutput\n```\t"},
+		{"spaces and tabs close tilde", "~~~\nx\n~~~~ \t ", "~~~\nx\n~~~~ \t "},
+		{"Unicode space does not close tilde", "~~~\nx\n~~~\u2003", "~~~\nx\n~~~\u2003\n~~~"},
+		{"four space closer stays open", "```\nx\n    ```", "```\nx\n    ```\n```"},
 		{"open backtick", "```text\nx", "```text\nx\n```"},
 		{"open tilde", "~~~\nx\n", "~~~\nx\n~~~"},
 		{"longer fence", "````md\n```\ninner\n```\nmore", "````md\n```\ninner\n```\nmore\n````"},

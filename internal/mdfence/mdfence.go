@@ -39,7 +39,7 @@ func (f *Fence) Consume(raw string) {
 			return
 		}
 		f.marker, f.width = line[0], n
-	} else if line[0] == f.marker && n >= f.width && strings.TrimSpace(line[n:]) == "" {
+	} else if line[0] == f.marker && n >= f.width && strings.Trim(line[n:], " \t") == "" {
 		f.marker, f.width = 0, 0
 	}
 }

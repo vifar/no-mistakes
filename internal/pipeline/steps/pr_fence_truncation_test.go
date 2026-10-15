@@ -153,18 +153,37 @@ func TestAppendIssuesSectionClosesOpenFence(t *testing.T) {
 	}
 }
 
-func TestFenceClosedWithinRebuildsWhenBuilderLeavesFenceOpen(t *testing.T) {
+func TestAppendIssuesSectionAfterOpenFenceFitsBudget(t *testing.T) {
 	t.Parallel()
-	var budgets []int
-	got := fenceClosedWithin(100, func(s string) int { return len(s) }, func(budget int) string {
-		budgets = append(budgets, budget)
-		return "```\nbody"
+	const limit = 100
+	sctx := closingTestContext("39")
+	section := issuesSection(sctx, "")
+	body := fenceClosedWithin(limit-len("\n\n"+section), func(s string) int { return len(s) }, func(budget int) string {
+		return "```text\n" + strings.Repeat("x", budget-len("```text\n"))
 	})
-	if len(budgets) != 2 || budgets[1] != 100-len("\n```") {
-		t.Fatalf("builder budgets = %v, want a rebuild with room for the closing line", budgets)
+	got := appendIssuesSection(body, section)
+	if len(got) > limit {
+		t.Fatalf("assembled body is %d bytes, want <= %d:\n%s", len(got), limit, got)
 	}
-	if got == "" {
-		t.Fatal("empty body")
+	if err := verifyClosingIssuesInBody(got, sctx); err != nil {
+		t.Fatalf("%v\n%s", err, got)
+	}
+}
+
+func TestAppendIssuesSectionAfterNBSPFenceSuffix(t *testing.T) {
+	t.Parallel()
+	sctx := closingTestContext("39")
+	body := "```text\noutput\n```\u00a0"
+	section := issuesSection(sctx, "")
+	if err := verifyClosingIssuesInBody(body+"\n\n"+section, sctx); err == nil {
+		t.Fatal("NBSP-suffixed fence must leave the closing reference inside code")
+	}
+	got := appendIssuesSection(body, section)
+	if want := body + "\n```\n\n" + section; got != want {
+		t.Fatalf("assembled body = %q, want %q", got, want)
+	}
+	if err := verifyClosingIssuesInBody(got, sctx); err != nil {
+		t.Fatalf("%v\n%s", err, got)
 	}
 }
 
