@@ -52,7 +52,7 @@ func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 	const oldApproval = `{"name":"approve","workflow":"Final Approval","state":"SUCCESS","bucket":"pass","app":"github-actions","link":"https://github.com/owner/project/actions/runs/1/job/7"}`
 	for _, tc := range []struct {
 		name, checks, protection, rules, comments, refusal string
-		runs                                             string
+		runs                                               string
 		policy                                             scm.CheckScopePolicy
 	}{
 		{name: "auto ignores outside approval failure", checks: buildPass + "," + approveFail},
