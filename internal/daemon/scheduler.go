@@ -278,32 +278,27 @@ func (t *runSlot) Release() { t.release(false) }
 // daemon.hold_slot_while_parked asks for the old hold-through behaviour.
 func (t *runSlot) Yield() {
 	t.s.refresh()
-	t.s.mu.Lock()
-	hold := t.s.hold
-	t.s.mu.Unlock()
-	if hold {
-		t.markParkedHeld()
-		return
+	if !t.markParkedHeld() {
+		t.release(true)
 	}
-	t.release(true)
 }
 
-// markParkedHeld records that this run is waiting while keeping its slot because
-// the hold policy skipped its yield.
-func (t *runSlot) markParkedHeld() {
+func (t *runSlot) markParkedHeld() bool {
 	t.mu.Lock()
-	if !t.held {
-		t.mu.Unlock()
-		return
-	}
-	t.parkedHeld = true
-	t.mu.Unlock()
+	defer t.mu.Unlock()
 	t.s.mu.Lock()
-	if t.s.parkedHeld == nil {
-		t.s.parkedHeld = map[*runSlot]struct{}{}
+	defer t.s.mu.Unlock()
+	if !t.s.hold {
+		return false
 	}
-	t.s.parkedHeld[t] = struct{}{}
-	t.s.mu.Unlock()
+	if t.held {
+		t.parkedHeld = true
+		if t.s.parkedHeld == nil {
+			t.s.parkedHeld = map[*runSlot]struct{}{}
+		}
+		t.s.parkedHeld[t] = struct{}{}
+	}
+	return true
 }
 
 // releaseParked gives back the slot of a run that is parked while holding it,

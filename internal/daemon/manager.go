@@ -320,7 +320,7 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		// executor exists; any earlier exit must unregister it here.
 		if r := recover(); r != nil {
 			slog.Error("panic launching queued run", "run_id", runID, "panic", r)
-			m.failRunSetup(handle.runCtx, runID, fmt.Sprintf("internal panic: %v", r))
+			m.failRunSetup(handle.runCtx, runID, false, fmt.Sprintf("internal panic: %v", r))
 		}
 		if !handle.consumed {
 			m.mu.Lock()
@@ -335,18 +335,18 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		}
 	}()
 	if cause := context.Cause(handle.runCtx); cause != nil {
-		m.failRunSetup(handle.runCtx, runID, cause.Error())
+		m.failRunSetup(handle.runCtx, runID, false, cause.Error())
 		return
 	}
 	run, err := m.db.GetRun(runID)
 	if err != nil || run == nil {
 		slog.Error("queued run is unreadable", "run_id", runID, "error", err)
-		m.failRunSetup(handle.runCtx, runID, "queued run is unreadable")
+		m.failRunSetup(handle.runCtx, runID, false, "queued run is unreadable")
 		return
 	}
 	fail := func(msg string) {
 		slog.Error("queued run cannot start", "run_id", runID, "error", msg)
-		m.failRunSetup(handle.runCtx, runID, msg)
+		m.failRunSetup(handle.runCtx, runID, false, msg)
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil || repo == nil {
@@ -376,7 +376,7 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 // failRunSetup preserves cancellation over the error from interrupted setup.
 // Its conditional write leaves terminal outcomes alone, and subscribers see
 // the saved verdict rather than a competing local failure reason.
-func (m *RunManager) failRunSetup(ctx context.Context, runID, reason string) {
+func (m *RunManager) failRunSetup(ctx context.Context, runID string, started bool, reason string) {
 	m.mu.Lock()
 	status := types.RunFailed
 	cause := context.Cause(ctx)
@@ -388,7 +388,11 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID, reason string) {
 	if cause != nil {
 		status, reason = types.RunCancelled, cause.Error()
 	}
-	_, err := m.db.TerminateActiveRun(runID, reason, status)
+	terminate := m.db.TerminateActiveRun
+	if !started {
+		terminate = m.db.TerminateUnstartedRun
+	}
+	_, err := terminate(runID, reason, status)
 	run, readErr := m.db.GetRun(runID)
 	m.mu.Unlock()
 	if err != nil {
@@ -2097,7 +2101,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	}
 	if inherited := strings.TrimSpace(inheritedPRURL); inherited != "" {
 		if err := m.db.UpdateRunPRURL(run.ID, inherited); err != nil {
-			m.db.UpdateRunError(run.ID, fmt.Sprintf("inherit PR URL: %s", err))
+			m.failRunSetup(ctx, run.ID, false, fmt.Sprintf("inherit PR URL: %s", err))
 			trackStartFailure("inherit_pr_url")
 			return "", fmt.Errorf("inherit PR URL: %w", err)
 		}
@@ -2106,7 +2110,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	if len(closingIssues) > 0 {
 		if err := m.db.UpdateRunClosingIssueRefs(run.ID, closingIssues); err != nil {
 			msg := fmt.Sprintf("persist closing issue references: %s", err)
-			m.db.UpdateRunError(run.ID, msg)
+			m.failRunSetup(ctx, run.ID, false, msg)
 			trackStartFailure("persist_closing_issue_refs")
 			return "", fmt.Errorf("persist closing issue references: %w", err)
 		}
@@ -2115,7 +2119,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// Legacy launches retain their existing failed-row diagnostics on a bad
 	// global config. Explicit profiles already resolved before supersession.
 	if globalCfgErr != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("load config: %s", globalCfgErr))
+		m.failRunSetup(ctx, run.ID, false, fmt.Sprintf("load config: %s", globalCfgErr))
 		trackStartFailure("load_global_config")
 		return "", fmt.Errorf("load global config: %w", globalCfgErr)
 	}
@@ -2130,7 +2134,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		// The row exists but is neither queued nor owned: end it through the
 		// shared setup-failure path (conditional, and it tells subscribers), so no
 		// orphan is left to block the branch's active-run lookup.
-		m.failRunSetup(ctx, run.ID, fmt.Sprintf("queue run: %s", err))
+		m.failRunSetup(ctx, run.ID, false, fmt.Sprintf("queue run: %s", err))
 		trackStartFailure("queue_run")
 		return "", fmt.Errorf("queue run: %w", err)
 	}
@@ -2236,13 +2240,14 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		storedPRBaseBranch = *run.PRBaseBranch
 	}
 	bgOwnsSlot := false
+	started := false
 	defer func() {
 		if !bgOwnsSlot {
 			if r := recover(); r != nil {
 				err = fmt.Errorf("internal panic: %v", r)
 			}
 			if err != nil {
-				m.failRunSetup(setupCtx, run.ID, err.Error())
+				m.failRunSetup(setupCtx, run.ID, started, err.Error())
 			}
 			slot.Release()
 		}
@@ -2274,6 +2279,8 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)
 	}
+
+	started = true
 
 	// The worktree exists from here on, so cleanup ownership is armed from here
 	// on: every later setup failure returns through this defer, and the

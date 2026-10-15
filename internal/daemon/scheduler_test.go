@@ -619,3 +619,39 @@ func TestSchedulerResumedRunKeepsItsSlotWhenHoldIsDisabled(t *testing.T) {
 		t.Fatalf("stats = %+v", st)
 	}
 }
+
+func TestSchedulerDisablingHoldDuringYieldRegistration(t *testing.T) {
+	h := newSchedHarness(1, true)
+	parked, _ := h.tryAdmit("parked")
+	h.enqueue("queued")
+	checked := make(chan struct{})
+	register := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		h.slotScheduler.mu.Lock()
+		hold := h.slotScheduler.hold
+		h.slotScheduler.mu.Unlock()
+		close(checked)
+		<-register
+		if !hold || !parked.markParkedHeld() {
+			parked.release(true)
+		}
+		close(done)
+	}()
+	<-checked
+	h.setLimits(1, false)
+	h.refresh()
+	close(register)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("yield did not finish")
+	}
+	h.dispatch()
+	if got := h.startedIDs(); !equalIDs(got, []string{"queued"}) {
+		t.Fatalf("started = %v, want queued after disabling hold during yield", got)
+	}
+	if st := h.stats(); st.Active != 1 || st.Yielded != 1 {
+		t.Fatalf("stats = %+v, want one active queued run and one yielded run", st)
+	}
+}

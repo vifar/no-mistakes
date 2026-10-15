@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
@@ -141,5 +142,57 @@ func TestSetupFailurePreservesCancellation(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestQueuedSetupConfigFailureReleasesBranchCustody(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	holder := f.push("holder")
+	f.waitStarted(holder)
+	id := f.push("queued")
+	if f.status(id) != types.RunQueued {
+		t.Fatal("run did not queue")
+	}
+	repo, err := f.d.GetRepo("fault-repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "checkout", "-b", "queued")
+	if err := os.WriteFile(f.p.ConfigFile(), []byte("daemon: [invalid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.step.release(holder)
+	f.waitFor("queued configuration failure", func() bool { return f.status(id) == types.RunFailed })
+	run, err := f.d.GetRun(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.WorktreeDir != nil || run.TerminalHeadVerifiedAt == nil || run.LastPushedSHA != nil || run.PushGeneration != nil || run.PushActive || f.started(id) {
+		t.Fatalf("never-started setup failure lost its release proof: %+v", run)
+	}
+	svc := branchsync.Service{DB: f.d, Repo: repo, WorkDir: repo.WorkingPath, Paths: f.p, GateDir: f.p.RepoDir(repo.ID)}
+	state := svc.InspectCached(context.Background())
+	if state.State != branchsync.StateUserOwned || state.Safety != "user_owned" || state.NextAction != nil || state.Pipeline.RunID != id {
+		t.Fatalf("failed queued branch was not released: %+v", state)
+	}
+}
+
+func TestStartedSetupFailureRetainsBranchCustody(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	repo, err := f.d.GetRepo("fault-repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := f.d.InsertRun(repo.ID, "started", f.head, f.head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.mgr.failRunSetup(context.Background(), run.ID, true, "failure after worktree creation")
+	stored, err := f.d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != types.RunFailed || stored.TerminalHeadVerifiedAt != nil {
+		t.Fatalf("started failure incorrectly released custody: %+v", stored)
 	}
 }
