@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -45,10 +47,71 @@ func (e *Executor) acquireSlot(ctx context.Context) error {
 	return e.slot.Acquire(ctx)
 }
 
-// acceptApprovalGate persists and publishes the consumed gate before its
-// response can wait for capacity. The caller holds e.mu, the same lock held
-// through park publication, so a stale park cannot overtake this running event.
-func (e *Executor) acceptApprovalGate() error {
+// pendingGateResponse is the durable form of an accepted gate response whose
+// run is waiting for a run slot. It carries everything dispatch needs, so a
+// daemon that stops during the wait can re-apply the response after a restart.
+type pendingGateResponse struct {
+	Action           types.ApprovalAction `json:"action"`
+	FindingIDs       []string             `json:"finding_ids,omitempty"`
+	IgnoreFindingIDs []string             `json:"ignore_finding_ids,omitempty"`
+	Instructions     map[string]string    `json:"instructions,omitempty"`
+	AddedFindings    []types.Finding      `json:"added_findings,omitempty"`
+	ApprovalReason   string               `json:"approval_reason,omitempty"`
+	AcceptedGaps     *db.AcceptedGaps     `json:"accepted_gaps,omitempty"`
+}
+
+func encodePendingResponse(r approvalResponse) (string, error) {
+	raw, err := json.Marshal(pendingGateResponse{
+		Action:           r.action,
+		FindingIDs:       r.findingIDs,
+		IgnoreFindingIDs: r.ignoreFindingIDs,
+		Instructions:     r.instructions,
+		AddedFindings:    r.addedFindings,
+		ApprovalReason:   r.approvalReason,
+		AcceptedGaps:     r.acceptedGaps,
+	})
+	return string(raw), err
+}
+
+func decodePendingResponse(raw string) (approvalResponse, error) {
+	var p pendingGateResponse
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return approvalResponse{}, fmt.Errorf("decode recorded gate response: %w", err)
+	}
+	switch p.Action {
+	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAnswer:
+	default:
+		return approvalResponse{}, fmt.Errorf("recorded gate response has unusable action %q", p.Action)
+	}
+	return approvalResponse{
+		action:           p.Action,
+		findingIDs:       p.FindingIDs,
+		ignoreFindingIDs: p.IgnoreFindingIDs,
+		instructions:     p.Instructions,
+		addedFindings:    p.AddedFindings,
+		approvalReason:   p.ApprovalReason,
+		acceptedGaps:     p.AcceptedGaps,
+	}, nil
+}
+
+// answeredActivity is what status surfaces show for a gate whose response is
+// accepted but cannot dispatch until a run slot frees.
+const answeredActivity = "already answered; waiting for a run slot"
+
+// acceptApprovalGate consumes the parked gate for a response (resp) or for a
+// reconciliation/resume claim (resp nil). The caller holds e.mu, the same lock
+// held through park publication, so a stale park cannot overtake this event.
+//
+// With a run slot (every daemon run), acceptance does not move the step: until
+// dispatch begins (see acquireAnsweredGateSlot, which first waits for capacity)
+// the gate stays durably parked with the accepted response recorded beside it.
+// A daemon that stops anywhere in that window - waiting for a slot, or between
+// acceptance and the gate loop reading the response - recovers the gate and
+// re-applies the response (see RegisterRecoveredGate), instead of finding a
+// running step it must treat as stale. A claim without a response needs no
+// record; the recovered gate reconciles again by itself. Without a slot there is
+// nothing to wait for and the step moves at once.
+func (e *Executor) acceptApprovalGate(resp *approvalResponse) error {
 	row, err := e.db.GetStepResult(e.waitingStepResultID)
 	if err != nil {
 		return err
@@ -63,34 +126,79 @@ func (e *Executor) acceptApprovalGate() error {
 	if run == nil {
 		return fmt.Errorf("cannot read the parked run")
 	}
-	activity := "gate resumed"
-	if e.slot != nil {
-		activity = "already answered; waiting for a run slot"
-	}
 	parkedMS := int64(0)
 	if !e.waitingSince.IsZero() {
 		parkedMS = time.Since(e.waitingSince).Milliseconds()
 	}
-	if err := e.db.ResumeStepFromApproval(run.ID, row.ID, activity, parkedMS); err != nil {
-		return fmt.Errorf("resume answered gate: %w", err)
-	}
-	if e.slot != nil {
+	if e.slot == nil {
+		// No daemon, no run slots: nothing can make dispatch wait, so the step
+		// moves at once (embeddings and focused tests).
+		if err := e.db.ResumeStepFromApproval(run.ID, row.ID, "gate resumed", parkedMS); err != nil {
+			return fmt.Errorf("resume answered gate: %w", err)
+		}
+	} else {
+		if resp != nil {
+			raw, err := encodePendingResponse(*resp)
+			if err != nil {
+				return fmt.Errorf("record gate response: %w", err)
+			}
+			if err := e.db.SetStepPendingResponse(row.ID, raw, answeredActivity); err != nil {
+				return err
+			}
+		} else if err := e.db.TouchStepActivity(row.ID, answeredActivity); err != nil {
+			return err
+		}
 		e.slotWaitStep = e.waitingStep
+		e.answeredParkedMS = parkedMS
 	}
 	e.emitStepEvent(ipc.EventStepStarted, run, &db.Repo{ID: run.RepoID}, e.waitingStep, string(types.StepStatusRunning))
 	return nil
 }
 
-func (e *Executor) acquireAnsweredGateSlot(ctx context.Context, stepID string) error {
+// endGateWait closes the parked-time accounting after a gate wait returns. A
+// response waiting for a slot keeps the gate parked, and its accounting, until
+// dispatch begins (acquireAnsweredGateSlot).
+func (e *Executor) endGateWait(runID string, parkStart time.Time, waitErr error) {
+	e.mu.Lock()
+	waiting := e.slotWaitStep != ""
+	if waitErr != nil {
+		e.slotWaitStep = ""
+	}
+	e.mu.Unlock()
+	if waitErr == nil && waiting {
+		return
+	}
+	if dbErr := e.db.CompleteRunAwaitingAgent(runID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+		slog.Warn("failed to complete awaiting-agent state in db", "run", runID, "error", dbErr)
+	}
+}
+
+// acquireAnsweredGateSlot waits for the run slot an accepted response needs,
+// then begins dispatch: the step moves to running and the pending response and
+// awaiting-agent marker are cleared together. Until then the gate stays
+// recoverable.
+func (e *Executor) acquireAnsweredGateSlot(ctx context.Context, runID, stepID string) error {
+	if e.slot == nil {
+		return nil
+	}
+	e.mu.Lock()
+	parkedMS := e.answeredParkedMS
+	e.mu.Unlock()
 	defer func() {
 		e.mu.Lock()
 		e.slotWaitStep = ""
 		e.mu.Unlock()
 	}()
 	if err := e.acquireSlot(ctx); err != nil {
+		if dbErr := e.db.CompleteRunAwaitingAgent(runID, parkedMS); dbErr != nil {
+			slog.Warn("failed to complete awaiting-agent state in db", "run", runID, "error", dbErr)
+		}
 		return err
 	}
-	return e.db.TouchStepActivity(stepID, "gate resumed")
+	if err := e.db.ResumeStepFromApproval(runID, stepID, "gate resumed", parkedMS); err != nil {
+		return fmt.Errorf("resume answered gate: %w", err)
+	}
+	return nil
 }
 
 // YieldSlot releases the run's concurrency slot while a step waits on

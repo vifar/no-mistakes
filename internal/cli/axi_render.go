@@ -133,6 +133,9 @@ type runView struct {
 	// awaiting the driving agent, or nil when the run is not parked. It powers
 	// the top-level parked signal in the run object.
 	AwaitingAgentSince *int64
+	// AnsweredStep names a step whose gate response was accepted and is waiting
+	// for a run slot to dispatch; the run is answered, not awaiting a decision.
+	AnsweredStep string
 	// QueuePosition/QueueTotal place a run that is waiting for an execution
 	// slot (status queued, or a resumed run with WaitingForSlot) in the daemon's
 	// start order; both are zero when it is not waiting.
@@ -206,6 +209,9 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 			SkipReason:          s.SkipReason,
 			AcceptedGapRecorded: s.AcceptedGapRecorded,
 		}
+		if s.ResponsePending {
+			rv.AnsweredStep = string(s.StepName)
+		}
 		if s.LastActivity != nil {
 			sv.LastActivity = *s.LastActivity
 		}
@@ -274,6 +280,13 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 			sv.SkipReason = *s.SkipReason
 		}
 		sv.AcceptedGapRecorded = s.ValidAcceptedGaps() != nil
+		if s.AnsweredWaitingForSlot() {
+			// Parked in the database so a restart recovers the gate, but already
+			// answered: show it as running, not as a decision still owed.
+			sv.Status = string(types.StepStatusRunning)
+			rv.AnsweredStep = string(s.StepName)
+			rv.AwaitingAgentSince = nil
+		}
 		if s.LastActivity != nil {
 			sv.LastActivity = *s.LastActivity
 		}
@@ -545,6 +558,9 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	// while genuinely parked (non-nil marker on a non-terminal run).
 	if rv.AwaitingAgentSince != nil && !terminalStatus(rv.Status) {
 		fields = append(fields, toon.Field{Key: "awaiting_agent", Value: formatParkedFor(*rv.AwaitingAgentSince)})
+	}
+	if rv.AnsweredStep != "" && !terminalStatus(rv.Status) {
+		fields = append(fields, toon.Field{Key: "answered", Value: rv.AnsweredStep + ": answered, waiting for a run slot"})
 	}
 	// A run waiting for an execution slot (daemon.max_concurrent_runs) reports
 	// its place in the start order next to its status. A queued run has not

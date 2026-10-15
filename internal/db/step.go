@@ -43,6 +43,17 @@ type StepResult struct {
 	// SkipReason records an automatic PR/CI skip, distinct from an explicit
 	// per-run skip. Legacy rows have no recorded reason.
 	SkipReason *string
+	// PendingResponse is the accepted gate response (JSON) of a parked step
+	// whose run is waiting for a run-concurrency slot. NULL means none.
+	PendingResponse *string
+}
+
+// AnsweredWaitingForSlot reports whether the step is parked at a gate whose
+// response was already accepted and is waiting for a run slot to dispatch. It
+// is answered, not awaiting a decision, whatever the persisted parked status.
+func (s *StepResult) AnsweredWaitingForSlot() bool {
+	return s != nil && s.PendingResponse != nil &&
+		(s.Status == types.StepStatusAwaitingApproval || s.Status == types.StepStatusFixReview)
 }
 
 const stepResultColumns = `id, run_id, step_name, step_order, status, exit_code, duration_ms, log_path, findings_json, error, started_at, completed_at, last_activity_at, last_activity, agent_pid, auto_fix_limit`
@@ -79,6 +90,11 @@ func (d *DB) readableStepResultColumns() string {
 	} else {
 		columns += ", NULL AS accepted_gaps_json"
 	}
+	if d.hasColumn("step_results", "pending_response") {
+		columns += ", pending_response"
+	} else {
+		columns += ", NULL AS pending_response"
+	}
 	return columns
 }
 
@@ -106,7 +122,7 @@ func (d *DB) GetStepResult(id string) (*StepResult, error) {
 	s := &StepResult{}
 	err := d.sql.QueryRow(
 		`SELECT `+d.readableStepResultColumns()+` FROM step_results WHERE id = ?`, id,
-	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.RoundStartedAt, &s.OverrideReason, &s.SkipReason, &s.ApprovalReason, &s.AcceptedGapsJSON)
+	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.RoundStartedAt, &s.OverrideReason, &s.SkipReason, &s.ApprovalReason, &s.AcceptedGapsJSON, &s.PendingResponse)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -136,7 +152,7 @@ func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
 	var steps []*StepResult
 	for rows.Next() {
 		s := &StepResult{}
-		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.RoundStartedAt, &s.OverrideReason, &s.SkipReason, &s.ApprovalReason, &s.AcceptedGapsJSON); err != nil {
+		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.RoundStartedAt, &s.OverrideReason, &s.SkipReason, &s.ApprovalReason, &s.AcceptedGapsJSON, &s.PendingResponse); err != nil {
 			return nil, fmt.Errorf("scan step result: %w", err)
 		}
 		steps = append(steps, s)
@@ -193,7 +209,7 @@ func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, 
 
 	ts := now()
 	stepResult, err := tx.Exec(
-		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, findings_json = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`,
+		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, findings_json = ?, pending_response = NULL, last_activity_at = ?, last_activity = ? WHERE id = ?`,
 		status, exitCode, durationMS, findingsJSON, ts, fmt.Sprintf("status: %s", status), stepID,
 	)
 	if err != nil {
@@ -226,13 +242,34 @@ func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, 
 	return nil
 }
 
+// SetStepPendingResponse durably records the accepted response of a parked gate
+// whose run must wait for a run slot. The step keeps its parked status and the
+// run keeps its awaiting-agent marker, so the gate is still recovered as a gate
+// if the daemon stops during the wait; activity is what status surfaces show.
+func (d *DB) SetStepPendingResponse(stepID, response, activity string) error {
+	result, err := d.sql.Exec(`UPDATE step_results SET pending_response = ?, last_activity_at = ?, last_activity = ? WHERE id = ? AND status IN (?, ?)`,
+		response, now(), activity, stepID, types.StepStatusAwaitingApproval, types.StepStatusFixReview)
+	if err != nil {
+		return fmt.Errorf("record pending gate response: %w", err)
+	}
+	if n, err := result.RowsAffected(); err != nil {
+		return fmt.Errorf("record pending gate response: %w", err)
+	} else if n != 1 {
+		return fmt.Errorf("record pending gate response: step is no longer parked")
+	}
+	return nil
+}
+
+// ResumeStepFromApproval moves a parked step to running when its response is
+// dispatched, clearing any pending response and the run's awaiting-agent marker
+// in one transaction.
 func (d *DB) ResumeStepFromApproval(runID, stepID, activity string, parkedMS int64) error {
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE step_results SET status = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`, types.StepStatusRunning, now(), activity, stepID); err != nil {
+	if _, err := tx.Exec(`UPDATE step_results SET status = ?, pending_response = NULL, last_activity_at = ?, last_activity = ? WHERE id = ?`, types.StepStatusRunning, now(), activity, stepID); err != nil {
 		return err
 	}
 	if parkedMS < 0 {

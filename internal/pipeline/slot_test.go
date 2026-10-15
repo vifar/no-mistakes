@@ -550,15 +550,17 @@ func TestExecutorAnsweredGateWaitsAsRunning(t *testing.T) {
 					t.Fatalf("steps: %d", len(rows))
 				}
 				row := rows[0]
-				if row.Status != types.StepStatusRunning || row.LastActivity == nil || *row.LastActivity != "already answered; waiting for a run slot" {
-					t.Fatalf("answered gate: status=%s activity=%v", row.Status, row.LastActivity)
+				// The gate stays durably parked, with the accepted response recorded
+				// beside it, until dispatch begins: a crash now must recover it.
+				if (row.Status != types.StepStatusAwaitingApproval && row.Status != types.StepStatusFixReview) || row.PendingResponse == nil || !row.AnsweredWaitingForSlot() || row.LastActivity == nil || *row.LastActivity != "already answered; waiting for a run slot" {
+					t.Fatalf("answered gate: status=%s pending=%v activity=%v", row.Status, row.PendingResponse, row.LastActivity)
 				}
 				current, err := database.GetRun(run.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if current.AwaitingAgentSince != nil {
-					t.Fatal("answered gate still marked parked")
+				if current.AwaitingAgentSince == nil {
+					t.Fatal("answered gate lost its parked marker before dispatch; a restart could not recover it")
 				}
 				if err := exec.Respond(types.StepReview, action, nil); err == nil || !strings.Contains(err.Error(), "already answered; waiting for a run slot") {
 					t.Fatalf("second response: %v", err)
@@ -581,6 +583,9 @@ func TestExecutorAnsweredGateWaitsAsRunning(t *testing.T) {
 					}
 				case <-ctx.Done():
 					t.Fatal("A did not finish after capacity became available")
+				}
+				if rows, err := database.GetStepsByRun(run.ID); err != nil || len(rows) != 1 || rows[0].PendingResponse != nil {
+					t.Fatalf("dispatch left the pending response behind: %v, %v", rows, err)
 				}
 			})
 		}

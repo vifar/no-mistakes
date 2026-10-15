@@ -1733,6 +1733,9 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		for _, s := range steps {
 			stepInfo := stepToInfo(d, s)
 			info.Steps = append(info.Steps, stepInfo)
+			if stepInfo.ResponsePending {
+				info.AwaitingAgent, info.AwaitingAgentSince = false, nil
+			}
 			if reason := s.TestOverrideReason(); reason != "" {
 				info.TestOverrideReason = reason
 			}
@@ -1761,6 +1764,12 @@ func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 		LastActivityAt: s.LastActivityAt,
 		LastActivity:   s.LastActivity,
 		AgentPID:       s.AgentPID,
+	}
+	if s.AnsweredWaitingForSlot() {
+		// Parked in the database so a restart recovers the gate, but answered:
+		// report it as running, not as a decision still owed.
+		info.Status = types.StepStatusRunning
+		info.ResponsePending = true
 	}
 	if s.StepName == types.StepDocument {
 		if combined, err := d.HasAgentInvocationPurpose(s.RunID, string(s.StepName), "housekeeping"); err == nil && combined {

@@ -450,4 +450,9 @@ var migrationStatements = []string{
 	// without waiting.
 	`ALTER TABLE runs ADD COLUMN queued_at INTEGER`,
 	`ALTER TABLE runs ADD COLUMN queue_spec TEXT`,
+	// The operator's accepted response to a parked gate while the run waits for a
+	// run-concurrency slot (JSON). The step keeps its parked status until the
+	// response is dispatched, so a crash during the wait leaves a recoverable
+	// gate; NULL means no response is pending. Cleared when dispatch begins.
+	`ALTER TABLE step_results ADD COLUMN pending_response TEXT`,
 }

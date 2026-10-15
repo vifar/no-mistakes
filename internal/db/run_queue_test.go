@@ -203,3 +203,45 @@ func TestQueuedAtIsMonotonicWhateverTheClockDoes(t *testing.T) {
 		t.Fatalf("restored queue order = %v, want admission order %v", got, want)
 	}
 }
+
+func TestPendingGateResponseLifecycle(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.SetStepPendingResponse(step.ID, `{"action":"approve"}`, "x"); err == nil {
+		t.Fatal("a response was recorded for a step that is not parked")
+	}
+	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusFixReview, 0, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetStepPendingResponse(step.ID, `{"action":"approve"}`, "answered"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := d.GetStepResult(step.ID)
+	if got.Status != types.StepStatusFixReview || !got.AnsweredWaitingForSlot() || *got.PendingResponse != `{"action":"approve"}` {
+		t.Fatalf("recorded step = %+v", got)
+	}
+	// A re-park (a new round) starts with no stale answer.
+	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = d.GetStepResult(step.ID); got.PendingResponse != nil {
+		t.Fatalf("a new park kept the old pending response: %v", *got.PendingResponse)
+	}
+	// Dispatch clears the response, the parked status and the marker together.
+	if err := d.SetStepPendingResponse(step.ID, `{"action":"skip"}`, "answered"); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ResumeStepFromApproval(run.ID, step.ID, "gate resumed", 5); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = d.GetStepResult(step.ID)
+	r, _ := d.GetRun(run.ID)
+	if got.Status != types.StepStatusRunning || got.PendingResponse != nil || r.AwaitingAgentSince != nil {
+		t.Fatalf("after dispatch: step %+v run awaiting %v", got, r.AwaitingAgentSince)
+	}
+}

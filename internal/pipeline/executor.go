@@ -82,11 +82,16 @@ type Executor struct {
 	shared   *RunShared
 	workDir  string
 
-	mu                     sync.Mutex
-	activeAgentPID         atomic.Int64          // live lifecycle ownership, independent of SQLite
-	approvalCh             chan approvalResponse // buffered channel for approval responses
-	waiting                bool                  // true when blocked on approval
-	slotWaitStep           types.StepName
+	mu             sync.Mutex
+	activeAgentPID atomic.Int64          // live lifecycle ownership, independent of SQLite
+	approvalCh     chan approvalResponse // buffered channel for approval responses
+	waiting        bool                  // true when blocked on approval
+	slotWaitStep   types.StepName
+	// answeredParkedMS is the parked time at acceptance of a response waiting
+	// for a slot; recoveredResponse is a recorded response a recovered gate
+	// re-applies instead of waiting for a new one.
+	answeredParkedMS       int64
+	recoveredResponse      *approvalResponse
 	waitingStep            types.StepName // which step is currently awaiting approval
 	waitingApprovalRefusal string         // non-empty: why Approve is rejected at the waiting gate
 	// waitingFindings and waitingStepResultID describe the parked gate: the
@@ -423,7 +428,7 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 		dispositions.Kept = excludeFindingIDs(split.Kept, restoredGateIDs)
 	}
 	if action != types.ActionAbort {
-		if err := e.acceptApprovalGate(); err != nil {
+		if err := e.acceptApprovalGate(&response); err != nil {
 			e.mu.Unlock()
 			return RespondDispositions{}, err
 		}
@@ -724,6 +729,20 @@ func (e *Executor) RegisterRecoveredGate(run *db.Run) error {
 		return err
 	}
 	e.recoveryGate = gate
+	if gate.stepResult.PendingResponse != nil {
+		// The operator already answered this gate; only the slot wait was
+		// interrupted. Recover it as an answered gate: no new response is
+		// accepted, and the recorded one is re-applied once a slot is granted.
+		recorded, err := decodePendingResponse(*gate.stepResult.PendingResponse)
+		if err != nil {
+			return err
+		}
+		e.recoveredResponse = &recorded
+		e.slotWaitStep = gate.step.Name()
+		e.waitingSince = time.Unix(*run.AwaitingAgentSince, 0)
+		e.answeredParkedMS = time.Since(e.waitingSince).Milliseconds()
+		return nil
+	}
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingShipping = run.Shipping
@@ -881,11 +900,21 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	e.mu.Unlock()
 
-	e.yieldSlot()
-	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, true)
-	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
-		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
+	var response approvalResponse
+	var reconciled bool
+	e.mu.Lock()
+	recorded := e.recoveredResponse
+	e.mu.Unlock()
+	if recorded != nil {
+		// The operator's response was accepted before the restart and is durably
+		// recorded: re-apply it. The slot admission already granted is kept
+		// rather than yielded, because this run is about to dispatch.
+		response = *recorded
+	} else {
+		e.yieldSlot()
+		response, reconciled, err = e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, true)
 	}
+	e.endGateWait(run.ID, parkStart, err)
 	if err == nil && !reconciled && response.action == types.ActionAbort {
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if dbErr := e.db.FailStep(gate.stepResult.ID, "aborted by user", duration); dbErr != nil {
@@ -895,7 +924,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
 	}
 	if err == nil {
-		err = e.acquireAnsweredGateSlot(ctx, gate.stepResult.ID)
+		err = e.acquireAnsweredGateSlot(ctx, run.ID, gate.stepResult.ID)
 	}
 	if err != nil {
 		if dbErr := e.db.FailStep(gate.stepResult.ID, err.Error(), duration); dbErr != nil {
@@ -1900,9 +1929,7 @@ rounds:
 
 			e.yieldSlot()
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)
-			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
-				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
-			}
+			e.endGateWait(run.ID, parkStart, err)
 			if err == nil && !reconciled && response.action == types.ActionAbort {
 				e.recordDeclinedRound(currentRoundID, effectiveFindings, stepName, roundNum)
 				if dbErr := e.db.FailStep(sr.ID, "aborted by user", executionMS); dbErr != nil {
@@ -1912,7 +1939,7 @@ rounds:
 				return false, "", fmt.Errorf("step %s: aborted by user", stepName)
 			}
 			if err == nil {
-				err = e.acquireAnsweredGateSlot(ctx, sr.ID)
+				err = e.acquireAnsweredGateSlot(ctx, run.ID, sr.ID)
 			}
 			if err != nil {
 				if dbErr := e.db.FailStep(sr.ID, err.Error(), executionMS); dbErr != nil {
@@ -2587,7 +2614,7 @@ func (e *Executor) claimGateReconciliation() (bool, error) {
 	if !e.waiting {
 		return false, nil
 	}
-	if err := e.acceptApprovalGate(); err != nil {
+	if err := e.acceptApprovalGate(nil); err != nil {
 		return false, err
 	}
 	e.waiting = false

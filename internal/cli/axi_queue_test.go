@@ -364,3 +364,59 @@ func TestDaemonSetMaxConcurrentRunsWithStoppedDaemonOnlyWritesConfig(t *testing.
 		t.Fatalf("persisted cap = %v, %v; want 0 (unlimited)", cfg.Daemon, err)
 	}
 }
+
+// A gate whose response was accepted while the run waits for a slot is parked in
+// the database (so a restart recovers it) but is shown as answered: running, not
+// parked, with the wait named, and never offered as a decision.
+func TestAnsweredGateWaitingForSlotRendersAsAnswered(t *testing.T) {
+	_, _, database, repo := setupAxiQueryRepo(t)
+	run, err := database.InsertRun(repo.ID, "feature/answered", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	step, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetStepPendingResponse(step.ID, `{"action":"approve"}`, "already answered; waiting for a run slot"); err != nil {
+		t.Fatal(err)
+	}
+
+	row, _ := database.GetRun(run.ID)
+	steps, _ := database.GetStepsByRun(run.ID)
+	rv := runViewFromDB(row, steps, database)
+	if _, ok := rv.awaitingStep(); ok {
+		t.Fatal("an answered gate is offered as a decision still owed")
+	}
+	if rv.AwaitingAgentSince != nil || rv.AnsweredStep != "review" || rv.Steps[0].Status != string(types.StepStatusRunning) {
+		t.Fatalf("answered gate view = %+v", rv)
+	}
+	out := axiDoc(runObjectField(rv))
+	if !strings.Contains(out, `answered: "review: answered, waiting for a run slot"`) || strings.Contains(out, "awaiting_agent") {
+		t.Errorf("run object:\n%s", out)
+	}
+
+	// The same through the daemon's wire shape.
+	wire := runViewFromIPC(&ipc.RunInfo{ID: run.ID, Status: types.RunRunning, Steps: []ipc.StepResultInfo{{StepName: types.StepReview, Status: types.StepStatusRunning, ResponsePending: true}}})
+	if _, ok := wire.awaitingStep(); ok || wire.AnsweredStep != "review" {
+		t.Fatalf("wire view = %+v", wire)
+	}
+
+	// Once dispatch begins the marker and the parked status are gone together.
+	if err := database.ResumeStepFromApproval(run.ID, step.ID, "gate resumed", 0); err != nil {
+		t.Fatal(err)
+	}
+	steps, _ = database.GetStepsByRun(run.ID)
+	if steps[0].PendingResponse != nil || steps[0].AnsweredWaitingForSlot() {
+		t.Fatalf("dispatch left the pending response: %+v", steps[0])
+	}
+}

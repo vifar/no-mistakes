@@ -611,6 +611,10 @@ type StepResultInfo struct {
 	LastActivityAt   *int64   `json:"last_activity_at,omitempty"`
 	LastActivity     *string  `json:"last_activity,omitempty"`
 	AgentPID         *int     `json:"agent_pid,omitempty"`
+	// ResponsePending is true for a step whose gate response was accepted and is
+	// waiting for a run slot to dispatch. Its persisted status is still the parked
+	// one, but it is reported as running: it is answered, not awaiting a decision.
+	ResponsePending bool `json:"response_pending,omitempty"`
 	// OverrideReason is non-empty when a human answered ActionApprove on this
 	// step's gate despite an unresolved external condition (currently: the CI
 	// step's live checks were still failing). See

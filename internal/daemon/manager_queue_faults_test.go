@@ -549,15 +549,15 @@ func TestRecoveredGateWaitingForSlotAcceptsResponses(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						if row.Status != types.StepStatusRunning || row.LastActivity == nil || *row.LastActivity != "already answered; waiting for a run slot" {
-							t.Fatalf("answered step still advertises a gate: %+v", row)
+						if !row.AnsweredWaitingForSlot() || row.LastActivity == nil || *row.LastActivity != "already answered; waiting for a run slot" {
+							t.Fatalf("answered step lost its recorded response: %+v", row)
 						}
 						run, err := f.d.GetRun(waitingID)
 						if err != nil {
 							t.Fatal(err)
 						}
-						if run.Status != types.RunRunning || run.AwaitingAgentSince != nil {
-							t.Fatalf("answered run still parked: %+v", run)
+						if run.Status != types.RunRunning || run.AwaitingAgentSince == nil {
+							t.Fatalf("answered run is not durably parked for recovery: %+v", run)
 						}
 						if err := f.mgr.HandleRespond(waitingID, types.StepReview, action, nil); err == nil || !strings.Contains(err.Error(), "already answered; waiting for a run slot") {
 							t.Fatalf("duplicate response: %v", err)
