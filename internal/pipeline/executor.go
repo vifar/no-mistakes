@@ -931,7 +931,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		// rather than yielded, because this run is about to dispatch.
 		response = *recorded
 	} else {
-		e.yieldSlot()
+		e.yieldSlotForGateWait()
 		response, reconciled, err = e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, true, false)
 	}
 	e.endGateWait(run.ID, parkStart, err)
@@ -1947,7 +1947,7 @@ rounds:
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
 			e.mu.Unlock()
 
-			e.yieldSlot()
+			e.yieldSlotForGateWait()
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true, false)
 			e.endGateWait(run.ID, parkStart, err)
 			if err == nil && !reconciled && response.action == types.ActionAbort {

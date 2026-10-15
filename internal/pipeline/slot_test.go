@@ -908,3 +908,22 @@ func TestRecoveredGateKeepsAcceptanceParkedDuration(t *testing.T) {
 		}
 	}
 }
+
+// A gate answered before the run reaches its wait keeps the slot it holds for
+// dispatch; an unanswered one gives it back.
+func TestYieldSlotForGateWaitKeepsTheSlotOfAnAnsweredGate(t *testing.T) {
+	slot := &recordingSlot{}
+	exec := NewExecutor(nil, nil, nil, nil, nil, nil)
+	exec.SetRunSlot(slot)
+	exec.yieldSlotForGateWait()
+	if got := slot.log(); len(got) != 1 || got[0] != "yield" {
+		t.Fatalf("unanswered gate slot events = %v, want [yield]", got)
+	}
+	exec.mu.Lock()
+	exec.slotWaitStep = types.StepReview // a response or reconciliation was accepted
+	exec.mu.Unlock()
+	exec.yieldSlotForGateWait()
+	if got := slot.log(); len(got) != 1 {
+		t.Fatalf("answered gate yielded its slot: %v", got)
+	}
+}

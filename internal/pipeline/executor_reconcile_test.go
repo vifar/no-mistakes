@@ -553,3 +553,55 @@ func TestExecutor_RecoveredReconciliationPreservesPendingOnTransientError(t *tes
 		})
 	}
 }
+
+// A fatal reconciliation error on a recovered, already-answered gate fails the
+// run exactly as ordinary reconciliation does: no endless retry. The pending
+// marker is not cleared before the read; it is cleared only by dispatch, so
+// until the failure it is still present.
+func TestExecutor_RecoveredReconciliationFatalErrorFailsInsteadOfRetrying(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := completionFixture(t, database, run)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	row, err := database.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(row.ID); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[],"summary":"closed PR"}`
+	if _, err := database.InsertStepRound(row.ID, 1, "initial", &findings, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.ParkStepForApproval(run.ID, row.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetStepPendingResponse(row.ID, `{"kind":"reconcile"}`, answeredActivity); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := &reconcilingApprovalStep{name: types.StepCI}
+	fatal := fmt.Errorf("%w: PR belongs to another repository", ErrFatalGateReconciliation)
+	step.err.Store(&fatal)
+	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	exec.SetRunSlot(&recordingSlot{})
+	exec.SetGateReconcileTimings(10*time.Millisecond, time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err = exec.Resume(ctx, run, repo, workDir)
+	if !errors.Is(err, ErrFatalGateReconciliation) {
+		t.Fatalf("Resume = %v, want the fatal reconciliation error", err)
+	}
+	if calls := step.calls.Load(); calls != 1 {
+		t.Fatalf("a fatal reconciliation was retried: %d calls", calls)
+	}
+	current, err := database.GetRun(run.ID)
+	if err != nil || current.Status != types.RunFailed || current.AwaitingAgentSince != nil {
+		t.Fatalf("run after a fatal reconciliation: %+v, %v", current, err)
+	}
+}

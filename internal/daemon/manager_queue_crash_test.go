@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -121,4 +122,39 @@ func TestRecoveredReconciliationIsReportedAsAnsweredBeforeAdmission(t *testing.T
 	}
 	f.mgr.resumeRecoveredRuns(plans)
 	f.assertAnsweredWaiting(f.mgr, plans[1].run.ID, "recovered reconciliation")
+}
+
+// A recovered gate that is approved while it waits for capacity keeps the slot
+// the scheduler grants it: handing that slot to a queued new run first would
+// make an answered gate wait behind work that arrived after it.
+func TestAnsweredRecoveredGateKeepsItsPriorityHandoffSlot(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	plans := seedRecoveredQueueGates(f)
+	// hold_slot_while_parked: false - a parked run gives its slot back.
+	if err := config.SetGlobalDaemonSetting(f.p.ConfigFile(), "hold_slot_while_parked", "false"); err != nil {
+		t.Fatal(err)
+	}
+	f.mgr.ReloadLimits()
+
+	holder := f.push("holder")
+	f.waitStarted(holder)
+	f.mgr.resumeRecoveredRuns(plans[:1])
+	gate := plans[0].run.ID
+	if info := f.answeredInfo(f.mgr, gate); !info.WaitingForSlot {
+		t.Fatalf("setup: recovered gate is not waiting behind the executing run: %+v", info)
+	}
+	if err := f.mgr.HandleRespond(gate, types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatalf("approve after registration: %v", err)
+	}
+	queued := f.push("queued")
+	if info := f.answeredInfo(f.mgr, queued); info.QueuePosition != 2 || info.QueueTotal != 2 {
+		t.Fatalf("the new run did not queue behind the answered gate: %+v", info)
+	}
+
+	f.step.release(holder)
+	f.waitStarted(queued)
+	if got := f.status(gate); got != types.RunCompleted {
+		t.Fatalf("answered gate status = %s when the queued run started; it was handed the slot first", got)
+	}
+	f.step.release(queued)
 }

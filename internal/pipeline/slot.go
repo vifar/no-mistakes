@@ -40,6 +40,22 @@ func (e *Executor) yieldSlot() {
 	}
 }
 
+// yieldSlotForGateWait gives the slot back for a parked gate's wait - unless the
+// gate was already answered. A response (or reconciliation claim) accepted before
+// this point has recorded its pending response and is about to dispatch; the
+// slot the scheduler granted for exactly that must not be handed to a queued
+// new run first. The decision runs under the same lock as acceptance, so a
+// response is either accepted before it (no yield) or after it (the run yields
+// and re-acquires with priority, as for any answer that arrives during the wait).
+func (e *Executor) yieldSlotForGateWait() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.slotWaitStep != "" {
+		return
+	}
+	e.yieldSlot()
+}
+
 func (e *Executor) acquireSlot(ctx context.Context) error {
 	if e.slot == nil {
 		return nil
