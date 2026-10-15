@@ -22,6 +22,12 @@ func SetGlobalDaemonSetting(path, key, value string) error {
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("read global config: %w", err)
 	}
+	// The config can hold secrets-adjacent settings, so a file the operator
+	// made private stays private. Only a file created here gets the default.
+	mode := fs.FileMode(0o600)
+	if info, statErr := os.Stat(path); statErr == nil {
+		mode = info.Mode().Perm()
+	}
 	updated, err := setDaemonSettingText(string(data), key, value)
 	if err != nil {
 		return err
@@ -44,7 +50,7 @@ func SetGlobalDaemonSetting(path, key, value string) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("write global config: %w", err)
 	}
-	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+	if err := os.Chmod(tmp.Name(), mode); err != nil {
 		return fmt.Errorf("write global config: %w", err)
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {

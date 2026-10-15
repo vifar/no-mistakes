@@ -400,3 +400,84 @@ func TestSchedulerLoweredCapAdmitsNothingUntilUsageDropsBelowIt(t *testing.T) {
 		t.Fatalf("started = %v, want [c] once usage dropped below the cap", got)
 	}
 }
+
+// Concurrent Acquire calls for one run are single-flight: the run takes one
+// slot, however many callers race.
+func TestSchedulerConcurrentAcquireTakesOneSlot(t *testing.T) {
+	for iter := 0; iter < 10; iter++ {
+		h := newSchedHarness(4, false)
+		run := h.forceAcquire("run")
+		run.Yield()
+		if st := h.stats(); st.Active != 0 || st.Yielded != 1 {
+			t.Fatalf("setup stats = %+v", st)
+		}
+		// Widen the window between "not held" and "slot taken" so every
+		// caller is inside Acquire before any of them finishes.
+		inner := h.limits
+		h.limits = func() (int, bool) {
+			time.Sleep(5 * time.Millisecond)
+			return inner()
+		}
+		const callers = 8
+		var ready, done sync.WaitGroup
+		start := make(chan struct{})
+		ready.Add(callers)
+		done.Add(callers)
+		for i := 0; i < callers; i++ {
+			go func() {
+				defer done.Done()
+				ready.Done()
+				<-start
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				if err := run.Acquire(ctx); err != nil {
+					t.Error(err)
+				}
+			}()
+		}
+		ready.Wait()
+		close(start)
+		done.Wait()
+		if st := h.stats(); st.Active != 1 || st.Yielded != 0 {
+			t.Fatalf("iteration %d: stats after %d concurrent Acquires = %+v, want exactly 1 slot", iter, callers, st)
+		}
+		run.Release()
+		if st := h.stats(); st.Active != 0 {
+			t.Fatalf("iteration %d: release left %+v", iter, st)
+		}
+	}
+}
+
+// A second Acquire waits on the first rather than queueing its own waiter, and
+// takes over if the first is cancelled.
+func TestSchedulerSecondAcquireWaitsForFirstAndSurvivesItsCancel(t *testing.T) {
+	h := newSchedHarness(1, false)
+	holder, _ := h.tryAdmit("holder")
+	run := h.forceAcquire("run")
+	run.Yield()
+
+	ctx1, cancel1 := context.WithCancelCause(context.Background())
+	first := make(chan error, 1)
+	go func() { first <- run.Acquire(ctx1) }()
+	waitForSchedCondition(t, func() bool { _, _, w := position(h, "run"); return w })
+
+	second := make(chan error, 1)
+	go func() { second <- run.Acquire(context.Background()) }()
+	time.Sleep(30 * time.Millisecond)
+	if st := h.stats(); st.Queued != 1 {
+		t.Fatalf("two concurrent Acquires queued %d waiters, want 1", st.Queued)
+	}
+
+	cancel1(errors.New("first caller gave up"))
+	if err := <-first; err == nil {
+		t.Fatal("cancelled Acquire returned nil")
+	}
+	waitForSchedCondition(t, func() bool { _, _, w := position(h, "run"); return w })
+	holder.Release()
+	if err := <-second; err != nil {
+		t.Fatalf("second Acquire = %v, want it to take over and succeed", err)
+	}
+	if st := h.stats(); st.Active != 1 || st.Yielded != 0 {
+		t.Fatalf("stats = %+v, want the run holding exactly one slot", st)
+	}
+}

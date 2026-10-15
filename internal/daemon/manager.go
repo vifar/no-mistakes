@@ -62,11 +62,16 @@ type RunManager struct {
 
 	// sched enforces daemon.max_concurrent_runs and owns the start order of
 	// queued runs; limitsMu/limitsCache memoise the live global config it reads.
-	sched       *slotScheduler
-	watchOnce   sync.Once
-	watchStop   chan struct{}
-	limitsMu    sync.Mutex
-	limitsCache runLimits
+	sched *slotScheduler
+	// claimQueued moves a dispatched queued run to pending; beforeQueuedRegister
+	// runs between the shutdown pre-check and handle registration. Both exist
+	// so tests can inject faults and pauses.
+	claimQueued          func(runID string) (bool, error)
+	beforeQueuedRegister func()
+	watchOnce            sync.Once
+	watchStop            chan struct{}
+	limitsMu             sync.Mutex
+	limitsCache          runLimits
 
 	// evalCaptureMu serializes automatic eval collection. Concurrent runs
 	// finishing together would otherwise write the same per-repository object
@@ -109,6 +114,7 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		completedRuns: make(map[string]bool),
 	}
 	m.limitsCache = runLimits{max: config.DefaultMaxConcurrentRuns}
+	m.claimQueued = database.ClaimQueuedRun
 	m.sched = newSlotScheduler(m.liveLimits)
 	m.sched.start = m.startQueuedRun
 	return m
@@ -214,13 +220,25 @@ func (m *RunManager) startQueuedRun(runID string, slot *runSlot) func() {
 	if m.shuttingDown.Load() {
 		return slot.Release
 	}
+	if m.beforeQueuedRegister != nil {
+		m.beforeQueuedRegister()
+	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
 	handle := &runHandle{cancel: cancel, runCtx: runCtx, done: make(chan struct{})}
 	m.mu.Lock()
+	// Shutdown sets the flag and then snapshots m.cancels under this same
+	// lock. Checking the flag and registering under it means a launch either
+	// sees shutdown and never starts, or is registered before the snapshot and
+	// is cancelled by it.
+	if m.shuttingDown.Load() {
+		m.mu.Unlock()
+		cancel(nil)
+		return slot.Release
+	}
 	m.cancels[runID] = cancel
 	m.dones[runID] = handle.done
-	m.mu.Unlock()
 	m.wg.Add(1)
+	m.mu.Unlock()
 	return func() {
 		go func() {
 			defer m.wg.Done()
@@ -233,6 +251,7 @@ func (m *RunManager) startQueuedRun(runID string, slot *runSlot) func() {
 // everything from its row. Failures end the run as failed (as an inline launch
 // does); there is no caller left to return them to.
 func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHandle) {
+	requeue := false
 	defer func() {
 		// launchRun transfers the handle to the run goroutine once the
 		// executor exists; any earlier exit must unregister it here.
@@ -241,9 +260,18 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 			_ = m.db.UpdateRunError(runID, fmt.Sprintf("internal panic: %v", r))
 		}
 		if !handle.consumed {
+			// A run that could not be claimed goes back to the head of the
+			// queue, where dispatch took it from, BEFORE its handle is
+			// unregistered: at every instant it is reachable by an abort,
+			// either through the handle or through the queue.
+			if requeue {
+				m.sched.requeueFront(runID)
+			}
 			m.mu.Lock()
-			delete(m.cancels, runID)
-			delete(m.dones, runID)
+			if m.dones[runID] == handle.done {
+				delete(m.cancels, runID)
+				delete(m.dones, runID)
+			}
 			m.mu.Unlock()
 			handle.cancel(nil)
 			close(handle.done)
@@ -251,9 +279,23 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 			slot.Release()
 		}
 	}()
-	claimed, err := m.db.ClaimQueuedRun(runID)
+	if handle.runCtx.Err() != nil {
+		m.abandonQueuedLaunch(runID, handle)
+		return
+	}
+	claimed, err := m.claimQueued(runID)
 	if err != nil {
-		slog.Error("failed to claim queued run", "run_id", runID, "error", err)
+		// Transient database trouble must not strand a durable queued run: it
+		// is neither in the start order (dispatch removed it) nor running.
+		// Back off briefly, then restore it to the front of the queue so the
+		// next dispatch retries it ahead of every later run.
+		slog.Error("failed to claim queued run; returning it to the queue", "run_id", runID, "error", err)
+		select {
+		case <-time.After(claimRetryDelay):
+			requeue = true
+		case <-handle.runCtx.Done():
+			m.abandonQueuedLaunch(runID, handle)
+		}
 		return
 	}
 	if !claimed {
@@ -290,6 +332,28 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 	if _, err := m.launchRun(handle.runCtx, repo, run, globalCfg, spec.Trigger, spec.SkipSteps, slot, handle); err != nil {
 		// launchRun already recorded the failure on the row for setup errors.
 		m.broadcastTerminal(run, types.RunFailed, err.Error())
+	}
+}
+
+// claimRetryDelay spaces retries of a queued run whose claim failed, so a
+// persistent database fault cannot spin the queue. A variable for tests.
+var claimRetryDelay = time.Second
+
+// abandonQueuedLaunch settles a run taken off the queue whose launch was
+// cancelled before it was claimed. A daemon shutdown leaves the durable row
+// queued for the next start; an abort or a superseding push ends it, since no
+// executor will ever report that.
+func (m *RunManager) abandonQueuedLaunch(runID string, handle *runHandle) {
+	cause := context.Cause(handle.runCtx)
+	if cause == nil || m.shuttingDown.Load() {
+		return
+	}
+	reason := cause.Error()
+	if reason != types.RunCancelReasonAbortedByUser && reason != types.RunCancelReasonSuperseded {
+		return
+	}
+	if _, err := m.cancelQueuedRun(runID, reason); err != nil {
+		slog.Error("failed to cancel queued run", "run_id", runID, "error", err)
 	}
 }
 

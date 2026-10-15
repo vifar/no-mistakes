@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -127,5 +128,47 @@ func TestSetGlobalDaemonSettingRefusesFlowForms(t *testing.T) {
 	}
 	if err := SetGlobalDaemonSetting(filepath.Join(t.TempDir(), "c.yaml"), "max_concurrent_runs", "-1"); err == nil {
 		t.Fatal("a negative cap must be rejected before it is written")
+	}
+}
+
+func TestSetGlobalDaemonSettingPreservesFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes")
+	}
+	for _, mode := range []os.FileMode{0o600, 0o640, 0o644} {
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte("daemon:\n  max_concurrent_runs: 3\n"), mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, mode); err != nil { // beat the umask
+			t.Fatal(err)
+		}
+		if err := SetGlobalDaemonSetting(path, "max_concurrent_runs", "4"); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != mode {
+			t.Fatalf("mode after rewrite = %o, want the original %o", info.Mode().Perm(), mode)
+		}
+	}
+}
+
+func TestSetGlobalDaemonSettingCreatesNewFilePrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file modes")
+	}
+	path := filepath.Join(t.TempDir(), "sub", "config.yaml")
+	if err := SetGlobalDaemonSetting(path, "max_concurrent_runs", "4"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("new config mode = %o, want 600", info.Mode().Perm())
 	}
 }

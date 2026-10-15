@@ -99,6 +99,15 @@ func (s *slotScheduler) enqueue(runID string) {
 	s.dispatch()
 }
 
+// requeueFront puts a run dispatch just took off the queue back at the head,
+// its original first-in-first-out position, without dispatching. The caller
+// still holds the run's slot; the release that follows drains the queue.
+func (s *slotScheduler) requeueFront(runID string) {
+	s.mu.Lock()
+	s.queued = append([]string{runID}, s.queued...)
+	s.mu.Unlock()
+}
+
 // restoreQueue seeds the start order from the database at startup. ids must
 // already be in start order.
 func (s *slotScheduler) restoreQueue(ids []string) {
@@ -202,6 +211,13 @@ type runSlot struct {
 	mu      sync.Mutex
 	held    bool
 	yielded bool // gave the slot back for a wait and is still alive
+	// flight is the one Acquire currently taking a slot for this run. Another
+	// concurrent Acquire waits on it instead of taking a second slot.
+	flight *acquireFlight
+}
+
+type acquireFlight struct {
+	done chan struct{}
 }
 
 var _ interface {
@@ -253,14 +269,42 @@ func (t *runSlot) Yield() {
 }
 
 // Acquire takes a slot again for a run that resumed work. It jumps ahead of
-// every queued new run and waits behind earlier resumed runs.
+// every queued new run and waits behind earlier resumed runs. It is
+// single-flight per run: a concurrent Acquire for the same run waits for the
+// first one instead of taking a second slot, and takes over if that one is
+// cancelled.
 func (t *runSlot) Acquire(ctx context.Context) error {
-	t.mu.Lock()
-	held := t.held
-	t.mu.Unlock()
-	if held {
-		return nil
+	for {
+		t.mu.Lock()
+		if t.held {
+			t.mu.Unlock()
+			return nil
+		}
+		if f := t.flight; f != nil {
+			t.mu.Unlock()
+			select {
+			case <-f.done:
+				continue
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			}
+		}
+		f := &acquireFlight{done: make(chan struct{})}
+		t.flight = f
+		t.mu.Unlock()
+
+		err := t.acquire(ctx)
+
+		t.mu.Lock()
+		t.flight = nil
+		t.mu.Unlock()
+		close(f.done)
+		return err
 	}
+}
+
+// acquire waits for a slot on behalf of the single in-flight Acquire.
+func (t *runSlot) acquire(ctx context.Context) error {
 	s := t.s
 	s.refresh()
 	s.mu.Lock()
