@@ -288,18 +288,22 @@ func TestRootYesStopsWaitingForRunWhenContextCanceled(t *testing.T) {
 	defer cancel()
 
 	prevAuto := runWizardAuto
+	var canceledAt time.Time
 	runWizardAuto = func(got context.Context, p *paths.Paths, state *repoState, _ []types.StepName, _ waitForRunFunc) (wizard.Result, error) {
+		canceledAt = time.Now()
 		cancel()
 		return wizard.Result{Success: true, Pushed: true, TargetBranch: "feat/missing"}, nil
 	}
 	defer func() { runWizardAuto = prevAuto }()
 
-	start := time.Now()
 	_, err = executeCmdWithContext(ctx, "-y")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("executeCmdWithContext(-y) error = %v, want %v", err, context.Canceled)
 	}
-	if elapsed := time.Since(start); elapsed >= time.Second {
-		t.Fatalf("executeCmdWithContext(-y) took %v after cancellation, want under %v", elapsed, time.Second)
+	if canceledAt.IsZero() {
+		t.Fatal("runWizardAuto did not cancel the command context")
+	}
+	if elapsed := time.Since(canceledAt); elapsed >= time.Second {
+		t.Fatalf("executeCmdWithContext(-y) took %v to return after cancellation, want under %v", elapsed, time.Second)
 	}
 }
