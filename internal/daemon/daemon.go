@@ -1424,6 +1424,9 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 	srv.Handle(ipc.MethodProbeExternalCIOwner, func(context.Context, json.RawMessage) (interface{}, error) {
 		return &ipc.ProbeExternalCIOwnerResult{OK: true}, nil
 	})
+	srv.Handle(ipc.MethodProbeAcceptedGaps, func(context.Context, json.RawMessage) (interface{}, error) {
+		return &ipc.ProbeAcceptedGapsResult{OK: true}, nil
+	})
 
 	srv.Handle(ipc.MethodCaptureVerificationPlan, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {
@@ -1534,7 +1537,11 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		dispositions, err := mgr.HandleRespondWithOverrides(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason)
+		var gaps *db.AcceptedGaps
+		if len(p.AcceptGaps) > 0 || p.CoveredBy != "" {
+			gaps = &db.AcceptedGaps{FindingIDs: p.AcceptGaps, Reason: p.ApprovalReason, CoveredBy: p.CoveredBy}
+		}
+		dispositions, err := mgr.HandleRespondWithAcceptedGaps(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason, gaps)
 		if err != nil {
 			// A refused fix response is the caller's input to fix, not a
 			// transport failure: the gate is still parked. Report it as a
@@ -1732,6 +1739,7 @@ func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 	if s.SkipReason != nil {
 		info.SkipReason = *s.SkipReason
 	}
+	info.AcceptedGapRecorded = s.ValidAcceptedGaps() != nil
 	if s.AutoFixLimit != nil {
 		info.AutoFixLimit = *s.AutoFixLimit
 	}

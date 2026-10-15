@@ -110,6 +110,8 @@ type stepView struct {
 	PendingFixSource string
 	QuietWarning     time.Duration
 	SkipReason       string
+	// AcceptedGapRecorded: the step holds a valid durable owner-accepted gap.
+	AcceptedGapRecorded bool
 }
 
 // runView is a render-ready view of a pipeline run.
@@ -179,20 +181,21 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 	}
 	for _, s := range r.Steps {
 		sv := stepView{
-			ID:               s.ID,
-			Name:             string(s.StepName),
-			Status:           string(s.Status),
-			FixSummaries:     s.FixSummaries,
-			StartedAt:        s.StartedAt,
-			RoundStartedAt:   s.RoundStartedAt,
-			LastActivityAt:   s.LastActivityAt,
-			AgentPID:         s.AgentPID,
-			RoundCount:       s.RoundCount,
-			FixRoundCount:    s.FixRoundCount,
-			AutoFixLimit:     s.AutoFixLimit,
-			PendingFixSource: s.PendingFixSource,
-			WorkScope:        s.WorkScope,
-			SkipReason:       s.SkipReason,
+			ID:                  s.ID,
+			Name:                string(s.StepName),
+			Status:              string(s.Status),
+			FixSummaries:        s.FixSummaries,
+			StartedAt:           s.StartedAt,
+			RoundStartedAt:      s.RoundStartedAt,
+			LastActivityAt:      s.LastActivityAt,
+			AgentPID:            s.AgentPID,
+			RoundCount:          s.RoundCount,
+			FixRoundCount:       s.FixRoundCount,
+			AutoFixLimit:        s.AutoFixLimit,
+			PendingFixSource:    s.PendingFixSource,
+			WorkScope:           s.WorkScope,
+			SkipReason:          s.SkipReason,
+			AcceptedGapRecorded: s.AcceptedGapRecorded,
 		}
 		if s.LastActivity != nil {
 			sv.LastActivity = *s.LastActivity
@@ -256,6 +259,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 		if s.SkipReason != nil {
 			sv.SkipReason = *s.SkipReason
 		}
+		sv.AcceptedGapRecorded = s.ValidAcceptedGaps() != nil
 		if s.LastActivity != nil {
 			sv.LastActivity = *s.LastActivity
 		}
@@ -621,9 +625,28 @@ func gateFields(gate stepView) []toon.Field {
 // gateFieldsForRun renders the gate with every follow-up command that accepts
 // --run carrying runID, so a caller that selected the run by id keeps naming it.
 func gateFieldsForRun(gate stepView, runID string) []toon.Field {
+	return gateFieldsFor(gate, runID, false)
+}
+
+// gateFieldsFor is gateFieldsForRun that knows whether the run is strict
+// shipping. A strict Test gate parked on an eligible inconclusive verdict
+// cannot be plainly approved, so its help names the accepted-gap command
+// instead of a plain approve that the daemon would refuse.
+func gateFieldsFor(gate stepView, runID string, strict bool) []toon.Field {
 	respond := "no-mistakes axi respond" + runFlag(runID)
+	approve := "Run `" + respond + " --action approve` to accept this step and continue"
+	if strict && gate.Name == string(types.StepTest) && gate.AcceptedGapRecorded {
+		// A previous approval recorded the gap and the daemon stopped before the
+		// step completed. Recovery reuses that audit; a new reason or coverage
+		// would be asked for needlessly, and a reason on a plain approval is refused.
+		approve = "An owner-accepted gap is already recorded for this Test step (an earlier approval was interrupted). Run `" + respond + " --action approve` with no --reason, --accept-gap or --covered-by to complete it; the recorded audit is reused unchanged"
+	} else if strict && gate.Name == string(types.StepTest) {
+		if ids := (&db.StepResult{StepName: types.StepTest, FindingsJSON: &gate.FindingsJSON}).AcceptableGapIDs(); len(ids) > 0 {
+			approve = "Plain approve is refused in strict shipping for this inconclusive Test verdict. Only if the owner has explicitly approved this specific gap (the unreachable scenarios are covered by mocked tests), run `" + respond + " --action approve --accept-gap " + strings.Join(ids, ",") + " --reason \"<who approved, where, when>\" --covered-by \"<tests>\"`; do not use it without that approval. The reason must name who approved and where (at least 10 characters), and every actionable finding must be named"
+		}
+	}
 	help := []string{
-		"Run `" + respond + " --action approve` to accept this step and continue",
+		approve,
 		"Run `" + respond + " --action fix --findings <ids> [--ignore <ids>]` to have the pipeline fix the selected findings (do not edit files yourself); list every finding below in `--findings` or `--ignore`, unless an earlier round of this step already decided it, and a finding that round chose to fix cannot be declined by a later response",
 	}
 	// A review parked in waiting-on-answers is not asking for a verdict: its

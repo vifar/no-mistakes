@@ -24,12 +24,16 @@ func TestAxiTestApprovalExceptionJourney(t *testing.T) {
 		exit                 int
 		verdict              string
 		qualified            bool
+		// findingID is the ID the underlying finding is stored under: the
+		// native verdict finding keeps its reserved ID; every other finding is
+		// numbered. Empty means "test-1".
+		findingID string
 	}{
 		{name: "clean"},
 		{name: "command-reason", exit: 7, action: "approve", reason: "Synthetic exception: accept exit 7 only for this isolated test", qualified: true},
 		{name: "command-no-reason", exit: 7, action: "approve", qualified: true},
-		{name: "evidence-exception", verdict: "no-go", action: "approve", reason: "Synthetic failed scenario accepted for this test", qualified: true},
-		{name: "evidence-inconclusive", verdict: "inconclusive", action: "approve", reason: "Synthetic inconclusive evidence accepted", qualified: true},
+		{name: "evidence-exception", verdict: "no-go", action: "approve", reason: "Synthetic failed scenario accepted for this test", qualified: true, findingID: types.FindingIDTestVerdict},
+		{name: "evidence-inconclusive", verdict: "inconclusive", action: "approve", reason: "Synthetic inconclusive evidence accepted", qualified: true, findingID: types.FindingIDTestVerdict},
 		// A no-surface acknowledgement keeps its reason but completes normally.
 		{name: "no-surface-ack", verdict: "no-surface", action: "approve", reason: "Docs-only change acknowledged"},
 		{name: "skipped", exit: 7, action: "skip"},
@@ -141,7 +145,11 @@ func TestAxiTestApprovalExceptionJourney(t *testing.T) {
 					if step.ApprovalReason == nil || *step.ApprovalReason != tc.reason {
 						t.Fatalf("operator reason lost: %+v", step)
 					}
-					if step.FindingsJSON == nil || !strings.Contains(*step.FindingsJSON, "test-1") {
+					wantID := tc.findingID
+					if wantID == "" {
+						wantID = "test-1"
+					}
+					if step.FindingsJSON == nil || !strings.Contains(*step.FindingsJSON, `"`+wantID+`"`) {
 						t.Fatalf("underlying finding lost: %+v", step)
 					}
 				} else if step.ApprovalReason != nil {

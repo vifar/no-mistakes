@@ -956,13 +956,13 @@ func restampPRAttestationWithSteps(ctx context.Context, host scm.Host, pr *scm.P
 	for attempt := 1; attempt <= attempts; attempt++ {
 		content, err := reader.GetPRContent(ctx, pr)
 		if err == nil {
-			updated, rebound, rebindErr := rebindOwnedPRAttestation(content.Body, newHeadSHA, steps, policy)
+			updated, rebound, rebindErr := rebindOwnedPRAttestation(content.Body, newHeadSHA, steps, policy, host.Provider())
 			if rebindErr != nil {
 				return fmt.Errorf("rebind PR appendix: %w", rebindErr)
 			}
 			// Azure's adapter clamps ordinary descriptions. Owned writes must
 			// fail before that boundary can cut off author text or the digest.
-			if rebound && hasPRAppendixMarkers(updated) {
+			if rebound {
 				if err := validateOwnedPRBudget(updated, scm.HostMaxPRBodyChars(host)); err != nil {
 					return err
 				}

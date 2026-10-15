@@ -102,7 +102,7 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 		if !branchScopedCommandsSafe {
 			fields = append(fields, inspectionOnlyGateFields(gate, run.ID)...)
 		} else {
-			fields = append(fields, gateFields(gate)...)
+			fields = append(fields, gateFieldsFor(gate, "", rv.Shipping != nil)...)
 		}
 	} else if terminalStatus(rv.Status) {
 		fields = append(fields, toon.Field{Key: "outcome", Value: outcomeForRun(rv)})

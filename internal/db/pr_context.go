@@ -182,7 +182,7 @@ func (d *DB) bindRunPRContext(runID string, candidate PRContextCandidate, resetF
 			started_at=NULL, round_started_at=NULL, completed_at=NULL,
 			last_activity_at=NULL, last_activity=NULL, agent_pid=NULL,
 			auto_fix_limit=NULL, ci_fix_attempts=0, override_reason=NULL,
-			approval_reason=NULL, skip_reason=NULL
+			approval_reason=NULL, accepted_gaps_json=NULL, skip_reason=NULL
 			WHERE run_id=? AND step_order>=?`, types.StepStatusPending, runID, resetFrom.Order()); err != nil {
 			return PRContextBindResult{}, fmt.Errorf("bind run PR context: reset dependent steps: %w", err)
 		}

@@ -123,6 +123,35 @@ const FindingCategoryTestCommand = "test-command"
 // verdict finding because the cut supplies no new verdict.
 const FindingCategoryTestVerdict = "test-verdict"
 
+// FindingIDTestVerdict is the reserved, stable ID the Test step sets natively
+// on the finding it derives from the evidence turn's verdict. Together with
+// FindingCategoryTestVerdict it authenticates that finding: the Test analyzer
+// and user-added findings can supply neither (see parseTestAnalyzerOutput and
+// MergeUserOverrides), so accepting a gap can never waive a finding some other
+// author labeled as the verdict.
+const FindingIDTestVerdict = "test-verdict"
+
+// IsReservedTestVerdictID reports whether id names the Test step's own verdict
+// finding once NormalizeFindings has trimmed it. The comparison is also
+// case-insensitive so no spelling of the reserved ID is left to a producer.
+func IsReservedTestVerdictID(id string) bool {
+	return strings.EqualFold(strings.TrimSpace(id), FindingIDTestVerdict)
+}
+
+// IsReservedTestVerdictCategory is the category-side twin of
+// IsReservedTestVerdictID.
+func IsReservedTestVerdictCategory(category string) bool {
+	return strings.EqualFold(strings.TrimSpace(category), FindingCategoryTestVerdict)
+}
+
+// IsNativeTestVerdictFinding reports whether f is the finding the Test step
+// itself derived from an inconclusive verdict: the reserved ID and category,
+// the exact severity and action verdictFindings assigns, and not user-authored.
+func IsNativeTestVerdictFinding(f Finding) bool {
+	return f.ID == FindingIDTestVerdict && f.Category == FindingCategoryTestVerdict &&
+		f.Severity == FindingSeverityWarning && f.Action == ActionAskUser && f.Source != FindingSourceUser
+}
+
 // FindingIDTestAgentTimeout is the Test-step park when an evidence or repair
 // invocation burned its wall-clock budget. It is a budget/provider-slowness
 // cut, not a product defect; TestOverrideReason treats an approval of this
@@ -511,7 +540,12 @@ func MergeUserOverrides(findings Findings, instructions map[string]string, added
 		// identity a later round attributes by must not carry whitespace, and a
 		// padded collision must still be seen as a collision.
 		item.ID = strings.TrimSpace(item.ID)
-		if item.ID == "" || used[item.ID] {
+		// The verdict ID and category are reserved for the Test step's own
+		// finding; a user-authored finding never carries them.
+		if IsReservedTestVerdictCategory(item.Category) {
+			item.Category = ""
+		}
+		if item.ID == "" || used[item.ID] || IsReservedTestVerdictID(item.ID) {
 			item.ID, counter = nextUserFindingID(used, counter)
 		} else {
 			used[item.ID] = true

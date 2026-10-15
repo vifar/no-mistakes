@@ -439,4 +439,7 @@ var migrationStatements = []string{
 	// a late --closes can still reach the Issues section; non-NULL closes that window
 	// (see UpdateRunClosingIssueRefs / ClaimClosingIssueRefsForPRBody).
 	`ALTER TABLE runs ADD COLUMN closing_issue_refs_locked_at INTEGER`,
+	// Owner-approved Test gaps accepted under strict shipping (see
+	// StepResult.AcceptedGapRefusal). NULL means no gap was accepted.
+	`ALTER TABLE step_results ADD COLUMN accepted_gaps_json TEXT`,
 }

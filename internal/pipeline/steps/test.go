@@ -441,6 +441,12 @@ func parseTestAnalyzerOutput(result *agent.Result) (Findings, error) {
 			(item.Support != nil && item.Support.OwnerResult != nil) {
 			return Findings{}, fmt.Errorf("test analyzer finding %d cannot supply Review support owner result", i)
 		}
+		// The verdict finding is the Test step's own: strict accepted gaps
+		// authenticate it by this reserved ID and category, so an analyzer
+		// can never supply either.
+		if types.IsReservedTestVerdictCategory(item.Category) || types.IsReservedTestVerdictID(item.ID) {
+			return Findings{}, fmt.Errorf("test analyzer finding %d cannot use the reserved test-verdict id or category", i)
+		}
 		if slices.Contains(testBudgetCutIDs, findings.Items[i].ID) {
 			findings.Items[i].ID = ""
 		}
@@ -518,6 +524,7 @@ func verdictFindings(findings Findings) []Finding {
 	switch findings.Verdict {
 	case types.TestVerdictNoGo:
 		return []Finding{{
+			ID:          types.FindingIDTestVerdict,
 			Category:    types.FindingCategoryTestVerdict,
 			Severity:    types.FindingSeverityError,
 			Action:      types.ActionAutoFix,
@@ -525,6 +532,7 @@ func verdictFindings(findings Findings) []Finding {
 		}}
 	case types.TestVerdictInconclusive:
 		return []Finding{{
+			ID:          types.FindingIDTestVerdict,
 			Category:    types.FindingCategoryTestVerdict,
 			Severity:    types.FindingSeverityWarning,
 			Action:      types.ActionAskUser,

@@ -1354,7 +1354,7 @@ func driveRunScoped(ctx context.Context, progress io.Writer, client *ipc.Client,
 			if action == types.ActionFix {
 				fixedSteps[gate.Name] = true
 			}
-			if _, err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil, nil, ""); err != nil {
+			if _, err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil, nil, "", nil, ""); err != nil {
 				return nil, false, fmt.Errorf("auto-resolve %s: %w", gate.Name, err)
 			}
 			pendingGate = gateKey
@@ -1459,7 +1459,7 @@ func getRunInfo(ctx context.Context, socketPath, runID string) (*ipc.RunInfo, er
 // what it recorded. A response the daemon refused is returned as a
 // *respondRefusalError - the gate is still parked and the response can be
 // corrected.
-func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, added []types.Finding, approvalReason string) (ipc.RespondResult, error) {
+func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, added []types.Finding, approvalReason string, acceptGaps []string, coveredBy string) (ipc.RespondResult, error) {
 	params := &ipc.RespondParams{
 		RunID:            runID,
 		Step:             step,
@@ -1469,6 +1469,8 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 		Instructions:     instructions,
 		AddedFindings:    added,
 		ApprovalReason:   approvalReason,
+		AcceptGaps:       acceptGaps,
+		CoveredBy:        coveredBy,
 	}
 	var result ipc.RespondResult
 	if err := client.Call(ipc.MethodRespond, params, &result); err != nil {
@@ -1598,7 +1600,7 @@ func renderDriveResultForRun(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool,
 	}
 
 	if gate, ok := rv.awaitingStep(); ok {
-		fields = append(fields, gateFieldsForRun(gate, runID)...)
+		fields = append(fields, gateFieldsFor(gate, runID, rv.Shipping != nil)...)
 		emitDoc(cmd, fields...)
 		return nil
 	}
@@ -1688,7 +1690,7 @@ func successReportHelp(fixes []fixRow) []string {
 }
 
 func newAxiRespondCmd() *cobra.Command {
-	var action, step, findings, ignore, instructions, addFinding, reason, runID string
+	var action, step, findings, ignore, instructions, addFinding, reason, runID, acceptGap, coveredBy string
 	var autoYes bool
 	var wait time.Duration
 
@@ -1708,6 +1710,13 @@ func newAxiRespondCmd() *cobra.Command {
 			"--ignore is refused too: reverting an applied fix is out of scope for a gate\n" +
 			"response. The recorded dispositions (fixed, ignored, kept) are echoed in the\n" +
 			"output.\n\n" +
+			"A strict-shipping Test step parked on an inconclusive verdict can be\n" +
+			"approved only by naming the gap: --accept-gap <finding-id,...> with --reason\n" +
+			"(who approved it and where, e.g. \"owner approved via first mate, 2026-10-14\")\n" +
+			"and --covered-by (the tests that cover the unreachable scenarios). Every\n" +
+			"actionable finding must be named; no-go verdicts, failing test commands and\n" +
+			"Test-agent timeouts are never accepted. The gap is recorded and shown on\n" +
+			"the pull request.\n\n" +
 			"--wait bounds this hold (default 8m) so an agent harness with a 10-minute\n" +
 			"tool cap gets a structured return instead of an unbounded hang. Elapsed wait\n" +
 			"is not a failed run: inspect with axi status and reattach. A slow live daemon\n" +
@@ -1729,6 +1738,8 @@ func newAxiRespondCmd() *cobra.Command {
 					instructions: instructions,
 					addFinding:   addFinding,
 					reason:       reason,
+					acceptGap:    acceptGap,
+					coveredBy:    coveredBy,
 					runID:        strings.TrimSpace(runID),
 					runFlagSet:   cmd.Flags().Changed("run"),
 					autoYes:      autoYes,
@@ -1743,11 +1754,45 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated finding IDs to fix (with --action fix)")
 	cmd.Flags().StringVar(&ignore, "ignore", "", "comma-separated finding IDs to decline (with --action fix); every finding the gate shows must be in --findings or --ignore unless an earlier round of this step already decided it, and a finding that round chose to fix cannot be declined")
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
-	cmd.Flags().StringVar(&reason, "reason", "", "exception reason preserved with Test approval (with --action approve)")
+	cmd.Flags().StringVar(&reason, "reason", "", "exception reason preserved with Test approval (with --action approve); with --accept-gap it must name who approved the gap and where, at least 10 characters, e.g. \"owner approved via first mate, 2026-10-14\"")
+	cmd.Flags().StringVar(&acceptGap, "accept-gap", "", "comma-separated Test finding IDs to accept as a strict-shipping gap (with --action approve, --reason and --covered-by); only an inconclusive live-validation verdict is acceptable and every actionable finding must be named")
+	cmd.Flags().StringVar(&coveredBy, "covered-by", "", "test names or paths that cover the accepted gap, comma- or semicolon-separated or free text, recorded verbatim (with --accept-gap)")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix (with --action fix)")
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve subsequent eligible gates until a decision point or outcome; protected-path and Test unvalidated-work refusals require an explicit response, and an open review question requires `axi answer`")
 	bindAxiWaitFlag(cmd, &wait)
 	return cmd
+}
+
+// validateAcceptGapFlags checks the flag combination of an accepted-gap
+// approval before any daemon call. The daemon re-validates eligibility; this
+// only keeps a malformed audit record from ever being sent.
+func validateAcceptGapFlags(act types.ApprovalAction, ra respondArgs) ([]string, error) {
+	ids := splitCSV(ra.acceptGap)
+	if ra.acceptGap == "" && ra.coveredBy == "" {
+		return nil, nil
+	}
+	if ra.acceptGap == "" {
+		return nil, errors.New("--covered-by applies only with --accept-gap")
+	}
+	if len(ids) == 0 {
+		return nil, errors.New("--accept-gap requires at least one finding id")
+	}
+	if act != types.ActionApprove {
+		return nil, errors.New("--accept-gap applies only to --action approve")
+	}
+	if len([]rune(strings.TrimSpace(ra.reason))) < db.MinAcceptedGapReasonLen {
+		return nil, fmt.Errorf("--accept-gap requires a --reason of at least %d characters naming who approved the gap and where", db.MinAcceptedGapReasonLen)
+	}
+	if strings.TrimSpace(ra.coveredBy) == "" {
+		return nil, errors.New("--accept-gap requires a non-empty --covered-by naming the covering tests")
+	}
+	if refusal := db.AcceptedGapTextRefusal("--reason", ra.reason); refusal != "" {
+		return nil, errors.New(refusal)
+	}
+	if refusal := db.AcceptedGapTextRefusal("--covered-by", ra.coveredBy); refusal != "" {
+		return nil, errors.New(refusal)
+	}
+	return ids, nil
 }
 
 type respondArgs struct {
@@ -1758,6 +1803,8 @@ type respondArgs struct {
 	instructions string
 	addFinding   string
 	reason       string
+	acceptGap    string
+	coveredBy    string
 	runID        string
 	runFlagSet   bool
 	autoYes      bool
@@ -1789,6 +1836,11 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	default:
 		return emitError(cmd, 2, fmt.Sprintf("unknown action %q", ra.action),
 			"Valid actions: approve, fix, skip")
+	}
+	acceptGapIDs, err := validateAcceptGapFlags(act, ra)
+	if err != nil {
+		return emitError(cmd, 2, err.Error(),
+			"Use `"+respondCmd+" --action approve --accept-gap <finding-id,...> --reason \"owner approved via first mate, 2026-10-14\" --covered-by \"<covering tests>\"`")
 	}
 
 	var env *axiEnv
@@ -1860,6 +1912,9 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		stepName = types.StepName(gate.Name)
 	}
 
+	if len(acceptGapIDs) > 0 && stepName != types.StepTest {
+		return emitError(cmd, 2, "--accept-gap applies only to the Test step")
+	}
 	if ra.reason != "" && (act != types.ActionApprove || stepName != types.StepTest) {
 		return emitError(cmd, 2, "--reason applies only to --action approve on the Test step")
 	}
@@ -1892,7 +1947,15 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		return emitError(cmd, 2, "--findings and --ignore apply only to --action fix")
 	}
 
-	result, err := sendRespond(env.client, runID, stepName, act, findingIDs, ignoreIDs, instructions, added, ra.reason)
+	if len(acceptGapIDs) > 0 {
+		// An older daemon would drop accept_gaps and covered_by silently.
+		var capability ipc.ProbeAcceptedGapsResult
+		if err := env.client.Call(ipc.MethodProbeAcceptedGaps, &ipc.ProbeAcceptedGapsParams{}, &capability); err != nil || !capability.OK {
+			return emitError(cmd, 2, "the daemon predates accepted gaps; restart it with `no-mistakes daemon restart`")
+		}
+	}
+
+	result, err := sendRespond(env.client, runID, stepName, act, findingIDs, ignoreIDs, instructions, added, ra.reason, acceptGapIDs, ra.coveredBy)
 	if err != nil {
 		var refusal *respondRefusalError
 		if errors.As(err, &refusal) {

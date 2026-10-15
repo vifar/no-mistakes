@@ -9,6 +9,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/safepath"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
@@ -210,9 +211,21 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 // Restamping is also an owner-authorized appendix edit. Recompute its integrity
 // guard without touching author text, while refusing evidence edited by anyone
 // else. Legacy unmarked bodies retain the existing restamp contract.
-func rebindOwnedPRAttestation(body, head string, steps []*db.StepResult, policy pipelineAttestationPolicy) (string, bool, error) {
+func rebindOwnedPRAttestation(body, head string, steps []*db.StepResult, policy pipelineAttestationPolicy, provider scm.Provider) (string, bool, error) {
 	if !hasPRAppendixMarkers(body) {
 		updated, rebound := rebindPipelineAttestationWithSteps(body, head, steps, policy)
+		// The accepted-gap audit is independent of the attestation: a provider
+		// whose ordinary bodies carry no HTML attestation (Bitbucket) still has
+		// to gain, change or lose the block when the gap state changes. It is
+		// applied to any body that is recognizably ours, never to a foreign PR.
+		if steps != nil && (rebound || acceptedGapAuditApplicable(updated)) {
+			var err error
+			updated, err = rebindAcceptedGapAudit(updated, steps, provider)
+			if err != nil {
+				return "", false, err
+			}
+			rebound = true
+		}
 		return updated, rebound, nil
 	}
 	parts, err := parsePROwnedBody(body)
@@ -220,9 +233,19 @@ func rebindOwnedPRAttestation(body, head string, steps []*db.StepResult, policy 
 		return "", false, err
 	}
 	appendix, rebound := rebindPipelineAttestationWithSteps(parts.appendix, head, steps, policy)
-	if !rebound {
+	if !rebound && !(steps != nil && acceptedGapAuditApplicable(appendix)) {
 		return "", false, fmt.Errorf("cannot rebind the owned PR attestation")
 	}
+	if steps != nil {
+		appendix, err = rebindAcceptedGapAudit(appendix, steps, provider)
+		if err != nil {
+			return "", false, err
+		}
+	}
+	// Restamps reach UpdatePR without the draft path's redaction. The generated
+	// appendix is ours, so route it through the same publication redaction before
+	// the integrity guard is recomputed; author text outside it is untouched.
+	appendix = safepath.RedactText(appendix)
 	updated := parts.before + wrapPRAppendix(appendix) + parts.after
 	if len(updated) > maxPullRequestBodyBytes {
 		return "", false, fmt.Errorf("restamped PR body exceeds the publication budget")

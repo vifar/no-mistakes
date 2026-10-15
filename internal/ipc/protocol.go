@@ -18,6 +18,7 @@ const (
 	MethodResolvePiProfile          = "resolve_pi_profile"
 	MethodProbeOmitIntent           = "probe_omit_intent"
 	MethodProbeExternalCIOwner      = "probe_external_ci_owner"
+	MethodProbeAcceptedGaps         = "probe_accepted_gaps"
 	MethodReleaseVerificationPlan   = "release_verification_plan"
 	MethodCaptureVerificationPlan   = "capture_verification_plan"
 	MethodStartFreshRun             = "start_fresh_run"
@@ -168,6 +169,15 @@ type ProbeExternalCIOwnerResult struct {
 	OK bool `json:"ok"`
 }
 
+// ProbeAcceptedGaps is the capability check for RespondParams.AcceptGaps and
+// CoveredBy. An older daemon decodes respond requests permissively and would
+// drop both fields, turning an accepted-gap approval into a plain approval
+// whose refusal hides the cause; a distinct method is refused as not found.
+type ProbeAcceptedGapsParams struct{}
+type ProbeAcceptedGapsResult struct {
+	OK bool `json:"ok"`
+}
+
 // ClaimLaunchReceiptParams identifies one exact opaque receipt binding.
 // Generic run/status surfaces never expose launch bindings or intent digests.
 type ClaimLaunchReceiptParams struct {
@@ -285,6 +295,11 @@ type RespondParams struct {
 	Instructions     map[string]string    `json:"instructions,omitempty"`
 	AddedFindings    []types.Finding      `json:"added_findings,omitempty"`
 	ApprovalReason   string               `json:"approval_reason,omitempty"` // Test approval only
+	// AcceptGaps names the Test findings an owner accepts as a strict-shipping
+	// gap. It rides on ActionApprove with ApprovalReason (who approved, where)
+	// and CoveredBy (the tests that cover the gap), both stored verbatim.
+	AcceptGaps []string `json:"accept_gaps,omitempty"`
+	CoveredBy  string   `json:"covered_by,omitempty"`
 }
 
 // CancelRunParams cancels an active pipeline run.
@@ -576,6 +591,11 @@ type StepResultInfo struct {
 	// pipeline.ApprovalOverrideVerifier and db.StepResult.OverrideReason.
 	OverrideReason string `json:"override_reason,omitempty"`
 	SkipReason     string `json:"skip_reason,omitempty"`
+	// AcceptedGapRecorded is true when a valid owner-accepted Test gap is
+	// durably recorded on this step (db.StepResult.ValidAcceptedGaps). A parked
+	// Test step can hold one after a daemon stop between recording and
+	// completion; gate help then offers the recovery approval.
+	AcceptedGapRecorded bool `json:"accepted_gap_recorded,omitempty"`
 }
 
 // --- Events (for subscribe stream) ---

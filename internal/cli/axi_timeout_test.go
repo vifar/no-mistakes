@@ -430,6 +430,9 @@ type axiTimeoutOpts struct {
 	// respond, when set, replaces the default respond handler so a test can
 	// return the refusals and recorded dispositions the CLI has to render.
 	respond func(context.Context, json.RawMessage) (interface{}, error)
+	// withoutAcceptedGaps leaves the accepted-gap capability probe unregistered,
+	// like a daemon that predates accepted gaps.
+	withoutAcceptedGaps bool
 }
 
 type axiTimeoutFixture struct {
@@ -545,6 +548,11 @@ func newAxiTimeoutFixture(t *testing.T, opts axiTimeoutOpts) *axiTimeoutFixture 
 	srv.Handle(ipc.MethodGateContext, func(context.Context, json.RawMessage) (interface{}, error) {
 		return &ipc.GateContextResult{Nested: false}, nil
 	})
+	if !opts.withoutAcceptedGaps {
+		srv.Handle(ipc.MethodProbeAcceptedGaps, func(context.Context, json.RawMessage) (interface{}, error) {
+			return &ipc.ProbeAcceptedGapsResult{OK: true}, nil
+		})
+	}
 	srv.Handle(ipc.MethodGetActiveRun, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
 		run, err := fx.callGetActive(ctx)
 		if err != nil {

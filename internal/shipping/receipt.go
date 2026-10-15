@@ -51,6 +51,9 @@ type Step struct {
 	Step      string `json:"step"`
 	Status    string `json:"status"`
 	Execution string `json:"execution"`
+	// AcceptedGaps carries the owner-approved Test gap this step completed
+	// with, re-validated from durable state when the receipt is built.
+	AcceptedGaps *db.AcceptedGaps `json:"accepted_gaps,omitempty"`
 }
 type Payload struct {
 	SchemaVersion    int    `json:"schema_version"`
@@ -273,6 +276,10 @@ func durablePayload(database *db.DB, runID, phase string) (Payload, error) {
 			want = types.StepStatusRunning
 		}
 		noSurfaceAcknowledged := row.ApprovalReason != nil && row.NoSurfaceTestAcknowledgmentEligible()
+		var acceptedGaps *db.AcceptedGaps
+		if row.StepName == types.StepTest {
+			acceptedGaps = row.ValidAcceptedGaps()
+		}
 		if row.StepName != sequence[i] || row.Status != want || row.StepName == types.StepTest && row.StrictApprovalRefusal("") != "" || row.SkipReason != nil || row.OverrideReason != nil || row.ApprovalReason != nil && !noSurfaceAcknowledged || row.ExitCode != nil && *row.ExitCode != 0 {
 			return p, fmt.Errorf("shipping step is incomplete, skipped, or overridden: %s", row.StepName)
 		}
@@ -280,7 +287,7 @@ func durablePayload(database *db.DB, runID, phase string) (Payload, error) {
 		if r.Shipping.Mode == types.ShippingImmutableSource && (row.StepName == types.StepRebase || row.StepName == types.StepPush) {
 			execution = "verified-immutable"
 		}
-		proofSteps = append(proofSteps, Step{string(row.StepName), string(row.Status), execution})
+		proofSteps = append(proofSteps, Step{string(row.StepName), string(row.Status), execution, acceptedGaps})
 		if row.FindingsJSON != nil {
 			findings, err := types.ParseFindingsJSON(*row.FindingsJSON)
 			if err != nil {
@@ -289,7 +296,7 @@ func durablePayload(database *db.DB, runID, phase string) (Payload, error) {
 			if row.StepName == types.StepTest && findings.Verdict == types.TestVerdictNoSurface && !noSurfaceAcknowledged {
 				return p, fmt.Errorf("shipping no-surface Test lacks a valid acknowledgment")
 			}
-			if types.HasActionableFindings(findings) && !noSurfaceAcknowledged {
+			if types.HasActionableFindings(findings) && !noSurfaceAcknowledged && acceptedGaps == nil {
 				return p, fmt.Errorf("shipping findings remain actionable: %s", row.StepName)
 			}
 			if row.StepName == types.StepReview {

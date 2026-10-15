@@ -60,12 +60,13 @@ func wrapValidation(inner string) string {
 }
 
 // minimalTail is the one-line risk level plus the attestation the pipeline
-// section already carries. Ordinary Bitbucket descriptions carry no
+// section already carries, preserving any mandatory accepted-gap audit even
+// when the rest of the evidence is omitted. Ordinary Bitbucket descriptions carry no
 // attestation comment; this does not invent one. An owned Bitbucket body
 // carries that comment inside a text fence, and the fence is kept so the
 // marker stays visible there.
 func minimalTail(risk, pipelineMD string, provider scm.Provider) string {
-	return joinBlocks(oneLineRisk(neutralizeAttestationMarkers(provider, risk)), noMistakesPRSignature, carriedAttestation(pipelineMD))
+	return joinBlocks(oneLineRisk(neutralizeAttestationMarkers(provider, risk)), noMistakesPRSignature, carriedAttestation(pipelineMD), acceptedGapAuditBlock(pipelineMD))
 }
 
 func oneLineRisk(risk string) string {
@@ -113,7 +114,10 @@ func narrativeWithIntent(sctx *pipeline.StepContext, whatChanged string) string 
 	return prependIntentSection(narrative, sctx)
 }
 
-func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) string {
+func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) (body string) {
+	defer func() {
+		body = preserveAcceptedGapAudit(body, narrativeWithIntent(sctx, whatChanged), pipelineMD, bodyLimit, scm.PRBodyLen, scm.ClampPRBody)
+	}()
 	switch appendixMode(sctx) {
 	case config.PRAppendixMinimal:
 		return assembleMinimalPRBody(sctx, whatChanged, riskLine, pipelineMD, bodyLimit, provider)
@@ -149,7 +153,10 @@ func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.St
 
 // buildPRBodyWithin is buildPRBody under a byte budget below the default,
 // which the Issues section uses to reserve its own room.
-func buildPRBodyWithin(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, provider scm.Provider, maxBytes int) string {
+func buildPRBodyWithin(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, provider scm.Provider, maxBytes int) (assembled string) {
+	defer func() {
+		assembled = preserveAcceptedGapAudit(assembled, narrativeWithIntent(sctx, body), pipelineMD, maxBytes, func(s string) int { return len(s) }, clampPRBytes)
+	}()
 	switch appendixMode(sctx) {
 	case config.PRAppendixMinimal:
 		return buildMinimalPRBody(body, riskLine, pipelineMD, sctx, maxBytes, provider)

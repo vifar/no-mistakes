@@ -218,7 +218,7 @@ func runAxiHome(cmd *cobra.Command) error {
 		if gate, ok := rv.awaitingStep(); ok {
 			gated = true
 			gatedOnAnswers = pipeline.HasUnansweredReviewQuestion(gate.FindingsJSON)
-			fields = append(fields, gateFields(gate)...)
+			fields = append(fields, gateFieldsFor(gate, "", rv.Shipping != nil)...)
 		}
 	} else if otherActive != nil {
 		steps, _ := env.d.GetStepsByRun(otherActive.ID)

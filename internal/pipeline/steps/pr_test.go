@@ -2790,7 +2790,7 @@ func TestPRStep_EvidenceQuotingAnOwnedBodyStaysRestampable(t *testing.T) {
 	}
 
 	newHead := strings.Repeat("ab", 20)
-	rebound, ok, err := rebindOwnedPRAttestation(content.Body, newHead, nil, pipelineAttestationPolicy{})
+	rebound, ok, err := rebindOwnedPRAttestation(content.Body, newHead, nil, pipelineAttestationPolicy{}, scm.ProviderGitHub)
 	if err != nil || !ok {
 		t.Fatalf("restamp of an ordinary body quoting an owned body = ok %v, err %v:\n%s", ok, err, content.Body)
 	}

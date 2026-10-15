@@ -70,6 +70,10 @@ type pipelineAttestationStep struct {
 	// a failing configured commands.test. Omitted for every other step, ordinary
 	// Test completions, and attestations that predate the field.
 	OverrideReason string `json:"override_reason,omitempty"`
+	// AcceptedGaps binds the owner-accepted Test gap to the human audit block
+	// using finding IDs and digests of the reason and covering tests. Omitted
+	// when no gap was accepted.
+	AcceptedGaps *pipelineAttestationAcceptedGaps `json:"accepted_gaps,omitempty"`
 }
 
 // pipelineAttestationLiveValidation reports the run's verdict and how much of
@@ -162,6 +166,12 @@ func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 		b.WriteString(buildPipelineAttestationWithPolicy(steps, rounds, headSHA, policy))
 		b.WriteString("\n\n")
 	}
+	if gapBlock := buildAcceptedGapsBlock(steps, provider); gapBlock != "" {
+		// Neutralized like every detail block: the reason and covering tests
+		// are operator text and must not mint a second attestation marker.
+		b.WriteString(gapBlock)
+		b.WriteString("\n\n")
+	}
 	for i, detail := range detailBlocks {
 		if i > 0 {
 			b.WriteString("\n")
@@ -208,6 +218,7 @@ func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.Step
 				attestation.AllowTestCommandOverride = strings.TrimSpace(policy.AllowTestCommandOverride)
 			}
 		}
+		item.AcceptedGaps = attestedAcceptedGaps(sr)
 		attestation.Steps = append(attestation.Steps, item)
 	}
 	// A custom gate shares its anchor's order, so the tie-break decides where
@@ -304,6 +315,7 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 	if err := json.Unmarshal([]byte(body[payloadStart:end]), &attestation); err != nil {
 		return body, false
 	}
+	keepAcceptedGaps := steps == nil
 	if steps == nil {
 		// A CI repair that did not re-run Test keeps the prior Test result,
 		// including an approved-over-failure override_reason. The caller's
@@ -321,6 +333,15 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 		}
 	}
 	rebound := newPipelineAttestation(steps, nil, newHeadSHA, policy)
+	if keepAcceptedGaps {
+		for i := range rebound.Steps {
+			for _, previous := range attestation.Steps {
+				if previous.Step == rebound.Steps[i].Step {
+					rebound.Steps[i].AcceptedGaps = previous.AcceptedGaps
+				}
+			}
+		}
+	}
 	// Step statuses may be republished for a head the pipeline did not
 	// re-validate. Live validation is a factual claim about one commit's
 	// behavior, so it is derived only from current step findings and never
@@ -1649,6 +1670,7 @@ func escapePipelineFoldMarkers(s string) string {
 // through here - the grammar has to travel with the text, because GitLab
 // resolves a reference inside a code block where GitHub does not.
 func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
+	s = strings.NewReplacer(acceptedGapsStart, "<!-- no-mistakes:accepted\\-gaps:start -->", acceptedGapsEnd, "<!-- no-mistakes:accepted\\-gaps:end -->").Replace(s)
 	escaped := escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
 	return closingGrammarFor(provider).neutralize(escaped)
 }

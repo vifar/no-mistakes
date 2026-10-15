@@ -37,6 +37,9 @@ type StepResult struct {
 	// the configured-command waiver used by PR enforcement. NULL means no
 	// recorded approval; an empty string means approved without a reason.
 	ApprovalReason *string
+	// AcceptedGapsJSON is the audit record of an owner-approved Test gap
+	// accepted under strict shipping (see AcceptedGaps). NULL means none.
+	AcceptedGapsJSON *string
 	// SkipReason records an automatic PR/CI skip, distinct from an explicit
 	// per-run skip. Legacy rows have no recorded reason.
 	SkipReason *string
@@ -71,6 +74,11 @@ func (d *DB) readableStepResultColumns() string {
 	} else {
 		columns += ", NULL AS approval_reason"
 	}
+	if d.hasColumn("step_results", "accepted_gaps_json") {
+		columns += ", accepted_gaps_json"
+	} else {
+		columns += ", NULL AS accepted_gaps_json"
+	}
 	return columns
 }
 
@@ -98,7 +106,7 @@ func (d *DB) GetStepResult(id string) (*StepResult, error) {
 	s := &StepResult{}
 	err := d.sql.QueryRow(
 		`SELECT `+d.readableStepResultColumns()+` FROM step_results WHERE id = ?`, id,
-	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.RoundStartedAt, &s.OverrideReason, &s.SkipReason, &s.ApprovalReason)
+	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.RoundStartedAt, &s.OverrideReason, &s.SkipReason, &s.ApprovalReason, &s.AcceptedGapsJSON)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -128,7 +136,7 @@ func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
 	var steps []*StepResult
 	for rows.Next() {
 		s := &StepResult{}
-		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.RoundStartedAt, &s.OverrideReason, &s.SkipReason, &s.ApprovalReason); err != nil {
+		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.RoundStartedAt, &s.OverrideReason, &s.SkipReason, &s.ApprovalReason, &s.AcceptedGapsJSON); err != nil {
 			return nil, fmt.Errorf("scan step result: %w", err)
 		}
 		steps = append(steps, s)
@@ -150,7 +158,7 @@ func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 		SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL,
 			findings_json = NULL, error = NULL, started_at = NULL,
 			round_started_at = NULL, completed_at = NULL, last_activity_at = NULL, last_activity = NULL,
-			agent_pid = NULL, auto_fix_limit = NULL, override_reason = NULL, approval_reason = NULL
+			agent_pid = NULL, auto_fix_limit = NULL, override_reason = NULL, approval_reason = NULL, accepted_gaps_json = NULL
 		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped)
 	if err != nil {
 		return fmt.Errorf("reset steps for revalidation: %w", err)
@@ -240,7 +248,7 @@ func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
 // one recorded by an earlier execution.
 func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = ?, override_reason = NULL, approval_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimitDBValue(autoFixLimit), id)
+	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = ?, override_reason = NULL, approval_reason = NULL, accepted_gaps_json = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimitDBValue(autoFixLimit), id)
 	if err != nil {
 		return fmt.Errorf("start step fix round: %w", err)
 	}
@@ -298,6 +306,9 @@ func (s *StepResult) TestOverrideReason() string {
 	condition := s.testExceptionCondition()
 	if condition == "" {
 		return ""
+	}
+	if gaps := s.ValidAcceptedGaps(); gaps != nil {
+		return strings.TrimSpace(condition + "\nTest gap accepted (" + strings.Join(gaps.FindingIDs, ", ") + "): " + gaps.Reason + "; covered by: " + gaps.CoveredBy)
 	}
 	if s.ApprovalReason == nil {
 		return condition
@@ -359,8 +370,8 @@ func (d *DB) CompleteSkippedStep(id string, exitCode int, durationMS int64, logP
 
 func (d *DB) completeStep(id string, status types.StepStatus, exitCode int, durationMS int64, logPath, skipReason string) error {
 	_, err := d.sql.Exec(
-		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, log_path = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, skip_reason = NULLIF(?, ''), override_reason = CASE WHEN ? THEN NULL ELSE override_reason END, approval_reason = CASE WHEN ? THEN NULL ELSE approval_reason END WHERE id = ?`,
-		status, exitCode, durationMS, logPath, now(), now(), fmt.Sprintf("status: %s", status), skipReason, status == types.StepStatusSkipped, status == types.StepStatusSkipped, id,
+		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, log_path = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, skip_reason = NULLIF(?, ''), override_reason = CASE WHEN ? THEN NULL ELSE override_reason END, approval_reason = CASE WHEN ? THEN NULL ELSE approval_reason END, accepted_gaps_json = CASE WHEN ? THEN NULL ELSE accepted_gaps_json END WHERE id = ?`,
+		status, exitCode, durationMS, logPath, now(), now(), fmt.Sprintf("status: %s", status), skipReason, status == types.StepStatusSkipped, status == types.StepStatusSkipped, status == types.StepStatusSkipped, id,
 	)
 	if err != nil {
 		return fmt.Errorf("complete step: %w", err)
@@ -486,6 +497,16 @@ func (s *StepResult) NoSurfaceTestAcknowledgmentEligible() bool {
 	return err == nil && types.IsNoSurfaceTestAcknowledgment(findings)
 }
 
+// StrictApprovalRefusalWithGaps is StrictApprovalRefusal for an approval that
+// may carry an accepted-gap request. With a request, AcceptedGapRefusal alone
+// decides; without one it is exactly StrictApprovalRefusal.
+func (s *StepResult) StrictApprovalRefusalWithGaps(reason string, gaps *AcceptedGaps) string {
+	if gaps == nil {
+		return s.StrictApprovalRefusal(reason)
+	}
+	return s.AcceptedGapRefusal(true, *gaps)
+}
+
 func (s *StepResult) StrictApprovalRefusal(reason string) string {
 	if s.StepName == types.StepReview {
 		return "strict Review requires a complete independent review; fix or rerun the review"
@@ -496,11 +517,14 @@ func (s *StepResult) StrictApprovalRefusal(reason string) string {
 	if s.OverrideReason != nil || s.SkipReason != nil {
 		return "strict shipping forbids recorded overrides or skips"
 	}
+	if reason == "" && s.ValidAcceptedGaps() != nil {
+		return ""
+	}
 	if s.NoSurfaceTestAcknowledgmentEligible() {
 		return ""
 	}
 	if reason != "" || s.ApprovalReason != nil {
-		return "strict shipping forbids Test exceptions"
+		return "strict shipping forbids Test exceptions" + s.acceptedGapHint()
 	}
 	if s.FindingsJSON != nil {
 		findings, err := types.ParseFindingsJSON(*s.FindingsJSON)
@@ -512,7 +536,7 @@ func (s *StepResult) StrictApprovalRefusal(reason string) string {
 			}
 		}
 		if err != nil || types.HasActionableFindings(findings) || s.StepName == types.StepTest && (findings.Verdict == types.TestVerdictNoSurface || findings.Verdict == types.TestVerdictNoGo || findings.Verdict == types.TestVerdictInconclusive) {
-			return "strict shipping cannot approve unresolved actionable findings"
+			return "strict shipping cannot approve unresolved actionable findings" + s.acceptedGapHint()
 		}
 	}
 	return ""

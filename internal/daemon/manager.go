@@ -2120,9 +2120,32 @@ func (m *RunManager) HandleRespond(runID string, step types.StepName, action typ
 // declines, user instructions, and user-authored findings to the executor, and
 // returns the dispositions the response recorded.
 func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string) (pipeline.RespondDispositions, error) {
+	return m.HandleRespondWithAcceptedGaps(runID, step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, nil)
+}
+
+// HandleRespondWithAcceptedGaps is HandleRespondWithOverrides for an approval
+// that may carry an owner-accepted Test gap. The pre-check here and the
+// executor's live gate share db.StepResult.AcceptedGapRefusal.
+func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps) (pipeline.RespondDispositions, error) {
 	run, err := m.db.GetRun(runID)
 	if err != nil {
 		return pipeline.RespondDispositions{}, err
+	}
+	if gaps != nil && action != types.ActionApprove {
+		return pipeline.RespondDispositions{}, fmt.Errorf("--accept-gap requires --action approve")
+	}
+	if run != nil && run.Shipping == nil && gaps != nil {
+		rows, err := m.db.GetStepsByRun(runID)
+		if err != nil {
+			return pipeline.RespondDispositions{}, err
+		}
+		for _, row := range rows {
+			if row.StepName == step {
+				if refusal := row.AcceptedGapRefusal(false, *gaps); refusal != "" {
+					return pipeline.RespondDispositions{}, errors.New(refusal)
+				}
+			}
+		}
 	}
 	if run != nil && run.Shipping != nil {
 		if action == types.ActionSkip {
@@ -2138,7 +2161,7 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 			}
 			for _, row := range rows {
 				if row.StepName == step {
-					if refusal := row.StrictApprovalRefusal(approvalReason); refusal != "" {
+					if refusal := row.StrictApprovalRefusalWithGaps(approvalReason, gaps); refusal != "" {
 						return pipeline.RespondDispositions{}, errors.New(refusal)
 					}
 				}
@@ -2153,7 +2176,7 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 		return pipeline.RespondDispositions{}, fmt.Errorf("no active executor for run %s", runID)
 	}
 
-	return exec.RespondWithOverrides(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason)
+	return exec.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, gaps)
 }
 
 // HandleAnswerReviewQuestion records one operator answer to a question the

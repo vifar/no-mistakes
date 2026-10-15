@@ -394,3 +394,70 @@ func TestExportNoSurfaceAcknowledgment(t *testing.T) {
 		}
 	}
 }
+
+func TestExportAcceptedTestGap(t *testing.T) {
+	const verdict = `{"id":"test-verdict","severity":"warning","action":"ask-user","category":"test-verdict","description":"live validation verdict: inconclusive (1 of 2 scenarios were driven live against the product); untested: broker timeout"}`
+	const evidence = `{"findings":[` + verdict + `],"verdict":"inconclusive"}`
+	const reason = "owner approved via first mate, 2026-10-14"
+	const coveredBy = "TestBrokerTimeoutMocked"
+	for _, kind := range []string{"accepted", "unrecorded", "extra-defect-after-record", "plain-approval-reason", "exit-code"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newExportFixture(t)
+			rows, err := f.database.GetStepsByRun(f.run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sr := rows[3]
+			raw := evidence
+			exit := 0
+			if kind == "exit-code" {
+				exit = 1
+			}
+			if err := f.database.ParkStepForApproval(f.run.ID, sr.ID, types.StepStatusAwaitingApproval, 0, 1, &raw); err != nil {
+				t.Fatal(err)
+			}
+			if kind != "unrecorded" {
+				if _, err := f.database.RecordAcceptedGaps(sr.ID, db.AcceptedGaps{FindingIDs: []string{"test-verdict"}, Reason: reason, CoveredBy: coveredBy}, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			switch kind {
+			case "extra-defect-after-record":
+				raw = `{"findings":[` + verdict + `,{"id":"test-2","severity":"error","action":"ask-user","description":"defect"}],"verdict":"inconclusive"}`
+				if err := f.database.SetStepFindings(sr.ID, raw); err != nil {
+					t.Fatal(err)
+				}
+			case "plain-approval-reason":
+				if err := f.database.SetTestApprovalReason(sr.ID, reason); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := f.database.CompleteStep(sr.ID, exit, 1, ""); err != nil {
+				t.Fatal(err)
+			}
+			exported, err := Export(context.Background(), f.database, f.repo, f.run.ID, "review", f.forge)
+			if kind != "accepted" {
+				if err == nil {
+					t.Fatal("receipt issued without a valid accepted gap")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("valid accepted gap refused receipt: %v", err)
+			}
+			var payload Payload
+			if err := json.Unmarshal(exported, &payload); err != nil {
+				t.Fatal(err)
+			}
+			step := payload.Steps[3]
+			if step.Status != "completed" || step.Execution != "performed" || step.AcceptedGaps == nil || step.AcceptedGaps.Reason != reason || step.AcceptedGaps.CoveredBy != coveredBy || len(step.AcceptedGaps.FindingIDs) != 1 || step.AcceptedGaps.FindingIDs[0] != "test-verdict" {
+				t.Fatalf("receipt step = %+v", step)
+			}
+			for i, other := range payload.Steps {
+				if i != 3 && other.AcceptedGaps != nil {
+					t.Fatalf("accepted gaps leaked onto %s", other.Step)
+				}
+			}
+		})
+	}
+}
