@@ -330,3 +330,54 @@ func TestHeldQueueStartsNothingUntilReleased(t *testing.T) {
 	f.waitStarted(ids[1])
 	f.step.release(ids[1])
 }
+
+// Turning hold_slot_while_parked off at runtime releases the slots of gates that
+// were already parked under it - they never yield again on their own - so queued
+// runs are not blocked behind them. The parked gate itself stays parked and
+// resumes with priority.
+func TestDisablingHoldReleasesAlreadyParkedSlots(t *testing.T) {
+	slowWatcher(t, time.Hour)
+	f := newFaultFixture(t, "1")
+	if err := config.SetGlobalDaemonSetting(f.p.ConfigFile(), "hold_slot_while_parked", "true"); err != nil {
+		t.Fatal(err)
+	}
+	f.mgr.ReloadLimits()
+
+	parked := f.push("park1")
+	f.waitFor("gate to park", func() bool {
+		run, err := f.d.GetRun(parked)
+		return err == nil && run != nil && run.AwaitingAgentSince != nil
+	})
+	blocked := f.push("blocked")
+	later := f.push("later")
+	if st := f.mgr.sched.stats(); st.Active != 1 || st.Queued != 2 {
+		t.Fatalf("under hold the parked gate must keep its slot: %+v", st)
+	}
+	if f.started(blocked) {
+		t.Fatal("a queued run started behind a parked gate that holds the only slot")
+	}
+
+	if err := config.SetGlobalDaemonSetting(f.p.ConfigFile(), "hold_slot_while_parked", "false"); err != nil {
+		t.Fatal(err)
+	}
+	usage := f.mgr.ReloadLimits()
+	if usage.HoldSlotWhileParked {
+		t.Fatalf("reload did not apply the new policy: %+v", usage)
+	}
+	f.waitStarted(blocked)
+	if run, _ := f.d.GetRun(parked); run == nil || run.AwaitingAgentSince == nil || run.Status != types.RunRunning {
+		t.Fatalf("the parked gate was disturbed: %+v", run)
+	}
+	if st := f.mgr.sched.stats(); st.Yielded != 1 || st.Active != 1 {
+		t.Fatalf("after disabling hold: %+v, want the gate yielded and the blocked run holding the slot", st)
+	}
+
+	// The gate resumes with priority over the run that queued after it parked.
+	if err := f.mgr.HandleRespond(parked, types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.step.release(blocked)
+	f.waitFor("the parked gate to complete first", func() bool { return f.status(parked) == types.RunCompleted })
+	f.waitStarted(later)
+	f.step.release(later)
+}

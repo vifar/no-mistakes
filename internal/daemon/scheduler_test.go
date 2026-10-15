@@ -520,3 +520,102 @@ func TestSchedulerSecondAcquireWaitsForFirstAndSurvivesItsCancel(t *testing.T) {
 		t.Fatalf("stats = %+v, want the run holding exactly one slot", st)
 	}
 }
+
+func TestSchedulerDisablingHoldReleasesOnlyParkedHeldSlots(t *testing.T) {
+	h := newSchedHarness(2, true)
+	parked, _ := h.tryAdmit("parked")
+	working, _ := h.tryAdmit("working")
+	h.enqueue("queued")
+	parked.Yield() // skipped by the policy: parked while holding
+	if st := h.stats(); st.Active != 2 || st.Yielded != 0 {
+		t.Fatalf("under hold: %+v", st)
+	}
+	h.setLimits(2, false)
+	h.dispatch()
+	if got := h.startedIDs(); !equalIDs(got, []string{"queued"}) {
+		t.Fatalf("started = %v, want the queued run to take the parked gate's slot", got)
+	}
+	if st := h.stats(); st.Active != 2 || st.Yielded != 1 {
+		t.Fatalf("after disabling hold: %+v, want the parked gate yielded and the working run untouched", st)
+	}
+	// The working run never yielded, so its slot was not taken.
+	if !working.held {
+		t.Fatal("a run that was not parked lost its slot")
+	}
+	// The parked gate resumes with priority, like any yielded run.
+	got := make(chan error, 1)
+	go func() { got <- parked.Acquire(context.Background()) }()
+	waitForSchedCondition(t, func() bool { _, _, w := position(h, "parked"); return w })
+	working.Release()
+	if err := <-got; err != nil {
+		t.Fatal(err)
+	}
+	// Re-enabling hold is not retroactive and a resumed run is never released by it.
+	h.setLimits(2, true)
+	h.dispatch()
+	if !parked.held {
+		t.Fatal("re-enabling hold took the slot of a running gate")
+	}
+}
+
+// A run that resumes concurrently with the policy change keeps its slot: the
+// release only takes slots still marked parked-while-holding.
+func TestSchedulerResumedHeldSlotIsNotReleasedByPolicyChange(t *testing.T) {
+	h := newSchedHarness(1, true)
+	slot, _ := h.tryAdmit("run")
+	slot.Yield()
+	if err := slot.Acquire(context.Background()); err != nil { // resume while holding
+		t.Fatal(err)
+	}
+	h.setLimits(1, false)
+	h.dispatch()
+	if !slot.held || h.stats().Active != 1 || h.stats().Yielded != 0 {
+		t.Fatalf("a resumed run lost its slot on the policy change: %+v held=%v", h.stats(), slot.held)
+	}
+}
+
+// Disabling hold releases the slots of runs parked under it, starts the queue,
+// and leaves a run that resumed in the meantime holding its slot.
+func TestSchedulerDisablingHoldReleasesParkedSlots(t *testing.T) {
+	h := newSchedHarness(1, true)
+	parked, _ := h.tryAdmit("parked")
+	h.enqueue("queued")
+	parked.Yield() // skipped by the hold policy
+	if got := h.startedIDs(); len(got) != 0 {
+		t.Fatalf("started %v under hold", got)
+	}
+	h.setLimits(1, false)
+	h.dispatch()
+	if got := h.startedIDs(); !equalIDs(got, []string{"queued"}) {
+		t.Fatalf("started = %v after disabling hold, want [queued]", got)
+	}
+	if st := h.stats(); st.Yielded != 1 || st.Active != 1 {
+		t.Fatalf("stats = %+v, want the parked run yielded and the queued one active", st)
+	}
+	// It resumes through the normal priority path.
+	done := make(chan error, 1)
+	go func() { done <- parked.Acquire(context.Background()) }()
+	waitForSchedCondition(t, func() bool { _, _, w := position(h, "parked"); return w })
+	h.slot("queued").Release()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSchedulerResumedRunKeepsItsSlotWhenHoldIsDisabled(t *testing.T) {
+	h := newSchedHarness(1, true)
+	run, _ := h.tryAdmit("run")
+	h.enqueue("queued")
+	run.Yield()
+	if err := run.Acquire(context.Background()); err != nil { // resumed: working again
+		t.Fatal(err)
+	}
+	h.setLimits(1, false)
+	h.dispatch()
+	if got := h.startedIDs(); len(got) != 0 {
+		t.Fatalf("a working run's slot was released: started %v", got)
+	}
+	if st := h.stats(); st.Active != 1 || st.Yielded != 0 {
+		t.Fatalf("stats = %+v", st)
+	}
+}

@@ -65,6 +65,7 @@ type RunManager struct {
 	// runs between the shutdown pre-check and handle registration. Both exist
 	// so tests can inject faults and pauses.
 	claimQueued          func(runID string) (bool, error)
+	markQueued           func(runID, spec string) (int64, error)
 	beforeQueuedRegister func()
 	// afterSupersedeSnapshot runs between supersession's snapshot of a branch's
 	// runs and the cancellation of each; a test seam for that race.
@@ -148,6 +149,7 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 	}
 	m.limitsCache = runLimits{max: config.DefaultMaxConcurrentRuns}
 	m.claimQueued = database.ClaimQueuedRun
+	m.markQueued = database.MarkRunQueued
 	m.sched = newSlotScheduler(m.liveLimits, &m.mu)
 	m.sched.start = m.startQueuedRun
 	return m
@@ -2125,7 +2127,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// from the row alone, so a queued run also survives a daemon restart.
 	slot, err := m.admitRun(run, queueSpec{Trigger: trigger, SkipSteps: skipSteps})
 	if err != nil {
-		m.db.UpdateRunError(run.ID, fmt.Sprintf("queue run: %s", err))
+		// The row exists but is neither queued nor owned: end it through the
+		// shared setup-failure path (conditional, and it tells subscribers), so no
+		// orphan is left to block the branch's active-run lookup.
+		m.failRunSetup(ctx, run.ID, fmt.Sprintf("queue run: %s", err))
 		trackStartFailure("queue_run")
 		return "", fmt.Errorf("queue run: %w", err)
 	}
@@ -2179,7 +2184,7 @@ func (m *RunManager) admitRun(run *db.Run, spec queueSpec) (*runSlot, error) {
 		m.afterFullDecision()
 	}
 	m.mu.Lock()
-	if _, err := m.db.MarkRunQueued(run.ID, string(raw)); err != nil {
+	if _, err := m.markQueued(run.ID, string(raw)); err != nil {
 		m.mu.Unlock()
 		return nil, err
 	}

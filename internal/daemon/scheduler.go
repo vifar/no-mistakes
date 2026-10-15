@@ -41,8 +41,13 @@ type slotScheduler struct {
 	// yielded counts live runs that gave their slot back for a wait (a parked
 	// gate, the CI poll) and have not taken one again.
 	yielded int
-	prio    []*slotWaiter // resumed runs waiting for a slot, oldest first
-	queued  []string      // new runs not yet started, oldest first
+	// parkedHeld is the set of slots whose run is parked (or waiting on CI) but
+	// kept its slot because hold_slot_while_parked was on when it tried to yield.
+	// Turning the policy off releases them, so queued runs are not blocked by
+	// gates that would now have yielded.
+	parkedHeld map[*runSlot]struct{}
+	prio       []*slotWaiter // resumed runs waiting for a slot, oldest first
+	queued     []string      // new runs not yet started, oldest first
 }
 
 type slotWaiter struct {
@@ -64,8 +69,25 @@ func (s *slotScheduler) refresh() {
 		max = 0
 	}
 	s.mu.Lock()
+	releasing := s.hold && !hold
 	s.max, s.hold = max, hold
+	var parked []*runSlot
+	if releasing {
+		for slot := range s.parkedHeld {
+			parked = append(parked, slot)
+		}
+	}
 	s.mu.Unlock()
+	// hold_slot_while_parked was just switched off: gates already parked under
+	// it never yield again on their own, so give their slots back now. Turning
+	// it on needs no retroactive step - a run simply stops yielding.
+	released := false
+	for _, slot := range parked {
+		released = slot.releaseParked() || released
+	}
+	if released {
+		s.dispatch()
+	}
 }
 
 func (s *slotScheduler) capacityLocked() bool { return s.max == 0 || s.active < s.max }
@@ -203,6 +225,9 @@ type runSlot struct {
 	mu      sync.Mutex
 	held    bool
 	yielded bool // gave the slot back for a wait and is still alive
+	// parkedHeld: Yield was asked for but skipped by the hold policy, so the run
+	// is waiting while still holding its slot (see slotScheduler.parkedHeld).
+	parkedHeld bool
 	// flight is the one Acquire currently taking a slot for this run. Another
 	// concurrent Acquire waits on it instead of taking a second slot.
 	flight *acquireFlight
@@ -226,10 +251,12 @@ func (t *runSlot) release(yield bool) {
 		t.mu.Unlock()
 		return
 	}
+	t.parkedHeld = false
 	t.held = false
 	t.yielded = yield
 	t.mu.Unlock()
 	t.s.mu.Lock()
+	delete(t.s.parkedHeld, t)
 	if wasHeld {
 		t.s.active--
 	}
@@ -255,9 +282,47 @@ func (t *runSlot) Yield() {
 	hold := t.s.hold
 	t.s.mu.Unlock()
 	if hold {
+		t.markParkedHeld()
 		return
 	}
 	t.release(true)
+}
+
+// markParkedHeld records that this run is waiting while keeping its slot because
+// the hold policy skipped its yield.
+func (t *runSlot) markParkedHeld() {
+	t.mu.Lock()
+	if !t.held {
+		t.mu.Unlock()
+		return
+	}
+	t.parkedHeld = true
+	t.mu.Unlock()
+	t.s.mu.Lock()
+	if t.s.parkedHeld == nil {
+		t.s.parkedHeld = map[*runSlot]struct{}{}
+	}
+	t.s.parkedHeld[t] = struct{}{}
+	t.s.mu.Unlock()
+}
+
+// releaseParked gives back the slot of a run that is parked while holding it,
+// as if its yield had not been skipped. It reports whether it released one; a
+// run that resumed in the meantime is left alone.
+func (t *runSlot) releaseParked() bool {
+	t.mu.Lock()
+	if !t.held || !t.parkedHeld {
+		t.mu.Unlock()
+		return false
+	}
+	t.parkedHeld, t.held, t.yielded = false, false, true
+	t.mu.Unlock()
+	t.s.mu.Lock()
+	delete(t.s.parkedHeld, t)
+	t.s.active--
+	t.s.yielded++
+	t.s.mu.Unlock()
+	return true
 }
 
 // Acquire takes a slot again for a run that resumed work. It jumps ahead of
@@ -269,7 +334,17 @@ func (t *runSlot) Acquire(ctx context.Context) error {
 	for {
 		t.mu.Lock()
 		if t.held {
+			// The run is working again: end "parked while holding" in the same
+			// critical section, so a concurrent policy release cannot take the
+			// slot of a run that has just resumed.
+			was := t.parkedHeld
+			t.parkedHeld = false
 			t.mu.Unlock()
+			if was {
+				t.s.mu.Lock()
+				delete(t.s.parkedHeld, t)
+				t.s.mu.Unlock()
+			}
 			return nil
 		}
 		if f := t.flight; f != nil {

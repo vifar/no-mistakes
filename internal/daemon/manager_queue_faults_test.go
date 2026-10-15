@@ -966,3 +966,76 @@ func TestFailedQueueRestoreLeavesParkedGatesRecoverable(t *testing.T) {
 		t.Fatalf("queued row after the successful start = %s, want it still owned", got)
 	}
 }
+
+// When the cap is full and recording the run as queued fails, the freshly
+// inserted row must not be left pending outside the ownership table, where it
+// could be neither aborted nor dispatched and would block the branch: it ends
+// through the shared setup-failure path, so a later launch works normally.
+func TestAdmissionQueueWriteFailureEndsTheRunAndFreesTheBranch(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	holder := f.push("holder")
+	f.waitStarted(holder)
+
+	f.mgr.markQueued = func(string, string) (int64, error) {
+		return 0, errors.New("injected queue write failure")
+	}
+	_, err := f.mgr.HandlePushReceived(context.Background(), &ipc.PushReceivedParams{
+		Gate: f.p.RepoDir("fault-repo"),
+		Ref:  "refs/heads/victim",
+		Old:  "0000000000000000000000000000000000000000",
+		New:  f.head,
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected queue write failure") {
+		t.Fatalf("launch error = %v, want the queue write failure", err)
+	}
+	runs, err := f.d.GetRunsByRepo("fault-repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var orphan *db.Run
+	for _, run := range runs {
+		if run.Branch == "victim" {
+			orphan = run
+		}
+	}
+	if orphan == nil {
+		t.Fatal("the rejected launch left no row to inspect")
+	}
+	if orphan.Status != types.RunFailed || orphan.Error == nil || !strings.Contains(*orphan.Error, "queue run: injected queue write failure") {
+		t.Fatalf("rejected run = status %s error %v, want failed with the cause", orphan.Status, orphan.Error)
+	}
+	f.mgr.mu.Lock()
+	_, owned := f.mgr.runs[orphan.ID]
+	f.mgr.mu.Unlock()
+	if owned {
+		t.Fatal("the rejected run is still in the ownership table")
+	}
+	if active, err := f.d.GetActiveRun("fault-repo", "victim"); err != nil || active != nil {
+		t.Fatalf("branch active-run lookup = %+v, %v; the failed launch must not block it", active, err)
+	}
+	// Attached clients are told, not left waiting on a stream that never ends.
+	sub, err := f.mgr.Subscribe(orphan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, ok := sub.Next(ctx); !ok {
+		t.Fatal("missing initial stream gap")
+	}
+	if _, ok := sub.Next(ctx); ok || ctx.Err() != nil {
+		t.Fatalf("the rejected run's event stream was left open (ctx err %v)", ctx.Err())
+	}
+
+	// A later launch on the same branch is an ordinary one.
+	f.mgr.markQueued = f.d.MarkRunQueued
+	next := f.push("victim")
+	if got := f.status(next); got != types.RunQueued {
+		t.Fatalf("later launch status = %s, want queued behind the holder", got)
+	}
+	f.step.release(holder)
+	f.waitStarted(next)
+	f.step.release(next)
+	f.waitFor("later launch to complete", func() bool { return f.status(next) == types.RunCompleted })
+}
