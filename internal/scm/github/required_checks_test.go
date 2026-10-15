@@ -756,3 +756,87 @@ func TestGetChecksGreenJoblessAttemptDoesNotInheritRetiredIdentities(t *testing.
 		}
 	}
 }
+
+// Run 1 passes build, run 2 fails before jobs, run 3 is skipped. A skipped
+// attempt cannot retire run 2's failure, which still stands for build.
+func TestGetChecksSkippedSuccessorDoesNotRetireAFailure(t *testing.T) {
+	t.Parallel()
+	job1 := `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-14T10:00:00Z","completedAt":"2026-10-14T10:05:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/1/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`
+	runs := `[{"total_count":3,"workflow_runs":[` +
+		`{"id":1,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/1"},` +
+		`{"id":2,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/2"},` +
+		`{"id":3,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"skipped","run_started_at":"2026-10-14T12:00:00Z","html_url":"https://github.com/test/repo/actions/runs/3"}]}]`
+	checks := checksForAttempts(t, "["+job1+"]", runs)
+	scope := scm.NewCheckScope(nil, scm.CheckScopePolicy{Resolved: &scm.CheckScopeResolution{Required: []scm.RequiredCheck{{Context: "build"}}, Derived: true}}, "main", nil)
+	if scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks); scoped.Ready() {
+		t.Fatalf("a skipped successor exposed run 1's stale build: %+v", checks)
+	}
+}
+
+// Every sequence of up to three attempts of one workflow (same event and
+// branch, distinct runs started in order) with each outcome must give the same
+// readiness for a required build as GitHub's newest meaningful attempt: ready
+// exactly when the newest attempt that was not skipped reported a passing
+// build job.
+func TestGetChecksAttemptSequencesJudgeTheNewestMeaningfulAttempt(t *testing.T) {
+	t.Parallel()
+	outcomes := []string{"jobs-pass", "jobs-fail", "jobless-fail", "jobless-pass", "jobless-skip", "pending"}
+	var sequences [][]string
+	var build func(prefix []string)
+	build = func(prefix []string) {
+		if len(prefix) > 0 {
+			sequences = append(sequences, append([]string(nil), prefix...))
+		}
+		if len(prefix) == 3 {
+			return
+		}
+		for _, o := range outcomes {
+			build(append(prefix, o))
+		}
+	}
+	build(nil)
+	for _, seq := range sequences {
+		var jobs, runs []string
+		for i, outcome := range seq {
+			id := i + 1
+			start := fmt.Sprintf("2026-10-14T1%d:00:00Z", id)
+			status, conclusion := "completed", "success"
+			switch outcome {
+			case "jobs-fail", "jobless-fail":
+				conclusion = "failure"
+			case "jobless-skip":
+				conclusion = "skipped"
+			case "pending":
+				status, conclusion = "in_progress", ""
+			}
+			conclusionJSON := `"conclusion":null`
+			if conclusion != "" {
+				conclusionJSON = fmt.Sprintf(`"conclusion":%q`, conclusion)
+			}
+			runs = append(runs, fmt.Sprintf(`{"id":%d,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":%q,%s,"run_started_at":%q,"html_url":"https://github.com/test/repo/actions/runs/%d"}`, id, status, conclusionJSON, start, id))
+			if strings.HasPrefix(outcome, "jobs-") || outcome == "pending" {
+				jobConclusion, jobStatus := "SUCCESS", "COMPLETED"
+				if outcome == "jobs-fail" {
+					jobConclusion = "FAILURE"
+				}
+				if outcome == "pending" {
+					jobStatus, jobConclusion = "IN_PROGRESS", ""
+				}
+				jobs = append(jobs, fmt.Sprintf(`{"__typename":"CheckRun","databaseId":%d,"name":"build","status":%q,"conclusion":%q,"startedAt":%q,"completedAt":"2026-10-14T1%d:05:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/%d/job/%d","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`, 100+id, jobStatus, jobConclusion, start, id, id, 100+id))
+			}
+		}
+		want := false
+		for i := len(seq) - 1; i >= 0; i-- {
+			if seq[i] == "jobless-skip" {
+				continue
+			}
+			want = seq[i] == "jobs-pass"
+			break
+		}
+		checks := checksForAttempts(t, "["+strings.Join(jobs, ",")+"]", fmt.Sprintf(`[{"total_count":%d,"workflow_runs":[`, len(runs))+strings.Join(runs, ",")+`]}]`)
+		scope := scm.NewCheckScope(nil, scm.CheckScopePolicy{Resolved: &scm.CheckScopeResolution{Required: []scm.RequiredCheck{{Context: "build"}}, Derived: true}}, "main", nil)
+		if got := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks).Ready(); got != want {
+			t.Errorf("%v: ready = %v, want %v; checks = %+v", seq, got, want, checks)
+		}
+	}
+}

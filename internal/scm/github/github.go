@@ -768,7 +768,9 @@ func (h *Host) retireObsoleteJoblessRuns(jobless, runs []scm.Check) []scm.Check 
 	for i, run := range jobless {
 		latest := run
 		for _, other := range runs {
-			if sameTrigger(run, other) {
+			// A skipped attempt runs no jobs and stands for nothing, so it
+			// cannot make an earlier result obsolete.
+			if sameTrigger(run, other) && other.Bucket != scm.CheckBucketSkip {
 				if after, ordered := h.attemptAfter(other, latest); ordered && after {
 					latest = other
 				}
