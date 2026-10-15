@@ -307,8 +307,8 @@ var ReviewBots = []ReviewBot{
 // identified by its app or, when the provider reported none, by the bot's
 // known check name.
 func ReviewBotForCheck(check Check) (ReviewBot, bool) {
-	if bot, ok := ReviewBotForApp(check.App); ok {
-		return bot, true
+	if strings.TrimSpace(check.App) != "" {
+		return ReviewBotForApp(check.App)
 	}
 	for _, bot := range ReviewBots {
 		for _, name := range bot.CheckNames {

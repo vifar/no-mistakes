@@ -38,17 +38,6 @@ func hasFailingChecks(checks []scm.Check) bool {
 	return false
 }
 
-// hasPendingChecks includes approval holds and synthetic missing requirements,
-// since they block readiness even though they are not executing.
-func hasPendingChecks(checks []scm.Check) bool {
-	for _, c := range checks {
-		if c.Pending() {
-			return true
-		}
-	}
-	return false
-}
-
 // hasExecutingPendingChecks returns true if any CI check is still running or
 // queued on its own. A check the provider holds for maintainer approval is
 // pending but will not finish without a human; a synthetic missing requirement
@@ -65,17 +54,6 @@ func hasExecutingPendingChecks(checks []scm.Check) bool {
 func hasAwaitingApprovalChecks(checks []scm.Check) bool {
 	for _, c := range checks {
 		if c.AwaitingApproval && c.Pending() {
-			return true
-		}
-	}
-	return false
-}
-
-func hasUnresolvedChecks(checks []scm.Check) bool {
-	for _, c := range checks {
-		switch c.Bucket {
-		case scm.CheckBucketPass, scm.CheckBucketFail, scm.CheckBucketSkip:
-		default:
 			return true
 		}
 	}

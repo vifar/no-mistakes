@@ -267,9 +267,6 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	scoped := overrideScope.Apply(ctx, pr, checks)
 	excludedChecks := append(scoped.External, overrideScope.ExternalReviewBotChecks()...)
 	checks = scoped.Relevant
-	if pending := pendingInformationalBotChecks(sctx, scoped.Informational); len(pending) > 0 && scoped.Ready() {
-		return fmt.Sprintf("live checks for %s: review bot check %s is still running", prURL, pending[0].Name), nil
-	}
 	if scoped.Ready() {
 		if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
 			return fmt.Sprintf("could not verify live CI comparison: %v", err), nil
@@ -828,8 +825,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			// readinessPending is deliberately broader: any state that is not a
 			// conclusive pass, failure, or skip must keep the PR non-ready. This
 			// includes cancelled, held, and unknown provider states.
-			readinessPending := hasPendingChecks(checks) || hasUnresolvedChecks(checks) ||
-				len(pendingInformationalBotChecks(sctx, scoped.Informational)) > 0
+			readinessPending := !scoped.Settled()
 			failing := failingCheckNames(checks)
 
 			// A rerun the provider has answered is no longer outstanding. This

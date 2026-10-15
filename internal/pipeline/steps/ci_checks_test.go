@@ -28,7 +28,7 @@ func TestAllChecksPassedFailsClosed(t *testing.T) {
 			if got := (scm.ScopedChecks{Relevant: checks}).Ready(); got != tt.ready {
 				t.Fatalf("Ready() = %v, want %v", got, tt.ready)
 			}
-			if !tt.ready && !hasUnresolvedChecks(checks) && tt.check.Bucket != scm.CheckBucketFail {
+			if !tt.ready && (scm.ScopedChecks{Relevant: checks}).Settled() && tt.check.Bucket != scm.CheckBucketFail {
 				t.Fatal("non-ready check must be unresolved or failing")
 			}
 		})
@@ -189,7 +189,7 @@ func TestMissingChecksDoNotCountAsExecutingOrVerifyRepairs(t *testing.T) {
 			if hasExecutingPendingChecks(checks) != tc.wantExecuting {
 				t.Fatalf("executing = %v, want %v", hasExecutingPendingChecks(checks), tc.wantExecuting)
 			}
-			if !hasPendingChecks(checks) || (scm.ScopedChecks{Relevant: checks}).Ready() {
+			if !checks[0].Pending() || (scm.ScopedChecks{Relevant: checks}).Ready() {
 				t.Fatal("pending requirements must block readiness")
 			}
 			for _, targets := range [][]scm.CheckTarget{nil, {{Name: "lint"}}} {

@@ -65,7 +65,7 @@ func TestHeldCheckIsNeitherFailingNorTerminal(t *testing.T) {
 	if checkFailedTerminally(held) {
 		t.Error("a held workflow has not failed terminally")
 	}
-	if !hasPendingChecks(checks) {
+	if !checks[0].Pending() {
 		t.Error("a held workflow must keep the PR pending")
 	}
 	if (scm.ScopedChecks{Relevant: checks}).Ready() {

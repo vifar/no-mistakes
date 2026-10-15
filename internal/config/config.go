@@ -817,9 +817,10 @@ type CI struct {
 // provider layer applies.
 func (c CI) CheckScopePolicy() scm.CheckScopePolicy {
 	return scm.CheckScopePolicy{
-		RequiredChecks: c.RequiredChecks,
-		MustPass:       append([]string(nil), c.MustPass...),
-		ExternalChecks: append([]string(nil), c.ExternalChecks...),
+		RequiredChecks:    c.RequiredChecks,
+		ReviewBotComments: c.ReviewBotComments,
+		MustPass:          append([]string(nil), c.MustPass...),
+		ExternalChecks:    append([]string(nil), c.ExternalChecks...),
 	}
 }
 

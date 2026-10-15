@@ -70,8 +70,11 @@ func TestCICheckScope_RejectsUnknownRequiredChecks(t *testing.T) {
 
 func TestCICheckScope_PolicyCopiesPatterns(t *testing.T) {
 	t.Parallel()
-	ci := CI{RequiredChecks: "auto", MustPass: []string{"a"}, ExternalChecks: []string{"b"}}
+	ci := CI{RequiredChecks: "auto", ReviewBotComments: CIReviewBotCommentsAlways, MustPass: []string{"a"}, ExternalChecks: []string{"b"}}
 	policy := ci.CheckScopePolicy()
+	if policy.ReviewBotComments != CIReviewBotCommentsAlways {
+		t.Fatalf("policy lost review-bot setting: %+v", policy)
+	}
 	policy.MustPass[0], policy.ExternalChecks[0] = "x", "y"
 	if ci.MustPass[0] != "a" || ci.ExternalChecks[0] != "b" {
 		t.Fatalf("policy aliases the config: %+v", ci)

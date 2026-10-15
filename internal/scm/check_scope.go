@@ -66,7 +66,8 @@ type RequiredChecksReader interface {
 // repair. It is plain data so a run can record the policy its CI step used and
 // a later reader (the strict readiness receipt) can apply the same one.
 type CheckScopePolicy struct {
-	NoCI bool `json:"no_ci,omitempty"`
+	NoCI              bool   `json:"no_ci,omitempty"`
+	ReviewBotComments string `json:"review_bot_comments,omitempty"`
 	// RequiredChecks is RequiredChecksAuto (the default when empty) or
 	// RequiredChecksAll.
 	RequiredChecks string `json:"required_checks,omitempty"`
@@ -96,13 +97,35 @@ const (
 type ScopedChecks struct {
 	// Relevant are the checks that decide readiness, including a synthetic
 	// pending entry for each required context the provider has not reported.
-	Relevant      []Check
-	External      []Check
-	Informational []Check
-	emptyReady    bool
+	Relevant                []Check
+	External                []Check
+	Informational           []Check
+	emptyReady              bool
+	reviewBotCommentsAlways bool
+}
+
+func (s ScopedChecks) Settled() bool {
+	for _, check := range s.Relevant {
+		switch check.Bucket {
+		case CheckBucketPass, CheckBucketFail, CheckBucketSkip:
+		default:
+			return false
+		}
+	}
+	if s.reviewBotCommentsAlways {
+		for _, check := range s.Informational {
+			if _, ok := ReviewBotForCheck(check); ok && check.Pending() {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (s ScopedChecks) Ready() bool {
+	if !s.Settled() {
+		return false
+	}
 	if len(s.Relevant) == 0 {
 		return s.emptyReady
 	}
@@ -254,7 +277,7 @@ func (s *CheckScope) Includes(ctx context.Context, pr *PR, check Check) bool {
 }
 
 func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck, derived bool) ScopedChecks {
-	out := ScopedChecks{emptyReady: len(checks) > 0 && (derived || s.policy.NoCI)}
+	out := ScopedChecks{emptyReady: len(checks) > 0 && (derived || s.policy.NoCI), reviewBotCommentsAlways: s.policy.ReviewBotComments == "always"}
 	for _, c := range checks {
 		switch s.classify(c, required, derived) {
 		case CheckRoleExternal:

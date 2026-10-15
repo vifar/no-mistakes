@@ -157,3 +157,37 @@ func TestCIReadyReceiptWithoutRecordedScopeJudgesEveryCheck(t *testing.T) {
 		t.Fatalf("all-green legacy run was refused: %v", err)
 	}
 }
+
+func TestCIReadyReceiptWaitsForRecordedReviewBotPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name, app string
+		bucket    scm.CheckBucket
+		policy    string
+		external  []string
+		ready     bool
+	}{
+		{"pending bot", "greptile-apps", scm.CheckBucketPending, "always", nil, false},
+		{"legacy pending bot", "", scm.CheckBucketPending, "always", nil, false},
+		{"different app", "github-actions", scm.CheckBucketPending, "always", nil, true},
+		{"completed bot", "greptile-apps", scm.CheckBucketPass, "always", nil, true},
+		{"default policy", "greptile-apps", scm.CheckBucketPending, "on_failure", nil, true},
+		{"external bot", "greptile-apps", scm.CheckBucketPending, "always", []string{"Greptile Review"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExportFixture(t)
+			if err := f.database.SetRunCIReadyWithReason(f.run.ID, true, false); err != nil {
+				t.Fatal(err)
+			}
+			forge := &protectedReceiptForge{receiptForge: f.forge, required: []string{"build"}}
+			f.forge.checks = []scm.Check{
+				{Name: "build", Bucket: scm.CheckBucketPass},
+				{Name: "Greptile Review", App: tc.app, Bucket: tc.bucket},
+			}
+			recordScope(t, f, scm.CheckScopePolicy{ReviewBotComments: tc.policy, ExternalChecks: tc.external})
+			_, err := Export(context.Background(), f.database, f.repo, f.run.ID, "ci-ready", forge)
+			if (err == nil) != tc.ready {
+				t.Fatalf("receipt error=%v, want ready=%v", err, tc.ready)
+			}
+		})
+	}
+}
