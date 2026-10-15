@@ -520,8 +520,7 @@ func (m *RunManager) releaseQueue() {
 //     dequeued. On error it stays queued in place and abortable.
 //   - claimed or recovering gate: the cancel handle is invoked at once, with no
 //     database access before it, so a failing database cannot keep a run alive
-//     (and a recovering gate needs no slot to be cancelled). The terminal row is
-//     then written best-effort and conditionally.
+//     (and a recovering gate needs no slot to be cancelled).
 //   - finishing: the outcome is already decided, so nothing is cancelled or
 //     rewritten.
 func (m *RunManager) cancelManagedRun(runID, reason string) error {
@@ -553,9 +552,6 @@ func (m *RunManager) cancelManagedRun(runID, reason string) error {
 	}
 	owned.handle.cancel(errors.New(reason))
 	m.mu.Unlock()
-	if _, err := m.db.TerminateActiveRun(runID, reason, types.RunCancelled); err != nil {
-		slog.Warn("failed to persist run cancellation", "run_id", runID, "error", err)
-	}
 	return nil
 }
 

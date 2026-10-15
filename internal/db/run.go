@@ -1449,8 +1449,9 @@ func (d *DB) TerminateActiveRun(id, errMsg string, status types.RunStatus) (bool
 // CancelQueuedRun terminalizes a run that never started. It reports false when
 // the run is not queued any more, so a start that won the race is left alone.
 func (d *DB) CancelQueuedRun(id, reason string) (bool, error) {
-	result, err := d.sql.Exec(`UPDATE runs SET status = ?, error = ?, push_active = 0, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ? AND status = ?`,
-		types.RunCancelled, reason, now(), id, types.RunQueued)
+	ts := now()
+	result, err := d.sql.Exec(`UPDATE runs SET status = ?, error = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		types.RunCancelled, reason, ts, ts, id, types.RunQueued)
 	if err != nil {
 		return false, fmt.Errorf("cancel queued run: %w", err)
 	}
