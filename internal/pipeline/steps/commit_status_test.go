@@ -705,7 +705,7 @@ func TestPipeline_GitHubCommitStatuses(t *testing.T) {
 			repaired := ""
 			steps = append(steps, &transitionStep{name: types.StepCI, execute: func(sc *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 				ciCalls++
-				if ciCalls == 1 && scenario != "no push" && scenario != "forgejo" && scenario != "bitbucket" && scenario != "already upstream" && scenario != "confirmation timeout then repair" {
+				if ciCalls == 1 && scenario != "no push" && scenario != "forgejo" && scenario != "bitbucket" && scenario != "confirmation timeout then repair" {
 					mu.Lock()
 					n := len(requests)
 					mu.Unlock()
@@ -857,7 +857,7 @@ func TestPipeline_GitHubCommitStatuses(t *testing.T) {
 			got := append([]statusRequest(nil), requests...)
 			mu.Unlock()
 			var want []statusRequest
-			if scenario != "no push" && scenario != "forgejo" && scenario != "bitbucket" && scenario != "already upstream" {
+			if scenario != "no push" && scenario != "forgejo" && scenario != "bitbucket" {
 				want = []statusRequest{{Path: "/repos/test/repo/statuses/" + head, State: "pending"}, {Path: "/repos/test/repo/statuses/" + head, State: "success"}}
 				if wantError || scenario == "recovered failure" {
 					want = append(want, statusRequest{Path: want[0].Path, State: "failure"})

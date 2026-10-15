@@ -16,6 +16,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 	"github.com/kunchenguid/no-mistakes/internal/shipping"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -235,7 +236,17 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		return err
 	}
 
-	if !decision.upToDate {
+	recordStatus := !decision.upToDate
+	if decision.upToDate && !suppressPluginCommitStatus(sctx) && resolvedProvider(sctx) == scm.ProviderGitHub {
+		publication, err := sctx.DB.GetCommitStatusPublication(ctx, sctx.Run.ID, db.CommitStatusPublication{
+			SHA: headBeingPushed, Host: resolvedHost(sctx, pushURL), Repo: github.RepoSlug(pushURL),
+		})
+		if err != nil {
+			statusWarning(sctx.Log, "read attached publication", err)
+		}
+		recordStatus = publication != nil
+	}
+	if recordStatus {
 		if err := recordCommitStatusAttempt(sctx, headBeingPushed, pushURL, ref, attestationSteps != nil && localValidationPassed(sctx, headBeingPushed), attestationSteps == nil && localValidationPassed(sctx, "")); err != nil {
 			statusWarning(sctx.Log, "record publication before push", err)
 		}
@@ -263,7 +274,7 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	}
 	// Resume status reporting for this run's recorded attempt, including a
 	// push whose response was lost. A head already upstream without an attempt
-	// never earns a status.
+	// never earns a status; attachment provides its own confirmed attempt.
 	reportStatus := func(string) {}
 	defer func() {
 		if publicationErr != nil {

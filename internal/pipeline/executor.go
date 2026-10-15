@@ -502,6 +502,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.failRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
+	e.attachPublishedHeadStatus(ctx, run, repo)
 
 	// Record every requested skip before any step can park. Recovery and
 	// revalidation already preserve skipped rows, so future skips must not
@@ -819,6 +820,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return failRecoveredGate(err)
 	}
 	e.initializeRunScopes(run.ID)
+	e.attachPublishedHeadStatus(ctx, run, repo)
 
 	// A recovered gate may have been parked while the PR base or its target
 	// moved. Revalidate before its old findings can reconcile or be approved.

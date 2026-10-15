@@ -24,7 +24,35 @@ type PublishedHeadStatusReporter interface {
 	ReportPublishedHeadStatus(*StepContext, string, string)
 }
 
-func (e *Executor) reportPublishedHeadStatus(runCtx context.Context, run *db.Run, repo *db.Repo, state string, validatedSHAs ...string) {
+// PublishedHeadStatusAttacher is an optional step hook that adopts an exact
+// already-published run head before validation starts or resumes.
+type PublishedHeadStatusAttacher interface {
+	AttachPublishedHeadStatus(*StepContext)
+}
+
+func (e *Executor) attachPublishedHeadStatus(ctx context.Context, run *db.Run, repo *db.Repo) {
+	for _, step := range e.steps {
+		if attacher, ok := step.(PublishedHeadStatusAttacher); ok {
+			e.withCommitStatusContext(ctx, run, repo, attacher.AttachPublishedHeadStatus)
+		}
+	}
+}
+
+func (e *Executor) reportPublishedHeadStatus(ctx context.Context, run *db.Run, repo *db.Repo, state string, validatedSHAs ...string) {
+	e.withCommitStatusContext(ctx, run, repo, func(sctx *StepContext) {
+		for _, step := range e.steps {
+			if reporter, ok := step.(PublishedHeadStatusReporter); ok {
+				validatedSHA := ""
+				if len(validatedSHAs) > 0 {
+					validatedSHA = validatedSHAs[0]
+				}
+				reporter.ReportPublishedHeadStatus(sctx, state, validatedSHA)
+			}
+		}
+	})
+}
+
+func (e *Executor) withCommitStatusContext(runCtx context.Context, run *db.Run, repo *db.Repo, report func(*StepContext)) {
 	ctx, cancel := context.WithTimeout(runCtx, commitStatusTimeout)
 	defer cancel()
 	log := func(message string) {
@@ -79,15 +107,7 @@ func (e *Executor) reportPublishedHeadStatus(runCtx context.Context, run *db.Run
 		}
 	}
 	sctx := &StepContext{Ctx: ctx, Run: run, Repo: repo, DB: e.db, Config: statusConfig, ForgeContext: forge, WorkDir: e.workDir, Shared: e.shared, Log: log}
-	for _, step := range e.steps {
-		if reporter, ok := step.(PublishedHeadStatusReporter); ok {
-			validatedSHA := ""
-			if len(validatedSHAs) > 0 {
-				validatedSHA = validatedSHAs[0]
-			}
-			reporter.ReportPublishedHeadStatus(sctx, state, validatedSHA)
-		}
-	}
+	report(sctx)
 }
 
 func (e *Executor) ReportPublishedHeadFailure(ctx context.Context, run *db.Run, repo *db.Repo) {

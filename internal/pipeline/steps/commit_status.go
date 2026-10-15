@@ -55,6 +55,69 @@ func suppressPluginCommitStatus(sctx *pipeline.StepContext, hosts ...string) boo
 	return owned
 }
 
+// AttachPublishedHeadStatus replaces stale statuses only after proving that
+// this run's current head is already at its exact push target. It grants no
+// validation credit. Confirmation and reporting share the existing ownership
+// lock with terminal/recovery reporters, so an older POST either finishes
+// before adoption or observes its permanently retired publication.
+func (*PushStep) AttachPublishedHeadStatus(sctx *pipeline.StepContext) {
+	if suppressPluginCommitStatus(sctx) || resolvedProvider(sctx) != scm.ProviderGitHub || sctx.Run.HeadSHA == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(sctx.Ctx, commitStatusOperationTimeout)
+	defer cancel()
+	bounded := *sctx
+	bounded.Ctx = ctx
+	publication, err := attachCommitStatusPublication(&bounded)
+	if err != nil {
+		statusWarning(sctx.Log, "attach published head", err)
+		return
+	}
+	if publication != nil && (publication.LastState == "" || publication.LastState == "pending") {
+		commitStatusReporter(&bounded, publication)(ctx, "pending", "", sctx.Log)
+	}
+}
+
+func attachCommitStatusPublication(sctx *pipeline.StepContext) (*db.CommitStatusPublication, error) {
+	if err := acquireCommitStatusLock(sctx.Ctx); err != nil {
+		return nil, err
+	}
+	defer func() { <-commitStatusLock }()
+	target := resolvePushURL(sctx)
+	if scm.ExtractHost(target) == "" {
+		return nil, nil
+	}
+	publication := db.CommitStatusPublication{SHA: sctx.Run.HeadSHA, Host: resolvedHost(sctx, target), Repo: github.RepoSlug(target)}
+	if publication.Repo == "" {
+		return nil, nil
+	}
+	current, err := sctx.DB.GetCommitStatusPublication(sctx.Ctx, sctx.Run.ID, publication)
+	if err != nil || current != nil {
+		return current, err
+	}
+	ref := normalizedBranchRef(sctx.Run.Branch)
+	remote, err := commitStatusRemoteSHA(sctx, target, ref)
+	if err != nil || remote != publication.SHA {
+		return nil, err
+	}
+	// Preserve the validation evidence of a pre-crash push attempt. An
+	// attachment without such an attempt always starts unvalidated.
+	attempt, err := sctx.DB.GetCommitStatusAttempt(sctx.Run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if attempt != nil && attempt.SHA == publication.SHA && attempt.Target == safeurl.Redact(target) && attempt.Ref == ref {
+		publication = attempt.CommitStatusPublication
+	} else if err := recordCommitStatusAttempt(sctx, publication.SHA, target, ref, false, false); err != nil {
+		return nil, err
+	}
+	confirmed, err := sctx.DB.ConfirmCommitStatusAttempt(sctx.Run.ID, publication)
+	if err != nil || !confirmed {
+		return nil, err
+	}
+	return &publication, nil
+}
+
 func recordCommitStatusAttempt(sctx *pipeline.StepContext, sha, target, ref string, validated, ciEligible bool) error {
 	if suppressPluginCommitStatus(sctx) || resolvedProvider(sctx) != scm.ProviderGitHub || scm.ExtractHost(target) == "" {
 		return nil
@@ -87,13 +150,7 @@ func reconcileCommitStatusAttempt(sctx *pipeline.StepContext) (*db.CommitStatusP
 			target = current
 		}
 	}
-	remote, err := lsRemoteSHA(func(args ...string) (string, error) {
-		cmd := stepCmd(&bounded, "git", args...)
-		cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, bounded.WorkDir)
-		shellenv.ConfigureShellCommand(cmd)
-		out, err := shellenv.OutputShellCommand(cmd)
-		return strings.TrimSpace(string(out)), err
-	}, target, attempt.Ref)
+	remote, err := commitStatusRemoteSHA(&bounded, target, attempt.Ref)
 	if err != nil {
 		return nil, err
 	}
@@ -105,6 +162,18 @@ func reconcileCommitStatusAttempt(sctx *pipeline.StepContext) (*db.CommitStatusP
 		return nil, err
 	}
 	return &attempt.CommitStatusPublication, nil
+}
+
+// Use the same bounded, process-group-aware remote check for attachment and
+// crash reconciliation, including Git credential and forge-profile settings.
+func commitStatusRemoteSHA(sctx *pipeline.StepContext, target, ref string) (string, error) {
+	return lsRemoteSHA(func(args ...string) (string, error) {
+		cmd := stepCmd(sctx, "git", args...)
+		cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
+		shellenv.ConfigureShellCommand(cmd)
+		out, err := shellenv.OutputShellCommand(cmd)
+		return strings.TrimSpace(string(out)), err
+	}, target, ref)
 }
 
 func beginPublishedCommitStatus(sctx *pipeline.StepContext) func(string) {

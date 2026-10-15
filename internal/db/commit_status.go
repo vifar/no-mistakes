@@ -12,7 +12,7 @@ type CommitStatusPublication struct {
 	Validated, CIEligible      bool
 }
 
-// CommitStatusAttempt is written before a remote mutation. An attempt is not
+// CommitStatusAttempt records a push or adoption target. An attempt is not
 // publication proof until its exact target ref is observed at SHA.
 type CommitStatusAttempt struct {
 	CommitStatusPublication
@@ -54,8 +54,10 @@ func (d *DB) putCommitStatusPublication(runID string, p CommitStatusPublication,
 		return false, err
 	}
 	defer tx.Rollback()
+	// Reconfirmation updates validation evidence, not the last successful POST.
+	// In particular, an up-to-date Push must preserve attach-time deduplication.
 	if _, err := tx.Exec(`INSERT INTO commit_status_publications (run_id,sha,host,repo,last_state,validated,ci_eligible)
-		VALUES (?,?,?,?,?,?,?) ON CONFLICT(host,repo,sha,run_id) DO UPDATE SET last_state=excluded.last_state,validated=excluded.validated,ci_eligible=excluded.ci_eligible`, runID, p.SHA, p.Host, p.Repo, p.LastState, p.Validated, p.CIEligible); err != nil {
+		VALUES (?,?,?,?,?,?,?) ON CONFLICT(host,repo,sha,run_id) DO UPDATE SET last_state=CASE WHEN ? THEN commit_status_publications.last_state ELSE excluded.last_state END,validated=excluded.validated,ci_eligible=excluded.ci_eligible`, runID, p.SHA, p.Host, p.Repo, p.LastState, p.Validated, p.CIEligible, confirm); err != nil {
 		return false, err
 	}
 	for _, table := range []string{"commit_status_attempts", "commit_status_publications"} {
