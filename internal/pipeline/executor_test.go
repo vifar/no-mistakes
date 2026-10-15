@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
@@ -96,6 +97,7 @@ func TestExecutor_SuccessfulStepsDoNotEmitTelemetry(t *testing.T) {
 // Review untouched, rather than paying for a second Review.
 func TestExecutor_RestartFromTestKeepsTheCompletedReview(t *testing.T) {
 	database, p, run, repo := setupTest(t)
+	workDir := completionFixture(t, database, run)
 	var order []types.StepName
 	pass := func(name types.StepName) Step {
 		return &adaptiveCallStep{name: name, fn: func(*StepContext) (*StepOutcome, error) {
@@ -127,7 +129,7 @@ func TestExecutor_RestartFromTestKeepsTheCompletedReview(t *testing.T) {
 	}
 	steps = append(steps, ci)
 	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{CI: 1}}, nil, steps, nil)
-	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	want := append(append([]types.StepName{}, cycle...), types.StepCI, types.StepCI)
@@ -154,10 +156,16 @@ func TestExecutor_RestartFromTestKeepsTheCompletedReview(t *testing.T) {
 // the carried head never published.
 func TestExecutor_RecoveredCIGateApprovalRestartsAPendingCarryAtTest(t *testing.T) {
 	database, p, run, repo := setupTest(t)
+	workDir := completionFixture(t, database, run)
+	reviewed := run.HeadSHA
+	if _, err := git.Run(context.Background(), workDir, "commit", "--allow-empty", "-m", "carried CI repair"); err != nil {
+		t.Fatal(err)
+	}
+	advanceCompletionFixture(t, database, run, workDir)
+	replayed := run.HeadSHA
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
-	const reviewed, replayed = "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222"
 	if err := database.UpdateRunReviewApprovedHeadSHA(run.ID, reviewed); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +218,7 @@ func TestExecutor_RecoveredCIGateApprovalRestartsAPendingCarryAtTest(t *testing.
 
 	exec := NewExecutor(database, p, &config.Config{}, nil, steps, nil)
 	done := make(chan error, 1)
-	go func() { done <- exec.Resume(context.Background(), run, repo, t.TempDir()) }()
+	go func() { done <- exec.Resume(context.Background(), run, repo, workDir) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for exec.Respond(types.StepCI, types.ActionApprove, nil) != nil {
 		if time.Now().After(deadline) {

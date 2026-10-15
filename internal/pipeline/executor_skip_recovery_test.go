@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -117,14 +116,8 @@ func TestExecutor_RequestedSkipsSurviveParkAndRecovery(t *testing.T) {
 						t.Fatal(err)
 					}
 					initGitRepo(t, workDir)
-					head, err := git.HeadSHA(context.Background(), workDir)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if err := database.UpdateRunHeadSHA(run.ID, head); err != nil {
-						t.Fatal(err)
-					}
-					run.HeadSHA = head
+					bindCompletionFixture(t, database, run, workDir)
+					var err error
 					ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 					defer cancel()
 					var executor *Executor
@@ -231,13 +224,8 @@ func TestExecutor_SkipRemainingPreservesRequestedSkipsAfterRecovery(t *testing.T
 				t.Fatal(err)
 			}
 			initGitRepo(t, workDir)
-			head, err := git.HeadSHA(context.Background(), workDir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := database.UpdateRunHeadSHA(run.ID, head); err != nil {
-				t.Fatal(err)
-			}
+			bindCompletionFixture(t, database, run, workDir)
+			var err error
 			if err := database.Close(); err != nil {
 				t.Fatal(err)
 			}

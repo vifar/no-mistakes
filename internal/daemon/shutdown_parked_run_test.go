@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -19,11 +20,24 @@ func startParkedRunDaemon(t *testing.T, p *paths.Paths, d *db.DB) chan error {
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- RunWithOptions(p, d, func() []pipeline.Step {
-			return []pipeline.Step{&mockApprovalStep{name: types.StepDocument}}
+			return []pipeline.Step{shutdownApprovalStep{}}
 		})
 	}()
 	waitForDaemonReady(t, p)
 	return errCh
+}
+
+type shutdownApprovalStep struct{}
+
+func (shutdownApprovalStep) Name() types.StepName { return types.StepDocument }
+func (shutdownApprovalStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := bindMockRunComparison(sctx); err != nil {
+		return nil, err
+	}
+	if err := sctx.DB.UpdateRunReviewApprovedHeadSHA(sctx.Run.ID, sctx.Run.HeadSHA); err != nil {
+		return nil, err
+	}
+	return &pipeline.StepOutcome{NeedsApproval: true, Findings: `{"findings":[],"summary":"needs review"}`}, nil
 }
 
 func stopParkedRunDaemon(t *testing.T, p *paths.Paths, errCh chan error) {
@@ -78,6 +92,16 @@ func TestShutdown_KeepsRunParkedAtApprovalGateForResume(t *testing.T) {
 	}
 	worktree := p.WorktreeDir(repo.ID, run.ID)
 	if err := gitpkg.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, headSHA); err != nil {
+		t.Fatal(err)
+	}
+	candidate, err := testgit.RunComparisonCandidate(run, worktree, repo.DefaultBranch, headSHA, "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.BindRunPRContext(run.ID, candidate, types.StepReview); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunReviewApprovedHeadSHA(run.ID, headSHA); err != nil {
 		t.Fatal(err)
 	}
 	step, err := d.InsertStepResult(run.ID, types.StepDocument)
