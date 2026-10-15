@@ -327,9 +327,17 @@ func oversizedBlobs(sctx *pipeline.StepContext, entries []rawDiffEntry, limit in
 		return nil, fmt.Errorf("measure blob sizes: cat-file returned %d records for %d objects", len(sizes), len(seen))
 	}
 	var over []oversizedFile
+	pathIndexes := map[string]int{}
 	for _, entry := range entries {
 		if size := sizes[entry.newSHA]; size > limit {
-			over = append(over, oversizedFile{path: entry.path, size: size})
+			if index, ok := pathIndexes[entry.path]; ok {
+				if size > over[index].size {
+					over[index].size = size
+				}
+			} else {
+				pathIndexes[entry.path] = len(over)
+				over = append(over, oversizedFile{path: entry.path, size: size})
+			}
 		}
 	}
 	return over, nil

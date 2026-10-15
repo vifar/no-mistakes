@@ -97,8 +97,7 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 	if err != nil {
 		return fmt.Errorf("scan published commits: %w", err)
 	}
-	var entries, introduced []rawDiffEntry
-	seen := map[string]bool{}
+	var entries []rawDiffEntry
 	for _, line := range strings.Split(commits, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
@@ -118,13 +117,6 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 			return fmt.Errorf("scan published commit %s: %w", fields[0], err)
 		}
 		entries = append(entries, changes...)
-		for _, entry := range addedOrModified(changes) {
-			key := entry.path + "\x00" + entry.newSHA
-			if !seen[key] {
-				seen[key] = true
-				introduced = append(introduced, entry)
-			}
-		}
 	}
 
 	var scratch []string
@@ -170,7 +162,7 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 			}
 		}
 	}
-	over, err := oversizedBlobs(sctx, introduced, limit)
+	over, err := oversizedBlobs(sctx, addedOrModified(entries), limit)
 	if err != nil {
 		return fmt.Errorf("scan published range: %w", err)
 	}

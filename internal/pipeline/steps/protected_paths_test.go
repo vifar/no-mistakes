@@ -1337,6 +1337,39 @@ func TestAssertPublishedRangeClean_RefusesReusedOversizedBaseBlob(t *testing.T) 
 	}
 }
 
+func TestAssertPublishedRangeClean_OversizedHistoryCountsUniquePaths(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{}, dir, base, head, config.Commands{})
+	sctx.Config.MaxFileSizeBytes = 500
+	for i := 0; i < 21; i++ {
+		size := 621 - i
+		if i == 10 {
+			size = 650
+		}
+		scratchGuardCommit(t, dir, map[string]string{"binary.dat": strings.Repeat("x", size)})
+	}
+	head = scratchGuardCommit(t, dir, map[string]string{
+		"binary.dat": "small final version",
+		"other.dat":  strings.Repeat("y", 700),
+	})
+	err := assertPublishedRangeClean(sctx, head)
+	if err == nil {
+		t.Fatal("expected oversized history refusal")
+	}
+	message := err.Error()
+	for _, want := range []string{"2 file(s) over", "binary.dat (650 B)", "other.dat (700 B)"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("refusal missing %q: %s", want, message)
+		}
+	}
+	for _, path := range []string{"binary.dat", "other.dat"} {
+		if strings.Count(message, path) != 1 {
+			t.Errorf("refusal must list %s once: %s", path, message)
+		}
+	}
+}
+
 func TestStagePipelineChanges_SkipsTestPhaseDriver(t *testing.T) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)
