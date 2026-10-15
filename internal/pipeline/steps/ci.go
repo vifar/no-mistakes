@@ -534,8 +534,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 	}
 	pr.BaseBranch = baseBranch
-	// One scope per execution: the target branch's required checks are read on
-	// the first poll that needs them and reused for every later one.
+	// Reuse the scope until the live target changes. Retarget handling below
+	// replaces it before classifying checks against the new target.
 	checkScope := newCIChecksScope(sctx, host, baseBranch)
 	// The recorded scope is what approval verification and the strict receipt
 	// read later. An execution that cannot record the policy it runs under

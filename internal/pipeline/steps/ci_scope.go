@@ -21,9 +21,8 @@ func ciCheckScopePolicy(sctx *pipeline.StepContext) scm.CheckScopePolicy {
 	return policy
 }
 
-// newCIChecksScope builds the scope one CI step execution applies to every
-// poll. The scope caches the target branch's required contexts, so the
-// provider is asked once per execution rather than once per poll.
+// newCIChecksScope builds a scope for one target branch. CheckScope owns the
+// required-context cache; the monitor replaces the scope when the target changes.
 func newCIChecksScope(sctx *pipeline.StepContext, host scm.Host, targetBranch string) *scm.CheckScope {
 	return scm.NewCheckScope(host, ciCheckScopePolicy(sctx), targetBranch, func(msg string) {
 		if sctx.Log != nil {
