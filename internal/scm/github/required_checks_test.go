@@ -312,3 +312,35 @@ func TestGetRequiredChecksIgnoresUnrelatedRuleTypes(t *testing.T) {
 		t.Fatalf("unrelated rule types must not trigger the fallback: %+v (logs %v)", scoped, logs)
 	}
 }
+
+func TestGetChecksNewerWorkflowRunWithoutJobsSupersedesStaleJobResults(t *testing.T) {
+	t.Parallel()
+	job := `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/1/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`
+	other := `{"__typename":"CheckRun","databaseId":6,"name":"docs","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/3/job/6","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"Docs"}}}}`
+	runs := `[{"total_count":3,"workflow_runs":[` +
+		`{"id":1,"workflow_id":10,"name":"CI","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/1"},` +
+		`{"id":2,"workflow_id":10,"name":"CI","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/2"},` +
+		`{"id":3,"workflow_id":11,"name":"Docs","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/3"}]}]`
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 5 --repo test/repo --json headRefOid --jq .headRefOid":                                       {stdout: "abc123\n"},
+		githubCommitChecksCommand("", "test/repo", "abc123"):                                                     {stdout: githubCommitChecksResponse("[" + job + "," + other + "]")},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=abc123 -f per_page=100 --paginate --slurp": {stdout: runs},
+	}), nil, "", "test/repo")
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "5", HeadSHA: "abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]scm.Check{}
+	for _, c := range checks {
+		byName[c.Name] = c
+	}
+	if _, stale := byName["build"]; stale || len(byName) != 2 {
+		t.Fatalf("the older attempt's passing job survived: %+v", checks)
+	}
+	if ci := byName["CI"]; ci.Bucket != scm.CheckBucketFail || !reflect.DeepEqual(ci.Supersedes, []string{"build"}) {
+		t.Fatalf("CI run = %+v, want a failure superseding build", ci)
+	}
+	if docs := byName["docs"]; docs.Bucket != scm.CheckBucketPass || len(docs.Supersedes) != 0 {
+		t.Fatalf("an unrelated workflow's job was touched: %+v", docs)
+	}
+}

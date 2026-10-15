@@ -434,3 +434,22 @@ func TestCheckScopeIdentityClassificationAcrossRepresentations(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckScopeSupersedingWorkflowRunStandsForTheRequiredJob(t *testing.T) {
+	t.Parallel()
+	host := &requiredChecksHost{contexts: []string{"build"}}
+	rerun := Check{Name: "CI", Kind: CheckKindRun, Bucket: CheckBucketFail, Supersedes: []string{"build"}}
+	scoped := NewCheckScope(host, CheckScopePolicy{}, "main", nil).Apply(context.Background(), &PR{HeadSHA: "h"}, []Check{rerun})
+	if scoped.Ready() || len(scoped.Relevant) != 1 || scoped.Relevant[0].Name != "CI" || len(scoped.Informational) != 0 {
+		t.Fatalf("a workflow run that replaced the required job must stay in scope as a failure, with no extra placeholder: %+v", scoped)
+	}
+	unrelated := Check{Name: "Docs", Kind: CheckKindRun, Bucket: CheckBucketFail, Supersedes: []string{"docs-job"}}
+	scoped = NewCheckScope(host, CheckScopePolicy{}, "main", nil).Apply(context.Background(), &PR{HeadSHA: "h"}, []Check{{Name: "build", Bucket: CheckBucketPass}, unrelated})
+	if !scoped.Ready() || len(scoped.Informational) != 1 {
+		t.Fatalf("a failed run superseding only non-required jobs stays informational: %+v", scoped)
+	}
+	scoped = NewCheckScope(&requiredChecksHost{contexts: []string{"x"}}, CheckScopePolicy{MustPass: []string{"bui*"}}, "main", nil).Apply(context.Background(), &PR{}, []Check{rerun})
+	if scoped.Ready() || scoped.Relevant[0].Name != "CI" {
+		t.Fatalf("must_pass must also follow the superseded job: %+v", scoped)
+	}
+}

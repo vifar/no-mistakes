@@ -78,6 +78,9 @@ type CIStep struct {
 	// must not re-arm the timeout. Overridable for testing; defaults to
 	// fetching the upstream default branch.
 	baseBranchTip func(context.Context) (string, bool)
+	// recordCheckScope persists the scope this execution evaluates under.
+	// Overridable for testing; defaults to recordCIChecksScope.
+	recordCheckScope func(*pipeline.StepContext) error
 }
 
 // SetPollIntervalOverride is a test hook; production leaves the override unset.
@@ -531,11 +534,16 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	// One scope per execution: the target branch's required checks are read on
 	// the first poll that needs them and reused for every later one.
 	checkScope := newCIChecksScope(sctx, host, baseBranch)
-	if err := recordCIChecksScope(sctx); err != nil {
-		if sctx.Run.Shipping != nil {
-			return nil, err
-		}
-		sctx.Log(fmt.Sprintf("warning: %v", err))
+	// The recorded scope is what approval verification and the strict receipt
+	// read later. An execution that cannot record the policy it runs under
+	// must not raise a gate under it: the stale record would judge that gate.
+	record := s.recordCheckScope
+	if record == nil {
+		record = recordCIChecksScope
+	}
+	if err := record(sctx); err != nil {
+		clearCIMonitorReady(sctx)
+		return nil, err
 	}
 	if repairRequested {
 		pr.HeadSHA = sctx.Run.HeadSHA

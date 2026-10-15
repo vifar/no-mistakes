@@ -228,6 +228,13 @@ type Check struct {
 	// distinguishes independent same-name workflows while allowing reruns of
 	// one workflow to use latest-wins ordering. Zero when unavailable.
 	WorkflowID int64
+	// RunID is the provider workflow run (GitHub Actions run) that produced the
+	// check, when known. Within one workflow a larger RunID is a newer attempt.
+	RunID int64
+	// WorkflowRun marks a workflow-level check: the run itself, reported
+	// because it produced no job or check run (for example a workflow that
+	// failed validation before creating any job). Name is the workflow's name.
+	WorkflowRun bool
 	// Link is the provider's details URL for this check. It may identify an
 	// individual job or a provider-side workflow run for targeted reruns. Empty
 	// when the provider reported no link.
@@ -261,6 +268,12 @@ type Check struct {
 	// carrying that ID. Zero when unknown, which includes legacy commit
 	// statuses.
 	AppID int64
+	// Supersedes names the job-level check contexts of an older attempt of
+	// the same workflow that this workflow-level check replaced. A workflow
+	// run that fails before it creates any job has no job of its own, so the
+	// provider layer drops the older attempt's stale results and records here
+	// which requirements this run now speaks for.
+	Supersedes []string
 	// Workflow is the name of the workflow that emitted the check, when the
 	// provider reports one (GitHub Actions). Together with Name it forms the
 	// "workflow / job" display form that check-scope patterns may match.

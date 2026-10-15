@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -481,6 +482,7 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 		}
 		checks = h.appendUnrepresentedWorkflowRuns(checks, runs)
 		checks = h.collapseLatestByName(checks)
+		checks = h.supersedeStaleJobResults(checks)
 		for i := range checks {
 			checks[i].HeadSHA = headSHA
 		}
@@ -701,6 +703,7 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 					checks[i].StartedAt = run.StartedAt
 				}
 				checks[i].WorkflowID = run.WorkflowID
+				checks[i].RunID = run.RunID
 			}
 			continue
 		}
@@ -757,6 +760,54 @@ func (h *Host) collapseLatestByName(checks []scm.Check) []scm.Check {
 		}
 	}
 	return collapsed
+}
+
+// supersedeStaleJobResults lets a newer workflow run that has produced no job
+// speak for the jobs of the older attempt of the same workflow. The rollup
+// keeps the older attempt's passing job forever, while the newer run may have
+// failed (or still be queued) before creating any job, such as on a workflow
+// validation error; the job-level names never reappear, so nothing would
+// replace the stale pass. Each such older job is dropped and its context
+// recorded on the newer workflow-level check, which then stands for it.
+func (h *Host) supersedeStaleJobResults(checks []scm.Check) []scm.Check {
+	drop := make(map[int]bool)
+	for wi := range checks {
+		w := &checks[wi]
+		if !w.WorkflowRun || w.Bucket == scm.CheckBucketPass || w.Bucket == scm.CheckBucketSkip {
+			continue
+		}
+		for ji := range checks {
+			j := checks[ji]
+			if ji == wi || j.WorkflowRun || j.Kind != scm.CheckKindRun {
+				continue
+			}
+			sameWorkflow := w.WorkflowID != 0 && w.WorkflowID == j.WorkflowID || j.WorkflowID == 0 && j.Workflow != "" && j.Workflow == w.Name
+			if !sameWorkflow {
+				continue
+			}
+			after, ordered := h.checkStartedAfter(*w, j)
+			if w.RunID != 0 && j.RunID != 0 && w.RunID != j.RunID {
+				after, ordered = w.RunID > j.RunID, true
+			}
+			if !ordered || !after {
+				continue
+			}
+			drop[ji] = true
+			if !slices.Contains(w.Supersedes, j.Name) {
+				w.Supersedes = append(w.Supersedes, j.Name)
+			}
+		}
+	}
+	if len(drop) == 0 {
+		return checks
+	}
+	kept := make([]scm.Check, 0, len(checks)-len(drop))
+	for i, c := range checks {
+		if !drop[i] {
+			kept = append(kept, c)
+		}
+	}
+	return kept
 }
 
 func (h *Host) sameCheckReplacementGroup(a, b scm.Check) bool {
@@ -940,7 +991,7 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 			}
 			link = fmt.Sprintf("https://%s/%s/actions/runs/%d", host, repo, run.ID)
 		}
-		checks = append(checks, scm.Check{Name: name, ProviderID: fmt.Sprintf("github-workflow-run:%d", run.ID), Bucket: bucket, Kind: scm.CheckKindRun, State: state, CompletedAt: completedAt, StartedAt: startedAt, WorkflowID: run.WorkflowID, Link: link, AwaitingApproval: awaitingApproval})
+		checks = append(checks, scm.Check{Name: name, ProviderID: fmt.Sprintf("github-workflow-run:%d", run.ID), Bucket: bucket, Kind: scm.CheckKindRun, State: state, CompletedAt: completedAt, StartedAt: startedAt, WorkflowID: run.WorkflowID, RunID: run.ID, WorkflowRun: true, Link: link, AwaitingApproval: awaitingApproval})
 	}
 	return checks, nil
 }

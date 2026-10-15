@@ -264,3 +264,16 @@ func TestCIReadyReceiptVerifiesRecordedReviewBotComments(t *testing.T) {
 		})
 	}
 }
+
+func TestCIReadyReceiptRefusesAWorkflowRerunThatFailedBeforeJobs(t *testing.T) {
+	f := newExportFixture(t)
+	if err := f.database.SetRunCIReadyWithReason(f.run.ID, true, false); err != nil {
+		t.Fatal(err)
+	}
+	forge := &protectedReceiptForge{receiptForge: f.forge, required: []string{"build"}}
+	f.forge.checks = []scm.Check{{Name: "CI", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketFail, Supersedes: []string{"build"}}}
+	recordScope(t, f, scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAuto})
+	if _, err := Export(context.Background(), f.database, f.repo, f.run.ID, "ci-ready", forge); err == nil {
+		t.Fatal("receipt accepted a head whose required workflow rerun failed before creating jobs")
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -49,6 +50,9 @@ func (r RequiredCheck) String() string {
 
 // satisfiedBy reports whether c is the check this requirement names.
 func (r RequiredCheck) satisfiedBy(c Check) bool {
+	if slices.Contains(c.Supersedes, r.Context) {
+		return true
+	}
 	return c.Name == r.Context && (r.AppID <= 0 || c.AppID == r.AppID) && (!r.SelfStatus || c.Kind == CheckKindRun)
 }
 
@@ -322,7 +326,7 @@ func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck,
 		}
 		satisfied := false
 		for _, c := range out.Relevant {
-			if c.Name == missing.Name && (missing.Workflow == "" || c.Workflow == missing.Workflow) {
+			if slices.Contains(c.Supersedes, missing.Name) || c.Name == missing.Name && (missing.Workflow == "" || c.Workflow == missing.Workflow) {
 				satisfied = true
 				break
 			}
@@ -341,6 +345,11 @@ func (s *CheckScope) classify(c Check, required []RequiredCheck, derived bool) C
 	}
 	if matchesCheckIdentity(s.policy.MustPass, c) {
 		return CheckRoleRequired
+	}
+	for _, superseded := range c.Supersedes {
+		if matchesCheckIdentity(s.policy.MustPass, Check{Name: superseded, Workflow: c.Name}) {
+			return CheckRoleRequired
+		}
 	}
 	if !derived {
 		return CheckRoleRequired

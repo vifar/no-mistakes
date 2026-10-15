@@ -473,3 +473,47 @@ func TestCIScopePendingInformationalBotDoesNotDelayBuildRepair(t *testing.T) {
 		t.Fatalf("completed bot must report its unresolved comment: %+v %v", findings, err)
 	}
 }
+
+// A scope that cannot be recorded must stop the execution before any gate is
+// raised: approval verification and the receipt read the record, and a stale
+// one would judge a gate that was raised under a different policy.
+func TestCIScopeUnrecordableScopeFailsTheExecutionBeforeAnyGate(t *testing.T) {
+	env := append(fakeCIGH(t, "OPEN", `[{"name":"build","state":"FAILURE","bucket":"fail"}]`),
+		`FAKE_CLI_PROTECTION_JSON={"contexts":["build"]}`, `FAKE_CLI_RULES_JSON=[]`)
+	sctx, ag, _, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsOnFailure, env)
+	const stale = `{"required_checks":"all"}`
+	if err := sctx.DB.SetRunCheckScope(sctx.Run.ID, stale); err != nil {
+		t.Fatal(err)
+	}
+	step := &CIStep{recordCheckScope: func(*pipeline.StepContext) error { return errors.New("record CI check scope: disk full") }}
+	outcome, err := step.Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("Execute() = %+v, %v; want the persistence error", outcome, err)
+	}
+	if outcome != nil || *ready || len(ag.calls) != 0 {
+		t.Fatalf("a gate or repair was produced under an unrecorded scope: outcome=%+v ready=%v repairs=%d", outcome, *ready, len(ag.calls))
+	}
+	if got, _ := sctx.DB.GetRunCheckScope(sctx.Run.ID); got != stale {
+		t.Fatalf("recorded scope changed to %q", got)
+	}
+}
+
+// A workflow rerun at the same commit can fail before it creates a job. The
+// rollup keeps the older attempt's passing job, which must not satisfy the
+// requirement the newer run now owns.
+func TestCIScopeRerunFailingBeforeJobsBlocksAndIsRepaired(t *testing.T) {
+	const checks = `[{"name":"build","state":"SUCCESS","bucket":"pass","workflow":"CI","app":"github-actions","link":"https://github.com/test/repo/actions/runs/1/job/5"}]`
+	const runs = `FAKE_CLI_WORKFLOW_RUNS=[` +
+		`{"id":1,"workflow_id":10,"name":"CI","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","updated_at":"2026-10-14T10:05:00Z"},` +
+		`{"id":2,"workflow_id":10,"name":"CI","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","updated_at":"2026-10-14T11:00:05Z"}]`
+	env := append(fakeCIGH(t, "OPEN", checks), runs, `FAKE_CLI_PROTECTION_JSON={"contexts":["build"]}`, `FAKE_CLI_RULES_JSON=[]`)
+	sctx, _, _, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsOnFailure, env)
+	step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error { return context.Canceled })
+	outcome, err := step.Execute(sctx)
+	if err != nil || outcome == nil || !outcome.NeedsApproval || !outcome.AutoFixable || !strings.Contains(outcome.Findings, `"check":"CI"`) {
+		t.Fatalf("the failed rerun was not offered for repair: %+v %v", outcome, err)
+	}
+	if *ready {
+		t.Fatal("the stale passing job published readiness")
+	}
+}
