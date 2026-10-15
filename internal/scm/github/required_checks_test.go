@@ -117,7 +117,7 @@ func TestGetRequiredCheckContextsReportsOtherFailures(t *testing.T) {
 
 func TestGetRequiredCheckContextsEscapesBranchSegments(t *testing.T) {
 	t.Parallel()
-	if got := escapeBranchPath("release/1.0 beta"); got != "release/1.0%20beta" {
+	if got := escapeBranchPath("release/1.0 beta"); got != "release%2F1.0%20beta" {
 		t.Fatalf("escapeBranchPath = %q", got)
 	}
 }

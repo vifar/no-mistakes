@@ -161,12 +161,9 @@ func (h *Host) apiGET(ctx context.Context, endpoint string, extra ...string) ([]
 	return out, nil
 }
 
-// escapeBranchPath percent-encodes each segment of a branch name for use in a
-// REST path while keeping the separators between segments.
+// escapeBranchPath percent-encodes a branch name as one REST path parameter.
+// Slashes become %2F: GitHub treats {branch} as a single segment, and gh api
+// sends the endpoint as given, so release/1.x must not split into two segments.
 func escapeBranchPath(branch string) string {
-	segments := strings.Split(branch, "/")
-	for i, s := range segments {
-		segments[i] = url.PathEscape(s)
-	}
-	return strings.Join(segments, "/")
+	return url.PathEscape(branch)
 }
