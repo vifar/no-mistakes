@@ -60,13 +60,17 @@ func retainedCICheckIncluded(sctx *pipeline.StepContext, scope *scm.CheckScope, 
 	if !matched && id != "" {
 		return retainedCICheckIncluded(sctx, scope, pr, checks, name, "")
 	}
-	return !matched && scope.Includes(sctx.Ctx, pr, scm.Check{Name: name})
+	identity := scm.Check{Name: name}
+	if workflow, job, qualified := strings.Cut(name, " / "); qualified {
+		identity.Name, identity.Workflow = job, workflow
+	}
+	return !matched && scope.Includes(sctx.Ctx, pr, identity)
 }
 
 func scopeRetainedCIFindings(sctx *pipeline.StepContext, scope *scm.CheckScope, pr *scm.PR, checks []scm.Check) error {
 	scoped := scope.Apply(sctx.Ctx, pr, checks)
 	excludedApps := map[string]bool{}
-	for _, check := range append(scoped.External, scoped.Informational...) {
+	for _, check := range append(append(scoped.External, scoped.Informational...), scope.ExternalReviewBotChecks()...) {
 		if check.App != "" {
 			excludedApps[strings.ToLower(strings.TrimSpace(check.App))] = true
 		}

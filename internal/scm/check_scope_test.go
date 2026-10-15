@@ -361,12 +361,12 @@ func TestCheckScopeWorkflowQualifiedExternalPatternExcludesMissingContext(t *tes
 	}
 }
 
-func TestCheckScopeQualifiedMustPassDoesNotDuplicateRequiredPlaceholder(t *testing.T) {
+func TestCheckScopeQualifiedMustPassKeepsWorkflowRequirement(t *testing.T) {
 	t.Parallel()
 	host := &requiredChecksHost{contexts: []string{"lint"}}
 	scoped := NewCheckScope(host, CheckScopePolicy{MustPass: []string{"CI / lint"}}, "main", nil).Apply(context.Background(), &PR{}, nil)
-	if len(scoped.Relevant) != 1 || scoped.Relevant[0].Name != "lint" {
-		t.Fatalf("relevant = %+v, want one placeholder for the bare required context", scoped.Relevant)
+	if len(scoped.Relevant) != 2 || scoped.Relevant[1].Name != "lint" || scoped.Relevant[1].Workflow != "CI" || !scoped.Relevant[1].ExpectedMissing {
+		t.Fatalf("relevant = %+v, want bare and workflow-qualified requirements", scoped.Relevant)
 	}
 }
 
@@ -379,6 +379,58 @@ func TestExternalReviewBotChecksFollowExternalPatterns(t *testing.T) {
 		got := NewCheckScope(nil, CheckScopePolicy{ExternalChecks: tc.patterns}, "main", nil).ExternalReviewBotChecks()
 		if len(got) != tc.want || tc.want == 1 && got[0].App != "greptile-apps" {
 			t.Errorf("patterns %v: markers = %+v, want %d", tc.patterns, got, tc.want)
+		}
+	}
+}
+
+func TestCheckScopeQualifiedLiteralMustPassReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		checks   []Check
+		external []string
+		ready    bool
+	}{
+		{"other workflow does not satisfy literal", []Check{{Name: "lint", Workflow: "Other", Bucket: CheckBucketPass}}, nil, false},
+		{"matching workflow satisfies literal", []Check{{Name: "lint", Workflow: "CI", Bucket: CheckBucketPass}}, nil, true},
+		{"missing literal respects bare exclusion", []Check{{Name: "build", Bucket: CheckBucketPass}}, []string{"lint"}, true},
+		{"missing literal respects qualified exclusion", []Check{{Name: "build", Bucket: CheckBucketPass}}, []string{"CI / lint"}, true},
+		{"other workflow exclusion does not remove literal", []Check{{Name: "build", Bucket: CheckBucketPass}}, []string{"Other / lint"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := NewCheckScope(&requiredChecksHost{contexts: []string{"lint"}}, CheckScopePolicy{MustPass: []string{"CI / lint"}, ExternalChecks: tc.external}, "main", nil)
+			scoped := scope.Apply(context.Background(), &PR{}, tc.checks)
+			if scoped.Ready() != tc.ready {
+				t.Fatalf("Ready() = %v, want %v: %+v", scoped.Ready(), tc.ready, scoped)
+			}
+			if tc.name == "other workflow does not satisfy literal" {
+				if len(scoped.Relevant) != 2 || scoped.Relevant[1].Workflow != "CI" || !scoped.Relevant[1].ExpectedMissing {
+					t.Fatalf("qualified literal lost its identity: %+v", scoped.Relevant)
+				}
+			}
+		})
+	}
+	unprotected := NewCheckScope(nil, CheckScopePolicy{MustPass: []string{"CI / lint"}, ExternalChecks: []string{"lint"}}, "main", nil)
+	if scoped := unprotected.Apply(context.Background(), &PR{}, nil); len(scoped.Relevant) != 0 {
+		t.Fatalf("excluded absent literal became a placeholder: %+v", scoped)
+	}
+}
+
+func TestCheckScopeIdentityClassificationAcrossRepresentations(t *testing.T) {
+	for _, tc := range []struct {
+		check    Check
+		included bool
+	}{
+		{Check{Name: "approve"}, false},
+		{Check{Name: "approve", Workflow: "Final Approval"}, false},
+		{Check{Name: "approve", Workflow: "Other"}, true},
+	} {
+		scope := NewCheckScope(&requiredChecksHost{contexts: []string{"approve"}}, CheckScopePolicy{MustPass: []string{"approve"}, ExternalChecks: []string{"Final Approval / approve*"}}, "main", nil)
+		if got := scope.Includes(context.Background(), &PR{}, tc.check); got != tc.included {
+			t.Errorf("Includes(%+v) = %v, want %v", tc.check, got, tc.included)
+		}
+		scoped := scope.Apply(context.Background(), &PR{}, []Check{tc.check})
+		if (len(scoped.Relevant) > 0) != tc.included {
+			t.Errorf("partition disagrees for %+v: %+v", tc.check, scoped)
 		}
 	}
 }

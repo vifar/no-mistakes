@@ -100,7 +100,7 @@ func TestCIScopeExcludedBotCannotReturnThroughComments(t *testing.T) {
 }
 
 func TestCIScopeRecoveredWorkDropsExcludedChecksAndKeepsBudget(t *testing.T) {
-	for _, mode := range []string{"informational", "external", "absent"} {
+	for _, mode := range []string{"informational", "external", "absent", "absent external"} {
 		t.Run(mode, func(t *testing.T) {
 			env := fakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"optional","workflow":"Extra","state":"CANCELLED","bucket":"cancel"}]`)
 			sctx, ag, _, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsOnFailure, env)
@@ -109,7 +109,12 @@ func TestCIScopeRecoveredWorkDropsExcludedChecksAndKeepsBudget(t *testing.T) {
 				sctx.Config.CI.MustPass = []string{"optional"}
 				sctx.Config.CI.ExternalChecks = []string{"Extra / optional"}
 			}
-			if mode == "absent" {
+			if mode == "absent external" {
+				sctx.Config.CI.MustPass = []string{"optional"}
+				sctx.Config.CI.ExternalChecks = []string{"Extra / optional*"}
+				sctx.Env = append(sctx.Env, `FAKE_CLI_PROTECTION_JSON={"contexts":["build","optional"]}`)
+			}
+			if mode == "absent" || mode == "absent external" {
 				sctx.Env = append(sctx.Env, `FAKE_CLI_CHECKS=[{"name":"build","state":"SUCCESS","bucket":"pass"}]`)
 			}
 			sctx.Fixing = true
@@ -182,38 +187,44 @@ func TestCIStep_EmptyRepairPropagatesMarkRunningFailure(t *testing.T) {
 	}
 }
 
-func TestCIScopeRetainedAbsentBotIsDroppedAfterExternalCheckRegisters(t *testing.T) {
-	initial := `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`
-	env := append(fakeCIGH(t, "OPEN", initial), greenGreptileCommentJSON)
-	sctx, ag, _, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsAlways, env)
-	step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error { return context.Canceled })
-	observation, err := step.Execute(sctx)
-	if err != nil || observation == nil || !observation.NeedsApproval {
-		t.Fatalf("absent bot observation = %+v, %v", observation, err)
-	}
-	findings, err := types.ParseFindingsJSON(observation.Findings)
-	if err != nil || len(findings.Items) != 1 {
-		t.Fatalf("absent bot findings = %+v, %v", findings, err)
-	}
-	if item := findings.Items[0]; item.Check != "" || item.CheckApp != "greptile-apps" {
-		t.Fatalf("absent bot lost app identity: %+v", item)
-	}
-	sctx.PreviousFindings = observation.Findings
-	sctx.DeferredFindings = observation.Findings
-	sctx.Fixing = true
-	sctx.Config.CI.ExternalChecks = []string{"Greptile Review"}
-	sctx.Env = append(sctx.Env, "FAKE_CLI_CHECKS="+greenGreptileChecksJSON)
-	marked := false
-	sctx.MarkRunning = func() error {
-		if sctx.PreviousFindings != "" || sctx.DeferredFindings != "" {
-			t.Fatalf("retained external bot survived scoping: %s %s", sctx.PreviousFindings, sctx.DeferredFindings)
-		}
-		marked = true
-		return nil
-	}
-	outcome, err := step.Execute(sctx)
-	if !errors.Is(err, context.Canceled) || outcome != nil || !marked || !*ready || len(ag.calls) != 0 {
-		t.Fatalf("external bot triggered repair or blocked monitoring: outcome=%+v err=%v marked=%v ready=%v calls=%d", outcome, err, marked, *ready, len(ag.calls))
+func TestCIScopeRetainedAbsentBotIsDroppedWhenExternal(t *testing.T) {
+	for _, registered := range []bool{false, true} {
+		t.Run(map[bool]string{false: "absent", true: "registered"}[registered], func(t *testing.T) {
+			initial := `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`
+			env := append(fakeCIGH(t, "OPEN", initial), greenGreptileCommentJSON)
+			sctx, ag, _, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsAlways, env)
+			step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error { return context.Canceled })
+			observation, err := step.Execute(sctx)
+			if err != nil || observation == nil || !observation.NeedsApproval {
+				t.Fatalf("absent bot observation = %+v, %v", observation, err)
+			}
+			findings, err := types.ParseFindingsJSON(observation.Findings)
+			if err != nil || len(findings.Items) != 1 {
+				t.Fatalf("absent bot findings = %+v, %v", findings, err)
+			}
+			if item := findings.Items[0]; item.Check != "" || item.CheckApp != "greptile-apps" {
+				t.Fatalf("absent bot lost app identity: %+v", item)
+			}
+			sctx.PreviousFindings = observation.Findings
+			sctx.DeferredFindings = observation.Findings
+			sctx.Fixing = true
+			sctx.Config.CI.ExternalChecks = []string{"Greptile Review"}
+			if registered {
+				sctx.Env = append(sctx.Env, "FAKE_CLI_CHECKS="+greenGreptileChecksJSON)
+			}
+			marked := false
+			sctx.MarkRunning = func() error {
+				if sctx.PreviousFindings != "" || sctx.DeferredFindings != "" {
+					t.Fatalf("retained external bot survived scoping: %s %s", sctx.PreviousFindings, sctx.DeferredFindings)
+				}
+				marked = true
+				return nil
+			}
+			outcome, err := step.Execute(sctx)
+			if !errors.Is(err, context.Canceled) || outcome != nil || !marked || !*ready || len(ag.calls) != 0 {
+				t.Fatalf("external bot triggered repair or blocked monitoring: outcome=%+v err=%v marked=%v ready=%v calls=%d", outcome, err, marked, *ready, len(ag.calls))
+			}
+		})
 	}
 }
 

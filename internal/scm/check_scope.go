@@ -255,10 +255,7 @@ func (s *CheckScope) Includes(ctx context.Context, pr *PR, check Check) bool {
 
 func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck, derived bool) ScopedChecks {
 	out := ScopedChecks{emptyReady: len(checks) > 0 && (derived || s.policy.NoCI)}
-	reportedForms := make(map[string]bool, len(checks)*2)
 	for _, c := range checks {
-		reportedForms[c.Name] = true
-		reportedForms[c.DisplayName()] = true
 		switch s.classify(c, required, derived) {
 		case CheckRoleExternal:
 			out.External = append(out.External, c)
@@ -268,22 +265,15 @@ func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck,
 			out.Relevant = append(out.Relevant, c)
 		}
 	}
-	expected := append([]RequiredCheck(nil), required...)
-	for _, p := range s.policy.MustPass {
-		if p = strings.TrimSpace(p); p != "" && !strings.ContainsAny(p, "*?") && !reportedForms[p] && !matchesMissingContext([]string{p}, required) {
-			expected = append(expected, RequiredCheck{Context: p})
-		}
-	}
 	head := ""
 	if pr != nil {
 		head = pr.HeadSHA
 	}
-	seen := make(map[RequiredCheck]bool, len(expected))
-	for _, want := range expected {
-		if seen[want] || MatchesMissingContext(s.policy.ExternalChecks, want.Context) {
+	for _, want := range required {
+		missing := Check{Name: want.Context, AppID: want.AppID, Kind: CheckKindRun, HeadSHA: head, Bucket: CheckBucketPending, State: "EXPECTED", ExpectedMissing: true}
+		if s.classify(missing, required, derived) != CheckRoleRequired || (want.SelfStatus && want.AppID <= 0) {
 			continue
 		}
-		seen[want] = true
 		satisfied := false
 		for _, c := range checks {
 			if want.satisfiedBy(c) {
@@ -291,20 +281,42 @@ func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck,
 				break
 			}
 		}
-		if satisfied || (want.SelfStatus && want.AppID <= 0) {
+		if !satisfied {
+			out.Relevant = append(out.Relevant, missing)
+		}
+	}
+	for _, pattern := range s.policy.MustPass {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" || strings.ContainsAny(pattern, "*?") {
 			continue
 		}
-		out.Relevant = append(out.Relevant, Check{Name: want.Context, AppID: want.AppID, HeadSHA: head, Bucket: CheckBucketPending, State: "EXPECTED", Kind: CheckKindStatus, ExpectedMissing: true})
+		missing := Check{Name: pattern, HeadSHA: head, Bucket: CheckBucketPending, State: "EXPECTED", ExpectedMissing: true}
+		if workflow, job, qualified := strings.Cut(pattern, " / "); qualified {
+			missing.Name, missing.Workflow = job, workflow
+		}
+		if s.classify(missing, required, derived) != CheckRoleRequired {
+			continue
+		}
+		satisfied := false
+		for _, c := range out.Relevant {
+			if c.Name == missing.Name && (missing.Workflow == "" || c.Workflow == missing.Workflow) {
+				satisfied = true
+				break
+			}
+		}
+		if !satisfied {
+			out.Relevant = append(out.Relevant, missing)
+		}
 	}
 	return out
 }
 
 // classify reports a single check's role under an already-resolved scope.
 func (s *CheckScope) classify(c Check, required []RequiredCheck, derived bool) CheckRole {
-	if MatchesAnyCheckPattern(s.policy.ExternalChecks, c.Name) || MatchesAnyCheckPattern(s.policy.ExternalChecks, c.DisplayName()) {
+	if matchesCheckIdentity(s.policy.ExternalChecks, c) {
 		return CheckRoleExternal
 	}
-	if MatchesAnyCheckPattern(s.policy.MustPass, c.Name) || MatchesAnyCheckPattern(s.policy.MustPass, c.DisplayName()) {
+	if matchesCheckIdentity(s.policy.MustPass, c) {
 		return CheckRoleRequired
 	}
 	if !derived {
@@ -318,30 +330,13 @@ func (s *CheckScope) classify(c Check, required []RequiredCheck, derived bool) C
 	return CheckRoleInformational
 }
 
-// MatchesMissingContext reports whether a pattern names a required context
-// that no check has registered yet. A missing context carries no workflow
-// metadata, so besides the whole pattern, a pattern of the form
-// "<workflow> / <job-pattern>" is tested by its job part against the bare
-// context: the registered check would display as "<workflow> / <context>", and
-// the pattern that excludes it must exclude its placeholder too.
-func MatchesMissingContext(patterns []string, context string) bool {
-	for _, p := range patterns {
-		if MatchCheckPattern(p, context) {
-			return true
-		}
-		if _, job, ok := strings.Cut(strings.TrimSpace(p), " / "); ok && MatchCheckPattern(job, context) {
-			return true
-		}
-	}
-	return false
-}
-
-// matchesMissingContext reports whether any pattern names one of the
-// already-required contexts, so a literal must_pass entry for it does not add
-// a second placeholder.
-func matchesMissingContext(patterns []string, required []RequiredCheck) bool {
-	for _, r := range required {
-		if MatchesMissingContext(patterns, r.Context) {
+func matchesCheckIdentity(patterns []string, check Check) bool {
+	for _, pattern := range patterns {
+		if workflow, job, qualified := strings.Cut(strings.TrimSpace(pattern), " / "); qualified {
+			if (check.Workflow == "" || MatchCheckPattern(workflow, check.Workflow)) && MatchCheckPattern(job, check.Name) {
+				return true
+			}
+		} else if MatchCheckPattern(pattern, check.Name) {
 			return true
 		}
 	}
@@ -356,23 +351,13 @@ func (s *CheckScope) ExternalReviewBotChecks() []Check {
 	var out []Check
 	for _, bot := range ReviewBots {
 		for _, name := range bot.CheckNames {
-			if MatchesAnyCheckPattern(s.policy.ExternalChecks, name) {
+			if s.classify(Check{Name: name, App: bot.AppSlug}, nil, false) == CheckRoleExternal {
 				out = append(out, Check{Name: name, App: bot.AppSlug})
 				break
 			}
 		}
 	}
 	return out
-}
-
-// MatchesAnyCheckPattern reports whether name matches any glob pattern.
-func MatchesAnyCheckPattern(patterns []string, name string) bool {
-	for _, p := range patterns {
-		if MatchCheckPattern(p, name) {
-			return true
-		}
-	}
-	return false
 }
 
 // MatchCheckPattern reports whether name matches a glob pattern in which '*'
