@@ -21,6 +21,20 @@ import (
 // Used as a base when there is no prior commit to diff against.
 const EmptyTreeSHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 
+// CommandError retains captured, credential-redacted stderr separately from
+// its rendered message. Unwrap preserves command, cancellation and drain causes.
+type CommandError struct {
+	Command string
+	Stderr  string
+	Err     error
+}
+
+func (e *CommandError) Error() string {
+	return fmt.Sprintf("git %s: %v: %s", e.Command, e.Err, strings.TrimSpace(e.Stderr))
+}
+
+func (e *CommandError) Unwrap() error { return e.Err }
+
 // IsZeroSHA returns true if the SHA is the null/zero ref that git uses for
 // new or deleted branches (40 zeros).
 func IsZeroSHA(sha string) bool {
@@ -81,6 +95,14 @@ func RunWithEnv(ctx context.Context, dir string, extraEnv []string, args ...stri
 	return runInDirWithEnv(ctx, dir, extraEnv, args...)
 }
 
+// RunDiscoveryWithEnv leaves bare-directory selection to the discovery caller.
+// Unlike RunWithEnv, it never injects --git-dir from the general bare heuristic:
+// ordinary project entries must not override corroborated identity discovery.
+func RunDiscoveryWithEnv(ctx context.Context, dir string, extraEnv []string, args ...string) (string, error) {
+	out, err := runInDirWithEnvRaw(ctx, dir, extraEnv, args...)
+	return string(out), err
+}
+
 func runInDir(ctx context.Context, dir string, args ...string) (string, error) {
 	return runInDirWithEnv(ctx, dir, nil, args...)
 }
@@ -115,9 +137,13 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = fmt.Errorf("%w (%v)", ctxErr, err)
+			err = fmt.Errorf("%w (%w)", ctxErr, err)
 		}
-		return nil, fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(strings.TrimSpace(stderr.String())))
+		return nil, &CommandError{
+			Command: safeurl.RedactText(strings.Join(args, " ")),
+			Stderr:  safeurl.RedactText(stderr.String()),
+			Err:     err,
+		}
 	}
 	return out, nil
 }

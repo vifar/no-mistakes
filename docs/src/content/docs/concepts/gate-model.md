@@ -77,6 +77,63 @@ That is a core design choice, not an implementation detail.
 
 ## Why it is built this way
 
+### Recursive-run containment
+
+Pipeline-control commands check the caller's Git common and actual metadata
+directories in one command first. Physical-ancestor checks corroborate successful
+discovery too: incomplete metadata skipped by Git cannot select an enclosing
+repository. Gitfile targets are compared with the actual metadata directory so
+linked and separate Git directories remain supported. Reopened gitfiles are limited
+to 1 MiB and must still be regular files. The independently resolved actual metadata
+path frames the raw common/actual command output, preserving embedded newlines and
+terminal whitespace without shell evaluation. The framing boundary converts native
+Windows separators to Git's forward slashes; Unix backslashes remain literal
+filename bytes. Optional top-level attribution also
+preserves path bytes. Every discovered common directory
+must have a recognizable `HEAD` and object/reference directories, regardless of
+registration and even when the linked worktree metadata is healthy. Unborn
+symbolic and detached `HEAD` forms remain supported. Symbolic files require
+`ref:` followed by optional space, tab, CR or LF and a `refs/` prefix, matching
+Git's locale-independent whitespace table. Vertical tab and form feed are not
+recognized delimiters. A `HEAD`
+symlink whose target starts with `refs/` is recognized without following it,
+including an unborn target. Detached HEAD recognition uses a hexadecimal object-ID
+prefix, matching Git discovery.
+Identity commands select explicit bare discovery only after substantive metadata
+evidence at the nearest physical ancestor boundary, with nearer `.git` entries
+taking precedence, so mixed ordinary files and directories cannot force an invalid
+Git directory.
+A canonical bare gate registered to the current owner proves managed identity,
+including when the caller is in the bare gate itself or one of its descendants. Ordinary clones and their
+linked worktrees do not need a worktree-root query. For managed callers, the
+root query is used only to attribute an active run; missing optional attribution
+does not remove the managed identity or permit pipeline control.
+
+The identity Git commands share a ten-second execution budget and honor an
+earlier caller deadline. This is a command budget, not a deadline for the whole
+classifier: filesystem checks, database reads, process-start system calls, and
+authenticated process-ancestry lookup can take longer.
+
+A Git failure proceeds as repository absence only after a single recognized
+English discovery diagnostic, a normal exit, complete output draining, and
+filesystem checks that find no Git metadata in the caller's physical ancestors.
+An explicit `.git` entry remains significant even when malformed. Bare metadata
+requires recognizable Git `HEAD` content or typed object/reference directory structure;
+ordinary names such as `HEAD`, `objects`, or `refs` alone are not evidence.
+Substantive remnants still prevent admission when other metadata components are missing.
+These evidence rules apply to successful discovery as well as absence.
+Malformed gitfiles, incomplete repository directories, dubious ownership,
+unknown failures, canceled commands, and incomplete output draining fail closed.
+An unexpected managed-root query failure retains positive managed identity and
+returns an error. A confirmed bare gate's lack of a worktree root affects only
+attribution.
+
+Ordinary clones and directories without repositories still undergo active-step
+and authenticated process-ancestry checks. Changing directory or removing
+`NO_MISTAKES_GATE` does not allow an active validation-step descendant to start
+or control another pipeline. Classification changes no enrollment, run, ref,
+mirror, or worktree records.
+
 ### Named remote
 
 The remote is explicit because trust matters. `no-mistakes` is an opt-in gate,
