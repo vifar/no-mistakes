@@ -410,8 +410,8 @@ func TestCheckScopeQualifiedLiteralMustPassReadiness(t *testing.T) {
 		})
 	}
 	unprotected := NewCheckScope(nil, CheckScopePolicy{MustPass: []string{"CI / lint"}, ExternalChecks: []string{"lint"}}, "main", nil)
-	if scoped := unprotected.Apply(context.Background(), &PR{}, nil); len(scoped.Relevant) != 0 {
-		t.Fatalf("excluded absent literal became a placeholder: %+v", scoped)
+	if scoped := unprotected.Apply(context.Background(), &PR{}, []Check{{Name: "build", Bucket: CheckBucketPass}}); !scoped.Ready() || len(scoped.Relevant) != 1 || scoped.Relevant[0].Name != "build" {
+		t.Fatalf("excluded absent literal blocked an otherwise passing head: %+v", scoped)
 	}
 }
 

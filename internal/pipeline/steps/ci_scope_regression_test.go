@@ -62,7 +62,7 @@ func TestCIScopeApprovalExternalOnlyReadiness(t *testing.T) {
 	}
 }
 
-func TestCIScopeExcludedBotCannotReturnThroughComments(t *testing.T) {
+func TestCIScopeAlwaysBotCommentsOnlyRespectExternalExclusions(t *testing.T) {
 	for _, external := range []bool{false, true} {
 		for _, failing := range []bool{false, true} {
 			t.Run(strings.Join([]string{map[bool]string{true: "external", false: "informational"}[external], map[bool]string{true: "red", false: "green"}[failing]}, "/"), func(t *testing.T) {
@@ -78,7 +78,19 @@ func TestCIScopeExcludedBotCannotReturnThroughComments(t *testing.T) {
 				}
 				step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error { return context.Canceled })
 				outcome, err := step.Execute(sctx)
-				if failing {
+				if !external {
+					if err != nil || outcome == nil || !outcome.NeedsApproval || !strings.Contains(outcome.Findings, `"category":"ci-review-bot"`) || *ready {
+						t.Fatalf("informational bot comments lost under always: %+v %v", outcome, err)
+					}
+					if failing && !strings.Contains(outcome.Findings, `"check":"build"`) {
+						t.Fatalf("build failure lost beside bot comments: %+v", outcome)
+					}
+					if !failing {
+						if reason, err := step.VerifyApprovalOverride(sctx); err != nil || reason == "" {
+							t.Fatalf("informational comments approved cleanly: %q %v", reason, err)
+						}
+					}
+				} else if failing {
 					if err != nil || outcome == nil || strings.Contains(outcome.Findings, "greptile") || strings.Contains(outcome.Findings, "Greptile") || !strings.Contains(outcome.Findings, `"check":"build"`) {
 						t.Fatalf("excluded bot resurfaced: %+v %v", outcome, err)
 					}
@@ -293,4 +305,37 @@ func TestCIScopeAbsentExternalBotDoesNotReturnThroughComments(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCIScopeAlwaysRetainsInformationalBotComments(t *testing.T) {
+	for _, named := range []bool{false, true} {
+		sctx := &pipeline.StepContext{Ctx: context.Background(), Config: &config.Config{}}
+		sctx.Config.CI.ReviewBotComments = config.CIReviewBotCommentsAlways
+		item := Finding{ID: "bot", Category: types.FindingCategoryCIReviewBot, CheckApp: "greptile-apps", Description: "unresolved comment"}
+		if named {
+			item.Check = "Greptile Review"
+		}
+		encoded, err := types.MarshalFindingsJSON(Findings{Items: []Finding{item}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.PreviousFindings, sctx.DeferredFindings = encoded, encoded
+		scope := scm.NewCheckScope(&retainedBotRequiredHost{}, scm.CheckScopePolicy{}, "main", nil)
+		checks := []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass}, {Name: "Greptile Review", App: "greptile-apps", Bucket: scm.CheckBucketFail}}
+		if err := scopeRetainedCIFindings(sctx, scope, &scm.PR{}, checks); err != nil {
+			t.Fatal(err)
+		}
+		for _, raw := range []string{sctx.PreviousFindings, sctx.DeferredFindings} {
+			got, err := types.ParseFindingsJSON(raw)
+			if err != nil || len(got.Items) != 1 || got.Items[0].ID != "bot" {
+				t.Fatalf("informational comment discarded under always: %+v %v", got, err)
+			}
+		}
+	}
+}
+
+type retainedBotRequiredHost struct{ scm.Host }
+
+func (*retainedBotRequiredHost) GetRequiredChecks(context.Context, *scm.PR, string) ([]scm.RequiredCheck, error) {
+	return []scm.RequiredCheck{{Context: "build"}}, nil
 }
