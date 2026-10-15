@@ -32,7 +32,14 @@ func (h *Host) GetRequiredChecks(ctx context.Context, _ *scm.PR, branch string) 
 	var required []scm.RequiredCheck
 
 	protection, err := h.apiGET(ctx, "repos/"+repo+"/branches/"+escaped+"/protection/required_status_checks")
-	if err != nil {
+	switch {
+	case err != nil && classicProtectionAbsent(err):
+		// A branch governed only by rulesets has no classic protection (or none
+		// requiring checks); that source is empty, and the rules read below
+		// still decides. A bare Not Found can also hide protection from a
+		// caller without admin access, so it stays unavailable.
+		protection = []byte(`{}`)
+	case err != nil:
 		return nil, fmt.Errorf("read branch protection required checks: %w", err)
 	}
 	{
@@ -147,6 +154,15 @@ func (h *Host) apiGET(ctx context.Context, endpoint string, extra ...string) ([]
 		return nil, fmt.Errorf("gh api %s: %s: %w", endpoint, strings.TrimSpace(text), err)
 	}
 	return out, nil
+}
+
+// classicProtectionAbsent reports whether a classic protection read failed
+// because the branch has no protection or none requiring status checks, as
+// opposed to a permission or lookup failure that GitHub also reports as 404.
+func classicProtectionAbsent(err error) bool {
+	text := err.Error()
+	return strings.Contains(text, "HTTP 404") &&
+		(strings.Contains(text, "Branch not protected") || strings.Contains(text, "Required status checks not enabled"))
 }
 
 // escapeBranchPath percent-encodes a branch name as one REST path parameter.

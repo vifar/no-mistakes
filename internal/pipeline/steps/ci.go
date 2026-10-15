@@ -690,6 +690,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					baseBranch = live
 					pr.BaseBranch = live
 					checkScope = newCIChecksScope(sctx, host, live)
+					// Timeout evidence judged the old target; it must not be
+					// reported before a poll under the new scope replaces it.
+					timeoutFailingChecks = nil
+					timeoutMergeConflict = false
 					lastScopeLog = ""
 					lastMonitorLog = ""
 					clearCIMonitorReady(sctx)

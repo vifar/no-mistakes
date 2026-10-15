@@ -361,3 +361,42 @@ func TestCIStep_TargetReadFailuresHonorTimeout(t *testing.T) {
 		})
 	}
 }
+
+// Timeout evidence judged the old target. A retarget observed as the idle
+// deadline passes must not report it before a poll under the new scope replaces it.
+func TestCIStep_RetargetAtDeadlineDropsTheOldTargetsTimeoutEvidence(t *testing.T) {
+	dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
+	env, _ := stepstest.FakeCIGHLoggedSequence(t, "OPEN", []string{`[{"name":"old-only","state":"FAILURE","bucket":"fail"},{"name":"new-req","state":"PENDING","bucket":"pending"}]`}, "", "")
+	targetFile := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(targetFile, []byte("main"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sctx := stepstest.NewTestContextWithDBRecords(t, nil, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = append(env, "FAKE_CLI_PR_BASE_FILE="+targetFile,
+		`FAKE_CLI_PROTECTION_JSON_MAIN={"contexts":["old-only","new-req"]}`,
+		`FAKE_CLI_PROTECTION_JSON_RELEASE={"contexts":["new-req"]}`,
+		`FAKE_CLI_RULES_JSON=[]`)
+	stepstest.BindCurrentPRComparison(t, sctx, "https://github.com/test/repo/pull/42", "test/repo", "main")
+	sctx.Config.CITimeout = 10 * time.Second
+	current := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	step := (&steps.CIStep{}).SetNow(func() time.Time { return current }).SetBaseBranchTip(func(context.Context) (string, bool) { return baseSHA, true })
+	started := current
+	retargeted := false
+	sctx.Log = func(message string) {
+		if strings.Contains(message, "PR target changed from main to release") {
+			retargeted = true
+			current = started.Add(sctx.Config.CITimeout)
+		}
+	}
+	step.SetWaitForNextPoll(func(context.Context, time.Duration) error {
+		current = current.Add(time.Second)
+		return os.WriteFile(targetFile, []byte("release"), 0600)
+	})
+	outcome, err := step.Execute(sctx)
+	if err != nil || outcome == nil || !outcome.NeedsApproval || !retargeted {
+		t.Fatalf("expected the timeout gate after the retarget: %+v, %v, retargeted=%v", outcome, err, retargeted)
+	}
+	if strings.Contains(outcome.Findings, "old-only") {
+		t.Fatalf("the old target's failure was reported after the retarget: %s", outcome.Findings)
+	}
+}

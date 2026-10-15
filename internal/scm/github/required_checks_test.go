@@ -105,6 +105,21 @@ func TestGetRequiredCheckContextsUnavailableOn404And403(t *testing.T) {
 	}
 }
 
+// GitHub answers the classic endpoint with a specific 404 when a branch is
+// governed only by rulesets; the rules then decide alone.
+func TestGetRequiredChecksReadsRulesetsWhenClassicProtectionIsAbsent(t *testing.T) {
+	t.Parallel()
+	for _, message := range []string{"gh: Branch not protected (HTTP 404)", "gh: Required status checks not enabled (HTTP 404)"} {
+		contexts, err := requiredContexts(t, map[string]githubTestResponse{
+			protectionCmd: {stderr: message, code: 1},
+			rulesCmd:      {stdout: `[[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ruleset-only"}]}}]]`},
+		})
+		if err != nil || !reflect.DeepEqual(contexts, []string{"ruleset-only"}) {
+			t.Fatalf("%s: contexts = %v, err = %v; want the ruleset requirement", message, contexts, err)
+		}
+	}
+}
+
 func TestGetRequiredCheckContextsReportsOtherFailures(t *testing.T) {
 	t.Parallel()
 	_, err := requiredContexts(t, map[string]githubTestResponse{
