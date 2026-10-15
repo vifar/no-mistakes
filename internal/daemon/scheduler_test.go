@@ -710,3 +710,39 @@ func TestSchedulerReleaseUnusedReservation(t *testing.T) {
 		})
 	}
 }
+
+// A refresh that read the limits before a config edit must not overwrite the
+// newer policy a concurrent refresh already applied. Otherwise a slot that
+// marks itself parked-held afterwards is never released by the disable.
+func TestSchedulerRefreshDoesNotApplyStaleLimits(t *testing.T) {
+	var mu sync.Mutex
+	staleRead := make(chan struct{})
+	proceed := make(chan struct{})
+	calls := 0
+	s := newSlotScheduler(func() (int, bool) {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		if n == 1 {
+			close(staleRead)
+			<-proceed
+			return 1, true // read before the edit
+		}
+		return 1, false
+	}, &sync.Mutex{})
+
+	done := make(chan struct{})
+	go func() { s.refresh(); close(done) }()
+	<-staleRead
+	go func() {
+		// Let the stale refresh finish once the newer one is under way.
+		time.Sleep(100 * time.Millisecond)
+		close(proceed)
+	}()
+	s.refresh() // reads the edited limits
+	<-done
+	if st := s.stats(); st.Hold {
+		t.Fatalf("stale limits overwrote the newer policy: %+v", st)
+	}
+}

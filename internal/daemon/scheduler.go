@@ -28,6 +28,11 @@ type slotScheduler struct {
 	// order of the queued_at stamps written to the database.
 	admitMu sync.Mutex
 
+	// refreshMu makes reading the live limits and applying them one step, so a
+	// refresh that read the limits before a config edit cannot land after a
+	// refresh that read the edited ones and restore the old policy.
+	refreshMu sync.Mutex
+
 	mu       *sync.Mutex
 	max      int
 	hold     bool
@@ -64,6 +69,7 @@ func (s *slotScheduler) refresh() {
 	if s.limits == nil {
 		return
 	}
+	s.refreshMu.Lock()
 	max, hold := s.limits()
 	if max < 0 {
 		max = 0
@@ -78,6 +84,7 @@ func (s *slotScheduler) refresh() {
 		}
 	}
 	s.mu.Unlock()
+	s.refreshMu.Unlock()
 	// hold_slot_while_parked was just switched off: gates already parked under
 	// it never yield again on their own, so give their slots back now. Turning
 	// it on needs no retroactive step - a run simply stops yielding.
