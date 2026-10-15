@@ -22,6 +22,10 @@ func TestCIScopeApprovalUsesSelectedTarget(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, nil, dir, base, head, config.Commands{})
 	sctx.Env = append(env, `FAKE_CLI_PROTECTION_JSON={"contexts":["build","deploy"]}`, `FAKE_CLI_RULES_JSON=[]`)
 	bindExistingPRMutationFixture(t, sctx, "https://github.com/test/repo/pull/42", "release")
+	// A gate is raised by Execute, which records the scope it evaluated.
+	if err := recordCIChecksScope(sctx); err != nil {
+		t.Fatal(err)
+	}
 	reason, err := (&CIStep{}).VerifyApprovalOverride(sctx)
 	if err != nil || !strings.Contains(reason, "deploy") {
 		t.Fatalf("reason=%q err=%v", reason, err)
@@ -55,6 +59,9 @@ func TestCIScopeApprovalExternalOnlyReadiness(t *testing.T) {
 			sctx, _, _, _, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsAlways, env)
 			sctx.Config.NoCI = tc.noCI
 			sctx.Config.CI.ExternalChecks = []string{"Greptile Review"}
+			if err := recordCIChecksScope(sctx); err != nil {
+				t.Fatal(err)
+			}
 			reason, err := (&CIStep{}).VerifyApprovalOverride(sctx)
 			if err != nil || (reason == "") != tc.ready {
 				t.Fatalf("approval reason=%q err=%v want ready=%v", reason, err, tc.ready)
@@ -360,13 +367,15 @@ func TestCIScopeApprovalUsesTheScopeRecordedWhenTheGateWasRaised(t *testing.T) {
 		t.Fatalf("approval after loosening external_checks = %q, %v; want the original failure recorded as an override", reason, err)
 	}
 
-	// A run that recorded nothing falls back to the live configuration.
+	// A run that recorded nothing predates check scoping, so it is judged by
+	// the legacy every-check policy like the strict receipt, never by the live
+	// configuration, which here would now treat build as external.
 	if err := sctx.DB.SetRunCheckScope(sctx.Run.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	reason, err = step.VerifyApprovalOverride(sctx)
-	if err != nil || reason != "" {
-		t.Fatalf("an unrecorded run must use the live configuration, got %q, %v", reason, err)
+	if err != nil || !strings.Contains(reason, "build") {
+		t.Fatalf("an unrecorded run must be judged on every check, got %q, %v", reason, err)
 	}
 }
 

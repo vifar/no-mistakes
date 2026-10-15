@@ -253,14 +253,17 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	pr.BaseBranch = targetBranch
 	// A parked gate is verified under the scope it was raised with, not the
 	// configuration loaded now: a later edit to external_checks must not
-	// reclassify the failure the operator is approving over. Only a run that
-	// recorded nothing falls back to the live configuration.
+	// reclassify the failure the operator is approving over. A run that
+	// recorded nothing predates check scoping (for example a gate parked by an
+	// older build); like the strict receipt, it keeps the legacy behavior of
+	// judging every check rather than the live configuration, which may be
+	// less strict than the gate's original evaluation.
 	policy, recorded, err := recordedCIChecksScope(sctx)
 	if err != nil {
 		return fmt.Sprintf("could not verify live CI scope: %v", err), nil
 	}
 	if !recorded {
-		policy = ciCheckScopePolicy(sctx)
+		policy = scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAll}
 	}
 	overrideScope := scm.NewCheckScope(host, policy, targetBranch, func(msg string) {
 		if sctx.Log != nil {
