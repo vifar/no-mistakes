@@ -885,9 +885,12 @@ func (p Provider) AuthCheckCommand() []string {
 	case ProviderForgejo:
 		return []string{"forgejo-axi", "status", "--json"}
 	case ProviderGitea:
-		// `tea whoami` is gone in tea 1.0; an authenticated GET /user works
-		// in both generations.
-		return []string{"tea", "api", "/user"}
+		// No generic probe: an unscoped `tea api /user` lets tea pick its
+		// default account, which may belong to a different instance than the
+		// repository's. Gitea authentication is decided only by
+		// gitea.Host.Available, which selects the repository's account with
+		// the generation-aware --login (tea 0.x) or --host (tea 1.0) flag.
+		return nil
 	case ProviderOrigin:
 		return []string{"origin", "auth", "status"}
 	default:
