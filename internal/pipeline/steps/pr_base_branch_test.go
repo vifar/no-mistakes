@@ -205,7 +205,7 @@ func TestPRStep_StrictShippingRejectsExistingPRWithWrongLiveBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(logData), "pr edit") || strings.Contains(string(logData), "pr create") {
+	if strings.Contains(string(logData), "--method PATCH") || strings.Contains(string(logData), "pr create") {
 		t.Fatalf("strict target mismatch changed or created a PR:\n%s", logData)
 	}
 }
@@ -379,10 +379,10 @@ func TestPRStep_PrefersPersistedPRWhenFindPRReturnsSibling(t *testing.T) {
 		t.Fatal(readErr)
 	}
 	ghLog := string(logData)
-	if strings.Contains(ghLog, "pr edit 99") {
+	if strings.Contains(ghLog, "pulls/99") {
 		t.Fatalf("unbound sibling pull request was mutated, got:\n%s", ghLog)
 	}
-	if !strings.Contains(ghLog, "pr edit 42") {
+	if !strings.Contains(ghLog, "pulls/42") {
 		t.Fatalf("expected persisted PR #42 to be updated, got:\n%s", ghLog)
 	}
 	if strings.Contains(ghLog, "pr create") {

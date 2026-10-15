@@ -724,7 +724,7 @@ func TestPushStep_UnavailableSCMRefusesUnverifiedPRTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(logData), "auth status") || strings.Contains(string(logData), "pr edit") {
+	if !strings.Contains(string(logData), "auth status") || strings.Contains(string(logData), "--method PATCH") {
 		t.Fatalf("expected refusal before any PR write:\n%s", logData)
 	}
 }
@@ -952,7 +952,7 @@ func TestPushStep_DoesNotMintAttestation(t *testing.T) {
 		t.Fatalf("push step failed: %v", err)
 	}
 
-	if logData, err := os.ReadFile(logFile); err == nil && strings.Contains(string(logData), "pr edit") {
+	if logData, err := os.ReadFile(logFile); err == nil && strings.Contains(string(logData), "--method PATCH") {
 		t.Fatalf("must not write a PR body when no attestation was present:\n%s", logData)
 	}
 	body, err := os.ReadFile(bodyFile)
@@ -1017,7 +1017,7 @@ func TestPushStep_NoPullRequestLogsTheSkippedAttestation(t *testing.T) {
 	if remoteHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); remoteHead != newHead {
 		t.Fatalf("remote head = %s, want %s", remoteHead, newHead)
 	}
-	if logData, err := os.ReadFile(logFile); err == nil && strings.Contains(string(logData), "pr edit") {
+	if logData, err := os.ReadFile(logFile); err == nil && strings.Contains(string(logData), "--method PATCH") {
 		t.Fatalf("must not write a PR body when no PR exists:\n%s", logData)
 	}
 	if want := "skipping attestation write: no pull request found for this branch"; !slices.Contains(logs, want) {

@@ -85,11 +85,11 @@ func TestPRStep_UpdatesExactSourceSelectedPR(t *testing.T) {
 		t.Fatal(err)
 	}
 	ghLog := string(logData)
-	if !strings.Contains(ghLog, "pr edit") {
-		t.Errorf("expected gh pr edit to be called, got:\n%s", ghLog)
+	if !strings.Contains(ghLog, "--method PATCH") {
+		t.Errorf("expected gh api PATCH to be called, got:\n%s", ghLog)
 	}
 	if !strings.Contains(ghLog, "--body") {
-		t.Errorf("expected --body flag in gh pr edit, got:\n%s", ghLog)
+		t.Errorf("expected the PR body in the gh api PATCH, got:\n%s", ghLog)
 	}
 	if !strings.Contains(ghLog, noMistakesPRSignature) {
 		t.Errorf("expected updated PR body to include no-mistakes signature, got:\n%s", ghLog)
@@ -123,7 +123,7 @@ func TestPRStep_UnboundSameBranchPRIsNeverUpdated(t *testing.T) {
 		t.Fatal(err)
 	}
 	ghLog := string(logData)
-	if strings.Contains(ghLog, "pr edit") {
+	if strings.Contains(ghLog, "--method PATCH") {
 		t.Fatalf("unbound same-branch pull request was updated:\n%s", ghLog)
 	}
 	if !strings.Contains(ghLog, "pr create") {
@@ -171,7 +171,7 @@ func TestPRStep_UsesResolvedForgeProviderForSelfHostedRemote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(logData), "pr edit") {
+	if !strings.Contains(string(logData), "--method PATCH") {
 		t.Fatalf("expected gh to update the existing PR, got:\n%s", logData)
 	}
 	if !strings.Contains(string(logData), "auth status --hostname code.example.test") {
@@ -681,8 +681,8 @@ func TestPRStep_ExistingPRAgainstDifferentBaseIsUpdatedNotDuplicated(t *testing.
 	if strings.Contains(ghLog, "pr create") {
 		t.Fatalf("expected existing PR to be updated, not duplicated with a new pr create, got:\n%s", ghLog)
 	}
-	if !strings.Contains(ghLog, "pr edit") {
-		t.Fatalf("expected gh pr edit to update the existing PR, got:\n%s", ghLog)
+	if !strings.Contains(ghLog, "--method PATCH") {
+		t.Fatalf("expected gh api PATCH to update the existing PR, got:\n%s", ghLog)
 	}
 
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
