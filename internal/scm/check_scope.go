@@ -30,10 +30,13 @@ var ErrRequiredChecksUnavailable = errors.New("required status checks are not av
 // Check.Name. AppID, when positive, binds the requirement to the application
 // that must produce the check: a same-named check from any other producer
 // (including a legacy commit status, which has no application) does not
-// satisfy it. Zero means any producer.
+// satisfy it. Zero means any producer, except for SelfStatus below.
 type RequiredCheck struct {
-	Context    string
-	AppID      int64
+	Context string
+	AppID   int64
+	// SelfStatus identifies the provider's pipeline-owned status context.
+	// Same-named check runs still count; only an unbound requirement may
+	// omit a missing-check placeholder to avoid waiting on the pipeline itself.
 	SelfStatus bool
 }
 
