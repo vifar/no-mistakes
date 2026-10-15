@@ -266,6 +266,16 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConf
 
 	// Recovery remains exclusive and completes before IPC is bound.
 	recoveredRuns := recoverOnStartup(d, p, mgr, layout)
+	// Queued runs were never executing, so recovery leaves them queued. They
+	// are restored only now that the resumed runs hold their slots, and a
+	// failure to restore them is fatal: serving requests with durable queued
+	// rows outside the ownership table would leave them unstartable and
+	// unabortable.
+	if err := mgr.recoverQueuedRuns(); err != nil {
+		mgr.Shutdown()
+		return fmt.Errorf("restore queued runs: %w", err)
+	}
+	mgr.StartLimitWatcher()
 
 	srv := ipc.NewServer()
 
@@ -500,10 +510,6 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	logStartupPhase("evidence_cleanup", evidenceStarted)
 
 	mgr.resumeRecoveredRuns(plans)
-	// Queued runs were never executing, so recovery leaves them queued. Drain
-	// them only now that the resumed runs hold their slots.
-	mgr.recoverQueuedRuns()
-	mgr.StartLimitWatcher()
 	return staleRuns
 }
 

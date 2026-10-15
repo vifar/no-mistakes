@@ -797,3 +797,112 @@ func TestClaimedCancelRPCStopsWorkWhenDatabaseReadsFail(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// queuedRowThenBreakListing leaves a durable queued row and then makes listing
+// the queue fail, standing in for a transient database error at startup.
+func queuedRowThenBreakListing(t *testing.T, f *faultFixture) string {
+	t.Helper()
+	repo, err := f.d.GetRepo("fault-repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := f.d.InsertRun(repo.ID, "orphan", f.head, f.head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.d.MarkRunQueued(run.ID, `{"trigger":"push"}`); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", f.p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`ALTER TABLE runs DROP COLUMN queued_at`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.d.QueuedRunIDs(); err == nil {
+		t.Fatal("fixture did not break the queue listing")
+	}
+	return run.ID
+}
+
+// A failure to restore the durable queue is reported, restores nothing
+// partially, and never leaves a queued row half-owned.
+func TestRecoverQueuedRunsReportsListingFailure(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	queuedRowThenBreakListing(t, f)
+	err := f.mgr.recoverQueuedRuns()
+	if err == nil || !strings.Contains(err.Error(), "list queued runs") {
+		t.Fatalf("recoverQueuedRuns error = %v, want a clear listing failure", err)
+	}
+	f.mgr.mu.Lock()
+	owned := len(f.mgr.runs)
+	f.mgr.mu.Unlock()
+	if owned != 0 || f.mgr.sched.stats().Queued != 0 {
+		t.Fatalf("a failed restoration left %d runs owned and %d queued", owned, f.mgr.sched.stats().Queued)
+	}
+}
+
+// The daemon refuses to serve when the queue cannot be restored, instead of
+// running with durable queued rows that nothing owns or can abort.
+func TestDaemonStartupFailsWhenQueuedRunsCannotBeRestored(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	queuedRowThenBreakListing(t, f)
+	f.mgr.Shutdown()
+	done := make(chan error, 1)
+	go func() { done <- RunWithOptions(f.p, f.d, nil) }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "restore queued runs") {
+			t.Fatalf("RunWithOptions error = %v, want a clear queue restoration failure", err)
+		}
+	case <-time.After(60 * time.Second):
+		if client, err := ipc.Dial(f.p.Socket()); err == nil {
+			_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
+			client.Close()
+		}
+		t.Fatal("daemon kept serving although its queued runs could not be restored")
+	}
+}
+
+// An earlier launch that saw a full cap must get a slot freed meanwhile ahead
+// of a later launch: the capacity decision and the queue insertion are one step.
+func TestAdmissionKeepsEarlierFullCapLaunchAheadOfLaterLaunch(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	holder := f.push("holder")
+	f.waitStarted(holder)
+
+	reached := make(chan struct{})
+	resume := make(chan struct{})
+	var once sync.Once
+	f.mgr.afterFullDecision = func() {
+		once.Do(func() {
+			close(reached)
+			<-resume
+		})
+	}
+	earlierID := make(chan string, 1)
+	go func() { earlierID <- f.push("earlier") }()
+	<-reached // the earlier launch has seen a full cap and is not queued yet
+
+	f.step.release(holder)
+	f.waitFor("the holder's slot to free", func() bool { return f.mgr.sched.stats().Active == 0 })
+
+	laterID := make(chan string, 1)
+	go func() { laterID <- f.push("later") }()
+	time.Sleep(200 * time.Millisecond) // let the later launch reach admission
+	close(resume)
+
+	earlier, later := <-earlierID, <-laterID
+	f.waitStarted(earlier)
+	if f.started(later) {
+		t.Fatalf("the later launch took the freed slot ahead of the earlier one (started = %v)", f.step.startedIDs())
+	}
+	if got := f.status(later); got != types.RunQueued {
+		t.Fatalf("later launch status = %s, want queued behind the earlier one", got)
+	}
+	f.step.release(earlier)
+	f.waitStarted(later)
+	f.step.release(later)
+}

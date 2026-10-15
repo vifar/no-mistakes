@@ -66,6 +66,9 @@ type RunManager struct {
 	// so tests can inject faults and pauses.
 	claimQueued          func(runID string) (bool, error)
 	beforeQueuedRegister func()
+	// afterFullDecision runs inside admission, between "the cap is full" and the
+	// queue insertion. A test seam for the admission race.
+	afterFullDecision func()
 	// afterExecute and whileFinishing run when a run's Execute returns: before
 	// and after it is marked finishing.
 	afterExecute   func(runID string)
@@ -422,28 +425,41 @@ func (m *RunManager) annotateQueue(info *ipc.RunInfo) *ipc.RunInfo {
 
 // recoverQueuedRuns reloads the durable queue after a restart and drains it.
 // Queued runs stay queued across a restart: nothing about them was running.
-func (m *RunManager) recoverQueuedRuns() {
+//
+// It is all or nothing and its error is fatal to daemon startup. A queued row
+// that is not in the ownership table can be neither started nor aborted (abort
+// and supersede consult the table first), and nothing would ever retry it, so
+// a daemon that served requests after a failed restoration would strand
+// durable rows. Failing startup lets the supervisor retry once the database
+// answers.
+func (m *RunManager) recoverQueuedRuns() error {
 	ids, err := m.db.QueuedRunIDs()
 	if err != nil {
-		slog.Error("failed to list queued runs for recovery", "error", err)
-		return
+		return fmt.Errorf("list queued runs: %w", err)
 	}
 	if len(ids) == 0 {
-		return
+		return nil
 	}
-	slog.Info("restored queued runs", "count", len(ids))
+	restored := make([]*db.Run, 0, len(ids))
 	for _, id := range ids {
 		run, err := m.db.GetRun(id)
-		if err != nil || run == nil {
-			slog.Error("failed to restore queued ownership", "run_id", id, "error", err)
-			return
+		if err != nil {
+			return fmt.Errorf("read queued run %s: %w", id, err)
 		}
-		m.mu.Lock()
-		m.runs[id] = &managedRun{run: run, state: ownershipQueued}
-		m.mu.Unlock()
+		if run == nil {
+			return fmt.Errorf("queued run %s disappeared", id)
+		}
+		restored = append(restored, run)
 	}
+	m.mu.Lock()
+	for _, run := range restored {
+		m.runs[run.ID] = &managedRun{run: run, state: ownershipQueued}
+	}
+	m.mu.Unlock()
+	slog.Info("restored queued runs", "count", len(ids))
 	m.sched.restoreQueue(ids)
 	m.sched.dispatch()
+	return nil
 }
 
 // cancelManagedRun is the single cancellation path for abort and supersede. It
@@ -2049,13 +2065,13 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// recorded as queued and this call returns at once: no worktree, no agent,
 	// no executor. The queue drain (slotScheduler.dispatch) finishes the launch
 	// from the row alone, so a queued run also survives a daemon restart.
-	slot, admitted := m.sched.tryAdmit(run.ID)
-	if !admitted {
-		if err := m.enqueueRun(run, queueSpec{Trigger: trigger, SkipSteps: skipSteps}); err != nil {
-			m.db.UpdateRunError(run.ID, fmt.Sprintf("queue run: %s", err))
-			trackStartFailure("queue_run")
-			return "", fmt.Errorf("queue run: %w", err)
-		}
+	slot, err := m.admitRun(run, queueSpec{Trigger: trigger, SkipSteps: skipSteps})
+	if err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("queue run: %s", err))
+		trackStartFailure("queue_run")
+		return "", fmt.Errorf("queue run: %w", err)
+	}
+	if slot == nil {
 		telemetry.Track("run", telemetry.Fields{
 			"action":      "queued",
 			"trigger":     trigger,
@@ -2084,25 +2100,37 @@ type runHandle struct {
 	consumed bool
 }
 
-// enqueueRun persists the run as queued and puts it in the start order.
-func (m *RunManager) enqueueRun(run *db.Run, spec queueSpec) error {
+// admitRun decides a new run's admission and, when it does not fit, queues it.
+// The capacity decision and the durable plus in-memory queue insertion happen
+// under one admission lock, so a later launch can never be admitted into a slot
+// that freed while an earlier launch was still on its way into the queue: that
+// later launch waits for the lock, finds the earlier run queued, and queues
+// behind it. A nil slot means the run was queued; otherwise the caller owns the
+// returned slot.
+func (m *RunManager) admitRun(run *db.Run, spec queueSpec) (*runSlot, error) {
 	raw, err := json.Marshal(spec)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	m.sched.admitMu.Lock()
 	defer m.sched.admitMu.Unlock()
+	if slot, ok := m.sched.tryAdmit(run.ID); ok {
+		return slot, nil
+	}
+	if m.afterFullDecision != nil {
+		m.afterFullDecision()
+	}
 	m.mu.Lock()
 	if _, err := m.db.MarkRunQueued(run.ID, string(raw)); err != nil {
 		m.mu.Unlock()
-		return err
+		return nil, err
 	}
 	run.Status = types.RunQueued
 	m.runs[run.ID] = &managedRun{run: run, state: ownershipQueued}
 	m.sched.queued = append(m.sched.queued, run.ID)
 	m.mu.Unlock()
 	m.sched.dispatch()
-	return nil
+	return nil, nil
 }
 
 // launchRun performs the setup and background start of a run that already
