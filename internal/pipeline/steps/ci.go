@@ -655,6 +655,48 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 		botCommentReadFailed := false
 
+		// The target a PR points at decides which checks are required of it,
+		// and it can change while this step monitors. Re-read it before any
+		// check is classified, and rebuild the scope for the new target so a
+		// requirement of the new base is never treated as informational and a
+		// failure only the old base required is never dispatched. Strict runs
+		// pin their target and verify it above.
+		if sctx.Run.Shipping == nil {
+			if reader, ok := host.(scm.PRBaseBranchReader); ok {
+				live, readErr := reader.GetPRBaseBranch(ctx, pr)
+				if readErr != nil && pluginPollFailsStep(readErr) {
+					clearCIMonitorReady(sctx)
+					return nil, readErr
+				}
+				if readErr != nil {
+					// An unreadable target cannot be classified against; wait
+					// for the next poll instead of using a possibly stale one.
+					sctx.Log(fmt.Sprintf("warning: could not read the PR target branch: %v", readErr))
+					clearCIMonitorReady(sctx)
+					lastMonitorLog = ""
+					if err := waitForPoll(); err != nil {
+						return nil, err
+					}
+					continue
+				}
+				if live = strings.TrimSpace(live); live != "" && live != baseBranch {
+					sctx.Log(fmt.Sprintf("PR target changed from %s to %s, re-reading its required checks", baseBranch, live))
+					baseBranch = live
+					pr.BaseBranch = live
+					checkScope = newCIChecksScope(sctx, host, live)
+					lastScopeLog = ""
+					lastMonitorLog = ""
+					clearCIMonitorReady(sctx)
+					// Re-record the scope this poll classifies under, and stop
+					// if it cannot be: nothing may be classified or repaired
+					// under a scope the approval and receipt paths do not see.
+					if err := record(sctx); err != nil {
+						return nil, err
+					}
+				}
+			}
+		}
+
 		if !unlimited && now().Sub(timeoutAnchor) >= timeout {
 			return timeoutOutcome()
 		}

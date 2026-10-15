@@ -318,9 +318,9 @@ func TestGetChecksNewerWorkflowRunWithoutJobsSupersedesStaleJobResults(t *testin
 	job := `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/1/job/5","checkSuite":{"app":{"slug":"github-actions","databaseId":15368},"workflowRun":{"workflow":{"name":"CI"}}}}`
 	other := `{"__typename":"CheckRun","databaseId":6,"name":"docs","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/3/job/6","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"Docs"}}}}`
 	runs := `[{"total_count":3,"workflow_runs":[` +
-		`{"id":1,"workflow_id":10,"name":"CI","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/1"},` +
-		`{"id":2,"workflow_id":10,"name":"CI","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/2"},` +
-		`{"id":3,"workflow_id":11,"name":"Docs","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/3"}]}]`
+		`{"id":1,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/1"},` +
+		`{"id":2,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/2"},` +
+		`{"id":3,"workflow_id":11,"name":"Docs","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/3"}]}]`
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		"gh pr view 5 --repo test/repo --json headRefOid --jq .headRefOid":                                       {stdout: "abc123\n"},
 		githubCommitChecksCommand("", "test/repo", "abc123"):                                                     {stdout: githubCommitChecksResponse("[" + job + "," + other + "]")},
@@ -343,4 +343,100 @@ func TestGetChecksNewerWorkflowRunWithoutJobsSupersedesStaleJobResults(t *testin
 	if docs := byName["docs"]; docs.Bucket != scm.CheckBucketPass || len(docs.Supersedes) != 0 {
 		t.Fatalf("an unrelated workflow's job was touched: %+v", docs)
 	}
+}
+
+func checksForWorkflowRuns(t *testing.T, secondRunEvent string) map[string]scm.Check {
+	return checksForWorkflowRunsAt(t, secondRunEvent, "completed", `"conclusion":"failure"`)
+}
+
+func checksForWorkflowRunsAt(t *testing.T, secondRunEvent, status, conclusion string) map[string]scm.Check {
+	t.Helper()
+	job := `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/1/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`
+	runs := `[{"total_count":2,"workflow_runs":[` +
+		`{"id":1,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/1"},` +
+		`{"id":2,"workflow_id":10,"name":"CI","event":"` + secondRunEvent + `","head_branch":"feature","status":"` + status + `",` + conclusion + `,"run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/2"}]}]`
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 5 --repo test/repo --json headRefOid --jq .headRefOid":                                       {stdout: "abc123\n"},
+		githubCommitChecksCommand("", "test/repo", "abc123"):                                                     {stdout: githubCommitChecksResponse("[" + job + "]")},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=abc123 -f per_page=100 --paginate --slurp": {stdout: runs},
+	}), nil, "", "test/repo")
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "5", HeadSHA: "abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]scm.Check{}
+	for _, c := range checks {
+		byName[c.Name] = c
+	}
+	return byName
+}
+
+// A pull_request run that passed and a later workflow_dispatch run that failed
+// are independent results: neither retries the other.
+func TestSupersedeKeepsIndependentlyTriggeredRuns(t *testing.T) {
+	t.Parallel()
+	byName := checksForWorkflowRuns(t, "workflow_dispatch")
+	if build, ok := byName["build"]; !ok || build.Bucket != scm.CheckBucketPass {
+		t.Fatalf("the pull_request run's job was superseded by an independent run: %+v", byName)
+	}
+	if ci := byName["CI"]; ci.Bucket != scm.CheckBucketFail || len(ci.Supersedes) != 0 {
+		t.Fatalf("the dispatched run = %+v, want a failure that supersedes nothing", ci)
+	}
+}
+
+func TestSupersedeReplacesSameEventRetrigger(t *testing.T) {
+	t.Parallel()
+	byName := checksForWorkflowRuns(t, "pull_request")
+	if _, stale := byName["build"]; stale || len(byName["CI"].Supersedes) != 1 {
+		t.Fatalf("a same-event retrigger must supersede the older attempt: %+v", byName)
+	}
+}
+
+func TestSupersedeNeedsAKnownEventAndCountsRerunAttempts(t *testing.T) {
+	t.Parallel()
+	h := New(nil, nil, "", "test/repo")
+	job := scm.Check{Name: "build", Kind: scm.CheckKindRun, Workflow: "CI", WorkflowID: 10, RunID: 7, WorkflowEvent: "push", WorkflowBranch: "feature", Bucket: scm.CheckBucketPass}
+	for name, tc := range map[string]struct {
+		run  scm.Check
+		want bool
+	}{
+		"rerun attempt of the same run": {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 7, RunAttempt: 2, WorkflowEvent: "push", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, true},
+		"first attempt of the same run": {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 7, RunAttempt: 1, WorkflowEvent: "push", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, false},
+		"unknown event":                 {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, Bucket: scm.CheckBucketFail}, false},
+		"different event":               {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, WorkflowEvent: "pull_request", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, false},
+		"same event, other branch":      {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, WorkflowEvent: "push", WorkflowBranch: "other", Bucket: scm.CheckBucketFail}, false},
+		"newer run, same event":         {scm.Check{Name: "CI", WorkflowRun: true, WorkflowID: 10, RunID: 8, WorkflowEvent: "push", WorkflowBranch: "feature", Bucket: scm.CheckBucketFail}, true},
+	} {
+		got := h.supersedeStaleJobResults([]scm.Check{job, tc.run})
+		if superseded := len(got) == 1; superseded != tc.want {
+			t.Errorf("%s: superseded = %v, want %v (%+v)", name, superseded, tc.want, got)
+		}
+	}
+}
+
+// A queued workflow_dispatch run has no job yet. It is not a retry of the
+// pull_request run, so it inherits none of that run's required contexts: the
+// PR run's job keeps satisfying "build" and the dispatch run stays informational.
+func TestQueuedDispatchRunDoesNotInheritThePullRequestRunsRequirements(t *testing.T) {
+	t.Parallel()
+	byName := checksForWorkflowRunsAt(t, "workflow_dispatch", "queued", `"conclusion":null`)
+	build, ok := byName["build"]
+	ci := byName["CI"]
+	if !ok || build.Bucket != scm.CheckBucketPass || ci.Bucket != scm.CheckBucketPending || len(ci.Supersedes) != 0 {
+		t.Fatalf("checks = %+v, want the PR run's job kept and the queued dispatch run independent", byName)
+	}
+	host := &fakeRequiredHost{required: []scm.RequiredCheck{{Context: "build"}}}
+	scoped := scm.NewCheckScope(host, scm.CheckScopePolicy{}, "main", nil).Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, []scm.Check{build, ci})
+	if !scoped.Ready() || len(scoped.Relevant) != 1 || len(scoped.Informational) != 1 {
+		t.Fatalf("scoped = %+v, want build relevant and ready, the queued dispatch run informational", scoped)
+	}
+}
+
+type fakeRequiredHost struct {
+	scm.Host
+	required []scm.RequiredCheck
+}
+
+func (h *fakeRequiredHost) GetRequiredChecks(context.Context, *scm.PR, string) ([]scm.RequiredCheck, error) {
+	return h.required, nil
 }

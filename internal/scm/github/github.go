@@ -703,6 +703,8 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 				}
 				checks[i].WorkflowID = run.WorkflowID
 				checks[i].RunID = run.RunID
+				checks[i].WorkflowEvent = run.WorkflowEvent
+				checks[i].WorkflowBranch = run.WorkflowBranch
 			}
 			continue
 		}
@@ -784,9 +786,24 @@ func (h *Host) supersedeStaleJobResults(checks []scm.Check) []scm.Check {
 			if !sameWorkflow {
 				continue
 			}
-			after, ordered := h.checkStartedAfter(*w, j)
-			if w.RunID != 0 && j.RunID != 0 && w.RunID != j.RunID {
+			// Only a proven retry or retrigger replaces an older result: the
+			// same workflow, triggered by the same event for the same head
+			// branch (runs are listed per head commit). Runs
+			// triggered independently (a pull_request run and a later
+			// workflow_dispatch run) are separate results, and a run whose
+			// event is unknown is not proven to be either.
+			if w.WorkflowEvent == "" || w.WorkflowEvent != j.WorkflowEvent || w.WorkflowBranch != j.WorkflowBranch {
+				continue
+			}
+			var after, ordered bool
+			switch {
+			case w.RunID != 0 && w.RunID == j.RunID:
+				// A rerun attempt of the very run that made the job.
+				after, ordered = w.RunAttempt > 1, true
+			case w.RunID != 0 && j.RunID != 0:
 				after, ordered = w.RunID > j.RunID, true
+			default:
+				after, ordered = h.checkStartedAfter(*w, j)
 			}
 			if !ordered || !after {
 				continue
@@ -885,6 +902,9 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 		CreatedAt    string `json:"created_at"`
 		UpdatedAt    string `json:"updated_at"`
 		HTMLURL      string `json:"html_url"`
+		Event        string `json:"event"`
+		HeadBranch   string `json:"head_branch"`
+		RunAttempt   int64  `json:"run_attempt"`
 	}
 	var pages []struct {
 		TotalCount   *int          `json:"total_count"`
@@ -988,7 +1008,7 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 			}
 			link = fmt.Sprintf("https://%s/%s/actions/runs/%d", host, repo, run.ID)
 		}
-		checks = append(checks, scm.Check{Name: name, ProviderID: fmt.Sprintf("github-workflow-run:%d", run.ID), Bucket: bucket, Kind: scm.CheckKindRun, State: state, CompletedAt: completedAt, StartedAt: startedAt, WorkflowID: run.WorkflowID, RunID: run.ID, WorkflowRun: true, Link: link, AwaitingApproval: awaitingApproval})
+		checks = append(checks, scm.Check{Name: name, ProviderID: fmt.Sprintf("github-workflow-run:%d", run.ID), Bucket: bucket, Kind: scm.CheckKindRun, State: state, CompletedAt: completedAt, StartedAt: startedAt, WorkflowID: run.WorkflowID, RunID: run.ID, RunAttempt: run.RunAttempt, WorkflowEvent: strings.TrimSpace(run.Event), WorkflowBranch: strings.TrimSpace(run.HeadBranch), WorkflowRun: true, Link: link, AwaitingApproval: awaitingApproval})
 	}
 	return checks, nil
 }

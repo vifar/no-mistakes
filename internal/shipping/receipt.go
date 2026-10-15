@@ -77,6 +77,11 @@ type Payload struct {
 	Review           Review `json:"review"`
 	Steps            []Step `json:"steps"`
 	TestOverride     any    `json:"test_override"`
+	// checkScope is the CI check scope recorded for the run when a ci-ready
+	// proof is built. It is not part of the emitted receipt; it is authority
+	// the proof was judged under, so both bracketing snapshots carry it and any
+	// movement while the export runs fails it closed.
+	checkScope string
 }
 
 func Sign(payload []byte, input io.Reader) ([]byte, error) {
@@ -171,7 +176,7 @@ func Export(ctx context.Context, database *db.DB, repo *db.Repo, runID, phase st
 		}
 		// Readiness is judged on the same checks the CI step judged it on:
 		// the scope it recorded for this run, not every context on the head.
-		policy, err := recordedCheckScope(database, runID)
+		policy, err := parseRecordedCheckScope(first.checkScope)
 		if err != nil {
 			return nil, err
 		}
@@ -222,15 +227,12 @@ func Export(ctx context.Context, database *db.DB, repo *db.Repo, runID, phase st
 	return out, nil
 }
 
-// recordedCheckScope returns the check-scope policy the CI step recorded for
-// the run. A run that recorded none predates check scoping, so it keeps the
-// legacy behavior of judging every check rather than the auto default.
-func recordedCheckScope(database *db.DB, runID string) (scm.CheckScopePolicy, error) {
+// parseRecordedCheckScope interprets the check-scope record the proof's
+// authority snapshot carried. A run that recorded none predates check scoping,
+// so it keeps the legacy behavior of judging every check rather than the auto
+// default.
+func parseRecordedCheckScope(raw string) (scm.CheckScopePolicy, error) {
 	var policy scm.CheckScopePolicy
-	raw, err := database.GetRunCheckScope(runID)
-	if err != nil {
-		return policy, err
-	}
 	if raw == "" {
 		return scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAll}, nil
 	}
@@ -346,7 +348,13 @@ func durablePayload(database *db.DB, runID, phase string) (Payload, error) {
 		}
 	}
 	findingBytes, _ := json.Marshal(reviewFindings)
-	p = Payload{SchemaVersion: 1, RunID: runID, Phase: phase, SourceRepo: c.SourceRepo, SourceBranch: c.SourceBranch, SubmittedHeadSHA: *r.SubmittedHeadSHA, LocalHeadSHA: r.HeadSHA, ForgeHeadSHA: r.HeadSHA, PRURL: *r.PRURL, TargetBranch: c.TargetBranch, TargetSHA: c.TargetSHA, MergeBaseSHA: c.MergeBaseSHA, DiffDigest: c.DiffDigest, Generation: c.Generation, IntentDigest: Digest([]byte(*r.Intent)), ShippingMode: r.Shipping.Mode, Draft: p.Draft, Review: Review{"completed", r.HeadSHA, Digest(findingBytes), reviewFindings}, Steps: proofSteps}
+	checkScope := ""
+	if phase == "ci-ready" {
+		if checkScope, err = database.GetRunCheckScope(runID); err != nil {
+			return p, err
+		}
+	}
+	p = Payload{SchemaVersion: 1, RunID: runID, Phase: phase, SourceRepo: c.SourceRepo, SourceBranch: c.SourceBranch, SubmittedHeadSHA: *r.SubmittedHeadSHA, LocalHeadSHA: r.HeadSHA, ForgeHeadSHA: r.HeadSHA, PRURL: *r.PRURL, TargetBranch: c.TargetBranch, TargetSHA: c.TargetSHA, MergeBaseSHA: c.MergeBaseSHA, DiffDigest: c.DiffDigest, Generation: c.Generation, IntentDigest: Digest([]byte(*r.Intent)), ShippingMode: r.Shipping.Mode, Draft: p.Draft, Review: Review{"completed", r.HeadSHA, Digest(findingBytes), reviewFindings}, Steps: proofSteps, checkScope: checkScope}
 	return p, nil
 }
 

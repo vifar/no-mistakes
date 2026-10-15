@@ -231,6 +231,16 @@ type Check struct {
 	// RunID is the provider workflow run (GitHub Actions run) that produced the
 	// check, when known. Within one workflow a larger RunID is a newer attempt.
 	RunID int64
+	// RunAttempt is the attempt number of the workflow run behind a
+	// workflow-level check; a rerun of the same run keeps RunID and raises it.
+	RunAttempt int64
+	// WorkflowEvent is the event that triggered the workflow run behind the
+	// check (GitHub: push, pull_request, workflow_dispatch, ...). Runs of one
+	// workflow triggered by different events are independent results.
+	WorkflowEvent string
+	// WorkflowBranch is the head branch the workflow run was triggered for.
+	// Retriggers of one workflow only supersede each other on one branch.
+	WorkflowBranch string
 	// WorkflowRun marks a workflow-level check: the run itself, reported
 	// because it produced no job or check run (for example a workflow that
 	// failed validation before creating any job). Name is the workflow's name.

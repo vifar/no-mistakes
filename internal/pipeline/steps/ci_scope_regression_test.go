@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -504,16 +505,108 @@ func TestCIScopeUnrecordableScopeFailsTheExecutionBeforeAnyGate(t *testing.T) {
 func TestCIScopeRerunFailingBeforeJobsBlocksAndIsRepaired(t *testing.T) {
 	const checks = `[{"name":"build","state":"SUCCESS","bucket":"pass","workflow":"CI","app":"github-actions","link":"https://github.com/test/repo/actions/runs/1/job/5"}]`
 	const runs = `FAKE_CLI_WORKFLOW_RUNS=[` +
-		`{"id":1,"workflow_id":10,"name":"CI","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","updated_at":"2026-10-14T10:05:00Z"},` +
-		`{"id":2,"workflow_id":10,"name":"CI","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","updated_at":"2026-10-14T11:00:05Z"}]`
+		`{"id":1,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","updated_at":"2026-10-14T10:05:00Z"},` +
+		`{"id":2,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","updated_at":"2026-10-14T11:00:05Z"}]`
 	env := append(fakeCIGH(t, "OPEN", checks), runs, `FAKE_CLI_PROTECTION_JSON={"contexts":["build"]}`, `FAKE_CLI_RULES_JSON=[]`)
-	sctx, _, _, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsOnFailure, env)
+	sctx, _, logs, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsOnFailure, env)
 	step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error { return context.Canceled })
 	outcome, err := step.Execute(sctx)
 	if err != nil || outcome == nil || !outcome.NeedsApproval || !outcome.AutoFixable || !strings.Contains(outcome.Findings, `"check":"CI"`) {
-		t.Fatalf("the failed rerun was not offered for repair: %+v %v", outcome, err)
+		t.Fatalf("the failed rerun was not offered for repair: %+v %v logs=%v", outcome, err, *logs)
 	}
 	if *ready {
 		t.Fatal("the stale passing job published readiness")
+	}
+}
+
+// The target a PR points at decides which checks are required of it. After a
+// retarget mid-monitoring, the new base's requirement must block and the
+// failure only the old base required must not be dispatched.
+func TestCIScopeFollowsAPRRetargetedWhileMonitoring(t *testing.T) {
+	const pending = `[{"name":"old-only","state":"PENDING","bucket":"pending"},{"name":"new-req","state":"PENDING","bucket":"pending"}]`
+	const failed = `[{"name":"old-only","state":"FAILURE","bucket":"fail"},{"name":"new-req","state":"FAILURE","bucket":"fail"}]`
+	baseFile := filepath.Join(t.TempDir(), "pr-base")
+	if err := os.WriteFile(baseFile, []byte("main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := append(fakeCIGHSequence(t, "OPEN", []string{pending, failed}),
+		"FAKE_CLI_PR_BASE_FILE="+baseFile,
+		`FAKE_CLI_PROTECTION_JSON_MAIN={"contexts":["old-only"]}`,
+		`FAKE_CLI_PROTECTION_JSON_RELEASE={"contexts":["new-req"]}`,
+		`FAKE_CLI_RULES_JSON=[]`)
+	sctx, ag, logs, _, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsOnFailure, env)
+	sctx.PRTarget = nil
+	step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error {
+		return os.WriteFile(baseFile, []byte("release"), 0o644)
+	})
+	outcome, err := step.Execute(sctx)
+	if err != nil || outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("outcome = %+v, %v; want the new base's failing requirement to park the step. logs: %v", outcome, err, *logs)
+	}
+	if !strings.Contains(outcome.Findings, `"check":"new-req"`) || strings.Contains(outcome.Findings, "old-only") {
+		t.Fatalf("findings %s must name only the new base's requirement", outcome.Findings)
+	}
+	if len(ag.calls) != 0 {
+		t.Fatalf("repair dispatched before the park: %d", len(ag.calls))
+	}
+}
+
+// The target a PR points at decides which checks it requires. A retarget
+// while the step is monitoring must re-scope every later poll: the new base's
+// required failure blocks, and a failure only the old base required is not
+// dispatched.
+func retargetFixture(t *testing.T) (*pipeline.StepContext, string) {
+	t.Helper()
+	baseFile := filepath.Join(t.TempDir(), "base")
+	if err := os.WriteFile(baseFile, []byte("main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pending := `[{"name":"old-only","state":"PENDING","bucket":"pending"},{"name":"new-req","state":"PENDING","bucket":"pending"}]`
+	failed := `[{"name":"old-only","state":"FAILURE","bucket":"fail"},{"name":"new-req","state":"FAILURE","bucket":"fail"}]`
+	env := append(fakeCIGHSequence(t, "OPEN", []string{pending, failed}),
+		"FAKE_CLI_PR_BASE_FILE="+baseFile,
+		`FAKE_CLI_PROTECTION_JSON_MAIN={"contexts":["old-only"]}`,
+		`FAKE_CLI_PROTECTION_JSON_RELEASE={"contexts":["new-req"]}`,
+		`FAKE_CLI_RULES_JSON=[]`)
+	sctx, _, _, _, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsOnFailure, env)
+	return sctx, baseFile
+}
+
+func TestCIScopeRetargetMidMonitoringReclassifiesBeforeDispatch(t *testing.T) {
+	sctx, baseFile := retargetFixture(t)
+	var logs []string
+	sctx.Log = func(s string) { logs = append(logs, s) }
+	polls := 0
+	step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error {
+		polls++
+		return os.WriteFile(baseFile, []byte("release"), 0o644)
+	})
+	outcome, err := step.Execute(sctx)
+	if err != nil || outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("outcome = %+v, %v; want the new base's failure raised", outcome, err)
+	}
+	if !strings.Contains(outcome.Findings, `"check":"new-req"`) || strings.Contains(outcome.Findings, `"check":"old-only"`) {
+		t.Fatalf("findings %s must name the new base's required check only", outcome.Findings)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "PR target changed from main to release") {
+		t.Fatalf("the retarget was not reported: %v", logs)
+	}
+}
+
+func TestCIScopeRetargetFailsWhenTheScopeCannotBeRecorded(t *testing.T) {
+	sctx, baseFile := retargetFixture(t)
+	records := 0
+	step := (&CIStep{recordCheckScope: func(*pipeline.StepContext) error {
+		records++
+		if records > 1 {
+			return errors.New("injected record failure")
+		}
+		return nil
+	}}).SetWaitForNextPoll(func(context.Context, time.Duration) error {
+		return os.WriteFile(baseFile, []byte("release"), 0o644)
+	})
+	outcome, err := step.Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "injected record failure") || outcome != nil {
+		t.Fatalf("a retarget that cannot be recorded must fail the step: %+v, %v", outcome, err)
 	}
 }

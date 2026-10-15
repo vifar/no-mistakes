@@ -277,3 +277,59 @@ func TestCIReadyReceiptRefusesAWorkflowRerunThatFailedBeforeJobs(t *testing.T) {
 		t.Fatal("receipt accepted a head whose required workflow rerun failed before creating jobs")
 	}
 }
+
+// The scope a ci-ready proof was judged under is part of the authority the
+// export brackets: a resumed CI execution that re-records it mid-export must
+// not leave a receipt issued under the old scope.
+func TestCIReadyReceiptRefusesAScopeRecordedMidExport(t *testing.T) {
+	ctx := context.Background()
+	f := newExportFixture(t)
+	if err := f.database.SetRunCIReadyWithReason(f.run.ID, true, false); err != nil {
+		t.Fatal(err)
+	}
+	f.forge.checks = []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass}, {Name: "approve", Bucket: scm.CheckBucketFail}}
+	recordScope(t, f, scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAuto})
+	forge := &protectedReceiptForge{receiptForge: f.forge, required: []string{"build"}}
+	if _, err := Export(ctx, f.database, f.repo, f.run.ID, "ci-ready", forge); err != nil {
+		t.Fatalf("stable scope was refused: %v", err)
+	}
+
+	observed := 0
+	f.forge.observe = func() {
+		observed++
+		if observed == 2 { // after readiness was judged, before the closing snapshot
+			recordScope(t, f, scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAll})
+		}
+	}
+	if _, err := Export(ctx, f.database, f.repo, f.run.ID, "ci-ready", forge); err == nil || !strings.Contains(err.Error(), "authority moved") {
+		t.Fatalf("a scope re-recorded mid-export must fail the export closed, got %v", err)
+	}
+}
+
+// A CI execution that resumes under a changed policy while an export runs
+// means the proof was judged under authority that no longer holds.
+func TestCIReadyReceiptRefusesWhenTheRecordedScopeMovesDuringExport(t *testing.T) {
+	ctx := context.Background()
+	f := newExportFixture(t)
+	if err := f.database.SetRunCIReadyWithReason(f.run.ID, true, false); err != nil {
+		t.Fatal(err)
+	}
+	f.forge.checks = []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass}}
+	recordScope(t, f, scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAll})
+	forge := &protectedReceiptForge{receiptForge: f.forge, required: []string{"build"}}
+	if _, err := Export(ctx, f.database, f.repo, f.run.ID, "ci-ready", forge); err != nil {
+		t.Fatalf("unmoved scope was refused: %v", err)
+	}
+
+	calls := 0
+	f.forge.observe = func() {
+		calls++
+		if calls == 2 { // the observation after the readiness judgement
+			recordScope(t, f, scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAll, ExternalChecks: []string{"build"}})
+		}
+	}
+	_, err := Export(ctx, f.database, f.repo, f.run.ID, "ci-ready", forge)
+	if err == nil || !strings.Contains(err.Error(), "authority moved") {
+		t.Fatalf("a scope change during export must fail closed, got %v", err)
+	}
+}

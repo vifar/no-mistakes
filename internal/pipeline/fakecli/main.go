@@ -623,6 +623,17 @@ func fakeCIGHFactsListAPI(args []string) {
 // reads behind required-check scoping. FAKE_CLI_PROTECTION_JSON and
 // FAKE_CLI_RULES_JSON are the response bodies; an unset one answers HTTP 404
 // (no protection, no rules) and the literal value "403" answers HTTP 403.
+// fakeCIPRBase is the PR's current target branch: FAKE_CLI_PR_BASE_FILE, when
+// set, is re-read on every call so a test can retarget the PR mid-run.
+func fakeCIPRBase() string {
+	if path := os.Getenv("FAKE_CLI_PR_BASE_FILE"); path != "" {
+		if data, err := os.ReadFile(path); err == nil {
+			return strings.TrimSpace(string(data))
+		}
+	}
+	return os.Getenv("FAKE_CLI_PR_BASE")
+}
+
 func fakeCIGHRequiredChecksAPI(args []string) {
 	if len(args) == 0 || args[0] != "api" {
 		return
@@ -632,12 +643,37 @@ func fakeCIGHRequiredChecksAPI(args []string) {
 		switch {
 		case strings.Contains(arg, "/protection/required_status_checks"):
 			env = "FAKE_CLI_PROTECTION_JSON"
+			// FAKE_CLI_PROTECTION_JSON_<BRANCH> answers for one branch.
+			if _, rest, ok := strings.Cut(arg, "/branches/"); ok {
+				branch, _, _ := strings.Cut(rest, "/protection/")
+				key := strings.Map(func(r rune) rune {
+					if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+						return r
+					}
+					return '_'
+				}, strings.ToUpper(branch))
+				if _, set := os.LookupEnv("FAKE_CLI_PROTECTION_JSON_" + key); set {
+					env = "FAKE_CLI_PROTECTION_JSON_" + key
+				}
+			}
 		case strings.Contains(arg, "/rules/branches/"):
 			env = "FAKE_CLI_RULES_JSON"
 		}
 	}
 	if env == "" {
 		return
+	}
+	// FAKE_CLI_PROTECTION_JSON_<BRANCH> answers for one target branch only.
+	if env == "FAKE_CLI_PROTECTION_JSON" {
+		for _, arg := range args[1:] {
+			if _, rest, ok := strings.Cut(arg, "/branches/"); ok {
+				branch, _, _ := strings.Cut(rest, "/protection")
+				key := env + "_" + strings.ToUpper(strings.NewReplacer("/", "_", "-", "_", ".", "_").Replace(branch))
+				if _, set := os.LookupEnv(key); set {
+					env = key
+				}
+			}
+		}
 	}
 	switch body := os.Getenv(env); body {
 	case "":
@@ -693,6 +729,10 @@ func fakeCIGHReconcileHandler(args []string) {
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		os.Exit(0)
 	}
+	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json baseRefName") {
+		fmt.Println(fakeCIPRBase())
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "api --method GET repos/test/repo/pulls ") {
 		if created {
 			fmt.Printf(`[[{"number":42,"html_url":"https://github.com/test/repo/pull/42","state":"open","merged":false,"head":{"ref":"feature","sha":%q,"repo":{"full_name":"test/repo"}},"base":{"ref":"main"}}]]`, fakePRHeadSHA())
@@ -717,6 +757,10 @@ func fakeCIGHReconcileHandler(args []string) {
 			}
 		}
 		fmt.Println("https://github.com/test/repo/pull/42")
+		os.Exit(0)
+	}
+	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json baseRefName") {
+		fmt.Println("main")
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json state") {
@@ -844,7 +888,7 @@ func fakeCIGHHandler(args []string) {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json baseRefName") {
-		fmt.Println(os.Getenv("FAKE_CLI_PR_BASE"))
+		fmt.Println(fakeCIPRBase())
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json headRefOid") {
@@ -944,6 +988,10 @@ func fakeCIGHSequenceHandler(args []string) {
 			mergeable = "MERGEABLE"
 		}
 		fmt.Println(mergeable)
+		os.Exit(0)
+	}
+	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json baseRefName") {
+		fmt.Println(fakeCIPRBase())
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json state") {
