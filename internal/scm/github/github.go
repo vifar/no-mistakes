@@ -756,7 +756,7 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 // attempt of the same workflow, event, and branch exists; attempts are ordered
 // by when they started, not by run ID, because a rerun keeps its ID. The job
 // identities a retired result stood for pass to the newest attempt when that
-// attempt is jobless too, so a requirement it covered is still owned by the
+// attempt is jobless too and did not pass, so a requirement it covered is still owned by the
 // failure that replaced it rather than silently dropped. A newest attempt with
 // current jobs speaks for its own jobs.
 func (h *Host) retireObsoleteJoblessRuns(jobless, runs []scm.Check) []scm.Check {
@@ -781,7 +781,10 @@ func (h *Host) retireObsoleteJoblessRuns(jobless, runs []scm.Check) []scm.Check 
 			continue
 		}
 		for j := range jobless {
-			if jobless[j].RunID == newest[i] {
+			// As for stale jobs, only a non-green attempt speaks for jobs it
+			// has not reported: a passing or skipped jobless attempt leaves
+			// their requirements missing until its jobs register.
+			if jobless[j].RunID == newest[i] && jobless[j].Bucket != scm.CheckBucketPass && jobless[j].Bucket != scm.CheckBucketSkip {
 				jobless[j].Supersedes = append(jobless[j].Supersedes, run.Supersedes...)
 			}
 		}

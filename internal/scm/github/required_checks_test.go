@@ -733,3 +733,24 @@ func TestGetChecksRetiredJoblessResultPassesItsIdentitiesOn(t *testing.T) {
 		t.Fatalf("readiness passed over the failure that owns build: %+v", scoped)
 	}
 }
+
+// A newer jobless attempt that passed or was skipped has not reported the jobs
+// it ran: it must not take over a retired failure's job identities, so the
+// required build stays missing until its job registers.
+func TestGetChecksGreenJoblessAttemptDoesNotInheritRetiredIdentities(t *testing.T) {
+	t.Parallel()
+	for _, conclusion := range []string{"success", "skipped"} {
+		job7 := `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-14T10:00:00Z","completedAt":"2026-10-14T10:05:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/7/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`
+		runs := `[{"total_count":2,"workflow_runs":[` +
+			`{"id":7,"workflow_id":10,"run_attempt":2,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/7"},` +
+			`{"id":8,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"` + conclusion + `","run_started_at":"2026-10-14T12:00:00Z","html_url":"https://github.com/test/repo/actions/runs/8"}]}]`
+		checks := checksForAttempts(t, "["+job7+"]", runs)
+		if len(checks) != 1 || checks[0].RunID != 8 || len(checks[0].Supersedes) != 0 {
+			t.Fatalf("%s: checks = %+v; want run 8 alone, standing for no job", conclusion, checks)
+		}
+		scope := scm.NewCheckScope(nil, scm.CheckScopePolicy{Resolved: &scm.CheckScopeResolution{Required: []scm.RequiredCheck{{Context: "build"}}, Derived: true}}, "main", nil)
+		if scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks); scoped.Ready() {
+			t.Fatalf("%s: a green jobless attempt certified the missing build: %+v", conclusion, scoped)
+		}
+	}
+}
