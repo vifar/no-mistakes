@@ -716,18 +716,13 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 				}
 				check.WorkflowID = run.WorkflowID
 				check.RunID = run.RunID
+				check.AttemptStartedAt = run.StartedAt
 				check.WorkflowEvent = run.WorkflowEvent
 				check.WorkflowBranch = run.WorkflowBranch
 				if run.Bucket == scm.CheckBucketPending && !run.AwaitingApproval {
 					check.Bucket = scm.CheckBucketPending
 					check.State = run.State
 					check.CompletedAt = time.Time{}
-					// The pending job stands for the run's current attempt, so it
-					// carries that attempt's start: ordering by the older job's
-					// start would let a later-ID run outrank this active rerun.
-					if run.StartedAt.After(check.StartedAt) {
-						check.StartedAt = run.StartedAt
-					}
 				} else if !check.CompletedAt.IsZero() && !run.StartedAt.IsZero() && check.CompletedAt.Before(run.StartedAt) {
 					drop[i] = true
 					// Only a non-green attempt speaks for the jobs it replaced. A
@@ -735,7 +730,7 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 					// proves nothing about them: their requirements stay missing
 					// until the jobs register.
 					if run.Bucket != scm.CheckBucketPass && run.Bucket != scm.CheckBucketSkip {
-						run.Supersedes = append(run.Supersedes, scm.Check{Name: check.Name, Workflow: check.Workflow, Kind: check.Kind, App: check.App, AppID: check.AppID})
+						run.Supersedes = append(run.Supersedes, scm.Check{Name: check.Name, ProviderID: check.ProviderID, Workflow: check.Workflow, Kind: check.Kind, App: check.App, AppID: check.AppID})
 					}
 					continue
 				}
@@ -800,7 +795,7 @@ func (h *Host) collapseLatestByName(checks []scm.Check) []scm.Check {
 				i++
 				continue
 			}
-			after, ordered := h.checkStartedAfter(check, other)
+			after, ordered := h.attemptAfter(check, other)
 			if !ordered {
 				i++
 				continue
@@ -857,7 +852,7 @@ func (h *Host) supersedeStaleJobResults(checks []scm.Check) []scm.Check {
 				continue
 			}
 			drop[ji] = true
-			w.Supersedes = append(w.Supersedes, scm.Check{Name: j.Name, Workflow: j.Workflow, Kind: j.Kind, App: j.App, AppID: j.AppID})
+			w.Supersedes = append(w.Supersedes, scm.Check{Name: j.Name, ProviderID: j.ProviderID, Workflow: j.Workflow, Kind: j.Kind, App: j.App, AppID: j.AppID})
 		}
 	}
 	if len(drop) == 0 {
@@ -876,16 +871,24 @@ func (h *Host) supersedeStaleJobResults(checks []scm.Check) []scm.Check {
 // first, since a rerun keeps its run ID, and the run ID only when the start
 // times cannot decide.
 func (h *Host) attemptAfter(a, b scm.Check) (bool, bool) {
-	if !a.StartedAt.IsZero() && !b.StartedAt.IsZero() {
-		if a.StartedAt.Equal(b.StartedAt) {
-			return false, false
-		}
-		return a.StartedAt.After(b.StartedAt), true
+	aStart, bStart := attemptStart(a), attemptStart(b)
+	if !aStart.IsZero() && !bStart.IsZero() && !aStart.Equal(bStart) {
+		return aStart.After(bStart), true
 	}
 	if a.RunID != 0 && b.RunID != 0 && a.RunID != b.RunID {
 		return a.RunID > b.RunID, true
 	}
 	return h.checkStartedAfter(a, b)
+}
+
+// attemptStart is when the attempt behind c started: its run's current
+// attempt for a job, the run itself for a workflow-level check, and the
+// check's own start when the provider reported no run.
+func attemptStart(c scm.Check) time.Time {
+	if !c.AttemptStartedAt.IsZero() {
+		return c.AttemptStartedAt
+	}
+	return c.StartedAt
 }
 
 func (h *Host) sameCheckReplacementGroup(a, b scm.Check) bool {

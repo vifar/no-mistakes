@@ -100,6 +100,14 @@ func retainedCICheckIncluded(sctx *pipeline.StepContext, scope *scm.CheckScope, 
 		}
 	}
 	if !matched && id != "" {
+		// The provider ID can name a job a workflow-level check now stands
+		// for; it identifies that job exactly, even when the job shares its
+		// workflow's name, so judge it alone before falling back to names.
+		for _, check := range checks {
+			if identity, ok := supersededIdentityWithID(check, id); ok {
+				return scope.Includes(sctx.Ctx, pr, identity)
+			}
+		}
 		return retainedCICheckIncluded(sctx, scope, pr, checks, name, "")
 	}
 	identity := scm.Check{Name: name}
@@ -107,6 +115,21 @@ func retainedCICheckIncluded(sctx *pipeline.StepContext, scope *scm.CheckScope, 
 		identity.Name, identity.Workflow = job, workflow
 	}
 	return !matched && scope.Includes(sctx.Ctx, pr, identity)
+}
+
+// supersededIdentityWithID finds the job identity with provider ID id that
+// check stands for, without the identities it superseded in turn.
+func supersededIdentityWithID(check scm.Check, id string) (scm.Check, bool) {
+	for _, identity := range check.Supersedes {
+		if identity.ProviderID == id {
+			identity.Supersedes = nil
+			return identity, true
+		}
+		if found, ok := supersededIdentityWithID(identity, id); ok {
+			return found, true
+		}
+	}
+	return scm.Check{}, false
 }
 
 // supersededIdentitiesNamed returns the job identities check stands for that

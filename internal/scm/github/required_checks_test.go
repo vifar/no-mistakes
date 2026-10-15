@@ -352,7 +352,7 @@ func TestGetChecksNewerWorkflowRunWithoutJobsSupersedesStaleJobResults(t *testin
 	if _, stale := byName["build"]; stale || len(byName) != 2 {
 		t.Fatalf("the older attempt's passing job survived: %+v", checks)
 	}
-	if ci := byName["CI"]; ci.Bucket != scm.CheckBucketFail || !reflect.DeepEqual(ci.Supersedes, []scm.Check{{Name: "build", Workflow: "CI", Kind: scm.CheckKindRun, App: "github-actions", AppID: 15368}}) {
+	if ci := byName["CI"]; ci.Bucket != scm.CheckBucketFail || !reflect.DeepEqual(ci.Supersedes, []scm.Check{{Name: "build", ProviderID: "github-check-run:5", Workflow: "CI", Kind: scm.CheckKindRun, App: "github-actions", AppID: 15368}}) {
 		t.Fatalf("CI run = %+v, want a failure superseding build", ci)
 	}
 	if docs := byName["docs"]; docs.Bucket != scm.CheckBucketPass || len(docs.Supersedes) != 0 {
@@ -381,7 +381,7 @@ func TestGetChecksSupersedesSameNameJobBeforeCollapsing(t *testing.T) {
 	if len(checks) != 1 {
 		t.Fatalf("checks = %+v, want only the newer workflow-level failure", checks)
 	}
-	want := []scm.Check{{Name: "CI", Workflow: "CI", Kind: scm.CheckKindRun, App: "github-actions", AppID: 15368}}
+	want := []scm.Check{{Name: "CI", ProviderID: "github-check-run:5", Workflow: "CI", Kind: scm.CheckKindRun, App: "github-actions", AppID: 15368}}
 	if ci := checks[0]; ci.Bucket != scm.CheckBucketFail || !reflect.DeepEqual(ci.Supersedes, want) {
 		t.Fatalf("CI run = %+v, want a failure superseding the app-bound CI job", ci)
 	}
@@ -697,5 +697,20 @@ func TestGetChecksActiveRerunOfAnOlderRunIDIsNotCollapsedAway(t *testing.T) {
 	checks := checksForAttempts(t, "["+job7+","+job8+"]", runs)
 	if len(checks) != 1 || checks[0].Name != "build" || checks[0].Bucket != scm.CheckBucketPending {
 		t.Fatalf("checks = %+v; want only the active rerun's pending build", checks)
+	}
+}
+
+// Run 7 started first but its build job started late; run 8 started later
+// and failed before creating jobs. Attempts are ordered by the run's start,
+// not the job's, so run 8 supersedes run 7's build.
+func TestGetChecksOrdersAttemptsByRunStartNotJobStart(t *testing.T) {
+	t.Parallel()
+	job7 := `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-14T12:00:00Z","completedAt":"2026-10-14T12:05:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/7/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`
+	runs := `[{"total_count":2,"workflow_runs":[` +
+		`{"id":7,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/7"},` +
+		`{"id":8,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/8"}]}]`
+	checks := checksForAttempts(t, "["+job7+"]", runs)
+	if len(checks) != 1 || checks[0].Name != "CI" || checks[0].Bucket != scm.CheckBucketFail || len(checks[0].Supersedes) != 1 || checks[0].Supersedes[0].Name != "build" {
+		t.Fatalf("checks = %+v; want run 8's failure superseding run 7's build", checks)
 	}
 }

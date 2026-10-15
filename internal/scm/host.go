@@ -224,6 +224,11 @@ type Check struct {
 	// commit rollup that keeps every run a commit ever had) down to the
 	// latest one; zero when the provider did not report it.
 	StartedAt time.Time
+	// AttemptStartedAt is when the current attempt of the workflow run behind
+	// this check started; zero when unknown. A job's own start can lag its
+	// attempt's, and a rerun keeps its run ID, so attempts of one workflow are
+	// ordered by this value rather than by job starts or run IDs.
+	AttemptStartedAt time.Time
 	// WorkflowID identifies the provider workflow that emitted the check. It
 	// distinguishes independent same-name workflows while allowing reruns of
 	// one workflow to use latest-wins ordering. Zero when unavailable.

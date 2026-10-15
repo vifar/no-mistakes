@@ -713,3 +713,29 @@ func TestCIScopeRetainedWorkUsesMatchedIdentity(t *testing.T) {
 		}
 	}
 }
+
+// A job named like its workflow (both CI) is excluded as external. When a
+// jobless workflow failure named CI supersedes it and required build, a
+// retained finding for the job (by its provider ID) is judged as that job,
+// not as the same-named replacement.
+func TestCIScopeRetainedWorkFindsSupersededJobByProviderID(t *testing.T) {
+	policy := scm.CheckScopePolicy{
+		ExternalChecks: []string{"CI / CI"},
+		Resolved:       &scm.CheckScopeResolution{Required: []scm.RequiredCheck{{Context: "build"}}, Derived: true},
+	}
+	scope := scm.NewCheckScope(nil, policy, "main", nil)
+	checks := []scm.Check{{Name: "CI", ProviderID: "github-workflow-run:8", WorkflowRun: true, Bucket: scm.CheckBucketFail,
+		Supersedes: []scm.Check{{Name: "CI", ProviderID: "github-check-run:5", Workflow: "CI"}, {Name: "build", ProviderID: "github-check-run:6", Workflow: "CI"}}}}
+	sctx := &pipeline.StepContext{Ctx: context.Background()}
+	encoded, err := types.MarshalFindingsJSON(Findings{Items: []Finding{{ID: "job", Category: types.FindingCategoryCICheck, Check: "CI", CheckID: "github-check-run:5", Action: types.ActionAutoFix}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.PreviousFindings = encoded
+	if err := scopeRetainedCIFindings(sctx, scope, &scm.PR{}, checks); err != nil {
+		t.Fatal(err)
+	}
+	if sctx.PreviousFindings != "" {
+		t.Fatalf("the excluded CI job reached repair through its same-named replacement: %q", sctx.PreviousFindings)
+	}
+}
