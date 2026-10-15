@@ -786,10 +786,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		} else {
 			consecutiveCheckErrs = 0
-			// Only the checks that decide readiness reach anything below.
-			// External approval contexts and checks the target branch does not
-			// require are reported here and nowhere else: they can neither
-			// block the PR nor be handed to the fix agent.
+			// Scope repair work before classifying failures. Informational and
+			// external checks are logged separately; ScopedChecks.Settled and
+			// reviewBotPresenceMarkers preserve the review-bot comment policy.
 			scoped := checkScope.Apply(ctx, pr, checks)
 			checks = scoped.Relevant
 			excludedChecks := append(scoped.External, scoped.Informational...)

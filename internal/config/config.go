@@ -776,17 +776,8 @@ type CI struct {
 	RevalidateRepairs bool
 	// ReviewBotComments selects when the CI step reads a registered review
 	// bot's (scm.ReviewBots) unresolved review comments.
-	//
-	// "on_failure" (default): only when the bot's check failed, so a green
-	// bot check never blocks checks-passed.
-	//
-	// "always": also when the bot's check completed green on the current
-	// head, or has not registered on it yet once every other check is green.
-	// Its unresolved comments then become the same ask-user findings a
-	// red check produces, and the step parks for a decision instead of
-	// reporting checks-passed. A review bot can conclude its check success
-	// while leaving an unresolved comment, most often on the pipeline's own
-	// CI repair commit, which no human has reviewed yet.
+	// Policy semantics and check-scope interactions are owned by
+	// docs/src/content/docs/reference/repo-config.md#cireview_bot_comments.
 	ReviewBotComments string
 	// RequiredChecks selects which checks on the PR head decide readiness and
 	// repair.
