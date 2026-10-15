@@ -599,7 +599,9 @@ func TestGetChecksRetiresHistoricalJoblessWorkflowRuns(t *testing.T) {
 		{"failing jobs", "pull_request", "feature", "completed", "failure", true, false},
 		{"queued without jobs", "pull_request", "feature", "queued", "", false, false},
 		{"failed without jobs", "pull_request", "feature", "completed", "failure", false, false},
-		{"green without jobs preserves existing job evidence", "pull_request", "feature", "completed", "success", false, true},
+		// A newer passing attempt whose jobs have not reached the rollup yet
+		// retires the older build: build stays missing until its job lands.
+		{"green without jobs retires older job evidence", "pull_request", "feature", "completed", "success", false, false},
 		{"independent event", "workflow_dispatch", "feature", "completed", "success", true, false},
 		{"independent branch", "pull_request", "other", "completed", "success", true, false},
 	} {

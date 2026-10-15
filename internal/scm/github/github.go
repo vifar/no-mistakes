@@ -850,13 +850,16 @@ func (h *Host) collapseLatestByName(checks []scm.Check) []scm.Check {
 // keeps the older attempt's passing job forever, while the newer run may have
 // failed (or still be queued) before creating any job, such as on a workflow
 // validation error; the job-level names never reappear, so nothing would
-// replace the stale pass. Each such older job is dropped and its context
-// recorded on the newer workflow-level check, which then stands for it.
+// replace the stale pass. Each such older job is dropped. A newer attempt that
+// did not pass records the job's context and then stands for it; a passing
+// one has not reported its own jobs yet, so it stands for nothing and the
+// job's requirement stays missing until the current job registers. A skipped
+// attempt never creates jobs and leaves older results in place.
 func (h *Host) supersedeStaleJobResults(checks []scm.Check) []scm.Check {
 	drop := make(map[int]bool)
 	for wi := range checks {
 		w := &checks[wi]
-		if !w.WorkflowRun || w.Bucket == scm.CheckBucketPass || w.Bucket == scm.CheckBucketSkip {
+		if !w.WorkflowRun || w.Bucket == scm.CheckBucketSkip {
 			continue
 		}
 		for ji := range checks {
@@ -884,7 +887,9 @@ func (h *Host) supersedeStaleJobResults(checks []scm.Check) []scm.Check {
 				continue
 			}
 			drop[ji] = true
-			w.Supersedes = append(w.Supersedes, scm.Check{Name: j.Name, ProviderID: j.ProviderID, Workflow: j.Workflow, Kind: j.Kind, App: j.App, AppID: j.AppID})
+			if w.Bucket != scm.CheckBucketPass {
+				w.Supersedes = append(w.Supersedes, scm.Check{Name: j.Name, ProviderID: j.ProviderID, Workflow: j.Workflow, Kind: j.Kind, App: j.App, AppID: j.AppID})
+			}
 		}
 	}
 	if len(drop) == 0 {
