@@ -119,16 +119,16 @@ If a native agent is installed in a version-manager shim directory or another no
 
 ```yaml
 agent_path_override:
-  claude: /Users/you/.local/bin/claude
+  claude: /path/to/claude
 ```
 
 For explicit ACP targets and [ACP aliases](/no-mistakes/reference/global-config/#agent), set `acpx_path` for the bridge.
 If the raw target command is also outside `PATH`, set its target key in `acp_registry_overrides`; `agent_path_override` applies only to native agents:
 
 ```yaml
-acpx_path: /Users/you/.local/bin/acpx
+acpx_path: /path/to/acpx
 acp_registry_overrides:
-  cursor: /Users/you/.local/bin/cursor-agent acp
+  cursor: /path/to/cursor-agent acp
 ```
 
 For Antigravity or Gemini-based driving agents, install a supported native agent CLI separately or configure a working ACP target such as `agent: acp:gemini` with `acpx` installed.

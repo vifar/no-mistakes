@@ -151,11 +151,18 @@ func commitOutsidePreservedHistory(t *testing.T, f *recoverFixture) string {
 	return sha
 }
 
+func anchorStrandedHead(t *testing.T, f *recoverFixture) {
+	t.Helper()
+	mustRun(t, f.gate, "update-ref", f.anchorRef(), f.preserved)
+}
+
 // TestRecoverReturnsCustodyAtTheRecordedHeadThatExtendsTheGateBranch is the
 // regression test for issue #1421. Before the fix, Recover reached the
 // equal-tree rewrite proof for this shape, found two different trees, and
 // refused with blocked_recover_unverified_head - while axi status kept
-// pointing at `sync --recover` as the next action.
+// pointing at `sync --recover` as the next action. The unanchored recorded
+// head still refuses; the fork accepts it only after its recovery ref anchors
+// that exact head.
 func TestRecoverReturnsCustodyAtTheRecordedHeadThatExtendsTheGateBranch(t *testing.T) {
 	t.Parallel()
 
@@ -176,6 +183,7 @@ func TestRecoverReturnsCustodyAtTheRecordedHeadThatExtendsTheGateBranch(t *testi
 	if got := mustRun(t, f.gate, "for-each-ref", "--contains", f.preserved); got != "" {
 		t.Fatalf("fixture recorded head is still referenced in the gate: %q", got)
 	}
+	anchorStrandedHead(t, f)
 	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.preserved {
 		t.Fatalf("fixture operator HEAD = %s, want the recorded head %s", got, f.preserved)
 	}
@@ -312,13 +320,15 @@ func TestRecoverRecordedHeadExtendingTheGateBranchFailsClosed(t *testing.T) {
 	})
 	t.Run("conflicting create-only anchor", func(t *testing.T) {
 		f, _ := newStrandedTestFixFixture(t, strandedTestFixOptions{})
+		anchorStrandedHead(t, f)
 		mustRun(t, f.gate, "update-ref", f.anchorRef(), f.submitted)
-		if state := assertUnverifiedRecoveryRefusalNoMutation(t, f); state.Safety != "blocked_recover_anchor_mismatch" {
+		if state := assertUnverifiedRecoveryRefusalNoMutation(t, f); state.Safety != "blocked_recover_unverified_head" {
 			t.Fatalf("anchor-conflict refusal = %s", state.Safety)
 		}
 	})
 	t.Run("racing local branch", func(t *testing.T) {
 		f, _ := newStrandedTestFixFixture(t, strandedTestFixOptions{})
+		anchorStrandedHead(t, f)
 		f.service.beforeRecoverTerminalHeadPreserve = func() {
 			mustRun(t, f.local, "checkout", "-b", "racing-branch", f.submitted)
 		}
@@ -329,13 +339,11 @@ func TestRecoverRecordedHeadExtendingTheGateBranchFailsClosed(t *testing.T) {
 			t.Fatalf("racing branch was changed to %s", got)
 		}
 	})
-	t.Run("review authority changed under the proof", func(t *testing.T) {
+	t.Run("recovery anchor moved under the proof", func(t *testing.T) {
 		f, _ := newStrandedTestFixFixture(t, strandedTestFixOptions{})
-		outside := commitOutsidePreservedHistory(t, f)
+		anchorStrandedHead(t, f)
 		f.service.beforeRecoverTerminalHeadPreserve = func() {
-			if err := f.db.UpdateRunReviewApprovedHeadSHA(f.run.ID, outside); err != nil {
-				t.Fatal(err)
-			}
+			mustRun(t, f.gate, "update-ref", f.anchorRef(), f.submitted)
 		}
 		state := f.service.Recover(f.ctx, false)
 		if state.Recovered || state.Changed || state.Safety != "blocked_recover_assumptions_changed" {
@@ -347,6 +355,9 @@ func TestRecoverRecordedHeadExtendingTheGateBranchFailsClosed(t *testing.T) {
 		}
 		if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.preserved {
 			t.Fatalf("stale proof moved HEAD to %s", got)
+		}
+		if got := mustRun(t, f.gate, "rev-parse", f.anchorRef()); got != f.submitted {
+			t.Fatalf("racing recovery anchor = %s", got)
 		}
 	})
 }

@@ -13,7 +13,19 @@ const giteaFactsSHA = "0123456789abcdef0123456789abcdef01234567"
 const giteaFactsJSON = `{"number":42,"html_url":"https://gitea.example.com/owner/repo/pulls/42","state":"open","merged":false,"head":{"ref":"feature","sha":"` + giteaFactsSHA + `","repo":{"full_name":"fork/repo"}},"base":{"ref":"develop"}}`
 
 func factsHost(responses map[string]giteaTestResponse) *Host {
-	return New(giteaTestCmdFactory(responses), nil, "gitea.example.com", "work", "owner/repo")
+	return New(giteaTestCmdFactory(responses), nil, "gitea.example.com", scm.TeaAccount{Login: "work", Instance: "https://gitea.example.com"}, "owner/repo")
+}
+
+func TestReadPRFactsUsesTeaOneHostAccount(t *testing.T) {
+	responses := map[string]giteaTestResponse{
+		tea1Probe: {},
+		"tea api --host https://gitea.example.com /repos/owner/repo/pulls/42": {stdout: giteaFactsJSON},
+	}
+	host := New(giteaTestCmdFactory(responses), nil, "gitea.example.com", scm.TeaAccount{Login: "work", Instance: "https://gitea.example.com"}, "owner/repo")
+	facts, err := host.ReadPRFacts(context.Background(), &scm.PR{Number: "42"})
+	if err != nil || facts.HeadSHA != giteaFactsSHA {
+		t.Fatalf("tea 1.0 PR facts = %+v, %v", facts, err)
+	}
 }
 
 func TestReadPRFactsBindsRecordedIdentityAndLiveFacts(t *testing.T) {

@@ -105,12 +105,13 @@ func (h *Host) factsFromWire(w giteaPRFactsWire, owner, repo string) (scm.PRFact
 }
 
 func (h *Host) factsAPI(ctx context.Context, endpoint string) ([]byte, error) {
-	// Every tea invocation needs --login: the daemon's bare gate has no remote
-	// from which tea can infer the correct instance.
-	if h.login == "" {
-		return nil, fmt.Errorf("Gitea PR facts: tea login is not configured")
+	_, account, err := h.begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("Gitea PR facts: %w", err)
 	}
-	out, err := h.cmd(ctx, "tea", "api", "--login", h.login, endpoint).CombinedOutput()
+	args := append([]string{"api"}, account...)
+	args = append(args, endpoint)
+	out, err := h.cmd(ctx, "tea", args...).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("tea api PR facts: %s: %w", strings.TrimSpace(string(out)), err)
 	}

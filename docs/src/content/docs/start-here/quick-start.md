@@ -56,8 +56,8 @@ If you instead cloned your own fork directly (`origin` is your fork, with an `up
 $ no-mistakes init
   ✓ Gate initialized
 
-    repo  /Users/you/src/my-repo
-    gate  no-mistakes → /Users/you/.no-mistakes/repos/abc123def456.git
+    repo  /home/user/src/my-repo
+    gate  no-mistakes → /home/user/.no-mistakes/repos/abc123def456.git
   remote  git@github.com:you/my-repo.git
    skill  /no-mistakes installed for agents at user level
 

@@ -119,7 +119,7 @@ func TestStartGuarded_RefusalLeavesDriftedServiceAndDaemonAlone(t *testing.T) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
 		return nil, nil
 	}
-	daemonHealthCheck = func(*paths.Paths) (bool, error) { return true, nil }
+	daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return true, nil }
 
 	refusal := fmt.Errorf("refusing daemon start")
 	if err := StartGuarded(p, func() error { return refusal }); err != refusal {

@@ -18,9 +18,9 @@ acp_registry_overrides:
   local-gemini: node /opt/mock-acp-agent.mjs
 
 agent_path_override:
-  claude: /Users/you/bin/claude
+  claude: /home/user/bin/claude
   codex: /opt/homebrew/bin/codex
-  grok: /Users/you/.grok/bin/grok
+  grok: /home/user/.grok/bin/grok
   rovodev: /usr/local/bin/acli
   opencode: /usr/local/bin/opencode
   pi: /usr/local/bin/pi
@@ -61,7 +61,7 @@ log_level: info
 session_reuse: true
 
 worktree_roots:
-  /Users/you/src/my-repo: /Users/you/work/my-repo-runs
+  /home/user/src/my-repo: /home/user/work/my-repo-runs
 
 forge_profiles:
   github-personal:
@@ -517,7 +517,7 @@ forge_profiles:
   github-personal:
     gh_config_dir: ~/.config/gh-personal
   github-work:
-    gh_config_dir: /Users/you/.config/gh-work
+    gh_config_dir: /home/user/.config/gh-work
   gitlab-work:
     glab_config_dir: ~/.config/glab-work
     expected_login: team-bot
