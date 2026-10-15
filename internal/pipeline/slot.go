@@ -51,7 +51,8 @@ func (e *Executor) acquireSlot(ctx context.Context) error {
 // run is waiting for a run slot. It carries everything dispatch needs, so a
 // daemon that stops during the wait can re-apply the response after a restart.
 type pendingGateResponse struct {
-	Action           types.ApprovalAction `json:"action"`
+	Kind             string               `json:"kind,omitempty"`
+	Action           types.ApprovalAction `json:"action,omitempty"`
 	FindingIDs       []string             `json:"finding_ids,omitempty"`
 	IgnoreFindingIDs []string             `json:"ignore_finding_ids,omitempty"`
 	Instructions     map[string]string    `json:"instructions,omitempty"`
@@ -73,17 +74,20 @@ func encodePendingResponse(r approvalResponse) (string, error) {
 	return string(raw), err
 }
 
-func decodePendingResponse(raw string) (approvalResponse, error) {
+func decodePendingResponse(raw string) (*approvalResponse, error) {
 	var p pendingGateResponse
 	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		return approvalResponse{}, fmt.Errorf("decode recorded gate response: %w", err)
+		return nil, fmt.Errorf("decode recorded gate response: %w", err)
+	}
+	if p.Kind == "reconcile" {
+		return nil, nil
 	}
 	switch p.Action {
 	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAnswer:
 	default:
-		return approvalResponse{}, fmt.Errorf("recorded gate response has unusable action %q", p.Action)
+		return nil, fmt.Errorf("recorded gate response has unusable action %q", p.Action)
 	}
-	return approvalResponse{
+	return &approvalResponse{
 		action:           p.Action,
 		findingIDs:       p.FindingIDs,
 		ignoreFindingIDs: p.IgnoreFindingIDs,
@@ -108,8 +112,7 @@ const answeredActivity = "already answered; waiting for a run slot"
 // A daemon that stops anywhere in that window - waiting for a slot, or between
 // acceptance and the gate loop reading the response - recovers the gate and
 // re-applies the response (see RegisterRecoveredGate), instead of finding a
-// running step it must treat as stale. A claim without a response needs no
-// record; the recovered gate reconciles again by itself. Without a slot there is
+// running step it must treat as stale. Without a slot there is
 // nothing to wait for and the step moves at once.
 func (e *Executor) acceptApprovalGate(resp *approvalResponse) error {
 	row, err := e.db.GetStepResult(e.waitingStepResultID)
@@ -137,15 +140,14 @@ func (e *Executor) acceptApprovalGate(resp *approvalResponse) error {
 			return fmt.Errorf("resume answered gate: %w", err)
 		}
 	} else {
+		raw := `{"kind":"reconcile"}`
 		if resp != nil {
-			raw, err := encodePendingResponse(*resp)
+			raw, err = encodePendingResponse(*resp)
 			if err != nil {
 				return fmt.Errorf("record gate response: %w", err)
 			}
-			if err := e.db.SetStepPendingResponse(row.ID, raw, answeredActivity); err != nil {
-				return err
-			}
-		} else if err := e.db.TouchStepActivity(row.ID, answeredActivity); err != nil {
+		}
+		if err := e.db.SetStepPendingResponse(row.ID, raw, answeredActivity); err != nil {
 			return err
 		}
 		e.slotWaitStep = e.waitingStep

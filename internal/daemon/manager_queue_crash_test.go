@@ -108,3 +108,17 @@ func TestAcceptedResponseSurvivesCrashWhileWaitingForSlot(t *testing.T) {
 		t.Fatalf("step after dispatch = %+v, want completed with no pending response", rows)
 	}
 }
+
+func TestRecoveredReconciliationIsReportedAsAnsweredBeforeAdmission(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	plans := seedRecoveredQueueGates(f)
+	rows, err := f.d.GetStepsByRun(plans[1].run.ID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("parked step: %+v, %v", rows, err)
+	}
+	if err := f.d.SetStepPendingResponse(rows[0].ID, `{"kind":"reconcile"}`, "already answered; waiting for a run slot"); err != nil {
+		t.Fatal(err)
+	}
+	f.mgr.resumeRecoveredRuns(plans)
+	f.assertAnsweredWaiting(f.mgr, plans[1].run.ID, "recovered reconciliation")
+}

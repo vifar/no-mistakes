@@ -737,7 +737,7 @@ func (e *Executor) RegisterRecoveredGate(run *db.Run) error {
 		if err != nil {
 			return err
 		}
-		e.recoveredResponse = &recorded
+		e.recoveredResponse = recorded
 		e.slotWaitStep = gate.step.Name()
 		e.waitingSince = time.Unix(*run.AwaitingAgentSince, 0)
 		e.answeredParkedMS = time.Since(e.waitingSince).Milliseconds()
@@ -883,6 +883,20 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		},
 		LogChunk: func(string) {},
 		LogFile:  func(string) {},
+	}
+
+	if gate.stepResult.PendingResponse != nil && e.recoveredResponse == nil {
+		if err := e.acquireAnsweredGateSlot(ctx, run.ID, gate.stepResult.ID); err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		resolved, err := e.reconcileApprovalGate(ctx, gate.step, reconcileCtx, gate.findings)
+		if err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		if resolved {
+			return completeReconciledGate()
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index, gate.step.Name())
 	}
 
 	e.mu.Lock()
@@ -2556,7 +2570,7 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 			// race guard reconciliation uses: an operator response that landed
 			// first wins.
 			if action, resume, err := e.resumeApprovalGate(ctx, step, sctx, findings); resume {
-				if claimed, err := e.claimGateReconciliation(); err != nil {
+				if claimed, err := e.claimGateReconciliation(&approvalResponse{action: action}); err != nil {
 					return approvalResponse{}, false, err
 				} else if claimed {
 					return approvalResponse{action: action}, false, nil
@@ -2571,7 +2585,7 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 			}
 			resolved, err := e.reconcileApprovalGate(ctx, step, sctx, findings)
 			if resolved {
-				if claimed, err := e.claimGateReconciliation(); err != nil {
+				if claimed, err := e.claimGateReconciliation(nil); err != nil {
 					return approvalResponse{}, false, err
 				} else if claimed {
 					return approvalResponse{}, true, nil
@@ -2608,13 +2622,13 @@ func (e *Executor) clearApprovalGate() {
 	}
 }
 
-func (e *Executor) claimGateReconciliation() (bool, error) {
+func (e *Executor) claimGateReconciliation(response *approvalResponse) (bool, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if !e.waiting {
 		return false, nil
 	}
-	if err := e.acceptApprovalGate(nil); err != nil {
+	if err := e.acceptApprovalGate(response); err != nil {
 		return false, err
 	}
 	e.waiting = false
