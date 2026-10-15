@@ -221,3 +221,49 @@ func TestGetRequiredChecksExcludesPipelineStatusFromEverySource(t *testing.T) {
 		})
 	}
 }
+
+func TestGetRequiredChecksFallsBackWhenRulesetsHoldUnmodeledCheckRules(t *testing.T) {
+	t.Parallel()
+	for _, ruleType := range []string{"workflows", "code_scanning", "required_deployments"} {
+		t.Run(ruleType, func(t *testing.T) {
+			t.Parallel()
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				protectionCmd: {stdout: `{"contexts":[],"checks":[]}`},
+				// The ruleset requires "build" and also gates on a rule whose
+				// checks are not named, so "build" alone is an incomplete set.
+				rulesCmd: {stdout: `[[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}},` +
+					`{"type":"` + ruleType + `","parameters":{}}]]`},
+			}), nil, "", "test/repo")
+			var logs []string
+			scope := scm.NewCheckScope(host, scm.CheckScopePolicy{}, "main", func(m string) { logs = append(logs, m) })
+			scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "h"}, []scm.Check{
+				{Name: "build", Bucket: scm.CheckBucketPass},
+				{Name: "required-workflow / job", Bucket: scm.CheckBucketFail},
+			})
+			if scoped.Ready() || len(scoped.Relevant) != 2 || len(scoped.Informational) != 0 {
+				t.Fatalf("a failing check from a required workflow must block through the all-checks fallback: %+v", scoped)
+			}
+			if len(logs) != 1 || !strings.Contains(logs[0], ruleType) || !strings.Contains(logs[0], "evaluating all checks") {
+				t.Fatalf("logs = %v, want one fallback line naming %s", logs, ruleType)
+			}
+		})
+	}
+}
+
+func TestGetRequiredChecksIgnoresUnrelatedRuleTypes(t *testing.T) {
+	t.Parallel()
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		protectionCmd: {stdout: `{"contexts":[],"checks":[]}`},
+		rulesCmd: {stdout: `[[{"type":"deletion"},{"type":"pull_request","parameters":{}},{"type":"non_fast_forward"},` +
+			`{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"build"}]}}]]`},
+	}), nil, "", "test/repo")
+	var logs []string
+	scope := scm.NewCheckScope(host, scm.CheckScopePolicy{}, "main", func(m string) { logs = append(logs, m) })
+	scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "h"}, []scm.Check{
+		{Name: "build", Bucket: scm.CheckBucketPass},
+		{Name: "optional", Bucket: scm.CheckBucketFail},
+	})
+	if !scoped.Ready() || len(scoped.Informational) != 1 {
+		t.Fatalf("unrelated rule types must not trigger the fallback: %+v (logs %v)", scoped, logs)
+	}
+}

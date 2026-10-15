@@ -98,6 +98,21 @@ func (h *Host) GetRequiredChecks(ctx context.Context, _ *scm.PR, branch string) 
 			}
 			all = append(all, single)
 		}
+		// required_status_checks is the only check requirement modelled here.
+		// These rule types also gate merges on checks or statuses but name no
+		// check context (a required workflow's job names are not in the
+		// rule), so a required set derived without them would be incomplete:
+		// treat the set as unavailable and let the caller judge every check.
+		var unmodeled []string
+		for _, r := range all {
+			if unmodeledCheckRules[r.Type] && !slices.Contains(unmodeled, r.Type) {
+				unmodeled = append(unmodeled, r.Type)
+			}
+		}
+		if len(unmodeled) > 0 {
+			slices.Sort(unmodeled)
+			return nil, fmt.Errorf("%w: branch %q has %s rule(s) whose checks cannot be mapped to check runs", scm.ErrRequiredChecksUnavailable, branch, strings.Join(unmodeled, ", "))
+		}
 		for _, r := range all {
 			if r.Type != "required_status_checks" {
 				continue
@@ -111,6 +126,14 @@ func (h *Host) GetRequiredChecks(ctx context.Context, _ *scm.PR, branch string) 
 	return slices.DeleteFunc(required, func(check scm.RequiredCheck) bool {
 		return strings.TrimSpace(check.Context) == CommitStatusContext
 	}), nil
+}
+
+// unmodeledCheckRules are the ruleset rule types that gate merging on checks,
+// statuses, or deployments without naming check contexts.
+var unmodeledCheckRules = map[string]bool{
+	"workflows":            true,
+	"code_scanning":        true,
+	"required_deployments": true,
 }
 
 func appIDOrZero(id *int64) int64 {
