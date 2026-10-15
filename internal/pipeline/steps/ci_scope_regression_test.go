@@ -677,6 +677,10 @@ func TestCIScopeRetainedWorkWithoutProducerEvidence(t *testing.T) {
 		{name: "build", keep: true},
 		{name: "CI / build", keep: true},
 		{name: "CI / lint-extra", keep: true},
+		{name: "build / test", keep: true},
+		{name: "security / audit", keep: true},
+		{name: "build / excluded"},
+		{name: "build / external"},
 		{name: "approve"},
 		{name: "CI / approve"},
 		{name: "optional"},
@@ -686,10 +690,11 @@ func TestCIScopeRetainedWorkWithoutProducerEvidence(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			policy := scm.CheckScopePolicy{
-				MustPass:       []string{"CI / lint-*"},
-				ExternalChecks: []string{"CI / approve"},
+				MustPass:       []string{"CI / lint-*", "security / audit", "build / excluded"},
+				ExternalChecks: []string{"CI / approve", "build / excluded", "Other / build / external"},
 				Resolved: &scm.CheckScopeResolution{Derived: true, Required: []scm.RequiredCheck{
 					{Context: "build", AppID: 15368}, {Context: "approve", AppID: 15368},
+					{Context: "build / test", AppID: 15368}, {Context: "build / excluded", AppID: 15368}, {Context: "build / external", AppID: 15368},
 				}},
 			}
 			scope := scm.NewCheckScope(nil, policy, "main", nil)

@@ -325,10 +325,22 @@ func (s *CheckScope) IncludesContext(ctx context.Context, pr *PR, name string) b
 		required[i].SelfStatus = false
 	}
 	identity := Check{Name: name}
+	qualifiedIdentity := identity
 	if workflow, job, qualified := strings.Cut(name, " / "); qualified {
-		identity.Name, identity.Workflow = job, workflow
+		qualifiedIdentity.Name, qualifiedIdentity.Workflow = job, workflow
 	}
-	return s.classify(identity, required, derived) == CheckRoleRequired
+	if matchesCheckIdentity(s.policy.ExternalChecks, identity) || matchesCheckIdentity(s.policy.ExternalChecks, qualifiedIdentity) {
+		return false
+	}
+	if s.classify(identity, required, derived) == CheckRoleRequired {
+		return true
+	}
+	for _, pattern := range s.policy.MustPass {
+		if strings.TrimSpace(pattern) == name {
+			return true
+		}
+	}
+	return s.classify(qualifiedIdentity, required, derived) == CheckRoleRequired
 }
 
 func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck, derived bool) ScopedChecks {

@@ -519,37 +519,41 @@ func TestCIStep_CarryReviewOnReplay_ACommitOnTopOfAPendingCarryRevalidatesFromRe
 // there would complete the run with the carried head never published.
 func TestCIStep_CarryReviewOnReplay_AFailedFixRoundStillRestartsAtTest(t *testing.T) {
 	t.Parallel()
-	f := newReplayFixture(t, true, false)
-	f.carry(t)
-	f.sctx.Env = append(f.sctx.Env, `FAKE_CLI_PROTECTION_JSON={"checks":[{"context":"test","app_id":15368}]}`, `FAKE_CLI_RULES_JSON=[]`)
-	fixerCalled := false
-	f.sctx.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-		fixerCalled = true
-		return nil, errors.New("fixer unavailable")
-	}}
-	f.sctx.Fixing = true
-	f.sctx.PreviousFindings = ciGateFindingsJSON("test")
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	f.sctx.Ctx = ctx
+	for _, name := range []string{"test", "build / test"} {
+		t.Run(name, func(t *testing.T) {
+			f := newReplayFixture(t, true, false)
+			f.carry(t)
+			f.sctx.Env = append(f.sctx.Env, `FAKE_CLI_PROTECTION_JSON={"checks":[{"context":"`+name+`","app_id":15368}]}`, `FAKE_CLI_RULES_JSON=[]`)
+			fixerCalled := false
+			f.sctx.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				fixerCalled = true
+				return nil, errors.New("fixer unavailable")
+			}}
+			f.sctx.Fixing = true
+			f.sctx.PreviousFindings = ciGateFindingsJSON(name)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			f.sctx.Ctx = ctx
 
-	// The live step already observed the checks it parked on, so the fix
-	// round does not snapshot them again.
-	outcome, err := (&CIStep{observedCompletedAt: map[string]checkFreshness{}, waitForNextPoll: func(ctx context.Context, _ time.Duration) error {
-		cancel()
-		return ctx.Err()
-	}}).Execute(f.sctx)
-	if err != nil {
-		t.Fatalf("Execute: %v\nlog:\n%s", err, f.log())
-	}
-	if !fixerCalled {
-		t.Fatal("the selected app-bound test repair was dropped while a carry was pending")
-	}
-	if outcome == nil || outcome.RestartFrom != types.StepTest {
-		t.Fatalf("outcome = %+v, want a restart from Test\nlog:\n%s", outcome, f.log())
-	}
-	if f.remoteHead(t) != f.reviewedHead {
-		t.Fatalf("remote moved to %s; the carried head was published before Test ran", f.remoteHead(t))
+			// The live step already observed the checks it parked on, so the fix
+			// round does not snapshot them again.
+			outcome, err := (&CIStep{observedCompletedAt: map[string]checkFreshness{}, waitForNextPoll: func(ctx context.Context, _ time.Duration) error {
+				cancel()
+				return ctx.Err()
+			}}).Execute(f.sctx)
+			if err != nil {
+				t.Fatalf("Execute: %v\nlog:\n%s", err, f.log())
+			}
+			if !fixerCalled {
+				t.Fatal("the selected app-bound test repair was dropped while a carry was pending")
+			}
+			if outcome == nil || outcome.RestartFrom != types.StepTest {
+				t.Fatalf("outcome = %+v, want a restart from Test\nlog:\n%s", outcome, f.log())
+			}
+			if f.remoteHead(t) != f.reviewedHead {
+				t.Fatalf("remote moved to %s; the carried head was published before Test ran", f.remoteHead(t))
+			}
+		})
 	}
 }
 
