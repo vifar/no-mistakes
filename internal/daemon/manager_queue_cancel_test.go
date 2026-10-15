@@ -165,3 +165,94 @@ func TestClaimedCancellationWaitsForAgentExit(t *testing.T) {
 		}
 	}
 }
+
+// routedStep runs the blocking agent workload for one branch and the plain
+// controllable step for every other.
+type routedStep struct {
+	blockingBranch string
+	blocking       *cancellationExitAgent
+	plain          *schedStep
+}
+
+func (*routedStep) Name() types.StepName { return types.StepReview }
+
+func (s *routedStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if sctx.Run.Branch != s.blockingBranch {
+		return s.plain.Execute(sctx)
+	}
+	copyCtx := *sctx
+	copyCtx.Agent = s.blocking
+	_, err := copyCtx.RunAgent(agent.RunOpts{Prompt: "blocking workload", CWD: sctx.WorkDir})
+	return nil, err
+}
+
+// Supersession snapshots a branch's runs and then cancels each. A queued run
+// that dispatch claims in between is cancelled as claimed, and the replacement
+// must wait for that run's workload to stop like for any other: it may not
+// start while the old run's agent is still shutting down.
+func TestSupersessionWaitsForARunClaimedAfterTheSnapshot(t *testing.T) {
+	f := newFaultFixture(t, "2")
+	ag := &cancellationExitAgent{started: make(chan struct{}), cancelled: make(chan struct{}), exit: make(chan struct{})}
+	var once sync.Once
+	release := func() { once.Do(func() { close(ag.exit) }) }
+	t.Cleanup(release)
+	routed := &routedStep{blockingBranch: "same", blocking: ag, plain: f.step}
+	f.mgr.steps = func() []pipeline.Step { return []pipeline.Step{routed} }
+
+	holderA := f.push("holder-a")
+	holderB := f.push("holder-b")
+	f.waitStarted(holderA)
+	f.waitStarted(holderB)
+	queued := f.push("same")
+	if f.status(queued) != types.RunQueued {
+		t.Fatal("run did not queue behind the two holders")
+	}
+
+	reached := make(chan struct{})
+	resume := make(chan struct{})
+	var pauseOnce sync.Once
+	f.mgr.afterSupersedeSnapshot = func() {
+		pauseOnce.Do(func() {
+			close(reached)
+			<-resume
+		})
+	}
+	result := make(chan error, 1)
+	go func() { result <- f.mgr.cancelActiveRuns("fault-repo", "same") }()
+	select {
+	case <-reached:
+	case <-time.After(30 * time.Second):
+		t.Fatal("supersession never snapshotted the branch")
+	}
+
+	// A slot frees; dispatch claims the queued run and its workload starts.
+	f.step.release(holderA)
+	select {
+	case <-ag.started:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the queued run never started after the snapshot")
+	}
+	close(resume)
+
+	select {
+	case <-ag.cancelled:
+	case <-time.After(10 * time.Second):
+		t.Fatal("supersession did not signal the run it found claimed")
+	}
+	select {
+	case err := <-result:
+		t.Fatalf("supersession returned (%v) while the old run's workload was still stopping", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("supersession never finished after the workload stopped")
+	}
+	f.waitFor("superseded run to be cancelled", func() bool { return f.status(queued) == types.RunCancelled })
+	f.step.release(holderB)
+}

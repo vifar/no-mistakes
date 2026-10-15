@@ -66,6 +66,9 @@ type RunManager struct {
 	// so tests can inject faults and pauses.
 	claimQueued          func(runID string) (bool, error)
 	beforeQueuedRegister func()
+	// afterSupersedeSnapshot runs between supersession's snapshot of a branch's
+	// runs and the cancellation of each; a test seam for that race.
+	afterSupersedeSnapshot func()
 	// afterFullDecision runs inside admission, between "the cap is full" and the
 	// queue insertion. A test seam for the admission race.
 	afterFullDecision func()
@@ -523,36 +526,44 @@ func (m *RunManager) releaseQueue() {
 //     (and a recovering gate needs no slot to be cancelled).
 //   - finishing: the outcome is already decided, so nothing is cancelled or
 //     rewritten.
-func (m *RunManager) cancelManagedRun(runID, reason string) error {
+//
+// It returns the channel that closes when the cancelled run's workload has
+// stopped, or nil when there is nothing to wait for (a never-started queued run,
+// a finishing run, an unknown id). The state is read and acted on under one
+// hold of the ownership lock, so the channel is always the handle that was
+// actually signalled: a queued run that dispatch claimed a moment earlier is
+// cancelled as claimed, with its new handle and completion channel returned.
+func (m *RunManager) cancelManagedRun(runID, reason string) (<-chan struct{}, error) {
 	m.mu.Lock()
 	owned := m.runs[runID]
 	if owned == nil {
 		m.mu.Unlock()
-		return nil
+		return nil, nil
 	}
 	switch owned.state {
 	case ownershipQueued:
 		cancelled, err := m.db.CancelQueuedRun(runID, reason)
 		if err != nil {
 			m.mu.Unlock()
-			return err
+			return nil, err
 		}
 		if !cancelled {
 			m.mu.Unlock()
-			return fmt.Errorf("queued run %s could not be cancelled", runID)
+			return nil, fmt.Errorf("queued run %s could not be cancelled", runID)
 		}
 		m.sched.removeQueuedLocked(runID)
 		delete(m.runs, runID)
 		m.mu.Unlock()
 		m.broadcastTerminal(owned.run, types.RunCancelled, reason)
-		return nil
+		return nil, nil
 	case ownershipFinishing:
 		m.mu.Unlock()
-		return nil
+		return nil, nil
 	}
 	owned.handle.cancel(errors.New(reason))
+	done := owned.handle.done
 	m.mu.Unlock()
-	return nil
+	return done, nil
 }
 
 type recoveredRunPlan struct {
@@ -3024,7 +3035,8 @@ func (m *RunManager) HandleCancel(runID string) error {
 	if owned == nil {
 		return fmt.Errorf("no active run %s", runID)
 	}
-	return m.cancelManagedRun(runID, types.RunCancelReasonAbortedByUser)
+	_, err := m.cancelManagedRun(runID, types.RunCancelReasonAbortedByUser)
+	return err
 }
 
 // cancelActiveRuns cancels any in-progress runs for the given repo+branch
@@ -3035,21 +3047,29 @@ func (m *RunManager) HandleCancel(runID string) error {
 func (m *RunManager) cancelActiveRuns(repoID, branch string) error {
 	m.mu.Lock()
 	var ids []string
-	var toWait []chan struct{}
 	for id, owned := range m.runs {
 		// A finishing run's outcome is decided and its pipeline is over, so a
 		// new push neither cancels nor waits for it.
 		if owned.run.RepoID == repoID && owned.run.Branch == branch && owned.state != ownershipFinishing {
 			ids = append(ids, id)
-			if owned.handle != nil && owned.handle.done != nil {
-				toWait = append(toWait, owned.handle.done)
-			}
 		}
 	}
 	m.mu.Unlock()
+	if m.afterSupersedeSnapshot != nil {
+		m.afterSupersedeSnapshot()
+	}
+	// The snapshot only names candidates. Each is cancelled by re-reading its
+	// state under the ownership lock (cancelManagedRun), which also hands back
+	// the completion channel of the handle it actually signalled - so a run that
+	// dispatch claimed after the snapshot is waited for like any other.
+	var toWait []<-chan struct{}
 	for _, id := range ids {
-		if err := m.cancelManagedRun(id, types.RunCancelReasonSuperseded); err != nil {
+		done, err := m.cancelManagedRun(id, types.RunCancelReasonSuperseded)
+		if err != nil {
 			return err
+		}
+		if done != nil {
+			toWait = append(toWait, done)
 		}
 	}
 
