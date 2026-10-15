@@ -60,10 +60,10 @@ func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 	const currentJob = `{"__typename":"CheckRun","databaseId":6,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-10-14T11:00:00Z","detailsUrl":"https://github.com/owner/project/actions/runs/7/job/6","checkSuite":{"app":{"slug":"github-actions","databaseId":15368},"workflowRun":{"runAttempt":2,"workflow":{"name":"CI"}}}}`
 	const rerunIdentity = `"id":7,"workflow_id":10,"run_attempt":2,"name":"CI","event":"push","head_branch":"feature","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/owner/project/actions/runs/7"`
 	for _, tc := range []struct {
-		name, checks, protection, rules, comments, refusal string
-		runs                                               string
-		policy                                             scm.CheckScopePolicy
-		jobs                                               string
+		name, checks, protection, rules, comments, refusal, attemptJobs string
+		runs                                                            string
+		policy                                                          scm.CheckScopePolicy
+		jobs                                                            string
 	}{
 		{name: "auto ignores outside approval failure", checks: buildPass + "," + approveFail},
 		{name: "required failure refuses", checks: `{"name":"build","state":"FAILURE","bucket":"fail"}`, refusal: "all live checks green"},
@@ -98,7 +98,7 @@ func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 		{name: "waiting same-run rerun rejects stale parent-attempt success", jobs: staleJob, runs: `[{` + rerunIdentity + `,"status":"waiting","conclusion":""}]`, refusal: "all live checks green"},
 		{name: "pending same-run rerun rejects stale parent-attempt success", jobs: staleJob, runs: `[{` + rerunIdentity + `,"status":"pending","conclusion":""}]`, refusal: "all live checks green"},
 		{name: "same-run failure before jobs rejects stale parent-attempt success", jobs: staleJob, runs: `[{` + rerunIdentity + `,"status":"completed","conclusion":"failure"}]`, refusal: "all live checks green"},
-		{name: "completed same-run rerun accepts current passing job", jobs: staleJob + "," + currentJob, runs: `[{` + rerunIdentity + `,"status":"completed","conclusion":"success"}]`},
+		{name: "completed same-run rerun accepts current passing job", jobs: staleJob + "," + currentJob, runs: `[{` + rerunIdentity + `,"status":"completed","conclusion":"success"}]`, attemptJobs: "6"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newExportFixture(t)
@@ -128,7 +128,7 @@ func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 			cmd.Env = append(os.Environ(), "NM_HOME="+filepath.Dir(f.dir), "HOME="+root, "XDG_CONFIG_HOME="+root,
 				"PATH="+root+string(os.PathListSeparator)+os.Getenv("PATH"), "GIT_CONFIG_GLOBAL="+filepath.Join(root, "no-global-config"), "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_COUNT=0",
 				"NO_MISTAKES_TELEMETRY=off", "NO_MISTAKES_NO_UPDATE_CHECK=1", "FAKE_CLI_MODE=ci-gh", "FAKE_CLI_PR_HEAD_SHA="+f.run.HeadSHA,
-				"FAKE_CLI_PR_FACTS_JSON="+string(rawFacts), "FAKE_CLI_CHECKS=["+tc.checks+"]", "FAKE_CLI_PROTECTION_JSON="+protection, "FAKE_CLI_RULES_JSON="+rules, "FAKE_CLI_REVIEW_COMMENTS="+tc.comments, "FAKE_CLI_WORKFLOW_RUNS="+tc.runs)
+				"FAKE_CLI_PR_FACTS_JSON="+string(rawFacts), "FAKE_CLI_CHECKS=["+tc.checks+"]", "FAKE_CLI_PROTECTION_JSON="+protection, "FAKE_CLI_RULES_JSON="+rules, "FAKE_CLI_REVIEW_COMMENTS="+tc.comments, "FAKE_CLI_WORKFLOW_RUNS="+tc.runs, "FAKE_CLI_ATTEMPT_JOBS="+tc.attemptJobs)
 			if tc.jobs != "" {
 				graphql := `{"data":{"repository":{"object":{"__typename":"Commit","oid":"` + f.run.HeadSHA + `","statusCheckRollup":{"contexts":{"nodes":[` + tc.jobs + `],"pageInfo":{"hasNextPage":false}}}}}}}`
 				cmd.Env = append(cmd.Env, "RECEIPT_TEST_GRAPHQL="+graphql)

@@ -938,6 +938,10 @@ func fakeCIGHHandler(args []string) {
 		printFakeCommitChecks(checksJSON, args)
 		os.Exit(0)
 	}
+	if strings.Contains(joined, "api") && strings.Contains(joined, "/attempts/") && strings.Contains(joined, "/jobs") {
+		printFakeAttemptJobs()
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "api") && strings.Contains(joined, "actions/runs") {
 		printFakeWorkflowRuns()
 		os.Exit(0)
@@ -1063,6 +1067,10 @@ func fakeCIGHSequenceHandler(args []string) {
 			os.Exit(1)
 		}
 		printFakeCommitChecks(entries[index], args)
+		os.Exit(0)
+	}
+	if strings.Contains(joined, "api") && strings.Contains(joined, "/attempts/") && strings.Contains(joined, "/jobs") {
+		printFakeAttemptJobs()
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "api") && strings.Contains(joined, "actions/runs") {
@@ -1303,6 +1311,10 @@ func fakeCIGHNoChecksHandler(args []string) {
 	if strings.Contains(joined, "pr checks") {
 		fmt.Fprintln(os.Stderr, "no checks reported on the 'feature/e2e' branch")
 		os.Exit(1)
+	}
+	if strings.Contains(joined, "api") && strings.Contains(joined, "/attempts/") && strings.Contains(joined, "/jobs") {
+		printFakeAttemptJobs()
+		os.Exit(0)
 	}
 	if strings.Contains(joined, "api") && strings.Contains(joined, "actions/runs") {
 		printFakeWorkflowRuns()
@@ -1581,4 +1593,17 @@ func forwardCommitStatus(args []string) bool {
 		os.Exit(1)
 	}
 	return true
+}
+
+// printFakeAttemptJobs answers the read of the jobs a rerun's current attempt
+// owns. FAKE_CLI_ATTEMPT_JOBS lists their database IDs, comma-separated; unset
+// means the attempt owns none of the jobs in the rollup.
+func printFakeAttemptJobs() {
+	var jobs []string
+	for _, id := range strings.Split(os.Getenv("FAKE_CLI_ATTEMPT_JOBS"), ",") {
+		if id = strings.TrimSpace(id); id != "" {
+			jobs = append(jobs, `{"id":`+id+`}`)
+		}
+	}
+	fmt.Printf(`[{"total_count":%d,"jobs":[%s]}]`, len(jobs), strings.Join(jobs, ","))
 }
