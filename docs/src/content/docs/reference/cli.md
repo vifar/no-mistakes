@@ -110,7 +110,8 @@ no-mistakes axi
 ```
 
 With no subcommand, shows the executable path, description, repo, current branch, daemon state, recent runs, and next-step help, including a pointer to `no-mistakes axi run --help` and the installed `/no-mistakes` skill for full driving guidance.
-When the daemon is running, a `slots` line reports the run-concurrency cap and usage (for example `slots: "2/3 in use, 4 queued"`; `N in use (no cap)` when `daemon.max_concurrent_runs` is 0, plus a `parked (slot released)` count when any run gave its slot back at a gate). `axi status` shows the same line. A run waiting behind the cap has `status: queued` and `queue_position: N` (see [`daemon`](/no-mistakes/reference/global-config/#daemon)).
+When the daemon is reachable, a `slots` line reports the run-concurrency cap and usage (for example `slots: "2/3 in use, 4 queued"`; `N in use (no cap)` for an unlimited cap). The queued count includes resumed runs waiting for a slot. A `parked (slot released)` count includes live runs that yielded at a gate or during CI monitoring. `axi status` shows the same line.
+A new run waiting for a slot has `status: queued`, `queue_position: N`, and `queue_length: M`. A resumed run keeps `status: running` and adds `waiting_for_slot: true` with its position. Home and status use the daemon's live positions, including resumed waiters, when reachable. Otherwise, positions come from the database's queued new runs; live slot usage and resumed waiters are unavailable. See [`daemon`](/no-mistakes/reference/global-config/#daemon) for admission rules.
 When the current branch has an active run, that run appears as `active_run` with any approval gate and help for `axi respond` when it is parked or `axi status` when it is still running.
 If an active run object is parked at a decision gate, it includes `awaiting_agent: parked <duration>` immediately after `status`.
 That field is observability only; the `gate:` object still tells the agent which response to send.
@@ -822,7 +823,7 @@ no-mistakes daemon set max-concurrent-runs 0   # unlimited
 
 Writes `daemon.max_concurrent_runs` into the global config (only that value line changes; comments and other settings are preserved, and the block is created when absent), then asks the running daemon to apply it immediately and prints the resulting slot usage. A value that is not a whole number of 0 or more is rejected before anything is written. With the daemon stopped, the value is only written and applies at the next start.
 
-Lowering the cap never stops or pauses a running run: it only holds back new starts until usage drops below the new cap. Raising it starts queued runs, first in first out, up to the new cap at once. The daemon also notices a hand edit of the config file within a couple of seconds, so editing `daemon.max_concurrent_runs` or `daemon.hold_slot_while_parked` needs no command at all; see [`daemon`](/no-mistakes/reference/global-config/#daemon).
+The global [`daemon` configuration](/no-mistakes/reference/global-config/#daemon) owns hot reload, admission order, and the effects of raising or lowering a cap. The [validation-step containment rule](/no-mistakes/concepts/daemon/#starting-and-stopping) also applies to `daemon set`, before any config write.
 
 ## no-mistakes daemon uninstall
 

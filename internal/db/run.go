@@ -1460,8 +1460,9 @@ func (d *DB) GetRunQueueSpec(id string) (string, error) {
 }
 
 // QueuePosition reports a queued run's 1-based position among queued runs and
-// the queue length, read straight from the database so a client without a
-// daemon sees the same answer. position is 0 when the run is not queued.
+// the queue length among new queued runs. This is the offline fallback; the
+// daemon overlays live positions that also include resumed waiters ahead of
+// these runs. position is 0 when the run is not queued.
 func (d *DB) QueuePosition(id string) (position, total int, err error) {
 	ids, err := d.QueuedRunIDs()
 	if err != nil {

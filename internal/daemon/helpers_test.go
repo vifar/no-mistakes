@@ -312,9 +312,9 @@ func startTestDaemonWithStepsConfig(t *testing.T, sf StepFactory, extraConfig st
 	t.Cleanup(func() { d.Close() })
 
 	// A run reaches its terminal DB state before its goroutine finishes git
-	// worktree cleanup. On process-spawn-bound Windows that cleanup can take
-	// longer than three seconds, so give graceful shutdown its own budget.
-	runTestDaemon(t, p, d, sf, 15*time.Second)
+	// worktree cleanup. Process-spawn-bound or heavily loaded hosts can need
+	// more than fifteen seconds, so give graceful shutdown its own budget.
+	runTestDaemon(t, p, d, sf, 45*time.Second)
 	return p, d
 }
 

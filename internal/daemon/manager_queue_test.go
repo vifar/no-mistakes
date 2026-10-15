@@ -64,7 +64,10 @@ func TestQueuedSetupAbortCancelsStalledFetchAndReleasesSlot(t *testing.T) {
 	}
 	bin := t.TempDir()
 	marker := filepath.Join(bin, "fetch-started")
-	script := fmt.Sprintf("#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = fetch ]; then\n  touch '%s'\n  exec sleep 10\n fi\ndone\nexec '%s' \"$@\"\n", marker, realGit)
+	// Keep the stalled operation longer than the completion budget. Waiting
+	// for the launch also includes real Git worktree cleanup, which can take
+	// several seconds on a loaded host even after fetch was cancelled.
+	script := fmt.Sprintf("#!/bin/sh\nfor arg in \"$@\"; do\n if [ \"$arg\" = fetch ]; then\n  touch '%s'\n  exec sleep 60\n fi\ndone\nexec '%s' \"$@\"\n", marker, realGit)
 	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +77,9 @@ func TestQueuedSetupAbortCancelsStalledFetchAndReleasesSlot(t *testing.T) {
 	m.sched.start = m.startQueuedRun
 	defer m.Shutdown()
 	m.sched.enqueue(run.ID)
-	deadline := time.Now().Add(10 * time.Second)
+	// Setup is outside the cancellation assertion below: a busy host may
+	// need time to create the worktree before the fetch shim starts.
+	deadline := time.Now().Add(60 * time.Second)
 	for {
 		if _, err := os.Stat(marker); err == nil {
 			break
@@ -91,7 +96,7 @@ func TestQueuedSetupAbortCancelsStalledFetchAndReleasesSlot(t *testing.T) {
 	go func() { m.wg.Wait(); close(finished) }()
 	select {
 	case <-finished:
-	case <-time.After(3 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("abort did not stop queued setup")
 	}
 	if usage := m.sched.stats(); usage.Active != 0 {

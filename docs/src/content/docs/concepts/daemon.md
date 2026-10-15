@@ -63,8 +63,9 @@ If the daemon executable path cannot be determined, the update aborts before rep
 `no-mistakes daemon stop`, `no-mistakes daemon uninstall`, and `no-mistakes daemon restart` apply the same guard: if pending or running pipeline runs exist, each refuses by default and lists the active runs, and each takes its own `--force` to proceed anyway.
 That `--force` override is available only to an ordinary top-level caller. A
 process descended from an active validation-step agent cannot start, stop,
-restart, uninstall, or update the daemon; recursive containment refuses the command before
-any lifecycle mutation, with no `--force` or `--yes` bypass.
+restart, uninstall, or update the daemon, or change its scheduling settings with
+`daemon set`. Recursive containment refuses the command before any lifecycle
+or config mutation, with no `--force` or `--yes` bypass.
 Every invocation of `daemon stop`, `daemon uninstall`, `daemon restart`, or `update` - forced or not - logs the caller's PID, parent PID, and parent command line to `~/.no-mistakes/logs/cli.log` so a later incident can identify which agent or process triggered it.
 
 The daemon writes an identity record to `~/.no-mistakes/daemon.pid` and listens on a Unix socket at `~/.no-mistakes/socket`. On Windows, it uses a localhost TCP listener and a protected endpoint file at the same path. CLI clients bound how long they wait for that socket to accept a connection with [`daemon_connect_timeout`](/no-mistakes/reference/global-config/#daemon_connect_timeout), so a daemon process that is alive but stuck fails the connection instead of hanging the caller; see [Troubleshooting](/no-mistakes/guides/troubleshooting/#check-for-stale-artifacts). After connecting, daemon status and readiness probes allow a separate five seconds for the health reply, so a slow but responsive daemon remains healthy. A health-reply timeout makes commands that ensure the daemon is running fail without starting a replacement; explicit `daemon start` still attempts startup after a health error.
@@ -81,7 +82,9 @@ As an independent safety layer, the daemon also refuses to bind the Unix socket 
 
 ## What it does
 
-When a push arrives via the post-receive hook:
+When a push arrives via the post-receive hook, the daemon records the run. If
+no execution slot is available, it queues the run durably without creating a
+worktree or executor. Once admitted, it:
 
 1. Creates a detached worktree at `~/.no-mistakes/worktrees/<repoID>/<runID>/`, or at `<root>/<runID>` when [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) names a directory for that repository. The placement is resolved once, at run creation, and recorded on the run, so editing the setting never retargets a run that already exists
 2. Starts the pipeline executor in that worktree
@@ -114,11 +117,11 @@ If you push to the same branch while a run is already active, the daemon:
 
 1. Cancels the in-progress run (reason: "cancelled: superseded by new push")
 2. Waits for it to finish
-3. Starts a new run with the latest push
+3. Submits a new run with the latest push for admission
 
-Pushes to different branches run concurrently, up to [`daemon.max_concurrent_runs`](/no-mistakes/reference/global-config/#daemon) (default 3). A launch beyond that limit is recorded as a `queued` run and returned immediately; queued runs start in order as slots free. A newer push to a branch whose run is still queued supersedes it the same way. The control plane (`status`, `respond`, `abort`, `gate_context`, launch) never waits on a slot.
+Pushes to different branches share execution slots. A newer push to a branch whose run is still queued supersedes it without starting it. The control plane (`status`, `respond`, `abort`, `gate_context`, launch) never waits on a slot; aborting a parked run also needs no slot.
 
-The cap is adjustable while the daemon runs: it re-reads `daemon.max_concurrent_runs` and `daemon.hold_slot_while_parked` when the global config changes, and `no-mistakes daemon set max-concurrent-runs N` applies a new value immediately over IPC. Lowering it never stops a running run, it only holds back new admissions until usage is below the new cap; raising it starts queued runs up to the new cap at once. `axi status`, the `axi` home view, and `doctor` report the cap, slots in use, queued runs, and parked runs that released their slot.
+The global [`daemon` configuration](/no-mistakes/reference/global-config/#daemon) owns the limits, queue ordering, slot release rules, and hot reload behavior. The [CLI reference](/no-mistakes/reference/cli/#no-mistakes-daemon-set-max-concurrent-runs) explains changing the cap with `daemon set`; [`axi` status output](/no-mistakes/reference/cli/#no-mistakes-axi) and [`doctor`](/no-mistakes/reference/cli/#no-mistakes-doctor) report usage.
 
 This is another reason the daemon exists: branch-level coordination is easier to
 reason about in one long-lived process than inside independent hook invocations.
@@ -168,6 +171,6 @@ The [starting and stopping](#starting-and-stopping) section owns the active-run
 guard, the top-level `--force` override, and the separate validation-step
 containment rule.
 
-1. Cancels all active runs
+1. Cancels executing and parked runs; leaves queued runs durable for the next start
 2. Waits up to 30 seconds for goroutines to finish
 3. Removes the PID file and socket
