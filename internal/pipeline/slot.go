@@ -20,9 +20,10 @@ import (
 // that do no work of their own (a gate parked on the operator, the CI step's
 // PR monitoring poll) and takes one again before it resumes work.
 //
-// Both methods are idempotent: Yield on a slot that is not held and Acquire on
+// Slot operations are idempotent: Yield on a slot that is not held and Acquire on
 // one that is held do nothing. A nil RunSlot means no cap applies.
 type RunSlot interface {
+	Reserve()
 	// Yield releases the slot for the duration of a wait. An implementation
 	// that is configured to hold slots through waits does nothing.
 	Yield()
@@ -168,6 +169,7 @@ func (e *Executor) acceptApprovalGate(resp *approvalResponse) error {
 		if err := e.db.SetStepPendingResponse(row.ID, raw, answeredActivity); err != nil {
 			return err
 		}
+		e.slot.Reserve()
 		e.slotWaitStep = e.waitingStep
 		e.answeredParkedMS = parkedMS
 	}

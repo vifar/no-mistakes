@@ -927,3 +927,8 @@ func TestYieldSlotForGateWaitKeepsTheSlotOfAnAnsweredGate(t *testing.T) {
 		t.Fatalf("answered gate yielded its slot: %v", got)
 	}
 }
+
+func (*occupiedRunSlot) Reserve()    {}
+func (*recordingSlot) Reserve()      {}
+func (*gateCapacitySlot) Reserve()   {}
+func (*publicationRunSlot) Reserve() {}

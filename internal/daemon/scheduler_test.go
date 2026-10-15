@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -290,9 +291,9 @@ func TestSchedulerRecoveredParkedRunsRespectCapAndPriority(t *testing.T) {
 	h := newSchedHarness(1, true)
 	a := &runSlot{s: h.slotScheduler, runID: "recovered-a"}
 	b := &runSlot{s: h.slotScheduler, runID: "recovered-b"}
-	wa := h.requestSlot(a.runID)
-	wb := h.requestSlot(b.runID)
-	if err := a.waitForSlot(context.Background(), wa); err != nil {
+	a.Reserve()
+	b.Reserve()
+	if err := a.Acquire(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	a.Yield()
@@ -304,7 +305,7 @@ func TestSchedulerRecoveredParkedRunsRespectCapAndPriority(t *testing.T) {
 		t.Fatalf("second recovered run position = %d, waiting = %v", pos, waiting)
 	}
 	a.Release()
-	if err := b.waitForSlot(context.Background(), wb); err != nil {
+	if err := b.Acquire(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	b.Yield()
@@ -653,5 +654,59 @@ func TestSchedulerDisablingHoldDuringYieldRegistration(t *testing.T) {
 	}
 	if st := h.stats(); st.Active != 1 || st.Yielded != 1 {
 		t.Fatalf("stats = %+v, want one active queued run and one yielded run", st)
+	}
+}
+
+func TestSchedulerReservationPrecedesAcquire(t *testing.T) {
+	h := newSchedHarness(1, false)
+	parked, _ := h.tryAdmit("parked")
+	parked.Yield()
+	blocker, _ := h.tryAdmit("blocker")
+	h.enqueue("new")
+	parked.Reserve()
+	parked.Reserve()
+	if pos, total, waiting := position(h, "parked"); !waiting || pos != 1 || total != 2 {
+		t.Fatalf("reservation = %d of %d, waiting=%v", pos, total, waiting)
+	}
+	blocker.Release()
+	if got := h.startedIDs(); len(got) != 0 {
+		t.Fatalf("new work overtook a reserved resume before Acquire: %v", got)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := parked.Acquire(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st := h.stats(); st.Active != 1 || st.Queued != 1 || st.Yielded != 0 {
+		t.Fatalf("acquired reservation: %+v", st)
+	}
+	parked.Release()
+	if got := h.startedIDs(); !equalIDs(got, []string{"new"}) {
+		t.Fatalf("start order = %v", got)
+	}
+}
+
+func TestSchedulerReleaseUnusedReservation(t *testing.T) {
+	for _, granted := range []bool{false, true} {
+		t.Run(fmt.Sprint(granted), func(t *testing.T) {
+			h := newSchedHarness(1, false)
+			parked, _ := h.tryAdmit("parked")
+			parked.Yield()
+			blocker, _ := h.tryAdmit("blocker")
+			h.enqueue("new")
+			parked.Reserve()
+			if granted {
+				blocker.Release()
+			}
+			parked.Release()
+			parked.Release()
+			blocker.Release()
+			if got := h.startedIDs(); !equalIDs(got, []string{"new"}) {
+				t.Fatalf("unused reservation blocked new work: %v", got)
+			}
+			if st := h.stats(); st.Active != 1 || st.Queued != 0 || st.Yielded != 0 {
+				t.Fatalf("release left a reservation: %+v", st)
+			}
+		})
 	}
 }

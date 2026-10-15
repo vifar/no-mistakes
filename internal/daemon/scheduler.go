@@ -228,6 +228,7 @@ type runSlot struct {
 	// parkedHeld: Yield was asked for but skipped by the hold policy, so the run
 	// is waiting while still holding its slot (see slotScheduler.parkedHeld).
 	parkedHeld bool
+	pending    *slotWaiter
 	// flight is the one Acquire currently taking a slot for this run. Another
 	// concurrent Acquire waits on it instead of taking a second slot.
 	flight *acquireFlight
@@ -238,6 +239,7 @@ type acquireFlight struct {
 }
 
 var _ interface {
+	Reserve()
 	Yield()
 	Acquire(context.Context) error
 } = (*runSlot)(nil)
@@ -247,7 +249,11 @@ var _ interface {
 func (t *runSlot) release(yield bool) {
 	t.mu.Lock()
 	wasHeld, wasYielded := t.held, t.yielded
-	if !wasHeld && !(wasYielded && !yield) {
+	var pending *slotWaiter
+	if !yield {
+		pending, t.pending = t.pending, nil
+	}
+	if pending == nil && !wasHeld && !(wasYielded && !yield) {
 		t.mu.Unlock()
 		return
 	}
@@ -257,6 +263,9 @@ func (t *runSlot) release(yield bool) {
 	t.mu.Unlock()
 	t.s.mu.Lock()
 	delete(t.s.parkedHeld, t)
+	if pending != nil {
+		t.s.cancelWaiterLocked(pending)
+	}
 	if wasHeld {
 		t.s.active--
 	}
@@ -320,6 +329,22 @@ func (t *runSlot) releaseParked() bool {
 	return true
 }
 
+func (t *runSlot) Reserve() {
+	t.s.refresh()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.s.mu.Lock()
+	defer t.s.mu.Unlock()
+	if t.held {
+		t.parkedHeld = false
+		delete(t.s.parkedHeld, t)
+		return
+	}
+	if t.pending == nil && t.flight == nil {
+		t.pending = t.s.requestSlotLocked(t.runID)
+	}
+}
+
 // Acquire takes a slot again for a run that resumed work. It jumps ahead of
 // every queued new run and waits behind earlier resumed runs. It is
 // single-flight per run: a concurrent Acquire for the same run waits for the
@@ -327,19 +352,10 @@ func (t *runSlot) releaseParked() bool {
 // cancelled.
 func (t *runSlot) Acquire(ctx context.Context) error {
 	for {
+		t.Reserve()
 		t.mu.Lock()
 		if t.held {
-			// The run is working again: end "parked while holding" in the same
-			// critical section, so a concurrent policy release cannot take the
-			// slot of a run that has just resumed.
-			was := t.parkedHeld
-			t.parkedHeld = false
 			t.mu.Unlock()
-			if was {
-				t.s.mu.Lock()
-				delete(t.s.parkedHeld, t)
-				t.s.mu.Unlock()
-			}
 			return nil
 		}
 		if f := t.flight; f != nil {
@@ -351,11 +367,17 @@ func (t *runSlot) Acquire(ctx context.Context) error {
 				return context.Cause(ctx)
 			}
 		}
+		if t.pending == nil {
+			t.mu.Unlock()
+			continue
+		}
+		w := t.pending
+		t.pending = nil
 		f := &acquireFlight{done: make(chan struct{})}
 		t.flight = f
 		t.mu.Unlock()
 
-		err := t.acquire(ctx)
+		err := t.waitForSlot(ctx, w)
 
 		t.mu.Lock()
 		t.flight = nil
@@ -365,15 +387,7 @@ func (t *runSlot) Acquire(ctx context.Context) error {
 	}
 }
 
-// acquire waits for a slot on behalf of the single in-flight Acquire.
-func (t *runSlot) acquire(ctx context.Context) error {
-	return t.waitForSlot(ctx, t.s.requestSlot(t.runID))
-}
-
-func (s *slotScheduler) requestSlot(runID string) *slotWaiter {
-	s.refresh()
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *slotScheduler) requestSlotLocked(runID string) *slotWaiter {
 	w := &slotWaiter{runID: runID, ready: make(chan struct{})}
 	if s.capacityLocked() && len(s.prio) == 0 {
 		s.active++
@@ -394,21 +408,23 @@ func (t *runSlot) waitForSlot(ctx context.Context, w *slotWaiter) error {
 		return nil
 	case <-ctx.Done():
 		s.mu.Lock()
-		if w.granted {
-			// Granted in the same instant the wait was cancelled: hand it back.
-			s.active--
-			s.mu.Unlock()
-			s.dispatch()
-			return context.Cause(ctx)
-		}
-		for i, queued := range s.prio {
-			if queued == w {
-				s.prio = append(s.prio[:i], s.prio[i+1:]...)
-				break
-			}
-		}
+		s.cancelWaiterLocked(w)
 		s.mu.Unlock()
+		s.dispatch()
 		return context.Cause(ctx)
+	}
+}
+
+func (s *slotScheduler) cancelWaiterLocked(w *slotWaiter) {
+	if w.granted {
+		s.active--
+		return
+	}
+	for i, queued := range s.prio {
+		if queued == w {
+			s.prio = append(s.prio[:i], s.prio[i+1:]...)
+			return
+		}
 	}
 }
 

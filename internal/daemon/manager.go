@@ -907,14 +907,13 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		executor.SetPRContextGuard(steps.GuardPRContext)
 	}
 	registerErr := executor.RegisterRecoveredGate(plan.run)
+	if registerErr == nil {
+		slot.Reserve()
+	}
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.runs[plan.run.ID] = &managedRun{run: plan.run, state: ownershipRecoveringGate, handle: &runHandle{runCtx: runCtx, cancel: cancel, done: done}, executor: executor}
 	m.mu.Unlock()
-	var waiter *slotWaiter
-	if registerErr == nil {
-		waiter = m.sched.requestSlot(plan.run.ID)
-	}
 
 	m.wg.Add(1)
 	go func() {
@@ -951,8 +950,8 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			m.mu.Unlock()
 		}()
 
-		if waiter != nil {
-			_ = slot.waitForSlot(runCtx, waiter)
+		if registerErr == nil {
+			_ = slot.Acquire(runCtx)
 		}
 		m.mu.Lock()
 		m.runs[plan.run.ID].state = ownershipClaimed

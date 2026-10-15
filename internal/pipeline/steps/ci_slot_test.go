@@ -65,3 +65,5 @@ func TestCIStepYieldsRunSlotWhileWaitingForNextPoll(t *testing.T) {
 		t.Fatalf("slot events when the poll wait began = %v, want exactly [yield]", atWait)
 	}
 }
+
+func (*ciSlotRecorder) Reserve() {}
