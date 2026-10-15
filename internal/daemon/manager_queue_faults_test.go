@@ -244,7 +244,12 @@ func TestQueueShutdownRacingQueuedLaunchNeverStartsIt(t *testing.T) {
 		t.Fatalf("a queued run started during shutdown (started = %v)", f.step.startedIDs())
 	}
 	f.mgr.mu.Lock()
-	leaked := len(f.mgr.cancels)
+	leaked := 0
+	for _, owned := range f.mgr.runs {
+		if owned.handle != nil {
+			leaked++
+		}
+	}
 	f.mgr.mu.Unlock()
 	if leaked != 0 {
 		t.Fatalf("%d run handles still registered after shutdown", leaked)
@@ -259,7 +264,7 @@ func TestQueueShutdownRacingQueuedLaunchNeverStartsIt(t *testing.T) {
 }
 
 func TestQueueCancellationWriteFailurePreservesOwnership(t *testing.T) {
-	for _, action := range []string{"abort", "supersede", "cancelled-dispatch"} {
+	for _, action := range []string{"abort", "supersede", "claim-retry"} {
 		t.Run(action, func(t *testing.T) {
 			f := newFaultFixture(t, "1")
 			running := f.push("holder")
@@ -274,24 +279,26 @@ func TestQueueCancellationWriteFailurePreservesOwnership(t *testing.T) {
 			if _, err := raw.Exec(`CREATE TRIGGER reject_cancel BEFORE UPDATE OF status ON runs WHEN NEW.status = 'cancelled' BEGIN SELECT RAISE(FAIL, 'injected cancellation write failure'); END`); err != nil {
 				t.Fatal(err)
 			}
+			if action == "claim-retry" {
+				var attempts atomic.Int32
+				f.mgr.claimQueued = func(id string) (bool, error) {
+					attempts.Add(1)
+					return false, errors.New("injected claim failure")
+				}
+				f.step.release(running)
+				f.waitFor("the failed claim", func() bool { return attempts.Load() > 0 })
+				if st := f.mgr.sched.stats(); st.Active != 0 {
+					t.Fatalf("failed claim retained capacity during retry: %+v", st)
+				}
+			}
 			switch action {
-			case "abort":
+			case "abort", "claim-retry":
 				err = f.mgr.HandleCancel(first)
 			case "supersede":
 				_, err = f.mgr.HandlePushReceived(context.Background(), &ipc.PushReceivedParams{Gate: f.p.RepoDir("fault-repo"), Ref: "refs/heads/first", New: f.head})
-			case "cancelled-dispatch":
-				if !f.mgr.sched.removeQueued(first) {
-					t.Fatal("run was not queued")
-				}
-				ctx, cancel := context.WithCancelCause(context.Background())
-				h := &runHandle{runCtx: ctx, cancel: cancel, done: make(chan struct{})}
-				f.mgr.mu.Lock()
-				f.mgr.cancels[first], f.mgr.dones[first] = cancel, h.done
-				f.mgr.mu.Unlock()
-				cancel(errors.New(types.RunCancelReasonAbortedByUser))
-				f.mgr.launchQueuedRun(first, &runSlot{s: f.mgr.sched, runID: first}, h)
+
 			}
-			if action != "cancelled-dispatch" && (err == nil || !strings.Contains(err.Error(), "injected cancellation write failure")) {
+			if err == nil || !strings.Contains(err.Error(), "injected cancellation write failure") {
 				t.Fatalf("cancellation error = %v", err)
 			}
 			if got := f.status(first); got != types.RunQueued {
@@ -310,10 +317,15 @@ func TestQueueCancellationWriteFailurePreservesOwnership(t *testing.T) {
 			if err := f.mgr.HandleCancel(first); err != nil {
 				t.Fatalf("retry abort: %v", err)
 			}
+			f.mgr.mu.Lock()
+			f.mgr.claimQueued = f.d.ClaimQueuedRun
+			f.mgr.mu.Unlock()
 			if f.status(first) != types.RunCancelled || f.started(first) {
 				t.Fatal("retry did not cancel without starting")
 			}
-			f.step.release(running)
+			if action != "claim-retry" {
+				f.step.release(running)
+			}
 			f.waitStarted(second)
 			f.step.release(second)
 		})
@@ -347,60 +359,65 @@ func TestQueueSpecReadFailureFailsLaunch(t *testing.T) {
 	}
 }
 
-func TestRecoveredParkedRunsUseBoundedPriorityAdmission(t *testing.T) {
-	f := newFaultFixture(t, "1")
+func seedRecoveredQueueGates(f *faultFixture) []recoveredRunPlan {
 	if err := config.SetGlobalDaemonSetting(f.p.ConfigFile(), "hold_slot_while_parked", "true"); err != nil {
-		t.Fatal(err)
+		f.t.Fatal(err)
 	}
 	global, err := config.LoadGlobal(f.p.ConfigFile())
 	if err != nil {
-		t.Fatal(err)
+		f.t.Fatal(err)
 	}
 	cfg := config.Merge(global, &config.RepoConfig{})
 	repo, err := f.d.GetRepo("fault-repo")
 	if err != nil {
-		t.Fatal(err)
+		f.t.Fatal(err)
 	}
 	var plans []recoveredRunPlan
 	for _, branch := range []string{"recovered-a", "recovered-b"} {
 		run, err := f.d.InsertRun(repo.ID, branch, f.head, f.head)
 		if err != nil {
-			t.Fatal(err)
+			f.t.Fatal(err)
 		}
 		if err := f.d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
-			t.Fatal(err)
+			f.t.Fatal(err)
 		}
 		workDir := f.p.WorktreeDir(repo.ID, run.ID)
 		if err := gitpkg.WorktreeAdd(context.Background(), f.p.RepoDir(repo.ID), workDir, f.head); err != nil {
-			t.Fatal(err)
+			f.t.Fatal(err)
 		}
-		testgit.BindRunComparison(t, f.d, run, workDir, "main", "", "", "")
+		testgit.BindRunComparison(f.t, f.d, run, workDir, "main", "", "", "")
 		step, err := f.d.InsertStepResult(run.ID, types.StepReview)
 		if err != nil {
-			t.Fatal(err)
+			f.t.Fatal(err)
 		}
 		if err := f.d.StartStep(step.ID); err != nil {
-			t.Fatal(err)
+			f.t.Fatal(err)
 		}
 		findings := `{"findings":[],"summary":"needs approval"}`
 		if err := f.d.SetStepFindings(step.ID, findings); err != nil {
-			t.Fatal(err)
+			f.t.Fatal(err)
 		}
 		if _, err := f.d.InsertReviewStepRound(step.ID, 1, "initial", &findings, nil, f.head, 1); err != nil {
-			t.Fatal(err)
+			f.t.Fatal(err)
 		}
 		if err := f.d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
-			t.Fatal(err)
+			f.t.Fatal(err)
 		}
 		if err := f.d.SetRunAwaitingAgent(run.ID); err != nil {
-			t.Fatal(err)
+			f.t.Fatal(err)
 		}
 		run, err = f.d.GetRun(run.ID)
 		if err != nil {
-			t.Fatal(err)
+			f.t.Fatal(err)
 		}
 		plans = append(plans, recoveredRunPlan{run: run, repo: repo, workDir: workDir, gateDir: f.p.RepoDir(repo.ID), cfg: cfg, agent: recoveredRunTestAgent{}, steps: []pipeline.Step{&mockApprovalStep{name: types.StepReview}}})
 	}
+	return plans
+}
+
+func TestRecoveredParkedRunsUseBoundedPriorityAdmission(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	plans := seedRecoveredQueueGates(f)
 	f.mgr.resumeRecoveredRuns(plans)
 	queued := f.push("new")
 	if st := f.mgr.sched.stats(); st.Active != 1 || st.Queued != 2 {
@@ -425,51 +442,104 @@ func TestRecoveredParkedRunsUseBoundedPriorityAdmission(t *testing.T) {
 	f.step.release(queued)
 }
 
-func TestClaimedCancellationDoesNotRequireDatabaseWrites(t *testing.T) {
+func TestClaimedCancellationDoesNotRequireDatabaseAccess(t *testing.T) {
 	for _, branch := range []string{"running", "parked"} {
 		for _, action := range []string{"abort", "supersede"} {
-			t.Run(branch+"/"+action, func(t *testing.T) {
-				f := newFaultFixture(t, "1")
-				id := f.push(branch)
-				f.waitStarted(id)
-				if branch == "parked" {
-					f.waitFor("run to park", func() bool {
-						run, err := f.d.GetRun(id)
-						return err == nil && run.AwaitingAgentSince != nil
-					})
-				}
-				readonly, err := db.OpenReadOnly(f.p.DB())
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { f.mgr.Shutdown(); readonly.Close() })
-				if _, err := readonly.CancelQueuedRun(id, types.RunCancelReasonAbortedByUser); err == nil {
-					t.Fatal("fixture allowed a write on the read-only connection")
-				}
-				f.mgr.db = readonly
-				reason := types.RunCancelReasonAbortedByUser
-				if action == "abort" {
-					err = f.mgr.HandleCancel(id)
-				} else {
-					reason = types.RunCancelReasonSuperseded
-					err = f.mgr.cancelActiveRuns("fault-repo", branch)
-				}
-				if err != nil {
-					t.Fatalf("cancel claimed run: %v", err)
-				}
-				f.waitFor("claimed run to stop", func() bool { return f.status(id) == types.RunCancelled })
-				run, err := f.d.GetRun(id)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if run.Error == nil || *run.Error != reason {
-					t.Fatalf("cancellation reason = %v, want %s", run.Error, reason)
-				}
-				f.mgr.wg.Wait()
-				if st := f.mgr.sched.stats(); st.Active != 0 {
-					t.Fatalf("stopped run retained capacity: %+v", st)
-				}
-			})
+			for _, fault := range []string{"readonly", "closed"} {
+				t.Run(branch+"/"+action+"/"+fault, func(t *testing.T) {
+					f := newFaultFixture(t, "1")
+					id := f.push(branch)
+					f.waitStarted(id)
+					if branch == "parked" {
+						f.waitFor("run to park", func() bool {
+							run, err := f.d.GetRun(id)
+							return err == nil && run.AwaitingAgentSince != nil
+						})
+					}
+					readonly, err := db.OpenReadOnly(f.p.DB())
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { f.mgr.Shutdown(); readonly.Close() })
+					if _, err := readonly.CancelQueuedRun(id, types.RunCancelReasonAbortedByUser); err == nil {
+						t.Fatal("fixture allowed a write on the read-only connection")
+					}
+					if fault == "closed" {
+						if err := readonly.Close(); err != nil {
+							t.Fatal(err)
+						}
+						if _, err := readonly.GetRun(id); err == nil {
+							t.Fatal("fixture allowed a read on a closed connection")
+						}
+					}
+					f.mgr.db = readonly
+					reason := types.RunCancelReasonAbortedByUser
+					if action == "abort" {
+						err = f.mgr.HandleCancel(id)
+					} else {
+						reason = types.RunCancelReasonSuperseded
+						err = f.mgr.cancelActiveRuns("fault-repo", branch)
+					}
+					if err != nil {
+						t.Fatalf("cancel claimed run: %v", err)
+					}
+					f.waitFor("claimed run to stop", func() bool { return f.status(id) == types.RunCancelled })
+					run, err := f.d.GetRun(id)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if run.Error == nil || *run.Error != reason {
+						t.Fatalf("cancellation reason = %v, want %s", run.Error, reason)
+					}
+					f.mgr.wg.Wait()
+					if st := f.mgr.sched.stats(); st.Active != 0 {
+						t.Fatalf("stopped run retained capacity: %+v", st)
+					}
+				})
+			}
 		}
+	}
+}
+
+func TestRecoveredGateWaitingForSlotAcceptsResponses(t *testing.T) {
+	for _, action := range []types.ApprovalAction{types.ActionAbort, types.ActionApprove} {
+		t.Run(string(action), func(t *testing.T) {
+			f := newFaultFixture(t, "1")
+			plans := seedRecoveredQueueGates(f)
+			f.mgr.resumeRecoveredRuns(plans)
+			queued := f.push("new")
+			waitingID := plans[1].run.ID
+			info := &ipc.RunInfo{ID: waitingID}
+			f.mgr.annotateQueue(info)
+			if !info.WaitingForSlot || info.QueuePosition != 1 {
+				t.Fatalf("recovered run did not wait behind the held slot: %+v", info)
+			}
+			if err := f.mgr.HandleRespond(waitingID, types.StepReview, action, nil); err != nil {
+				t.Fatalf("respond before admission: %v", err)
+			}
+			if action == types.ActionAbort {
+				f.waitFor("waiting gate to abort without capacity", func() bool { return f.status(waitingID) == types.RunCancelled })
+				run, err := f.d.GetRun(waitingID)
+				if err != nil || run.AwaitingAgentSince != nil {
+					t.Fatalf("aborted recovery remained parked: run=%+v error=%v", run, err)
+				}
+			} else if got := f.status(waitingID); got != types.RunRunning {
+				t.Fatalf("approval ran without capacity: %s", got)
+			}
+			if st := f.mgr.sched.stats(); st.Active != 1 {
+				t.Fatalf("recovered admission exceeded cap: %+v", st)
+			}
+			if f.started(queued) {
+				t.Fatal("new work overtook recovered gates")
+			}
+			if err := f.mgr.HandleRespond(plans[0].run.ID, types.StepReview, types.ActionApprove, nil); err != nil {
+				t.Fatal(err)
+			}
+			if action == types.ActionApprove {
+				f.waitFor("early approval to complete after admission", func() bool { return f.status(waitingID) == types.RunCompleted })
+			}
+			f.waitStarted(queued)
+			f.step.release(queued)
+		})
 	}
 }

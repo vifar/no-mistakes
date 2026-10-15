@@ -96,6 +96,7 @@ type Executor struct {
 	// recorded, so an echo never claims a decision that is not durable.
 	waitingRoundID  string
 	waitingShipping *types.ShippingOptions
+	recoveryGate    *recoveredGate
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -670,6 +671,30 @@ func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
 	return err
 }
 
+func (e *Executor) RegisterRecoveredGate(run *db.Run) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.recoveryGate != nil {
+		return nil
+	}
+	if err := ValidateRecoveredRun(e.db, run, e.steps); err != nil {
+		return err
+	}
+	gate, err := e.recoveredGate(run.ID)
+	if err != nil {
+		return err
+	}
+	e.recoveryGate = gate
+	e.waiting = true
+	e.waitingStep = gate.step.Name()
+	e.waitingShipping = run.Shipping
+	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
+	e.waitingFindings = gate.findings
+	e.waitingStepResultID = gate.stepResult.ID
+	e.waitingRoundID = gate.lastRoundID
+	return nil
+}
+
 // Resume restores a run that was durably parked at an approval gate when the
 // daemon stopped. It only accepts a fully recorded gate and otherwise returns
 // an error so startup recovery can fail the run rather than guessing.
@@ -679,12 +704,30 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if repo == nil {
 		return fmt.Errorf("recovered run has no repository")
 	}
-	if err := ValidateRecoveredRun(e.db, run, e.steps); err != nil {
+	if err := e.RegisterRecoveredGate(run); err != nil {
 		return err
 	}
-	gate, err := e.recoveredGate(run.ID)
-	if err != nil {
-		return err
+	e.mu.Lock()
+	gate := e.recoveryGate
+	e.mu.Unlock()
+	if ctx.Err() != nil {
+		select {
+		case response := <-e.approvalCh:
+			if response.action == types.ActionAbort {
+				e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
+				if err := e.db.FailStep(gate.stepResult.ID, "aborted by user", recoveredStepDuration(gate.stepResult)); err != nil {
+					slog.Warn("failed to mark recovered step as aborted", "step", gate.step.Name(), "error", err)
+				}
+			}
+		default:
+		}
+		e.clearApprovalGate()
+		if run.AwaitingAgentSince != nil {
+			if err := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(time.Unix(*run.AwaitingAgentSince, 0)).Milliseconds()); err != nil {
+				slog.Warn("failed to complete cancelled recovery awaiting-agent state", "run", run.ID, "error", err)
+			}
+		}
+		return e.failRun(run, repo, context.Cause(ctx), ctx)
 	}
 	logDir := e.paths.RunLogDir(run.ID)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
@@ -706,6 +749,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		if err := e.db.AddRunParkedDuration(run.ID, time.Since(parkStart).Milliseconds()); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("record recovered parked duration: %w", err), ctx)
 		}
+		e.clearApprovalGate()
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, gate.step.Name())
 	}
 	duration := recoveredStepDuration(gate.stepResult)
@@ -778,34 +822,6 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		LogChunk: func(string) {},
 		LogFile:  func(string) {},
 	}
-	if reconciled, reconcileErr := e.reconcileApprovalGate(ctx, gate.step, reconcileCtx, gate.findings); reconciled {
-		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
-			return e.failRun(run, repo, fmt.Errorf("complete reconciled awaiting-agent state: %w", dbErr), ctx)
-		}
-		return completeReconciledGate()
-	} else if reconcileErr != nil && ctx.Err() == nil {
-		if errors.Is(reconcileErr, ErrFatalGateReconciliation) {
-			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
-				return e.failRun(run, repo, fmt.Errorf("complete fatal reconciliation awaiting-agent state: %w", dbErr), ctx)
-			}
-			if dbErr := e.db.FailStep(gate.stepResult.ID, reconcileErr.Error(), duration); dbErr != nil {
-				slog.Warn("failed to mark recovered step as failed in db", "step", gate.step.Name(), "error", dbErr)
-			}
-			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", reconcileErr.Error(), &duration)
-			return e.failRun(run, repo, fmt.Errorf("step %s: reconcile approval gate: %w", gate.step.Name(), reconcileErr), ctx)
-		}
-		slog.Warn("could not reconcile recovered approval gate; preserving it", "run_id", run.ID, "step", gate.step.Name(), "error", reconcileErr)
-	}
-
-	e.mu.Lock()
-	e.waiting = true
-	e.waitingStep = gate.step.Name()
-	e.waitingShipping = run.Shipping
-	e.waitingApprovalRefusal = approvalRefusal(gate.step.Name(), gate.findings)
-	e.waitingFindings = gate.findings
-	e.waitingStepResultID = gate.stepResult.ID
-	e.waitingRoundID = gate.lastRoundID
-	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
 		run,
@@ -818,7 +834,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	)
 
 	e.yieldSlot()
-	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
+	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, true)
 	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
 	}
@@ -2394,20 +2410,7 @@ func pluralize(n int, singular, plural string) string {
 // so no watcher goroutine can outlive approval, cancellation, or shutdown.
 // The caller must set e.waiting and e.waitingStep before calling this method.
 func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sctx *StepContext, findings string, immediate bool) (approvalResponse, bool, error) {
-	defer func() {
-		e.mu.Lock()
-		e.waiting = false
-		e.waitingStep = ""
-		e.waitingFindings = ""
-		e.waitingStepResultID = ""
-		e.mu.Unlock()
-		// Drain any stale response that arrived after context cancellation or
-		// raced with an external reconciliation.
-		select {
-		case <-e.approvalCh:
-		default:
-		}
-	}()
+	defer e.clearApprovalGate()
 
 	_, reconciles := step.(ApprovalGateReconciler)
 	_, resumes := step.(ApprovalGateResumer)
@@ -2469,6 +2472,21 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 			}
 			timer.Reset(e.gateReconcileInterval)
 		}
+	}
+}
+
+func (e *Executor) clearApprovalGate() {
+	e.mu.Lock()
+	e.waiting = false
+	e.waitingStep = ""
+	e.waitingFindings = ""
+	e.waitingStepResultID = ""
+	e.mu.Unlock()
+	// Drain any stale response that arrived after context cancellation or
+	// raced with an external reconciliation.
+	select {
+	case <-e.approvalCh:
+	default:
 	}
 }
 

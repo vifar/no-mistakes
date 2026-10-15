@@ -105,7 +105,7 @@ func TestProtectedPathRefusalRetainsWorktreeButReapsProcessesAndEvidence(t *test
 			}
 			recoverOnStartup(database, p, mgr, layout)
 			run, err = database.GetRun(run.ID)
-			if err != nil || run.Status != types.RunFailed || len(mgr.executors) != 0 {
+			if err != nil || run.Status != types.RunFailed || len(mgr.runs) != 0 {
 				t.Fatalf("trusted-config recovery did not fail closed: run=%+v err=%v", run, err)
 			}
 			assertProtectedWorktreePreserved(t, workDir, head)
@@ -116,7 +116,7 @@ func TestProtectedPathRefusalRetainsWorktreeButReapsProcessesAndEvidence(t *test
 				t.Errorf("orphan %d in the terminal refused run survived the startup sweep", leakedPID)
 			}
 			_, evidenceErr := os.Stat(evidenceDir)
-			t.Logf("after failed trusted-config recovery: run=%s executors=%d orphan_alive=%t evidence_exists=%t", run.Status, len(mgr.executors), processIsAlive(leakedPID), !os.IsNotExist(evidenceErr))
+			t.Logf("after failed trusted-config recovery: run=%s executors=%d orphan_alive=%t evidence_exists=%t", run.Status, len(mgr.runs), processIsAlive(leakedPID), !os.IsNotExist(evidenceErr))
 		})
 	}
 }

@@ -121,6 +121,8 @@ If you push to the same branch while a run is already active, the daemon:
 
 Pushes to different branches share execution slots. A newer push to a branch whose run is still queued supersedes it without starting it. The control plane (`status`, `respond`, `abort`, `gate_context`, launch) never waits on a slot; aborting a parked run also needs no slot.
 
+The daemon tracks queued, claimed, and recovering-gate ownership in memory under the scheduler's lock. Aborting or superseding a queued run saves cancellation before removing its queue entry; a database write failure leaves its position intact and returns an error. A claimed run's cancel handle is invoked before any database access, and cancellation persistence is best effort with failures logged. Recovered gates register their response controls before waiting for capacity, so an abort response stops a waiting gate without taking a slot.
+
 The global [`daemon` configuration](/no-mistakes/reference/global-config/#daemon) owns the limits, queue ordering, slot release rules, and hot reload behavior. The [CLI reference](/no-mistakes/reference/cli/#no-mistakes-daemon-set-max-concurrent-runs) explains changing the cap with `daemon set`; [`axi` status output](/no-mistakes/reference/cli/#no-mistakes-axi) and [`doctor`](/no-mistakes/reference/cli/#no-mistakes-doctor) report usage.
 
 This is another reason the daemon exists: branch-level coordination is easier to

@@ -96,7 +96,7 @@ func TestShippingNoSurfaceManagerAdmission(t *testing.T) {
 						}
 					})
 					manager := NewRunManager(database, p, nil)
-					manager.executors[run.ID] = executor
+					manager.runs[run.ID] = &managedRun{run: run, executor: executor}
 					// Gate events follow both registration and persistence, including
 					// recovery. The deadline detects hangs, not admission latency.
 					ctx, cancel := context.WithTimeout(context.Background(), time.Minute)

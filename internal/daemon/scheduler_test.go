@@ -30,13 +30,13 @@ func newSchedHarness(max int, hold bool) *schedHarness {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		return h.max, h.hold
-	})
-	h.start = func(id string, slot *runSlot) func() {
+	}, &sync.Mutex{})
+	h.start = func(id string, slot *runSlot) (func(), bool) {
 		h.mu.Lock()
 		h.started = append(h.started, id)
 		h.slots[id] = slot
 		h.mu.Unlock()
-		return func() {}
+		return func() {}, true
 	}
 	return h
 }
@@ -91,17 +91,18 @@ func TestSchedulerDispatchCancellationHandoff(t *testing.T) {
 			t.Fatal(err)
 		}
 		m := NewRunManager(database, p, nil)
-		m.sched = newSlotScheduler(func() (int, bool) { return 1, false })
+		m.sched = newSlotScheduler(func() (int, bool) { return 1, false }, &m.mu)
 		preparing := make(chan struct{})
 		proceed := make(chan struct{})
 		registered := make(chan struct{})
-		m.sched.start = func(id string, slot *runSlot) func() {
+		m.sched.start = func(id string, slot *runSlot) (func(), bool) {
 			close(preparing)
 			<-proceed
 			m.startQueuedRun(id, slot)
 			close(registered)
-			return func() {}
+			return func() {}, true
 		}
+		m.runs[run.ID] = &managedRun{run: run, state: ownershipQueued}
 		m.sched.restoreQueue([]string{run.ID})
 		dispatched := make(chan struct{})
 		go func() { m.sched.dispatch(); close(dispatched) }()

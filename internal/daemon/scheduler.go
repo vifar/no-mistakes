@@ -14,10 +14,6 @@ import (
 // Start order is: runs that resumed from a parked gate (priority waiters,
 // first come first served), then new queued runs first in first out. A run
 // holds a slot only while it executes pipeline work (see pipeline.RunSlot).
-//
-// Nothing here blocks on pipeline work and no method holds mu across I/O, so
-// the control plane (status, respond, abort, gate_context, launch) can call in
-// at any time.
 type slotScheduler struct {
 	// limits reads the live machine limits. It is called outside mu on every
 	// admission, yield and dispatch so a config edit applies to the next
@@ -26,16 +22,17 @@ type slotScheduler struct {
 
 	// start launches a queued run that has just been given a slot. The slot is
 	// already held: the callee owns releasing it.
-	start func(runID string, slot *runSlot) func()
+	start func(runID string, slot *runSlot) (func(), bool)
 
 	// admitMu serialises admission so the in-memory queue order is exactly the
 	// order of the queued_at stamps written to the database.
 	admitMu sync.Mutex
 
-	mu     sync.Mutex
-	max    int
-	hold   bool
-	active int
+	mu       *sync.Mutex
+	max      int
+	hold     bool
+	active   int
+	retrying bool
 	// yielded counts live runs that gave their slot back for a wait (a parked
 	// gate, the CI poll) and have not taken one again.
 	yielded int
@@ -49,8 +46,8 @@ type slotWaiter struct {
 	granted bool
 }
 
-func newSlotScheduler(limits func() (int, bool)) *slotScheduler {
-	return &slotScheduler{limits: limits}
+func newSlotScheduler(limits func() (int, bool), mu *sync.Mutex) *slotScheduler {
+	return &slotScheduler{limits: limits, mu: mu}
 }
 
 func (s *slotScheduler) refresh() {
@@ -89,15 +86,6 @@ func (s *slotScheduler) enqueue(runID string) {
 	s.dispatch()
 }
 
-// requeueFront puts a run dispatch just took off the queue back at the head,
-// its original first-in-first-out position, without dispatching. The caller
-// still holds the run's slot; the release that follows drains the queue.
-func (s *slotScheduler) requeueFront(runID string) {
-	s.mu.Lock()
-	s.queued = append([]string{runID}, s.queued...)
-	s.mu.Unlock()
-}
-
 // restoreQueue seeds the start order from the database at startup. ids must
 // already be in start order.
 func (s *slotScheduler) restoreQueue(ids []string) {
@@ -111,6 +99,10 @@ func (s *slotScheduler) restoreQueue(ids []string) {
 func (s *slotScheduler) removeQueued(runID string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.removeQueuedLocked(runID)
+}
+
+func (s *slotScheduler) removeQueuedLocked(runID string) bool {
 	for i, id := range s.queued {
 		if id == runID {
 			s.queued = append(s.queued[:i], s.queued[i+1:]...)
@@ -140,12 +132,23 @@ func (s *slotScheduler) dispatch() {
 			continue
 		}
 		if len(s.queued) > 0 {
+			if s.retrying {
+				s.mu.Unlock()
+				return
+			}
 			id := s.queued[0]
-			s.queued = s.queued[1:]
 			s.active++
-			launch := s.start(id, &runSlot{s: s, runID: id, held: true})
+			launch, claimed := s.start(id, &runSlot{s: s, runID: id, held: true})
+			if claimed {
+				s.queued = s.queued[1:]
+			} else {
+				s.active--
+			}
 			s.mu.Unlock()
 			launch()
+			if !claimed {
+				return
+			}
 			continue
 		}
 		s.mu.Unlock()

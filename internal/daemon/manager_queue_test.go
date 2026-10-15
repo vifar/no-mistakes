@@ -73,9 +73,10 @@ func TestQueuedSetupAbortCancelsStalledFetchAndReleasesSlot(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	m := NewRunManager(database, p, nil)
-	m.sched = newSlotScheduler(func() (int, bool) { return 1, false })
+	m.sched = newSlotScheduler(func() (int, bool) { return 1, false }, &m.mu)
 	m.sched.start = m.startQueuedRun
 	defer m.Shutdown()
+	m.runs[run.ID] = &managedRun{run: run, state: ownershipQueued}
 	m.sched.enqueue(run.ID)
 	// Setup is outside the cancellation assertion below: a busy host may
 	// need time to create the worktree before the fetch shim starts.
