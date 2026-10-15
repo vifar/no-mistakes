@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -793,9 +792,7 @@ func (h *Host) supersedeStaleJobResults(checks []scm.Check) []scm.Check {
 				continue
 			}
 			drop[ji] = true
-			if !slices.Contains(w.Supersedes, j.Name) {
-				w.Supersedes = append(w.Supersedes, j.Name)
-			}
+			w.Supersedes = append(w.Supersedes, scm.Check{Name: j.Name, Workflow: j.Workflow, Kind: j.Kind, App: j.App, AppID: j.AppID})
 		}
 	}
 	if len(drop) == 0 {

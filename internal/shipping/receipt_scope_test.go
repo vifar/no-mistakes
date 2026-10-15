@@ -271,7 +271,7 @@ func TestCIReadyReceiptRefusesAWorkflowRerunThatFailedBeforeJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	forge := &protectedReceiptForge{receiptForge: f.forge, required: []string{"build"}}
-	f.forge.checks = []scm.Check{{Name: "CI", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketFail, Supersedes: []string{"build"}}}
+	f.forge.checks = []scm.Check{{Name: "CI", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketFail, Supersedes: []scm.Check{{Name: "build", Workflow: "CI", Kind: scm.CheckKindRun}}}}
 	recordScope(t, f, scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAuto})
 	if _, err := Export(context.Background(), f.database, f.repo, f.run.ID, "ci-ready", forge); err == nil {
 		t.Fatal("receipt accepted a head whose required workflow rerun failed before creating jobs")

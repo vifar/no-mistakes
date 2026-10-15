@@ -438,12 +438,12 @@ func TestCheckScopeIdentityClassificationAcrossRepresentations(t *testing.T) {
 func TestCheckScopeSupersedingWorkflowRunStandsForTheRequiredJob(t *testing.T) {
 	t.Parallel()
 	host := &requiredChecksHost{contexts: []string{"build"}}
-	rerun := Check{Name: "CI", Kind: CheckKindRun, Bucket: CheckBucketFail, Supersedes: []string{"build"}}
+	rerun := Check{Name: "CI", Kind: CheckKindRun, Bucket: CheckBucketFail, Supersedes: []Check{{Name: "build", Workflow: "CI", Kind: CheckKindRun}}}
 	scoped := NewCheckScope(host, CheckScopePolicy{}, "main", nil).Apply(context.Background(), &PR{HeadSHA: "h"}, []Check{rerun})
 	if scoped.Ready() || len(scoped.Relevant) != 1 || scoped.Relevant[0].Name != "CI" || len(scoped.Informational) != 0 {
 		t.Fatalf("a workflow run that replaced the required job must stay in scope as a failure, with no extra placeholder: %+v", scoped)
 	}
-	unrelated := Check{Name: "Docs", Kind: CheckKindRun, Bucket: CheckBucketFail, Supersedes: []string{"docs-job"}}
+	unrelated := Check{Name: "Docs", Kind: CheckKindRun, Bucket: CheckBucketFail, Supersedes: []Check{{Name: "docs-job", Workflow: "Docs", Kind: CheckKindRun}}}
 	scoped = NewCheckScope(host, CheckScopePolicy{}, "main", nil).Apply(context.Background(), &PR{HeadSHA: "h"}, []Check{{Name: "build", Bucket: CheckBucketPass}, unrelated})
 	if !scoped.Ready() || len(scoped.Informational) != 1 {
 		t.Fatalf("a failed run superseding only non-required jobs stays informational: %+v", scoped)
@@ -451,5 +451,101 @@ func TestCheckScopeSupersedingWorkflowRunStandsForTheRequiredJob(t *testing.T) {
 	scoped = NewCheckScope(&requiredChecksHost{contexts: []string{"x"}}, CheckScopePolicy{MustPass: []string{"bui*"}}, "main", nil).Apply(context.Background(), &PR{}, []Check{rerun})
 	if scoped.Ready() || scoped.Relevant[0].Name != "CI" {
 		t.Fatalf("must_pass must also follow the superseded job: %+v", scoped)
+	}
+}
+
+func TestCheckScopeSupersededContextPrecedenceAndIdentity(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		required []RequiredCheck
+		policy   CheckScopePolicy
+		rerun    Check
+		relevant []string
+		external []string
+		missing  int
+		ready    bool
+	}{
+		{
+			name:     "qualified external approval outranks required and must pass",
+			required: []RequiredCheck{{Context: "build"}, {Context: "approve"}},
+			policy:   CheckScopePolicy{ExternalChecks: []string{"Final Approval / approve*"}, MustPass: []string{"approve"}},
+			rerun:    Check{Name: "Final Approval", Supersedes: []Check{{Name: "approve", Workflow: "Final Approval", Kind: CheckKindRun}}},
+			relevant: []string{"build"}, external: []string{"Final Approval"}, ready: true,
+		},
+		{
+			name:     "excluded workflow cannot satisfy required job",
+			required: []RequiredCheck{{Context: "build"}, {Context: "other"}},
+			policy:   CheckScopePolicy{ExternalChecks: []string{"CI"}},
+			rerun:    Check{Name: "CI", Supersedes: []Check{{Name: "build", Workflow: "CI", Kind: CheckKindRun}}},
+			relevant: []string{"other", "build"}, external: []string{"CI"}, missing: 1,
+		},
+		{
+			name:     "non-external required sibling blocks",
+			required: []RequiredCheck{{Context: "build"}},
+			policy:   CheckScopePolicy{ExternalChecks: []string{"CI / approve*"}},
+			rerun:    Check{Name: "CI", Supersedes: []Check{{Name: "approve", Workflow: "CI", Kind: CheckKindRun}, {Name: "build", Workflow: "CI", Kind: CheckKindRun}}},
+			relevant: []string{"CI"},
+		},
+		{
+			name:     "wrong app cannot satisfy bound requirement",
+			required: []RequiredCheck{{Context: "build", AppID: 99}},
+			rerun:    Check{Name: "CI", AppID: 99, Supersedes: []Check{{Name: "build", Workflow: "CI", Kind: CheckKindRun, AppID: 42}}},
+			relevant: []string{"build"}, missing: 1,
+		},
+		{
+			name:     "matching app satisfies bound requirement",
+			required: []RequiredCheck{{Context: "build", AppID: 42}},
+			rerun:    Check{Name: "CI", Supersedes: []Check{{Name: "build", Workflow: "CI", Kind: CheckKindRun, AppID: 42}}},
+			relevant: []string{"CI"},
+		},
+		{
+			name:     "wrong workflow cannot satisfy qualified must pass",
+			required: []RequiredCheck{{Context: "other"}},
+			policy:   CheckScopePolicy{MustPass: []string{"CI / build"}},
+			rerun:    Check{Name: "Docs", Supersedes: []Check{{Name: "build", Workflow: "Docs", Kind: CheckKindRun}}},
+			relevant: []string{"other", "build"}, missing: 1,
+		},
+		{
+			name:     "matching workflow satisfies qualified must pass",
+			required: []RequiredCheck{{Context: "other"}},
+			policy:   CheckScopePolicy{MustPass: []string{"CI / build"}},
+			rerun:    Check{Name: "CI", Supersedes: []Check{{Name: "build", Workflow: "CI", Kind: CheckKindRun}}},
+			relevant: []string{"other", "CI"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := NewCheckScope(&requiredChecksHost{bound: tc.required}, tc.policy, "main", nil)
+			checks := []Check{}
+			for _, requirement := range tc.required {
+				if requirement.Context == "other" || requirement.Context == "build" && tc.ready {
+					checks = append(checks, Check{Name: requirement.Context, Bucket: CheckBucketPass})
+				}
+			}
+			tc.rerun.Kind, tc.rerun.Bucket = CheckKindRun, CheckBucketFail
+			checks = append(checks, tc.rerun)
+			scoped := scope.Apply(context.Background(), &PR{}, checks)
+			if got := names(scoped.Relevant); !reflect.DeepEqual(got, tc.relevant) {
+				t.Fatalf("relevant = %v, want %v", got, tc.relevant)
+			}
+			if got := names(scoped.External); strings.Join(got, ",") != strings.Join(tc.external, ",") {
+				t.Fatalf("external = %v, want %v", got, tc.external)
+			}
+			missing := 0
+			includesRerun := false
+			for _, c := range scoped.Relevant {
+				if c.ExpectedMissing {
+					missing++
+				} else if c.Name == tc.rerun.Name {
+					includesRerun = true
+				}
+			}
+			if missing != tc.missing || scoped.Ready() != tc.ready {
+				t.Fatalf("missing=%d ready=%v, want missing=%d ready=%v", missing, scoped.Ready(), tc.missing, tc.ready)
+			}
+			if scope.Includes(context.Background(), &PR{}, tc.rerun) != includesRerun {
+				t.Fatal("repair inclusion disagrees with readiness scope")
+			}
+		})
 	}
 }

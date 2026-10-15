@@ -268,12 +268,12 @@ type Check struct {
 	// carrying that ID. Zero when unknown, which includes legacy commit
 	// statuses.
 	AppID int64
-	// Supersedes names the job-level check contexts of an older attempt of
+	// Supersedes holds the job-level check identities of an older attempt of
 	// the same workflow that this workflow-level check replaced. A workflow
 	// run that fails before it creates any job has no job of its own, so the
 	// provider layer drops the older attempt's stale results and records here
 	// which requirements this run now speaks for.
-	Supersedes []string
+	Supersedes []Check
 	// Workflow is the name of the workflow that emitted the check, when the
 	// provider reports one (GitHub Actions). Together with Name it forms the
 	// "workflow / job" display form that check-scope patterns may match.

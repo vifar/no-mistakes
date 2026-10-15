@@ -315,7 +315,7 @@ func TestGetRequiredChecksIgnoresUnrelatedRuleTypes(t *testing.T) {
 
 func TestGetChecksNewerWorkflowRunWithoutJobsSupersedesStaleJobResults(t *testing.T) {
 	t.Parallel()
-	job := `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/1/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`
+	job := `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/1/job/5","checkSuite":{"app":{"slug":"github-actions","databaseId":15368},"workflowRun":{"workflow":{"name":"CI"}}}}`
 	other := `{"__typename":"CheckRun","databaseId":6,"name":"docs","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/3/job/6","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"Docs"}}}}`
 	runs := `[{"total_count":3,"workflow_runs":[` +
 		`{"id":1,"workflow_id":10,"name":"CI","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/1"},` +
@@ -337,7 +337,7 @@ func TestGetChecksNewerWorkflowRunWithoutJobsSupersedesStaleJobResults(t *testin
 	if _, stale := byName["build"]; stale || len(byName) != 2 {
 		t.Fatalf("the older attempt's passing job survived: %+v", checks)
 	}
-	if ci := byName["CI"]; ci.Bucket != scm.CheckBucketFail || !reflect.DeepEqual(ci.Supersedes, []string{"build"}) {
+	if ci := byName["CI"]; ci.Bucket != scm.CheckBucketFail || !reflect.DeepEqual(ci.Supersedes, []scm.Check{{Name: "build", Workflow: "CI", Kind: scm.CheckKindRun, App: "github-actions", AppID: 15368}}) {
 		t.Fatalf("CI run = %+v, want a failure superseding build", ci)
 	}
 	if docs := byName["docs"]; docs.Bucket != scm.CheckBucketPass || len(docs.Supersedes) != 0 {
