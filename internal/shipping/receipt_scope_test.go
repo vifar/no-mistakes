@@ -3,6 +3,7 @@ package shipping
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -16,6 +17,8 @@ type protectedReceiptForge struct {
 	required []string
 	reads    int
 }
+
+func (h *protectedReceiptForge) Capabilities() scm.Capabilities { return scm.Capabilities{} }
 
 func (h *protectedReceiptForge) GetRequiredChecks(context.Context, *scm.PR, string) ([]scm.RequiredCheck, error) {
 	h.reads++
@@ -187,6 +190,76 @@ func TestCIReadyReceiptWaitsForRecordedReviewBotPolicy(t *testing.T) {
 			_, err := Export(context.Background(), f.database, f.repo, f.run.ID, "ci-ready", forge)
 			if (err == nil) != tc.ready {
 				t.Fatalf("receipt error=%v, want ready=%v", err, tc.ready)
+			}
+		})
+	}
+}
+
+type commentReceiptForge struct {
+	*protectedReceiptForge
+	comments     []scm.ReviewComment
+	commentErr   error
+	commentReads int
+}
+
+func (h *commentReceiptForge) Capabilities() scm.Capabilities {
+	return scm.Capabilities{ReviewComments: true}
+}
+func (h *commentReceiptForge) Provider() scm.Provider { return scm.ProviderGitHub }
+func (h *commentReceiptForge) GetReviewComments(context.Context, *scm.PR) ([]scm.ReviewComment, error) {
+	h.commentReads++
+	return h.comments, h.commentErr
+}
+
+func TestCIReadyReceiptVerifiesRecordedReviewBotComments(t *testing.T) {
+	for _, tc := range []struct {
+		name                                     string
+		bucket                                   scm.CheckBucket
+		absent, external, unresolved, unreadable bool
+		policy                                   string
+		ready                                    bool
+		reads                                    int
+	}{
+		{name: "failed informational bot with unresolved comments", bucket: scm.CheckBucketFail, unresolved: true, policy: "always", reads: 1},
+		{name: "failed informational bot without comments", bucket: scm.CheckBucketFail, policy: "always", ready: true, reads: 1},
+		{name: "passing informational bot with unresolved comments", bucket: scm.CheckBucketPass, unresolved: true, policy: "always", reads: 1},
+		{name: "absent bot with unresolved comments", absent: true, unresolved: true, policy: "always", reads: 1},
+		{name: "cancelled informational bot with unresolved comments", bucket: scm.CheckBucketCancel, unresolved: true, policy: "always", reads: 1},
+		{name: "unreadable comments", bucket: scm.CheckBucketFail, unreadable: true, policy: "always", reads: 1},
+		{name: "external bot", bucket: scm.CheckBucketFail, external: true, unresolved: true, policy: "always", ready: true},
+		{name: "absent external bot", absent: true, external: true, unresolved: true, policy: "always", ready: true},
+		{name: "recorded on_failure", bucket: scm.CheckBucketFail, unresolved: true, policy: "on_failure", ready: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newExportFixture(t)
+			if err := f.database.SetRunCIReadyWithReason(f.run.ID, true, false); err != nil {
+				t.Fatal(err)
+			}
+			f.forge.checks = []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass}}
+			if !tc.absent {
+				f.forge.checks = append(f.forge.checks, scm.Check{Name: "Greptile Review", App: "greptile-apps", Bucket: tc.bucket})
+			}
+			forge := &commentReceiptForge{protectedReceiptForge: &protectedReceiptForge{receiptForge: f.forge, required: []string{"build"}}}
+			if tc.unresolved {
+				forge.comments = []scm.ReviewComment{{ID: "thread-1", Author: "greptile-apps[bot]", Body: "Unresolved review concern"}}
+			}
+			if tc.unreadable {
+				forge.commentErr = errors.New("comment read failed")
+			}
+			policy := scm.CheckScopePolicy{ReviewBotComments: tc.policy}
+			if tc.external {
+				policy.ExternalChecks = []string{"Greptile Review"}
+			}
+			recordScope(t, f, policy)
+			_, err := Export(context.Background(), f.database, f.repo, f.run.ID, "ci-ready", forge)
+			if (err == nil) != tc.ready {
+				t.Fatalf("receipt error=%v, want ready=%v", err, tc.ready)
+			}
+			if !tc.ready && !strings.Contains(err.Error(), "review bot comments") {
+				t.Fatalf("receipt refused for unrelated reason: %v", err)
+			}
+			if forge.commentReads != tc.reads {
+				t.Fatalf("comment reads=%d, want %d", forge.commentReads, tc.reads)
 			}
 		})
 	}

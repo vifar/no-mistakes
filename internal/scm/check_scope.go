@@ -415,3 +415,76 @@ func MatchCheckPattern(pattern, name string) bool {
 	}
 	return pi == len(p)
 }
+
+func (scoped ScopedChecks) ReviewBotPresenceMarkers(externalBots []Check) []Check {
+	markers := make([]Check, 0, len(scoped.External)+len(externalBots))
+	markers = append(markers, scoped.External...)
+	markers = append(markers, externalBots...)
+	for _, check := range scoped.Informational {
+		if _, ok := ReviewBotForCheck(check); !ok {
+			continue
+		}
+		if !check.Pending() {
+			continue
+		}
+		markers = append(markers, check)
+	}
+	return markers
+}
+
+func ReviewBotCommentChecks(checks []Check, excluded ...Check) []Check {
+	var green []Check
+	present := map[string]bool{}
+	for _, check := range excluded {
+		if bot, ok := ReviewBotForCheck(check); ok {
+			present[bot.AppSlug] = true
+		}
+	}
+	for _, check := range checks {
+		bot, ok := ReviewBotForApp(check.App)
+		if !ok {
+			continue
+		}
+		present[bot.AppSlug] = true
+		if check.Bucket == CheckBucketPass || check.Bucket == CheckBucketSkip {
+			green = append(green, check)
+		}
+	}
+	for _, bot := range ReviewBots {
+		if !present[bot.AppSlug] {
+			green = append(green, Check{App: bot.AppSlug})
+		}
+	}
+	return green
+}
+
+func ReadReadinessReviewBotComments(ctx context.Context, host Host, pr *PR, policy CheckScopePolicy, checks []Check, excluded ...Check) ([]ReviewComment, error) {
+	if policy.ReviewBotComments != "always" {
+		return nil, nil
+	}
+	candidates := ReviewBotCommentChecks(checks, excluded...)
+	if len(candidates) == 0 || !host.Capabilities().ReviewComments {
+		return nil, nil
+	}
+	reader, ok := host.(ReviewCommentsHost)
+	if !ok {
+		return nil, ErrUnsupported
+	}
+	comments, err := reader.GetReviewComments(ctx, pr)
+	if err != nil {
+		return nil, err
+	}
+	allowed := map[string]bool{}
+	for _, check := range candidates {
+		if bot, ok := ReviewBotForApp(check.App); ok {
+			allowed[bot.AppSlug] = true
+		}
+	}
+	var unresolved []ReviewComment
+	for _, comment := range comments {
+		if bot, ok := ReviewBotForLogin(host.Provider(), comment.Author); ok && allowed[bot.AppSlug] {
+			unresolved = append(unresolved, comment)
+		}
+	}
+	return unresolved, nil
+}

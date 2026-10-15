@@ -335,44 +335,11 @@ func reviewBotCommentsAlways(sctx *pipeline.StepContext) bool {
 	return sctx.Config != nil && sctx.Config.CI.ReviewBotComments == config.CIReviewBotCommentsAlways
 }
 
-func reviewBotPresenceMarkers(scoped scm.ScopedChecks, externalBots []scm.Check) []scm.Check {
-	markers := make([]scm.Check, 0, len(scoped.External)+len(externalBots))
-	markers = append(markers, scoped.External...)
-	markers = append(markers, externalBots...)
-	for _, check := range scoped.Informational {
-		if _, ok := scm.ReviewBotForCheck(check); !ok {
-			continue
-		}
-		if !check.Pending() {
-			continue
-		}
-		markers = append(markers, check)
-	}
-	return markers
-}
-
 func greenReviewBotChecks(checks []scm.Check, excluded ...scm.Check) []reviewBotCheck {
 	var green []reviewBotCheck
-	present := map[string]bool{}
-	for _, check := range excluded {
-		if bot, ok := scm.ReviewBotForCheck(check); ok {
-			present[bot.AppSlug] = true
-		}
-	}
-	for _, check := range checks {
-		bot, ok := scm.ReviewBotForApp(check.App)
-		if !ok {
-			continue
-		}
-		present[bot.AppSlug] = true
-		if check.Bucket == scm.CheckBucketPass || check.Bucket == scm.CheckBucketSkip {
-			green = append(green, reviewBotCheck{check: check, bot: bot, green: true})
-		}
-	}
-	for _, bot := range scm.ReviewBots {
-		if !present[bot.AppSlug] {
-			green = append(green, reviewBotCheck{bot: bot, green: true})
-		}
+	for _, check := range scm.ReviewBotCommentChecks(checks, excluded...) {
+		bot, _ := scm.ReviewBotForApp(check.App)
+		green = append(green, reviewBotCheck{check: check, bot: bot, green: true})
 	}
 	return green
 }
@@ -427,10 +394,7 @@ func reviewBotComments(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, ch
 // returns the read error, because the caller would otherwise report
 // checks-passed over comments it never read.
 func (s *CIStep) greenReviewBotFindings(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, policy scm.CheckScopePolicy, checks []scm.Check, excluded ...scm.Check) (Findings, error) {
-	if policy.ReviewBotComments != config.CIReviewBotCommentsAlways || len(greenReviewBotChecks(checks, excluded...)) == 0 {
-		return Findings{}, nil
-	}
-	comments, err := readReviewBotComments(sctx, host, pr)
+	comments, err := scm.ReadReadinessReviewBotComments(sctx.Ctx, host, pr, policy, checks, excluded...)
 	if err != nil {
 		return Findings{}, err
 	}

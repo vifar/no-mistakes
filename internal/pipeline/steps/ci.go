@@ -265,7 +265,7 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		}
 	})
 	scoped := overrideScope.Apply(ctx, pr, checks)
-	excludedChecks := reviewBotPresenceMarkers(scoped, overrideScope.ExternalReviewBotChecks())
+	excludedChecks := scoped.ReviewBotPresenceMarkers(overrideScope.ExternalReviewBotChecks())
 	checks = scoped.Relevant
 	if scoped.Ready() {
 		if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
@@ -800,7 +800,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 			// A configured exclusion of a review bot's check also covers the bot
 			// before it registers one, so the absent-bot fallback stays off.
-			excludedChecks = reviewBotPresenceMarkers(scoped, checkScope.ExternalReviewBotChecks())
+			excludedChecks = scoped.ReviewBotPresenceMarkers(checkScope.ExternalReviewBotChecks())
 			if summary := scoped.Summary(); summary != lastScopeLog {
 				lastScopeLog = summary
 				if summary != "" {

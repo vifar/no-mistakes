@@ -175,12 +175,20 @@ func Export(ctx context.Context, database *db.DB, repo *db.Repo, runID, phase st
 		if err != nil {
 			return nil, err
 		}
-		scoped := scm.NewCheckScope(host, policy, first.TargetBranch, nil).Apply(ctx, pr, checks)
+		scope := scm.NewCheckScope(host, policy, first.TargetBranch, nil)
+		scoped := scope.Apply(ctx, pr, checks)
 		if len(scoped.Relevant) == 0 && !scoped.Ready() {
 			return nil, fmt.Errorf("strict readiness requires live checks")
 		}
 		if !scoped.Ready() {
 			return nil, fmt.Errorf("strict readiness requires all live checks green")
+		}
+		comments, err := scm.ReadReadinessReviewBotComments(ctx, host, pr, policy, scoped.Relevant, scoped.ReviewBotPresenceMarkers(scope.ExternalReviewBotChecks())...)
+		if err != nil {
+			return nil, fmt.Errorf("could not verify review bot comments: %w", err)
+		}
+		if len(comments) > 0 {
+			return nil, fmt.Errorf("strict readiness requires no unresolved review bot comments")
 		}
 	}
 	afterFacts, err := reader.GetPRFacts(ctx, pr)
