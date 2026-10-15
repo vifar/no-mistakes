@@ -234,7 +234,7 @@ type Check struct {
 	// one workflow to use latest-wins ordering. Zero when unavailable.
 	WorkflowID int64
 	// RunID is the provider workflow run (GitHub Actions run) that produced the
-	// check, when known. Within one workflow a larger RunID is a newer attempt.
+	// check, when known. It breaks attempt-order ties; a rerun keeps its ID.
 	RunID int64
 	// WorkflowEvent is the event that triggered the workflow run behind the
 	// check (GitHub: push, pull_request, workflow_dispatch, ...). Runs of one
@@ -244,8 +244,8 @@ type Check struct {
 	// Retriggers of one workflow only supersede each other on one branch.
 	WorkflowBranch string
 	// WorkflowRun marks a workflow-level check: the run itself, reported
-	// because it produced no job or check run (for example a workflow that
-	// failed validation before creating any job). Name is the workflow's name.
+	// when its current jobs do not fully represent its outcome (for example
+	// a failure before jobs register). Name is the workflow's name.
 	WorkflowRun bool
 	// Link is the provider's details URL for this check. It may identify an
 	// individual job or a provider-side workflow run for targeted reruns. Empty
@@ -280,11 +280,10 @@ type Check struct {
 	// carrying that ID. Zero when unknown, which includes legacy commit
 	// statuses.
 	AppID int64
-	// Supersedes holds the job-level check identities of an older attempt of
-	// the same workflow that this workflow-level check replaced. A workflow
-	// run that fails before it creates any job has no job of its own, so the
-	// provider layer drops the older attempt's stale results and records here
-	// which requirements this run now speaks for.
+	// Supersedes holds retired job identities that a failing or unfinished
+	// workflow-level result stands for until the current attempt reports
+	// those jobs. This includes stale jobs of a rerun with the same run ID;
+	// a passing workflow-level result cannot stand for missing jobs.
 	Supersedes []Check
 	// Workflow is the name of the workflow that emitted the check, when the
 	// provider reports one (GitHub Actions). Together with Name it forms the
