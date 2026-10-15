@@ -1085,6 +1085,70 @@ func TestAssertPublishedRangeClean_CapsListedPaths(t *testing.T) {
 	}
 }
 
+func TestAssertPublishedRangeClean_MergeContent(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, path, content string
+		exclude             []string
+	}{
+		{name: "oversized", path: "asset.dat", content: strings.Repeat("x", 12<<20)},
+		{name: "oversized replacement", path: "feature.txt", content: strings.Repeat("y", 12<<20)},
+		{name: "hidden directory", path: ".cache/blob", content: "scratch"},
+		{name: "dependencies", path: "node_modules/dep/index.js", content: "scratch"},
+		{name: "excluded", path: "out/dump.bin", content: "output", exclude: []string{"*.bin"}},
+	} {
+		for _, introduced := range []bool{false, true} {
+			if tc.path == "feature.txt" && !introduced {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s/introduced=%t", tc.name, introduced), func(t *testing.T) {
+				t.Parallel()
+				dir, base, head := setupGitRepo(t)
+				gitCmd(t, dir, "checkout", "main")
+				files := map[string]string{"target.txt": "target change"}
+				if !introduced {
+					files[tc.path] = tc.content
+				}
+				scratchGuardCommit(t, dir, files)
+				gitCmd(t, dir, "checkout", "feature")
+				gitCmd(t, dir, "merge", "--no-ff", "--no-commit", "main")
+				files = map[string]string{}
+				if introduced {
+					files[tc.path] = tc.content
+				}
+				merged := scratchGuardCommit(t, dir, files)
+				sctx := newTestContext(t, &mockAgent{}, dir, base, head, config.Commands{})
+				sctx.Config.MaxFileSizeBytes = 10 << 20
+				sctx.Config.StagingExclude = tc.exclude
+				err := assertPublishedRangeClean(sctx, merged)
+				if !introduced && err != nil {
+					t.Fatalf("unchanged target content must publish: %v", err)
+				}
+				if introduced && (err == nil || !strings.Contains(err.Error(), tc.path)) {
+					t.Fatalf("merge-introduced content must refuse and name %s: %v", tc.path, err)
+				}
+			})
+		}
+	}
+}
+
+func TestAssertPublishedRangeClean_RestoredBaseContent(t *testing.T) {
+	t.Parallel()
+	dir, _, _ := setupGitRepo(t)
+	files := map[string]string{"asset.dat": strings.Repeat("x", 600), "out/dump.bin": "base output"}
+	base := scratchGuardCommit(t, dir, files)
+	gitCmd(t, dir, "branch", "-f", "main", base)
+	gitCmd(t, dir, "rm", "asset.dat", "out/dump.bin")
+	gitCmd(t, dir, "commit", "-m", "remove base files")
+	head := scratchGuardCommit(t, dir, files)
+	sctx := newTestContext(t, &mockAgent{}, dir, base, head, config.Commands{})
+	sctx.Config.MaxFileSizeBytes = 500
+	sctx.Config.StagingExclude = []string{"*.bin"}
+	if err := assertPublishedRangeClean(sctx, head); err != nil {
+		t.Fatalf("restoring identical path/blob pairs from the base must publish: %v", err)
+	}
+}
+
 func TestPublishRunHead_RefusesAgentCommittedScratch(t *testing.T) {
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")

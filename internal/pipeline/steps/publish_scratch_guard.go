@@ -83,13 +83,16 @@ func resolvePublicationBase(sctx *pipeline.StepContext, head string) (string, er
 
 // assertPublishedRangeClean refuses to publish a range that adds or modifies a
 // blob over max_file_size_bytes, or adds a path under a new scratch directory
-// or matching staging_exclude. Each commit is checked, including blobs reused
-// from the base and content later deleted. It covers agent commits with `git add -A`,
+// or matching staging_exclude. It covers agent commits with `git add -A`,
 // which bypass scratch-safe staging, and fails before anything leaves the
 // machine rather than at a forge's push limit.
 func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 	limit := sctx.Config.MaxFileSizeBytes
 	base, err := resolvePublicationBase(sctx, head)
+	if err != nil {
+		return err
+	}
+	baseObjects, err := publicationTreeObjects(sctx, base)
 	if err != nil {
 		return err
 	}
@@ -116,7 +119,28 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 		if err != nil {
 			return fmt.Errorf("scan published commit %s: %w", fields[0], err)
 		}
-		entries = append(entries, changes...)
+		inherited := []map[string]string{baseObjects}
+		if len(fields) > 2 {
+			for _, parent := range fields[1:] {
+				objects, err := publicationTreeObjects(sctx, parent)
+				if err != nil {
+					return err
+				}
+				inherited = append(inherited, objects)
+			}
+		}
+		for _, entry := range changes {
+			introduced := true
+			for _, objects := range inherited {
+				if objects[entry.path] == entry.newSHA {
+					introduced = false
+					break
+				}
+			}
+			if introduced {
+				entries = append(entries, entry)
+			}
+		}
 	}
 
 	var scratch []string
@@ -180,4 +204,21 @@ func assertPublishedRangeClean(sctx *pipeline.StepContext, head string) error {
 		"Remove the content from branch history by rewriting or dropping the offending commits, then retry publication; adding .gitignore alone cannot remove committed content. "+
 		"to publish a hidden directory deliberately, commit it before the run so it exists in the base",
 		shortSHA(head), strings.Join(problems, "; "))
+}
+
+func publicationTreeObjects(sctx *pipeline.StepContext, tree string) (map[string]string, error) {
+	raw, err := stepGitRunRaw(sctx, "ls-tree", "-r", "-z", "--full-tree", tree)
+	if err != nil {
+		return nil, fmt.Errorf("scan publication tree %s: %w", tree, err)
+	}
+	objects := map[string]string{}
+	for _, record := range nulFields(raw) {
+		meta, path, ok := strings.Cut(record, "\t")
+		fields := strings.Fields(meta)
+		if !ok || len(fields) != 3 {
+			return nil, fmt.Errorf("invalid publication tree record %q", record)
+		}
+		objects[path] = fields[2]
+	}
+	return objects, nil
 }
