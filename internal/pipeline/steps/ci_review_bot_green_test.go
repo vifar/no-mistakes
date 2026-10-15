@@ -493,7 +493,7 @@ func TestReviewBotCommentsOnGitLabFollowThePolicy(t *testing.T) {
 			pr := &scm.PR{Number: "42", URL: "https://gitlab.com/test/repo/-/merge_requests/42"}
 			checks := []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass, ProviderID: "gitlab-job:1"}}
 
-			findings, err := (&CIStep{}).greenReviewBotFindings(sctx, host, pr, checks)
+			findings, err := (&CIStep{}).greenReviewBotFindings(sctx, host, pr, ciCheckScopePolicy(sctx), checks)
 			if err != nil {
 				t.Fatalf("greenReviewBotFindings() error = %v", err)
 			}
@@ -520,5 +520,26 @@ func TestReviewBotCommentsOnGitLabFollowThePolicy(t *testing.T) {
 				t.Fatalf("findings = %+v, want none", findings.Items)
 			}
 		})
+	}
+}
+
+func TestCIStep_VerifyApprovalOverride_RecordedReviewBotPolicy(t *testing.T) {
+	t.Parallel()
+	env := append(fakeCIGH(t, "OPEN", greenGreptileChecksJSON), greenGreptileCommentJSON)
+	sctx, _, _, _, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsAlways, env)
+	outcome, err := (&CIStep{}).Execute(sctx)
+	if err != nil || outcome == nil || !outcome.NeedsApproval || !strings.Contains(outcome.Findings, "Greptile Review") {
+		t.Fatalf("expected unresolved bot comments to park CI: outcome=%+v err=%v", outcome, err)
+	}
+	recovered := *sctx
+	recoveredConfig := *sctx.Config
+	recoveredConfig.CI.ReviewBotComments = config.CIReviewBotCommentsOnFailure
+	recovered.Config = &recoveredConfig
+	unresolved, err := (&CIStep{}).VerifyApprovalOverride(&recovered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(unresolved, "Greptile Review") || !strings.Contains(unresolved, "needs a decision") {
+		t.Fatalf("approval must retain the recorded always policy and return an override reason, got %q", unresolved)
 	}
 }

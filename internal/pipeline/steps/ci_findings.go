@@ -418,8 +418,8 @@ func reviewBotComments(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, ch
 // is on_failure or the bots left nothing unresolved. Unlike reviewBotComments it
 // returns the read error, because the caller would otherwise report
 // checks-passed over comments it never read.
-func (s *CIStep) greenReviewBotFindings(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, checks []scm.Check, excluded ...scm.Check) (Findings, error) {
-	if !reviewBotCommentsAlways(sctx) || len(greenReviewBotChecks(checks, excluded...)) == 0 {
+func (s *CIStep) greenReviewBotFindings(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, policy scm.CheckScopePolicy, checks []scm.Check, excluded ...scm.Check) (Findings, error) {
+	if policy.ReviewBotComments != config.CIReviewBotCommentsAlways || len(greenReviewBotChecks(checks, excluded...)) == 0 {
 		return Findings{}, nil
 	}
 	comments, err := readReviewBotComments(sctx, host, pr)

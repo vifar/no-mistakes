@@ -274,7 +274,7 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		// A green head can still carry a green review bot's unresolved
 		// comments under ci.review_bot_comments: always; approving over
 		// them is an override, not a clean pass.
-		botFindings, err := s.greenReviewBotFindings(sctx, host, pr, checks, excludedChecks...)
+		botFindings, err := s.greenReviewBotFindings(sctx, host, pr, policy, checks, excludedChecks...)
 		if err != nil {
 			return fmt.Sprintf("could not verify review bot comments: %v", err), nil
 		}
@@ -995,7 +995,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// red bot check produces, so checks-passed is never reported
 					// over a comment nobody has looked at. A trusted no_ci head
 					// with no checks at all reads them the same way.
-					botFindings, botErr := s.greenReviewBotFindings(sctx, host, pr, checks, excludedChecks...)
+					botFindings, botErr := s.greenReviewBotFindings(sctx, host, pr, ciCheckScopePolicy(sctx), checks, excludedChecks...)
 					if botErr != nil && pluginPollFailsStep(botErr) {
 						clearCIMonitorReady(sctx)
 						return nil, botErr
