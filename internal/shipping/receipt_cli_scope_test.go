@@ -45,7 +45,7 @@ func TestReceiptCLIRecordedCheckScope(t *testing.T) {
 	const comment = `[{"author":"greptile-apps[bot]","path":"source.txt","line":1,"body":"Unresolved concern"}]`
 	for _, tc := range []struct {
 		name, checks, protection, rules, comments, refusal string
-		policy                                           scm.CheckScopePolicy
+		policy                                             scm.CheckScopePolicy
 	}{
 		{name: "auto ignores outside approval failure", checks: buildPass + "," + approveFail},
 		{name: "required failure refuses", checks: `{"name":"build","state":"FAILURE","bucket":"fail"}`, refusal: "all live checks green"},
