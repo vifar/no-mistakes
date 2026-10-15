@@ -303,6 +303,23 @@ var ReviewBots = []ReviewBot{
 	{AppSlug: "greptile-apps", Logins: []string{"greptile-apps[bot]", "greptile-apps"}, GitLabLogins: []string{"greptileai"}, CheckNames: []string{"Greptile Review"}},
 }
 
+// ReviewBotForCheck returns the registered review bot that published check,
+// identified by its app or, when the provider reported none, by the bot's
+// known check name.
+func ReviewBotForCheck(check Check) (ReviewBot, bool) {
+	if bot, ok := ReviewBotForApp(check.App); ok {
+		return bot, true
+	}
+	for _, bot := range ReviewBots {
+		for _, name := range bot.CheckNames {
+			if strings.EqualFold(strings.TrimSpace(check.Name), name) {
+				return bot, true
+			}
+		}
+	}
+	return ReviewBot{}, false
+}
+
 // ReviewBotForApp returns the registered review bot that publishes checks
 // under slug. An empty slug never matches: a provider that reported no app
 // identity has not identified a bot.

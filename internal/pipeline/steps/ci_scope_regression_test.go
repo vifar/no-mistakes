@@ -339,3 +339,74 @@ type retainedBotRequiredHost struct{ scm.Host }
 func (*retainedBotRequiredHost) GetRequiredChecks(context.Context, *scm.PR, string) ([]scm.RequiredCheck, error) {
 	return []scm.RequiredCheck{{Context: "build"}}, nil
 }
+
+// Approving a parked gate is judged under the scope the gate was raised with.
+// A later config edit must not reclassify the original failure and turn the
+// approval into a plain pass.
+func TestCIScopeApprovalUsesTheScopeRecordedWhenTheGateWasRaised(t *testing.T) {
+	env := append(fakeCIGH(t, "OPEN", `[{"name":"build","state":"FAILURE","bucket":"fail"},{"name":"lint","state":"SUCCESS","bucket":"pass"}]`),
+		`FAKE_CLI_PROTECTION_JSON={"contexts":["build","lint"]}`, `FAKE_CLI_RULES_JSON=[]`)
+	sctx, _, _, _, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsOnFailure, env)
+	step := &CIStep{}
+	outcome, err := step.Execute(sctx)
+	if err != nil || outcome == nil || !outcome.NeedsApproval || !strings.Contains(outcome.Findings, `"check":"build"`) {
+		t.Fatalf("the gate was not raised on the failing required check: %+v %v", outcome, err)
+	}
+
+	sctx.Config.CI.ExternalChecks = []string{"build"}
+	reason, err := step.VerifyApprovalOverride(sctx)
+	if err != nil || !strings.Contains(reason, "build") {
+		t.Fatalf("approval after loosening external_checks = %q, %v; want the original failure recorded as an override", reason, err)
+	}
+
+	// A run that recorded nothing falls back to the live configuration.
+	if err := sctx.DB.SetRunCheckScope(sctx.Run.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	reason, err = step.VerifyApprovalOverride(sctx)
+	if err != nil || reason != "" {
+		t.Fatalf("an unrecorded run must use the live configuration, got %q, %v", reason, err)
+	}
+}
+
+// Under review_bot_comments: always a bot's comments are read after its check
+// completes. A bot check outside the required scope that is still running keeps
+// the head unsettled, so checks-passed cannot publish ahead of the review.
+func TestCIScopePendingInformationalBotCheckBlocksReadinessUnderAlways(t *testing.T) {
+	const build = `{"name":"build","state":"SUCCESS","bucket":"pass","app":"github-actions"}`
+	const pendingBot = `{"name":"Greptile Review","state":"PENDING","bucket":"pending","app":"greptile-apps"}`
+	const doneBot = `{"name":"Greptile Review","state":"SUCCESS","bucket":"pass","app":"greptile-apps"}`
+	sequence := []string{"[" + build + "," + pendingBot + "]", "[" + build + "," + pendingBot + "]", "[" + build + "," + doneBot + "]"}
+	env := append(fakeCIGHSequence(t, "OPEN", sequence), greenGreptileCommentJSON, `FAKE_CLI_PROTECTION_JSON={"contexts":["build"]}`, `FAKE_CLI_RULES_JSON=[]`)
+	sctx, ag, _, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsAlways, env)
+	polls := 0
+	step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error {
+		polls++
+		if *ready {
+			t.Fatal("checks-passed was published while the review bot's check was still running")
+		}
+		return nil
+	})
+	outcome, err := step.Execute(sctx)
+	if err != nil || outcome == nil || !outcome.NeedsApproval || !strings.Contains(outcome.Findings, "api.test.ts") {
+		t.Fatalf("outcome = %+v, %v; want the bot's comments read once its check completed", outcome, err)
+	}
+	if polls != 2 {
+		t.Fatalf("polls before the comments were read = %d, want 2 (two pending observations)", polls)
+	}
+	if *ready || len(ag.calls) != 0 {
+		t.Fatalf("ready=%v repairs=%d", *ready, len(ag.calls))
+	}
+}
+
+func TestCIScopePendingExternalBotCheckDoesNotBlockReadiness(t *testing.T) {
+	const checks = `[{"name":"build","state":"SUCCESS","bucket":"pass","app":"github-actions"},{"name":"Greptile Review","state":"PENDING","bucket":"pending","app":"greptile-apps"}]`
+	env := append(fakeCIGH(t, "OPEN", checks), greenGreptileCommentJSON, `FAKE_CLI_PROTECTION_JSON={"contexts":["build"]}`, `FAKE_CLI_RULES_JSON=[]`)
+	sctx, _, _, ready, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsAlways, env)
+	sctx.Config.CI.ExternalChecks = []string{"Greptile Review"}
+	step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error { return context.Canceled })
+	outcome, err := step.Execute(sctx)
+	if !errors.Is(err, context.Canceled) || outcome != nil || !*ready {
+		t.Fatalf("an external bot check blocked readiness: %+v %v ready=%v", outcome, err, *ready)
+	}
+}

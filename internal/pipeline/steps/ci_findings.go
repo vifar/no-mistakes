@@ -335,6 +335,25 @@ func reviewBotCommentsAlways(sctx *pipeline.StepContext) bool {
 	return sctx.Config != nil && sctx.Config.CI.ReviewBotComments == config.CIReviewBotCommentsAlways
 }
 
+// pendingInformationalBotChecks returns the review-bot checks outside the
+// required scope that are still running. Under ci.review_bot_comments: always
+// the bot's comments are read once its check has completed; reading them while
+// the review is still being posted would report checks-passed over comments
+// that have not been written yet. Once the check completes its informational
+// status stands. External checks are not in the informational list.
+func pendingInformationalBotChecks(sctx *pipeline.StepContext, informational []scm.Check) []scm.Check {
+	if !reviewBotCommentsAlways(sctx) {
+		return nil
+	}
+	var pending []scm.Check
+	for _, check := range informational {
+		if _, ok := scm.ReviewBotForCheck(check); ok && check.Pending() {
+			pending = append(pending, check)
+		}
+	}
+	return pending
+}
+
 // greenReviewBotChecks returns the registered review-bot checks that
 // completed without failing, plus a nameless entry for every registered bot
 // with no check on this head at all: a bot that has not registered its check

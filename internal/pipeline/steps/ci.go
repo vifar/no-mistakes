@@ -248,10 +248,28 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		return fmt.Sprintf("could not verify live CI target: %v", err), nil
 	}
 	pr.BaseBranch = targetBranch
-	overrideScope := newCIChecksScope(sctx, host, targetBranch)
+	// A parked gate is verified under the scope it was raised with, not the
+	// configuration loaded now: a later edit to external_checks must not
+	// reclassify the failure the operator is approving over. Only a run that
+	// recorded nothing falls back to the live configuration.
+	policy, recorded, err := recordedCIChecksScope(sctx)
+	if err != nil {
+		return fmt.Sprintf("could not verify live CI scope: %v", err), nil
+	}
+	if !recorded {
+		policy = ciCheckScopePolicy(sctx)
+	}
+	overrideScope := scm.NewCheckScope(host, policy, targetBranch, func(msg string) {
+		if sctx.Log != nil {
+			sctx.Log(msg)
+		}
+	})
 	scoped := overrideScope.Apply(ctx, pr, checks)
 	excludedChecks := append(scoped.External, overrideScope.ExternalReviewBotChecks()...)
 	checks = scoped.Relevant
+	if pending := pendingInformationalBotChecks(sctx, scoped.Informational); len(pending) > 0 && scoped.Ready() {
+		return fmt.Sprintf("live checks for %s: review bot check %s is still running", prURL, pending[0].Name), nil
+	}
 	if scoped.Ready() {
 		if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
 			return fmt.Sprintf("could not verify live CI comparison: %v", err), nil
@@ -810,7 +828,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			// readinessPending is deliberately broader: any state that is not a
 			// conclusive pass, failure, or skip must keep the PR non-ready. This
 			// includes cancelled, held, and unknown provider states.
-			readinessPending := hasPendingChecks(checks) || hasUnresolvedChecks(checks)
+			readinessPending := hasPendingChecks(checks) || hasUnresolvedChecks(checks) ||
+				len(pendingInformationalBotChecks(sctx, scoped.Informational)) > 0
 			failing := failingCheckNames(checks)
 
 			// A rerun the provider has answered is no longer outstanding. This

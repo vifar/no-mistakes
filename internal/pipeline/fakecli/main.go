@@ -982,6 +982,10 @@ func fakeCIGHSequenceHandler(args []string) {
 		fmt.Println(entries[index])
 		os.Exit(0)
 	}
+	if strings.Contains(joined, "api") && strings.Contains(joined, "graphql") && strings.Contains(joined, "reviewThreads") {
+		printFakeReviewThreads(os.Getenv("FAKE_CLI_REVIEW_COMMENTS"))
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "api") && strings.Contains(joined, "graphql") {
 		data, err := os.ReadFile(checksPath)
 		if err != nil {

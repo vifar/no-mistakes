@@ -32,6 +32,22 @@ func newCIChecksScope(sctx *pipeline.StepContext, host scm.Host, targetBranch st
 	})
 }
 
+// recordedCIChecksScope returns the policy the CI step recorded when it last
+// observed this run. ok is false when nothing was recorded.
+func recordedCIChecksScope(sctx *pipeline.StepContext) (policy scm.CheckScopePolicy, ok bool, err error) {
+	raw, err := sctx.DB.GetRunCheckScope(sctx.Run.ID)
+	if err != nil {
+		return policy, false, fmt.Errorf("read recorded CI check scope: %w", err)
+	}
+	if raw == "" {
+		return policy, false, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
+		return policy, false, fmt.Errorf("invalid recorded CI check scope")
+	}
+	return policy, true, nil
+}
+
 // recordCIChecksScope stores the policy this execution evaluates checks under,
 // so the strict ci-ready receipt, which re-reads live checks in another
 // process, applies exactly the same one.
