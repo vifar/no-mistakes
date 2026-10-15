@@ -1039,3 +1039,41 @@ func TestAdmissionQueueWriteFailureEndsTheRunAndFreesTheBranch(t *testing.T) {
 	f.step.release(next)
 	f.waitFor("later launch to complete", func() bool { return f.status(next) == types.RunCompleted })
 }
+
+// A completed run is marked finishing while it still holds its slot. Release
+// dispatches queued runs synchronously, so a push landing during that dispatch
+// must already see the decided run as finishing, never as a claimed run to
+// cancel and wait on.
+func TestRunIsFinishingBeforeItReleasesItsSlot(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	type observation struct {
+		state  runOwnership
+		active int
+	}
+	seen := make(chan observation, 1)
+	f.mgr.whileFinishing = func(runID string) {
+		f.mgr.mu.Lock()
+		state := f.mgr.runs[runID].state
+		f.mgr.mu.Unlock()
+		select {
+		case seen <- observation{state: state, active: f.mgr.sched.stats().Active}:
+		default:
+		}
+	}
+	id := f.push("same")
+	f.waitStarted(id)
+	f.step.release(id)
+	var got observation
+	select {
+	case got = <-seen:
+	case <-time.After(60 * time.Second):
+		t.Fatal("run never reached finishing")
+	}
+	if got.state != ownershipFinishing {
+		t.Fatalf("ownership while finishing = %v, want finishing", got.state)
+	}
+	if got.active != 1 {
+		t.Fatalf("active slots when the run became finishing = %d, want 1 (slot released only after finishing)", got.active)
+	}
+	f.waitFor("run to complete", func() bool { return f.status(id) == types.RunCompleted })
+}

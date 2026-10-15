@@ -955,8 +955,11 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		m.runs[plan.run.ID].state = ownershipClaimed
 		m.mu.Unlock()
 		resumeErr := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
-		slot.Release()
+		// Mark finishing before releasing: Release dispatches queued runs
+		// synchronously, and a push landing in that window must not treat
+		// this already-decided run as a claimed one to cancel and wait on.
 		m.markFinishing(plan.run.ID)
+		slot.Release()
 		if err := resumeErr; err != nil {
 			if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
@@ -2507,12 +2510,13 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		}()
 
 		err := executor.Execute(runCtx, run, repo, wtDir)
-		// The pipeline's own work is over: free the slot before the eval
-		// collection below, which is local bookkeeping and not pipeline load,
-		// and mark the run finishing so abort and supersede leave its decided
-		// outcome alone.
-		slot.Release()
+		// The pipeline's own work is over. Mark the run finishing first, so
+		// abort and supersede leave its decided outcome alone even while
+		// Release synchronously dispatches queued runs, then free the slot
+		// before the eval collection below, which is local bookkeeping and
+		// not pipeline load.
 		m.markFinishing(run.ID)
+		slot.Release()
 		if err != nil {
 			fields := telemetry.Fields{
 				"action":      "finished",
