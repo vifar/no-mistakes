@@ -964,8 +964,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// previous passed-checks signal instead of looking stale.
 					// The broader readiness state is intentional here: cancelled
 					// and unknown checks must never be promoted as green.
-					// Applies even when no_ci is declared: registered checks are
-					// never waived.
+					// Applies even when no_ci is declared: unresolved in-scope
+					// checks are never waived.
 					lastMonitorLog = logCIMonitorStatus(sctx, ciWaitingMessage(checks), lastMonitorLog)
 				case len(checks) == 0 && !scoped.Ready() && (sctx.Config == nil || !sctx.Config.NoCI || sctx.Run.Shipping != nil):
 					clearCIMonitorReady(sctx)

@@ -147,7 +147,7 @@ In both modes, it resolves low-risk findings on its own and stops to relay anyth
 
 Grok Build is a pipeline runner, not a driving-skill target. See the [`init` reference](/no-mistakes/reference/cli/#no-mistakes-init) for skill installation and refresh, the installation opt-out, supported consumers, symlinked home directories, and legacy vendored copies.
 The skill drives `no-mistakes axi`, a non-interactive command surface that prints TOON to stdout and progress to stderr.
-When CI is ready - either its registered checks are green or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - but the PR is still open, `axi run` and `axi respond` return `outcome: checks-passed` with a help line pointing at the PR instead of waiting for a human merge. An empty check result without that declaration is not ready; see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for the readiness rules.
+When CI is ready but the PR is still open, `axi run` and `axi respond` return `outcome: checks-passed` with a help line pointing at the PR instead of waiting for a human merge. See the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for the readiness rules.
 That is a successful agent stopping point: report that the PR is ready and ask the user to review and merge it.
 Successful outcomes also instruct the agent to summarize the run for the user.
 When the pipeline applied fixes, successful outcomes include a `fixes` table listing each fix so the agent can acknowledge what it missed and the user can review them.

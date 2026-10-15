@@ -996,7 +996,7 @@ A value in the trusted repository config overrides this global value. An unrecog
 
 ### ci.must_pass
 
-The operator-level fallback for [`ci.must_pass`](/no-mistakes/reference/repo-config/#cimust_pass): glob patterns for check contexts that are always required.
+The operator-level fallback for [`ci.must_pass`](/no-mistakes/reference/repo-config/#cimust_pass), whose per-repository reference owns pattern matching and precedence.
 
 | | |
 |---|---|
@@ -1012,7 +1012,7 @@ A list in the trusted repository config replaces this one.
 
 ### ci.external_checks
 
-The operator-level fallback for [`ci.external_checks`](/no-mistakes/reference/repo-config/#ciexternal_checks): glob patterns for check contexts that pass only after an outside party acts, such as an external approval app. They are reported, never waited on, never repaired, and never become findings. An entirely excluded observed rollup is ready when the required set is known or trusted repository `no_ci: true` applies, including in strict shipping. Otherwise registration waits to avoid declaring readiness before real CI registers.
+The operator-level fallback for [`ci.external_checks`](/no-mistakes/reference/repo-config/#ciexternal_checks), whose per-repository reference owns external approval exclusions and links to the readiness rules.
 
 | | |
 |---|---|

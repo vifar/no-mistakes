@@ -238,8 +238,10 @@ type Finding struct {
 	Category string `json:"category,omitempty"`
 	// Check is the provider check name a CI finding was derived from. CheckID
 	// is the provider's opaque identity for that exact check, so same-named
-	// checks remain distinct through selection and repair. Both are empty on
-	// every non-CI finding.
+	// checks remain distinct through selection and repair. CheckApp preserves
+	// a review bot's app identity even when it has not registered a check, so
+	// retained findings can follow later scope exclusions. These fields are
+	// empty on every non-CI finding.
 	Check    string `json:"check,omitempty"`
 	CheckID  string `json:"check_id,omitempty"`
 	CheckApp string `json:"check_app,omitempty"`

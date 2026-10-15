@@ -12,10 +12,11 @@ import (
 // Check-scope modes for CheckScopePolicy.RequiredChecks.
 const (
 	// RequiredChecksAuto evaluates the target branch's required status checks
-	// when the provider reports them, and every check otherwise.
+	// when the provider reports them, and every check otherwise, subject to
+	// configured must-pass additions and external exclusions.
 	RequiredChecksAuto = "auto"
-	// RequiredChecksAll evaluates every check on the head, as the CI step did
-	// before required-check scoping existed.
+	// RequiredChecksAll evaluates every check on the head except configured
+	// external contexts, regardless of the target branch's required set.
 	RequiredChecksAll = "all"
 )
 
@@ -197,10 +198,9 @@ func normalizeContexts(contexts []string) []string {
 }
 
 // Apply partitions checks. Precedence is external_checks, then must_pass, then
-// the required set. When the required set is authoritative, every required
-// context (and every literal must_pass context) that no check reports yet is
-// represented by a pending placeholder so a missing required check blocks
-// readiness exactly as a pending one does.
+// the required set. Missing authoritative required contexts and literal
+// must_pass contexts become pending placeholders unless excluded as external,
+// so a missing required check blocks readiness exactly as a pending one does.
 func (s *CheckScope) Apply(ctx context.Context, pr *PR, checks []Check) ScopedChecks {
 	required, derived := s.requiredContexts(ctx, pr)
 	return s.partition(pr, checks, required, derived)

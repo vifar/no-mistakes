@@ -204,7 +204,7 @@ For ordinary runs, when `true` and the forge reports **zero** checks on the PR h
 
 Absence of this field means CI is expected. A zero-length check result then stays not-ready for as long as the forge reports no checks - elapsed time, grace periods, workflow-file presence or absence, prior check history, and branch names are not evidence.
 
-If checks still appear on a declared no-CI repository, their actual states are processed normally. The declaration never waives a pending or failing check that is in scope. When every observed check is excluded, it permits readiness immediately, including in strict shipping. Without this declaration or a known required set, an entirely excluded rollup keeps waiting so real CI has time to register.
+If checks still appear on a declared no-CI repository, their actual states are processed under the [check-scope rules](#cirequired_checks). The declaration never waives a pending or failing check that is in scope.
 
 This field is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.
 A feature branch cannot self-declare `no_ci: true` to bypass checks, and cannot clear a trusted declaration either.
@@ -879,7 +879,7 @@ Where the comments come from, and how the bot is identified, is provider-specifi
 
 Under `always`:
 
-- Comments are read only once every check on the current head has completed green, the bot's included when it has registered one, so a review still being posted is not raced. A bot that has not registered a check on the head yet has its comments read too, since its threads from an earlier head can still be unresolved. A head with no checks at all under trusted [`no_ci: true`](#no_ci) has them read the same way before it is reported ready. Only unresolved threads count, and the same per-gate bound applies as for a red check. A GitLab note counts only when it is resolvable, unresolved, not a system note, and authored by a registered bot, so an ordinary merge request comment is never a finding.
+- Comments are read only once every in-scope check on the current head has completed green, the bot's included when it has an in-scope check, so a review still being posted is not raced. A bot that has not registered a check on the head yet has its comments read too, since its threads from an earlier head can still be unresolved. A registered bot whose checks are all external or informational is excluded from comment findings, including retained findings selected before the scope changed. A head with no checks at all under trusted [`no_ci: true`](#no_ci) has comments read the same way before it is reported ready. Only unresolved threads count, and the same per-gate bound applies as for a red check. A GitLab note counts only when it is resolvable, unresolved, not a system note, and authored by a registered bot, so an ordinary merge request comment is never a finding.
 - The findings never spend an `auto_fix.ci` attempt. A human decides: approve, skip, or select comments for a fix round.
 - Approving over them records the CI step as passed with an override naming the comments, never as a clean pass.
 - A comment list that cannot be read is not treated as empty: `checks-passed` is withheld, and a read that keeps failing parks for a decision.
@@ -905,10 +905,14 @@ ci:
   required_checks: auto
 ```
 
-- **`auto` (default)** evaluates only the status checks the target branch requires, read from branch protection (`required_status_checks`) and repository rulesets (`required_status_checks` rules) and unioned. A failing check outside that set is reported as informational: it does not block `checks-passed`, `ci_ready`, or the strict `ci-ready` receipt, and it is never handed to the fix agent. A required check that is failing, pending, or not reported yet still blocks, and a failing one is still repaired. When the target has no required checks, the required checks cannot be read (HTTP 404 or 403), or the provider has no equivalent, every check is evaluated and the step log says so. Only GitHub reads required checks today.
-- **`all`** evaluates every check on the head, whatever the target branch requires. This was the only behavior before the key existed.
+- **`auto` (default)** evaluates only the status checks the target branch requires, read from branch protection (`required_status_checks`) and repository rulesets (`required_status_checks` rules) and unioned. A failing check outside that set is reported as informational: it does not block `checks-passed`, `ci_ready`, or the strict `ci-ready` receipt, and it is never handed to the fix agent. A required check that is failing, pending, or not reported yet still blocks and follows normal CI failure handling. When the target has no required checks, either source cannot be read (HTTP 404, 403, or any other read error), or the provider has no equivalent, the step falls back to all checks and logs the reason, naming the unreadable source when applicable. A readable source never substitutes for an unreadable one. Only GitHub reads required checks today.
+- **`all`** evaluates every check on the head, whatever the target branch requires, subject to `external_checks` below.
 
-The required set is read once per CI step execution, not once per poll. Required contexts are matched exactly against the check name. The strict `ci-ready` receipt applies the same scope the CI step recorded for the run.
+In either mode, precedence is [`external_checks`](#ciexternal_checks), then [`must_pass`](#cimust_pass), then the required set or all-check fallback. External exclusions still apply when required checks cannot be read.
+
+The target follows [PR target precedence](#prbase_branch). The required set is read once per CI step execution, not once per poll; an interrupted read is retried. Required contexts are matched exactly against the check name. Approval verification uses the same scope and live target. The strict `ci-ready` receipt re-reads live checks and requirements using the policy the CI step recorded for the run.
+
+When observed checks are all external or informational, readiness requires either a known required set or trusted [`no_ci: true`](#no_ci), including for strict shipping, approval verification, and strict receipts. Any missing or pending in-scope requirement still blocks. Without either condition, the monitor waits for registration to avoid declaring readiness before real CI registers. A rollup with no observed checks is a separate case governed by `no_ci`; strict shipping still requires an observed rollup.
 
 A value set here wins over the operator's own [`ci.required_checks`](/no-mistakes/reference/global-config/#cirequired_checks). An unrecognized value fails the config.
 
