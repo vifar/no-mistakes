@@ -86,8 +86,9 @@ type Executor struct {
 	activeAgentPID         atomic.Int64          // live lifecycle ownership, independent of SQLite
 	approvalCh             chan approvalResponse // buffered channel for approval responses
 	waiting                bool                  // true when blocked on approval
-	waitingStep            types.StepName        // which step is currently awaiting approval
-	waitingApprovalRefusal string                // non-empty: why Approve is rejected at the waiting gate
+	slotWaitStep           types.StepName
+	waitingStep            types.StepName // which step is currently awaiting approval
+	waitingApprovalRefusal string         // non-empty: why Approve is rejected at the waiting gate
 	// waitingFindings and waitingStepResultID describe the parked gate: the
 	// findings payload it showed and the step result whose rounds record what
 	// earlier rounds of this step decided. A fix response is validated against
@@ -307,6 +308,10 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 	}
 	e.mu.Lock()
 	if !e.waiting {
+		if e.slotWaitStep == step {
+			e.mu.Unlock()
+			return RespondDispositions{}, fmt.Errorf("step %s already answered; waiting for a run slot", step)
+		}
 		e.mu.Unlock()
 		return RespondDispositions{}, fmt.Errorf("no step awaiting approval")
 	}
@@ -415,6 +420,9 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 		// gate's own order rather than ahead of the ones the response named.
 		dispositions.Fixed = combineSelectedFindingIDs(idsInPayloadOrder(response.findingIDs, findingIDsInPayloadOrder(e.waitingFindings)), normalized)
 		dispositions.Kept = excludeFindingIDs(split.Kept, restoredGateIDs)
+	}
+	if e.slot != nil && action != types.ActionAbort {
+		e.slotWaitStep = step
 	}
 	e.waiting = false
 	e.waitingFindings = ""
@@ -874,7 +882,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
 	}
 	if err == nil {
-		err = e.acquireSlot(ctx)
+		err = e.acquireAnsweredGateSlot(ctx, run, repo, gate.step.Name(), gate.stepResult.ID)
 	}
 	if err != nil {
 		if dbErr := e.db.FailStep(gate.stepResult.ID, err.Error(), duration); dbErr != nil {
@@ -1890,7 +1898,7 @@ rounds:
 				return false, "", fmt.Errorf("step %s: aborted by user", stepName)
 			}
 			if err == nil {
-				err = e.acquireSlot(ctx)
+				err = e.acquireAnsweredGateSlot(ctx, run, repo, stepName, sr.ID)
 			}
 			if err != nil {
 				if dbErr := e.db.FailStep(sr.ID, err.Error(), executionMS); dbErr != nil {

@@ -2,9 +2,13 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // RunSlot is the daemon's run-concurrency slot as the pipeline sees it. A run
@@ -38,6 +42,32 @@ func (e *Executor) acquireSlot(ctx context.Context) error {
 		return nil
 	}
 	return e.slot.Acquire(ctx)
+}
+
+func (e *Executor) acquireAnsweredGateSlot(ctx context.Context, run *db.Run, repo *db.Repo, step types.StepName, stepID string) error {
+	e.mu.Lock()
+	if e.slot != nil {
+		e.slotWaitStep = step
+	}
+	e.mu.Unlock()
+	defer func() {
+		e.mu.Lock()
+		e.slotWaitStep = ""
+		e.mu.Unlock()
+	}()
+	if err := e.db.UpdateStepStatus(stepID, types.StepStatusRunning); err != nil {
+		return fmt.Errorf("resume answered gate: %w", err)
+	}
+	if e.slot != nil {
+		if err := e.db.TouchStepActivity(stepID, "already answered; waiting for a run slot"); err != nil {
+			return err
+		}
+	}
+	e.emitStepEvent(ipc.EventStepStarted, run, repo, step, string(types.StepStatusRunning))
+	if err := e.acquireSlot(ctx); err != nil {
+		return err
+	}
+	return e.db.TouchStepActivity(stepID, "gate resumed")
 }
 
 // YieldSlot releases the run's concurrency slot while a step waits on

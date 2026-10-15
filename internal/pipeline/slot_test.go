@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -442,5 +443,146 @@ func TestRunAgentAcquiresRunSlotBeforeInvokingAgent(t *testing.T) {
 	ag.calls = 0
 	if _, err := sctx.RunAgent(agent.RunOpts{Prompt: "fix"}); err == nil || ag.calls != 0 {
 		t.Fatalf("RunAgent with a refused slot = err %v, agent calls %d; want an error and no call", err, ag.calls)
+	}
+}
+
+type gateCapacitySlot struct {
+	capacity  *agentSemaphore
+	release   func()
+	yielded   chan struct{}
+	acquiring chan struct{}
+}
+
+func (s *gateCapacitySlot) Yield() {
+	s.release()
+	s.release = nil
+	close(s.yielded)
+}
+
+func (s *gateCapacitySlot) Acquire(ctx context.Context) error {
+	if s.release != nil {
+		return nil
+	}
+	s.acquiring <- struct{}{}
+	var err error
+	s.release, err = s.capacity.acquire(ctx)
+	return err
+}
+
+func TestExecutorAnsweredGateWaitsAsRunning(t *testing.T) {
+	for _, recoveredStatus := range []types.StepStatus{"", types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+		for _, action := range []types.ApprovalAction{types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAnswer} {
+			t.Run(string(recoveredStatus)+"/"+string(action), func(t *testing.T) {
+				database, p, run, repo := setupTest(t)
+				workDir := completionFixture(t, database, run)
+				findings := `{"findings":[],"summary":"review"}`
+				step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+					return &StepOutcome{NeedsApproval: !sctx.Fixing && !sctx.FinalizingAnswers, Findings: findings}, nil
+				}}
+				if recoveredStatus != "" {
+					if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+						t.Fatal(err)
+					}
+					sr, err := database.InsertStepResult(run.ID, types.StepReview)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := database.StartStep(sr.ID); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := database.InsertReviewStepRound(sr.ID, 1, "initial", &findings, nil, run.HeadSHA, 1); err != nil {
+						t.Fatal(err)
+					}
+					if err := database.ParkStepForApproval(run.ID, sr.ID, recoveredStatus, 0, 1, &findings); err != nil {
+						t.Fatal(err)
+					}
+					run, err = database.GetRun(run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				capacity := &agentSemaphore{limit: 1}
+				releaseA, err := capacity.acquire(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				slot := &gateCapacitySlot{capacity: capacity, release: releaseA, yielded: make(chan struct{}), acquiring: make(chan struct{}, 2)}
+				events := make(chan ipc.Event, 32)
+				exec := NewExecutor(database, p, nil, nil, []Step{step}, func(event ipc.Event) { events <- event })
+				exec.SetRunSlot(slot)
+				done := make(chan error, 1)
+				go func() {
+					if recoveredStatus != "" {
+						done <- exec.Resume(ctx, run, repo, workDir)
+					} else {
+						done <- exec.Execute(ctx, run, repo, workDir)
+					}
+				}()
+				defer func() { cancel(); <-done }()
+				select {
+				case <-slot.yielded:
+				case <-ctx.Done():
+					t.Fatal("A never parked")
+				}
+				releaseB, err := capacity.acquire(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { releaseB() }()
+				for len(events) > 0 {
+					<-events
+				}
+				if err := exec.Respond(types.StepReview, action, nil); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case <-slot.acquiring:
+				case <-ctx.Done():
+					t.Fatal("A never waited for capacity")
+				}
+				rows, err := database.GetStepsByRun(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(rows) != 1 {
+					t.Fatalf("steps: %d", len(rows))
+				}
+				row := rows[0]
+				if row.Status != types.StepStatusRunning || row.LastActivity == nil || *row.LastActivity != "already answered; waiting for a run slot" {
+					t.Fatalf("answered gate: status=%s activity=%v", row.Status, row.LastActivity)
+				}
+				current, err := database.GetRun(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if current.AwaitingAgentSince != nil {
+					t.Fatal("answered gate still marked parked")
+				}
+				if err := exec.Respond(types.StepReview, action, nil); err == nil || !strings.Contains(err.Error(), "already answered; waiting for a run slot") {
+					t.Fatalf("second response: %v", err)
+				}
+				select {
+				case event := <-events:
+					if event.Type != ipc.EventStepStarted || event.Status == nil || *event.Status != string(types.StepStatusRunning) {
+						t.Fatalf("resume event: %+v", event)
+					}
+				default:
+					t.Fatal("running event not published before capacity wait")
+				}
+				releaseB()
+				releaseB = func() {}
+				select {
+				case err := <-done:
+					done <- err
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-ctx.Done():
+					t.Fatal("A did not finish after capacity became available")
+				}
+			})
+		}
 	}
 }
