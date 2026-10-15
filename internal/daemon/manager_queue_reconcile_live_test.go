@@ -171,6 +171,37 @@ esac
 		t.Fatalf("second response: %v", err)
 	}
 	t.Logf("second respond refused: %v", err)
+	// R1 also covers shutdown while recovered reconciliation is retrying.
+	// Keep the external failure active across a real daemon stop and start;
+	// neither its durable acceptance nor its worktree may be consumed.
+	client.Close()
+	shutdownTestDaemonAndWaitForCleanup(t, p)
+	current, err = database.GetRun(run.ID)
+	if err != nil || current.Status != types.RunRunning || current.AwaitingAgentSince == nil {
+		t.Fatalf("shutdown lost the retrying parked run: %+v, %v", current, err)
+	}
+	persisted, err = database.GetStepResult(row.ID)
+	if err != nil || persisted.PendingResponse == nil || *persisted.PendingResponse != `{"kind":"reconcile","parked_ms":10000}` {
+		t.Fatalf("shutdown lost the retrying acceptance: %+v, %v", persisted, err)
+	}
+	if _, err := os.Stat(workDir); err != nil {
+		t.Fatalf("shutdown removed the retrying run's worktree: %v", err)
+	}
+	t.Logf("shutdown during forge retry preserved running gate and worktree; pending_response=%s", *persisted.PendingResponse)
+	runTestDaemon(t, p, database, func() []pipeline.Step { return []pipeline.Step{&steps.CIStep{}} }, 20*time.Second)
+	client, err = ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	if err := client.Call(ipc.MethodGetRun, &ipc.GetRunParams{RunID: run.ID}, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Run.Status != types.RunRunning || len(snapshot.Run.Steps) != 1 || !snapshot.Run.Steps[0].ResponsePending {
+		t.Fatalf("restart lost the retrying accepted gate: %+v", snapshot.Run)
+	}
+	wire, _ = json.MarshalIndent(snapshot, "", "  ")
+	t.Logf("get_run after restarting during transient forge failure:\n%s", wire)
 	if err := os.WriteFile(release, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -143,7 +143,7 @@ reason about in one long-lived process than inside independent hook invocations.
 
 ## Crash recovery
 
-A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) leaves a run that is fully recorded as waiting at an approval gate exactly as a crash would, so the next start resumes it at that gate. A clean stop still fails a run that is in the middle of a step.
+A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) leaves a run that is fully recorded as waiting at an approval gate exactly as a crash would, so the next start resumes it at that gate. This also preserves a recovered gate interrupted before dispatch, including during slot admission, comparison checks, or pending reconciliation retries: its parked state, any accepted response, and worktree remain available for the next restart. A clean stop still fails a run that is in the middle of executing a step.
 
 On startup, the daemon checks for interrupted `pending` or `running` runs and restores the durable queue:
 

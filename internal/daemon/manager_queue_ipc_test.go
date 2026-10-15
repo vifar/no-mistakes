@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +12,81 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+// An operator stopping the daemon while recovery waits for capacity must keep
+// both an unanswered gate and an acknowledged response across the next start.
+// The oracle is the durable gate and worktree, followed by completion without
+// asking for an accepted response again (review decision R1).
+func TestQueueRecoveredCapacityWaitSurvivesShutdownThroughIPC(t *testing.T) {
+	for _, answered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("answered=%t", answered), func(t *testing.T) {
+			seed := newFaultFixture(t, "1")
+			plans := seedRecoveredQueueGates(seed)
+			sf := func() []pipeline.Step {
+				return []pipeline.Step{&mockApprovalStep{name: types.StepReview}}
+			}
+			runTestDaemon(t, seed.p, seed.d, sf, 30*time.Second)
+			f := &schedFixture{t: t, p: seed.p, d: seed.d}
+			f.dial()
+			var waitingID, holderID string
+			for _, plan := range plans {
+				if f.info(plan.run.ID).WaitingForSlot {
+					waitingID = plan.run.ID
+				} else {
+					holderID = plan.run.ID
+				}
+			}
+			if waitingID == "" || holderID == "" {
+				t.Fatal("expected one recovered gate holding capacity and one waiting")
+			}
+			if answered {
+				f.respondApprove(waitingID)
+			}
+			before, err := seed.d.GetStepsByRun(waitingID)
+			if err != nil || len(before) != 1 {
+				t.Fatalf("waiting gate before shutdown: %v, %v", before, err)
+			}
+			f.client.Close()
+			shutdownTestDaemonAndWaitForCleanup(t, seed.p)
+			for _, plan := range plans {
+				current, err := seed.d.GetRun(plan.run.ID)
+				if err != nil || current.Status != types.RunRunning || current.AwaitingAgentSince == nil {
+					t.Fatalf("shutdown lost the parked run: %+v, %v", current, err)
+				}
+				if err := pipeline.ValidateRecoveredRun(seed.d, current, sf()); err != nil {
+					t.Fatalf("shutdown lost gate recoverability: %v", err)
+				}
+				if _, err := os.Stat(plan.workDir); err != nil {
+					t.Fatalf("shutdown removed the parked worktree: %v", err)
+				}
+			}
+			after, err := seed.d.GetStepsByRun(waitingID)
+			if err != nil || len(after) != 1 || after[0].Status != before[0].Status {
+				t.Fatalf("shutdown changed the waiting gate: %v, %v", after, err)
+			}
+			if answered {
+				if before[0].PendingResponse == nil || after[0].PendingResponse == nil || *before[0].PendingResponse != *after[0].PendingResponse {
+					t.Fatal("shutdown lost the acknowledged response")
+				}
+			} else if after[0].PendingResponse != nil {
+				t.Fatal("shutdown answered the gate without an operator response")
+			}
+			wire, _ := json.MarshalIndent(after[0], "", "  ")
+			t.Logf("durable waiting gate after shutdown; worktree still present:\n%s", wire)
+			runTestDaemon(t, seed.p, seed.d, sf, 30*time.Second)
+			f.dial()
+			wire, _ = json.MarshalIndent(f.info(waitingID), "", "  ")
+			t.Logf("get_run after restart:\n%s", wire)
+			f.respondApprove(holderID)
+			f.waitStatus(holderID, types.RunCompleted)
+			if !answered {
+				f.respondApprove(waitingID)
+			}
+			f.waitStatus(waitingID, types.RunCompleted)
+			t.Logf("after capacity freed: holder=%s, waiter=%s; slots=%+v", f.info(holderID).Status, f.info(waitingID).Status, f.slots())
+		})
+	}
+}
 
 // Race real IPC responses against the database park becoming visible. Lowering
 // the cap underneath the admitted run leaves it waiting after the response,

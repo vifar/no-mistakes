@@ -278,8 +278,7 @@ have a row of their own.
 
 The reviewer therefore never idles. It idles only in the sense the captain
 required - after it has reviewed everything it can and emitted every question -
-and in that state no process is alive at all, so there is nothing to time out
-and nothing to poll.
+and in that state no reviewer process is alive, so no agent timeout runs.
 
 Reusing the approval park costs one thing that has to be paid for: the park is
 released by a response, and there is a window in which no response can arrive.
@@ -291,9 +290,9 @@ reviewer left to read the answer. So the parked review gate re-checks the
 conversation on a timer (`pipeline.ApprovalGateResumer`) and, once nothing is
 open, resumes the reviewer itself. A live park checks immediately as it
 registers, then on the cadence of
-[`gate_reconcile_interval`](/no-mistakes/reference/global-config/); a park
-restored by daemon recovery has no immediate check, so its first re-check is
-one `gate_reconcile_interval` away.
+[`gate_reconcile_interval`](/no-mistakes/reference/global-config/). A park
+restored by daemon recovery checks immediately after it acquires a run slot,
+then follows the same timer cadence.
 
 It resumes rather than completing, which is the distinction that interface
 exists for: completing the step here would approve the run's head off the stale
@@ -310,9 +309,9 @@ checkpoints. That is not idling and not a wait: it is a file read interleaved
 with work it was doing anyway, and it is what lets an early answer redirect the
 pass before the effort is spent.
 
-While the reviewer is *parked*, nothing polls. `axi answer` appends the answer
-and, once no question is open, sends one `respond --action answer` to the
-daemon. The executor then resumes the reviewer's own session with the answers as
+While the reviewer is *parked*, no reviewer process is alive. `axi answer`
+appends the answer and, once no question is open, sends one
+`respond --action answer` to the daemon. The executor then resumes the reviewer's own session with the answers as
 its next message. From the reviewer's side an answer arrives as a message it did
 not ask for - a push - and it never learns that time passed.
 
@@ -324,14 +323,10 @@ earlier left a driving agent with neither a gate to answer nor an outcome to
 report, while the finalize turn's next park reached nobody. The daemon's answer
 result carries `closed_last` for this, because `resumed` is false for an answer
 that lands before the park registers, even though the gate's resumer releases
-that park moments later. Such a park briefly still lists the answered question,
-so a question park seen right after the answer gets one
-`gate_reconcile_timeout` to leave before it is taken for a new question. That
-grace is sized for the immediate first re-check a live park gets. A park
-restored by a daemon restart has no such check, so an answer racing that
-restart can see the grace expire and get the park it just answered back:
-reattach with `axi run` rather than answering again, which records only an
-orphan answer and releases nothing.
+that park once it can check the conversation. The
+[CLI reference](/no-mistakes/reference/cli/#no-mistakes-axi-answer) owns the
+grace period for a stale question gate, capacity waits, and how to reattach
+after an elapsed wait.
 
 A live `--input-format stream-json` stdin channel to a held-open subprocess was
 considered and rejected: a park lasts tens of minutes to hours, a daemon restart

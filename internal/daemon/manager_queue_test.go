@@ -445,18 +445,14 @@ func TestQueueParkedRunReleasesSlotAndResumedRunBeatsQueuedNewRun(t *testing.T) 
 	// The operator responds: the parked run needs a slot again and goes
 	// ahead of the queued new run, and says it is waiting for one.
 	f.respondApprove(parked)
-	deadline := time.Now().Add(30 * time.Second)
-	for {
-		info := f.info(parked)
-		if info.WaitingForSlot && info.QueuePosition == 1 && info.QueueTotal == 2 && info.Status == types.RunRunning {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("resumed run never reported waiting for a slot: %#v", info)
-		}
-		time.Sleep(10 * time.Millisecond)
+	// The acknowledgement itself promises the priority reservation (R2).
+	// Polling here would hide a reservation registered too late.
+	info := f.info(parked)
+	if !info.WaitingForSlot || info.QueuePosition != 1 || info.QueueTotal != 2 || info.Status != types.RunRunning {
+		t.Fatalf("acknowledged response did not reserve priority: %#v", info)
 	}
 	f.assertQueued(waiting, 2, 2)
+	t.Logf("immediately after response acknowledgement: resumed position=%d/%d, new run position=%d/%d; slots=%+v", info.QueuePosition, info.QueueTotal, f.info(waiting).QueuePosition, f.info(waiting).QueueTotal, f.slots())
 
 	f.step.release(blocker)
 	f.waitStarted(waiting)
@@ -464,6 +460,7 @@ func TestQueueParkedRunReleasesSlotAndResumedRunBeatsQueuedNewRun(t *testing.T) 
 	if got := f.status(parked); got != types.RunCompleted {
 		t.Fatalf("resumed run status = %s when the queued run started, want completed first", got)
 	}
+	t.Logf("after blocker released: resumed run=%s before queued new run started", f.status(parked))
 	f.step.release(waiting)
 	f.waitStatus(waiting, types.RunCompleted)
 }

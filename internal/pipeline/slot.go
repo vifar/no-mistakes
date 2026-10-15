@@ -23,6 +23,8 @@ import (
 // Slot operations are idempotent: Yield on a slot that is not held and Acquire on
 // one that is held do nothing. A nil RunSlot means no cap applies.
 type RunSlot interface {
+	// Reserve registers resume priority without waiting for capacity. Acceptance
+	// calls it before acknowledging a gate response; Acquire consumes the claim.
 	Reserve()
 	// Yield releases the slot for the duration of a wait. An implementation
 	// that is configured to hold slots through waits does nothing.
@@ -136,6 +138,8 @@ const answeredActivity = "already answered; waiting for a run slot"
 // re-applies the response (see RegisterRecoveredGate), instead of finding a
 // running step it must treat as stale. Without a slot there is
 // nothing to wait for and the step moves at once.
+// Resume priority is reserved before acceptance returns, so a queued new run
+// cannot take the next free slot while this gate's loop catches up.
 func (e *Executor) acceptApprovalGate(resp *approvalResponse) error {
 	row, err := e.db.GetStepResult(e.waitingStepResultID)
 	if err != nil {
