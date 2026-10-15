@@ -11,8 +11,14 @@ import (
 type RunStatus string
 
 const (
-	RunPending   RunStatus = "pending"
-	RunRunning   RunStatus = "running"
+	RunPending RunStatus = "pending"
+	RunRunning RunStatus = "running"
+	// RunQueued means the run is durably recorded but has not started: the
+	// daemon is at its daemon.max_concurrent_runs cap. It is non-terminal and
+	// is the branch's active run (reattach and abort target it) until a slot
+	// frees and it moves to pending/running, or it is cancelled before ever
+	// starting.
+	RunQueued    RunStatus = "queued"
 	RunCompleted RunStatus = "completed"
 	RunFailed    RunStatus = "failed"
 	RunCancelled RunStatus = "cancelled"
@@ -39,6 +45,19 @@ const (
 func (s RunStatus) Terminal() bool {
 	switch s {
 	case RunCompleted, RunFailed, RunCancelled, RunCIMonitorInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
+// Active reports whether the run still owns its branch: queued, pending or
+// running. Every "is there a run in flight for this branch" check routes
+// through it so a newly added in-flight status cannot drift out of sync with
+// Terminal. RunCIMonitorInterrupted and the terminal statuses are not active.
+func (s RunStatus) Active() bool {
+	switch s {
+	case RunQueued, RunPending, RunRunning:
 		return true
 	default:
 		return false

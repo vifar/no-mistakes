@@ -110,6 +110,8 @@ no-mistakes axi
 ```
 
 With no subcommand, shows the executable path, description, repo, current branch, daemon state, recent runs, and next-step help, including a pointer to `no-mistakes axi run --help` and the installed `/no-mistakes` skill for full driving guidance.
+When the daemon is reachable, a `slots` line reports the run-concurrency cap and usage (for example `slots: "2/3 in use, 4 queued"`; `N in use (no cap)` for an unlimited cap). The queued count includes resumed runs waiting for a slot. A `parked (slot released)` count includes live runs that yielded at a gate or during CI monitoring. `axi status` shows the same line.
+A new run waiting for a slot has `status: queued`, `queue_position: N`, and `queue_length: M`. A resumed run keeps `status: running` and adds `waiting_for_slot: true` with its position. Home and status use the daemon's live positions, including resumed waiters, when reachable. Otherwise, positions come from the database's queued new runs; live slot usage and resumed waiters are unavailable. See [`daemon`](/no-mistakes/reference/global-config/#daemon) for admission rules.
 When the current branch has an active run, that run appears as `active_run` with any approval gate and help for `axi respond` when it is parked or `axi status` when it is still running.
 If an active run object is parked at a decision gate, it includes `awaiting_agent: parked <duration>` immediately after `status`.
 That field is observability only; the `gate:` object still tells the agent which response to send.
@@ -231,6 +233,7 @@ So is a Test budget-cut gate that reports `test-agent-unvalidated-work`: approva
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
+When the daemon is at its `daemon.max_concurrent_runs` limit, the launch is recorded as a `queued` run and returns at once. Without an explicit `--wait`, `axi run` prints `queued (position N of M)` on stderr and returns success (exit 0) with the run object and `outcome: queued`; the run starts on its own when a slot frees. Passing `--wait` explicitly keeps driving through the queue, printing each position change, and never errors merely because the run is still queued. `axi abort --run <id>` cancels a queued run without ever starting it.
 `--wait` defaults to 8m so an agent harness with a 10-minute tool cap gets a structured error instead of an unbounded hang. It bounds the active-run lookup, event-subscription acknowledgement, and subsequent run driving. Elapsed wait is not a pipeline failure and does not mean the daemon is dead: run `no-mistakes axi status` and reattach with `axi run`. A timed-out `get_active_run` or `get_run` state read, before or during run driving, is retried only after a successful health probe. That probe allows up to 5 seconds for the health reply, capped by the caller's remaining deadline. Connection failures, RPC errors, an unhealthy status, or no health reply within that bound still stop the driver; genuine state-read RPC errors are not retried.
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
 When the CI step is still monitoring an open PR and checks are green - or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge. A generic empty check list without that declaration is not ready.
@@ -392,7 +395,7 @@ The run is always the current branch's active run, and there is deliberately no 
 
 This is not a gate response, and `axi respond` does not accept an answer. The answer is appended to the run's review conversation immediately, so a reviewer that is still working reads it at its next checkpoint and can redirect the rest of its pass. The output reports `open_questions` and `reviewer_resumed`: once no question is open, the daemon resumes that same reviewer session with the answers so it can finish its pass, rather than the caller approving or fixing to get past the gate.
 
-The answer that closes the last open question sets the run moving again, so it then behaves exactly like `axi respond` after its response: it blocks until the next `gate:`, `checks-passed`, or final `outcome:`, bounded by `--wait`, and returns that document led by the answer's own fields. That holds whether the reviewer was already parked (`reviewer_resumed: true`) or still finishing its turn, in which case the gate resumes the reviewer itself as soon as it parks. A review gate that still carries questions right after the answer is given one [`gate_reconcile_timeout`](/no-mistakes/reference/global-config/) to leave, because a park registered just after the answer landed briefly still lists the question it closed until the daemon releases it; one still there after that asks something new and is returned. Two cases end that grace differently: a park restored by a daemon restart is not re-checked until one [`gate_reconcile_interval`](/no-mistakes/reference/global-config/) has passed, so the grace can expire before it is released and the park you just answered comes back; and a `--wait` at or below the grace elapses before the grace does, so even a genuine new question is reported as an elapsed wait rather than a `gate:`. If it returns another `gate:`, answer that gate. An answer that leaves questions open, or closes none, returns at once. An elapsed wait, and a park that came back already answered, both reattach with `axi run`, never by answering again.
+The answer that closes the last open question sets the run moving again, so it then behaves exactly like `axi respond` after its response: it blocks until the next `gate:`, `checks-passed`, or final `outcome:`, bounded by `--wait`, and returns that document led by the answer's own fields. That holds whether the reviewer was already parked (`reviewer_resumed: true`) or still finishing its turn, in which case the gate resumes the reviewer itself as soon as it parks. A review gate that still carries questions right after the answer is given one [`gate_reconcile_timeout`](/no-mistakes/reference/global-config/) to leave, because a park registered just after the answer landed briefly still lists the question it closed until the daemon releases it. A gate still there after the grace is returned. A [recovered gate](/no-mistakes/concepts/daemon/#crash-recovery) waiting for a run slot may outlast that grace and return the question you just answered; once admitted, it re-checks immediately rather than waiting a timer interval. A `--wait` at or below the grace elapses before the grace does, so even a genuine new question is reported as an elapsed wait rather than a `gate:`. If it returns another `gate:`, answer that gate. An answer that leaves questions open, or closes none, returns at once. An elapsed wait, and a park that came back already answered, both reattach with `axi run`, never by answering again.
 
 Every answered question is recorded per branch, so a later cold reviewer receives it as settled and does not re-raise it, and the question and answer appear in the PR body's review conversation.
 
@@ -762,6 +765,8 @@ The standalone runner rows inspect default binary names; each ACP alias row (`cu
 The [Global Config Reference](/no-mistakes/reference/global-config/) owns ACP gate-validation availability and probing semantics.
 Each validation run performs the authoritative agent resolution again after applying any trusted repository-level override.
 
+When the daemon is running, `doctor` also prints one `run slots` line with the `daemon.max_concurrent_runs` cap, slots in use, queued runs, and the number of live runs that released their slot while parked, for example `2/3 in use, 4 queued, 1 parked (slot released)`.
+
 `doctor` checks `gh` and `az` availability, and that each configured [provider plugin](/no-mistakes/reference/global-config/#provider_plugins) command resolves (it does not run the plugin's handshake). [Provider Integration](/no-mistakes/guides/provider-integration/) owns the separate setup checks for GitLab, Forgejo, Bitbucket Cloud, Gitea, and the Azure DevOps extension and PAT.
 
 `tea` stays docs-only like `glab`, `forgejo-axi`, and Bitbucket's env vars, rather than an active `doctor` check like `gh`/`az`: Gitea is almost always self-hosted, so a bare "`tea` not found" row would be a near-universal, low-value warning for the vast majority of users who have no Gitea instance at all.
@@ -819,6 +824,19 @@ validation-step containment.
 
 This does not remove the managed service. A later `no-mistakes`, `no-mistakes daemon start`, `init`, `attach`, `rerun`, or `update` can start the daemon again through the same service manager when available, or as a detached daemon otherwise.
 On macOS, the retained LaunchAgent starts the daemon again at the next login; the stop output names its plist and points to `daemon uninstall`.
+
+## no-mistakes daemon set max-concurrent-runs
+
+Change how many pipeline runs execute at once, without restarting the daemon.
+
+```sh
+no-mistakes daemon set max-concurrent-runs 5
+no-mistakes daemon set max-concurrent-runs 0   # unlimited
+```
+
+Writes `daemon.max_concurrent_runs` into the global config (only that value line changes; comments and other settings are preserved, and the block is created when absent), then asks the running daemon to apply it immediately and prints the resulting slot usage. A value that is not a whole number of 0 or more is rejected before anything is written. With the daemon stopped, the value is only written and applies at the next start.
+
+The global [`daemon` configuration](/no-mistakes/reference/global-config/#daemon) owns hot reload, admission order, and the effects of raising or lowering a cap. The [validation-step containment rule](/no-mistakes/concepts/daemon/#starting-and-stopping) also applies to `daemon set`, before any config write.
 
 ## no-mistakes daemon uninstall
 

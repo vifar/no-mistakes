@@ -279,6 +279,13 @@ func (s *mockPanicStep) Execute(_ *pipeline.StepContext) (*pipeline.StepOutcome,
 // startTestDaemonWithSteps starts a daemon with a custom step factory.
 func startTestDaemonWithSteps(t *testing.T, sf StepFactory) (*paths.Paths, *db.DB) {
 	t.Helper()
+	return startTestDaemonWithStepsConfig(t, sf, "")
+}
+
+// startTestDaemonWithStepsConfig is startTestDaemonWithSteps with extra global
+// config YAML appended (for example a daemon: scheduling block).
+func startTestDaemonWithStepsConfig(t *testing.T, sf StepFactory, extraConfig string) (*paths.Paths, *db.DB) {
+	t.Helper()
 
 	tmpDir, err := os.MkdirTemp("", "dtest")
 	if err != nil {
@@ -293,7 +300,7 @@ func startTestDaemonWithSteps(t *testing.T, sf StepFactory) (*paths.Paths, *db.D
 
 	// Keep daemon tests hermetic now that the default config auto-detects agents.
 	mockClaude := writeMockClaude(t, t.TempDir())
-	configYAML := "agent: claude\nagent_path_override:\n  claude: " + mockClaude + "\n"
+	configYAML := "agent: claude\nagent_path_override:\n  claude: " + mockClaude + "\n" + extraConfig
 	if err := os.WriteFile(p.ConfigFile(), []byte(configYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -305,9 +312,9 @@ func startTestDaemonWithSteps(t *testing.T, sf StepFactory) (*paths.Paths, *db.D
 	t.Cleanup(func() { d.Close() })
 
 	// A run reaches its terminal DB state before its goroutine finishes git
-	// worktree cleanup. On process-spawn-bound Windows that cleanup can take
-	// longer than three seconds, so give graceful shutdown its own budget.
-	runTestDaemon(t, p, d, sf, 15*time.Second)
+	// worktree cleanup. Process-spawn-bound or heavily loaded hosts can need
+	// more than fifteen seconds, so give graceful shutdown its own budget.
+	runTestDaemon(t, p, d, sf, 45*time.Second)
 	return p, d
 }
 
@@ -341,6 +348,11 @@ func setupTestGitRepo(t *testing.T, p *paths.Paths, d *db.DB, repoID string) (*d
 	// Create bare repo at the expected gate path.
 	bareDir := p.RepoDir(repoID)
 	gitCmd(t, "", "init", "--bare", bareDir)
+	// Match managed gates: concurrent run setup must write identity into
+	// each worktree's config instead of racing on the bare's config.lock.
+	if err := git.IsolateHooksPath(ctx, bareDir); err != nil {
+		t.Fatal(err)
+	}
 
 	// Push from work to bare so it has refs.
 	gitCmd(t, workDir, "remote", "add", "gate", bareDir)

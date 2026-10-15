@@ -88,6 +88,7 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 		fields = append(fields, toon.Field{Key: "current_branch", Value: branch})
 	}
 	fields = append(fields, runObjectFieldWithKey(runKey, rv))
+	fields = append(fields, slotsFields(env.p)...)
 	if syncField := cachedBranchSyncField(cmd, run.ID); syncField != nil {
 		fields = append(fields, *syncField)
 	}
@@ -128,6 +129,7 @@ func emitNoRunForCaller(cmd *cobra.Command, env *axiEnv, branch string, runs []*
 		branchDisplay = "unknown"
 	}
 	fields := []toon.Field{{Key: "current_branch", Value: branchDisplay}}
+	fields = append(fields, slotsFields(env.p)...)
 	if branch != "" {
 		fields = append(fields, toon.Field{Key: "runs_on_current_branch", Value: 0})
 	}
@@ -150,6 +152,9 @@ func emitNoRunForCaller(cmd *cobra.Command, env *axiEnv, branch string, runs []*
 func annotateRunView(env *axiEnv, rv *runView) {
 	if env == nil || rv == nil {
 		return
+	}
+	if live := fetchRunScheduling(env.p, rv.ID); live != nil {
+		rv.QueuePosition, rv.QueueTotal, rv.WaitingForSlot = live.QueuePosition, live.QueueTotal, live.WaitingForSlot
 	}
 	quietWarning := configQuietWarning(env)
 	for i := range rv.Steps {
@@ -403,6 +408,8 @@ type progressPrinter struct {
 	w         io.Writer
 	seen      map[string]string
 	runStatus string
+	// queuePosition is the last queue position printed, so only changes print.
+	queuePosition int
 }
 
 func (p *progressPrinter) update(run *ipc.RunInfo) {
@@ -412,6 +419,14 @@ func (p *progressPrinter) update(run *ipc.RunInfo) {
 	if string(run.Status) != p.runStatus {
 		p.runStatus = string(run.Status)
 		fmt.Fprintf(p.w, "run: %s\n", p.runStatus)
+	}
+	// A run waiting for an execution slot reports its place in line whenever
+	// it moves, so a long --wait through the queue is not silent.
+	if run.QueuePosition > 0 && run.QueuePosition != p.queuePosition {
+		p.queuePosition = run.QueuePosition
+		fmt.Fprintf(p.w, "  %s\n", queuedLine(run.QueuePosition, run.QueueTotal))
+	} else if run.QueuePosition == 0 {
+		p.queuePosition = 0
 	}
 	for _, s := range run.Steps {
 		name := string(s.StepName)

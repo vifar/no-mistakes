@@ -122,7 +122,6 @@ func (sctx *StepContext) RunAgentSessionBudget(parent context.Context, timeout, 
 }
 
 func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, sessionRole SessionRole, timeout, working time.Duration, cause error) (*agent.Result, error) {
-	var ag agent.Agent
 	if timeout <= 0 {
 		timeout = AgentTimeout(nil)
 		working = 0
@@ -134,13 +133,18 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 	if cause == nil {
 		cause = ErrAgentTimeout
 	}
-	if sctx != nil {
-		ag = sctx.Agent
-	}
 	stall := AgentStallTimeout(nil)
 	if sctx != nil {
 		stall = AgentStallTimeout(sctx.Config)
 	}
+	// An agent turn is the heavy work the run-concurrency cap exists to bound:
+	// a run that yielded its slot (the CI step's PR poll) takes one back
+	// before spawning the agent, and the process-wide agent cap applies.
+	ag, release, err := sctx.AcquireAgent(parent)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	activity := observeAgentActivity(&opts)
 	return invokeAgent(parent, timeout, working, stall, cause, activity, func(ctx context.Context) (*agent.Result, error) {
 		if sessionRole != "" && sctx != nil && sctx.Sessions != nil {

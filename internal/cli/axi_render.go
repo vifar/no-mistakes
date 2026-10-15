@@ -133,7 +133,13 @@ type runView struct {
 	// awaiting the driving agent, or nil when the run is not parked. It powers
 	// the top-level parked signal in the run object.
 	AwaitingAgentSince *int64
-	Steps              []stepView
+	// QueuePosition/QueueTotal place a run that is waiting for an execution
+	// slot (status queued, or a resumed run with WaitingForSlot) in the daemon's
+	// start order; both are zero when it is not waiting.
+	QueuePosition  int
+	QueueTotal     int
+	WaitingForSlot bool
+	Steps          []stepView
 	// CIOverrideReason is non-empty when a human approved past a still-failing
 	// live check (see pipeline.ApprovalOverrideVerifier). outcomeForRun uses
 	// it to keep a deliberate override from reading identically to a
@@ -165,6 +171,9 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		CIReady:               r.CIReady,
 		CIReadyNoCI:           r.CIReadyNoCI,
 		AwaitingAgentSince:    r.AwaitingAgentSince,
+		QueuePosition:         r.QueuePosition,
+		QueueTotal:            r.QueueTotal,
+		WaitingForSlot:        r.WaitingForSlot,
 		CIOverrideReason:      r.CIOverrideReason,
 		TestOverrideReason:    r.TestOverrideReason,
 		ExternalCIOwner:       r.ExternalCIOwner,
@@ -227,6 +236,11 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 		ExternalCIOwner:    r.ExternalCIOwner,
 	}
 	if database != nil {
+		if r.Status == types.RunQueued {
+			if position, total, err := database.QueuePosition(r.ID); err == nil {
+				rv.QueuePosition, rv.QueueTotal = position, total
+			}
+		}
 		if context, err := database.GetRunPRContext(r.ID); err == nil && context != nil {
 			generation := context.Generation
 			rv.ReviewGeneration = &generation
@@ -531,6 +545,18 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	// while genuinely parked (non-nil marker on a non-terminal run).
 	if rv.AwaitingAgentSince != nil && !terminalStatus(rv.Status) {
 		fields = append(fields, toon.Field{Key: "awaiting_agent", Value: formatParkedFor(*rv.AwaitingAgentSince)})
+	}
+	// A run waiting for an execution slot (daemon.max_concurrent_runs) reports
+	// its place in the start order next to its status. A queued run has not
+	// started; a resumed run keeps status running and says it waits for a slot.
+	if rv.QueuePosition > 0 && !terminalStatus(rv.Status) {
+		fields = append(fields, toon.Field{Key: "queue_position", Value: rv.QueuePosition})
+		if rv.QueueTotal > 0 {
+			fields = append(fields, toon.Field{Key: "queue_length", Value: rv.QueueTotal})
+		}
+		if rv.WaitingForSlot {
+			fields = append(fields, toon.Field{Key: "waiting_for_slot", Value: true})
+		}
 	}
 	fields = append(fields, toon.Field{Key: "head", Value: shortSHA(rv.HeadSHA)})
 	fields = append(fields, toon.Field{Key: "head_sha", Value: rv.HeadSHA})

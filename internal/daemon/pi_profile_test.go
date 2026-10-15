@@ -275,7 +275,7 @@ func TestPiProfileConfigFailuresDoNotSupersedeActiveRun(t *testing.T) {
 			}
 			m := NewRunManager(d, p, nil)
 			cancelled := false
-			m.cancels[active.ID] = func(error) { cancelled = true }
+			m.runs[active.ID] = &managedRun{run: active, state: ownershipClaimed, handle: &runHandle{cancel: func(error) { cancelled = true }}}
 			pin := &agentcfg.PiProfile{Model: "openai-codex/gpt-5.6-sol", Effort: agentcfg.EffortXHigh}
 			if _, err := m.startRun(context.Background(), repo, "feature", head, head, "test", nil, "pin", "", false, "", "", nil, pin); err == nil {
 				t.Fatal("invalid configuration accepted")
@@ -322,7 +322,7 @@ func TestPiProfileInvalidLaunchDoesNotSupersedeActiveRun(t *testing.T) {
 			}
 			m := NewRunManager(d, p, nil)
 			cancelled := false
-			m.cancels[active.ID] = func(error) { cancelled = true }
+			m.runs[active.ID] = &managedRun{run: active, state: ownershipClaimed, handle: &runHandle{cancel: func(error) { cancelled = true }}}
 			pin := &agentcfg.PiProfile{Model: "openai-codex/gpt-5.4", Effort: agentcfg.EffortHigh}
 			if _, err := m.startRun(context.Background(), repo, "feature", head, head, "test", nil, "pin", "", false, "", "", nil, pin); err == nil {
 				t.Fatal("invalid pin accepted")
@@ -366,7 +366,7 @@ func TestPiProfileTrustedRepoAgentOverrideDoesNotSupersedeActiveRun(t *testing.T
 			}
 			m := NewRunManager(d, p, nil)
 			cancelled := false
-			m.cancels[active.ID] = func(error) { cancelled = true }
+			m.runs[active.ID] = &managedRun{run: active, state: ownershipClaimed, handle: &runHandle{cancel: func(error) { cancelled = true }}}
 			pin := &agentcfg.PiProfile{Model: "openai-codex/gpt-5.4", Effort: agentcfg.EffortHigh}
 			if _, err := m.startRun(context.Background(), repo, "feature", head, head, "test", nil, "pin", "", false, "", "", nil, pin); err == nil {
 				t.Fatal("trusted-repo override accepted")

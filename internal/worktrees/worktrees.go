@@ -50,11 +50,11 @@ func New(p *paths.Paths, roots map[string]string) *Layout {
 	return l
 }
 
-// Dir resolves where a NEW run's worktree belongs. It is the only placement
-// decision this package makes from configuration, and it is made once, at run
-// creation: the resolved directory is recorded on the run (runs.worktree_dir)
-// and every later consumer reads it back through RecordedDir, so editing
-// worktree_roots while a run is in flight cannot retarget that run.
+// Dir resolves where an admitted run's new worktree belongs. It is the only
+// placement decision this package makes from configuration. The resolved
+// directory is recorded on the run (runs.worktree_dir) before worktree creation,
+// and every later consumer reads it back through RecordedDir. A queued run has
+// no placement yet; it uses the configuration current at admission.
 func (l *Layout) Dir(repoID, workingPath, runID string) string {
 	if root, ok := l.CustomRoot(workingPath); ok {
 		return filepath.Join(root, runID)
@@ -62,23 +62,21 @@ func (l *Layout) Dir(repoID, workingPath, runID string) string {
 	return l.paths.WorktreeDir(repoID, runID)
 }
 
-// RecordedDir returns the worktree directory of an EXISTING run, and needs no
-// configuration to do it.
+// RecordedDir returns a run's previously resolved worktree directory without
+// consulting configuration. It does not choose placement for a queued run;
+// that decision belongs to Dir after admission.
 //
-// recorded is the run's runs.worktree_dir: the placement resolved by Dir when
-// the run was created. Reading it back rather than re-deriving it is what makes
-// an edit to worktree_roots inert for runs that already exist - resume, step
-// diff, startup cleanup, process reaping and eject all keep addressing the
-// directory the run was actually created in, so a mid-flight edit can neither
-// strand a parked run nor point a removal at a path it never created.
+// recorded is the run's runs.worktree_dir, resolved by Dir. Reading it back
+// rather than re-deriving it keeps resume, step diff, startup cleanup, process
+// reaping and eject addressing the worktree the run actually used, so a later
+// config edit can neither strand a parked run nor retarget a removal.
 //
-// An empty value is the default placement, never a configured root. Such a row
-// was written before this column existed, and the column shipped with
-// worktree_roots itself, so a run that recorded nothing predates the setting and
-// can only have run under <NM_HOME>/worktrees. Consulting the current
-// configuration for it would send resume and cleanup to a directory that run
-// never used, and adding an entry for the checkout would be enough to strand a
-// parked run upgraded across that boundary.
+// An empty value falls back to the default placement, never a configured root.
+// For a run that created a worktree, an empty column is legacy evidence: the
+// column shipped with worktree_roots, so that worktree can only have been under
+// <NM_HOME>/worktrees. Queued runs also have an empty column, but no worktree to
+// recover. Consulting current configuration here could send resume or cleanup
+// to a directory the run never used.
 //
 // Because neither branch reads configuration, a caller that only needs to find
 // an existing run's worktree keeps working while the global config is

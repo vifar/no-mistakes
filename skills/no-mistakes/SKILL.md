@@ -283,6 +283,12 @@ Run the pipeline and decide on its findings as they come up:
      Report the missing evidence and its cause from `run.automatic_skips`,
      bound to the full `run.head_sha`. This is neither CI readiness nor a
      failing code verdict. Explicit per-run skips retain their existing behavior.
+   - `queued` - the daemon is at its concurrent-run limit, so the run is recorded
+     but has not started (`queued (position N of M)`, `run.queue_position`). It
+     starts on its own, in order, and survives a daemon restart. This is a
+     success, not a failure: do not push again or start another run. Check it with
+     `no-mistakes axi status`, wait for it with an explicit `--wait`, or cancel it
+     before it starts with `no-mistakes axi abort --run <id>`.
    - `failed` or `cancelled` - they did not; read the output and address it.
      Follow the custody guidance below before fixing whatever the output
      points at (a failing test, a lint error, a finding you skipped). Commit the

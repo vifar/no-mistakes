@@ -63,8 +63,9 @@ If the daemon executable path cannot be determined, the update aborts before rep
 `no-mistakes daemon stop`, `no-mistakes daemon uninstall`, and `no-mistakes daemon restart` apply the same guard: if pending or running pipeline runs exist, each refuses by default and lists the active runs, and each takes its own `--force` to proceed anyway.
 That `--force` override is available only to an ordinary top-level caller. A
 process descended from an active validation-step agent cannot start, stop,
-restart, uninstall, or update the daemon; recursive containment refuses the command before
-any lifecycle mutation, with no `--force` or `--yes` bypass.
+restart, uninstall, or update the daemon, or change its scheduling settings with
+`daemon set`. Recursive containment refuses the command before any lifecycle
+or config mutation, with no `--force` or `--yes` bypass.
 Every invocation of `daemon stop`, `daemon uninstall`, `daemon restart`, or `update` - forced or not - logs the caller's PID, parent PID, and parent command line to `~/.no-mistakes/logs/cli.log` so a later incident can identify which agent or process triggered it.
 
 The daemon writes an identity record to `~/.no-mistakes/daemon.pid` and listens on a Unix socket at `~/.no-mistakes/socket`. On Windows, it uses a localhost TCP listener and a protected endpoint file at the same path. CLI clients bound how long they wait for that socket to accept a connection with [`daemon_connect_timeout`](/no-mistakes/reference/global-config/#daemon_connect_timeout), so a daemon process that is alive but stuck fails the connection instead of hanging the caller; see [Troubleshooting](/no-mistakes/guides/troubleshooting/#check-for-stale-artifacts). After connecting, daemon status and readiness probes allow a separate five seconds for the health reply, so a slow but responsive daemon remains healthy. A health-reply timeout makes commands that ensure the daemon is running fail without starting a replacement; explicit `daemon start` still attempts startup after a health error.
@@ -81,9 +82,11 @@ As an independent safety layer, the daemon also refuses to bind the Unix socket 
 
 ## What it does
 
-When a push arrives via the post-receive hook:
+When a push arrives via the post-receive hook, the daemon records the run. If
+no execution slot is available, it queues the run durably without creating a
+worktree or executor. Once admitted, it:
 
-1. Creates a detached worktree at `~/.no-mistakes/worktrees/<repoID>/<runID>/`, or at `<root>/<runID>` when [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) names a directory for that repository. The placement is resolved once, at run creation, and recorded on the run, so editing the setting never retargets a run that already exists
+1. Creates a detached worktree at `~/.no-mistakes/worktrees/<repoID>/<runID>/`, or in a configured root; [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) owns placement and when it becomes fixed for a run
 2. Starts the pipeline executor in that worktree
 3. Streams events to any connected TUI clients and serves request/response state to AXI clients
 4. Cleans up the worktree when the run finishes (success or failure), subject to the retention rules below
@@ -114,16 +117,29 @@ If you push to the same branch while a run is already active, the daemon:
 
 1. Cancels the in-progress run (reason: "cancelled: superseded by new push")
 2. Waits for it to finish
-3. Starts a new run with the latest push
+3. Submits a new run with the latest push for admission
 
-Pushes to different branches run concurrently.
+Pushes to different branches share execution slots. A newer push to a branch whose run is still queued supersedes it without starting it. The control plane (`status`, `respond`, `abort`, `gate_context`, launch) never waits on a slot; aborting a parked run also needs no slot.
+
+Abort and supersede share one cancellation path that consults an in-memory ownership table, under one lock, before the database. Each live run is in exactly one state:
+
+| State | What abort or supersede does |
+| --- | --- |
+| Queued | Saves the cancellation first and removes the queue entry only on success. A database write failure returns the error and leaves the run queued in place, still abortable. |
+| Claimed (launching or executing) | Invokes the run's cancel handle immediately, with no database access before it, so a failing database cannot keep a run alive. The terminal row is then written best effort, and only if the run is still `pending` or `running`. |
+| Recovering gate (a parked gate restored after a restart) | Cancels without needing a slot. Recovered gates register their response controls and cancel handle before they wait for capacity, so an abort stops a gate that is still waiting. |
+| Finishing (the pipeline has returned; cleanup and result collection remain) | Does nothing. The outcome is decided, so an abort racing completion leaves a `completed` run completed, and a new push neither cancels nor waits for a finishing run. |
+
+An abort or supersession during launch setup remains `cancelled` with its original reason, even when the interrupted setup operation returns an error or panics. An ordinary setup failure records `failed`; neither outcome overwrites an already terminal run. Subscribers receive the saved status and reason. A queued run whose saved launch spec cannot be read fails with a `read queued run spec` error instead of starting without it. [Crash recovery](#crash-recovery) owns admission of recovered gates.
+
+The global [`daemon` configuration](/no-mistakes/reference/global-config/#daemon) owns the limits, queue ordering, slot release rules, and hot reload behavior. The [CLI reference](/no-mistakes/reference/cli/#no-mistakes-daemon-set-max-concurrent-runs) explains changing the cap with `daemon set`; [`axi` status output](/no-mistakes/reference/cli/#no-mistakes-axi) and [`doctor`](/no-mistakes/reference/cli/#no-mistakes-doctor) report usage.
 
 This is another reason the daemon exists: branch-level coordination is easier to
 reason about in one long-lived process than inside independent hook invocations.
 
 ## Crash recovery
 
-On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
+On startup, the daemon checks for interrupted `pending` or `running` runs and restores the durable queue:
 
 - Never certifies a run from a stored `merged` or `closed` observation alone; current comparison and support evidence must pass before completion
 - Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
@@ -133,9 +149,10 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Preserves a run that was actively monitoring CI for an already-created PR as `ci_monitor_interrupted` rather than failing it: the run has no final verified verdict, so a restart mid-monitor is not a code failure. That run is terminal and never resumed
 - Before failing any other stale active run, verifies its managed worktree head and pins an unpublished descendant under the run-specific recovery ref so later rerun or guarded custody recovery does not fall back to a stale gate branch
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
+- Leaves `queued` runs queued (nothing about them was running) and starts them first in, first out as capacity becomes available. Recovered runs acquire slots in recovery order ahead of queued new runs, without exceeding `daemon.max_concurrent_runs`. With `daemon.hold_slot_while_parked: true`, recovered parked runs retain admitted slots; the rest wait in priority order
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
 - Terminates processes a crashed daemon left running in worktrees no run owns any more, using the same working-directory scoping as run cleanup plus a ten-minute age floor so a run starting concurrently with startup is never mistaken for a leak
-- Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`, or whose unresolved refusal requires [retention](#what-it-does); under `~/.no-mistakes/worktrees/` that means eligible leftovers from terminal runs plus directories with no matching run record, while in a [configured worktree root](/no-mistakes/reference/global-config/#worktree_roots) only the directories run records name are ever swept or removed. A `ci_monitor_interrupted` worktree is also kept when its checked-out commit differs from the run's last pushed commit, since it may still hold an unpushed CI auto-fix commit
+- Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `queued`, `pending`, or `running`, or whose unresolved refusal requires [retention](#what-it-does); under `~/.no-mistakes/worktrees/` that means eligible leftovers from terminal runs plus directories with no matching run record, while in a [configured worktree root](/no-mistakes/reference/global-config/#worktree_roots) only the directories run records name are ever swept or removed. A `ci_monitor_interrupted` worktree is also kept when its checked-out commit differs from the run's last pushed commit, since it may still hold an unpushed CI auto-fix commit
 - Migrates gates named by authoritative repository records, plus legacy directories with the strict `<repoID>.git` shape. Before changing an unstamped candidate, it validates that the directory is a bare repository without relying on the current directory or ancestor Git discovery; unrelated and malformed directories are rejected without hook or Git mutation
 - For a validated legacy gate, installs or refreshes the no-mistakes-managed pre-receive admission and post-receive notification hooks, preserving an existing custom pre-receive hook behind the admission wrapper, then enables push-option support and reapplies per-worktree hook-path isolation
 - Records a content-versioned gate configuration stamp only after the whole migration succeeds. Normal restarts check current stamped gates from the filesystem without rerunning the mutating Git commands
@@ -165,6 +182,6 @@ The [starting and stopping](#starting-and-stopping) section owns the active-run
 guard, the top-level `--force` override, and the separate validation-step
 containment rule.
 
-1. Cancels all active runs
+1. Cancels executing and parked runs; leaves queued runs durable for the next start
 2. Waits up to 30 seconds for goroutines to finish
 3. Removes the PID file and socket

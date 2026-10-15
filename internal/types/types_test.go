@@ -12,10 +12,23 @@ func TestRunStatusTerminal(t *testing.T) {
 			t.Errorf("status %q: Terminal() = false, want true", s)
 		}
 	}
-	nonTerminal := []RunStatus{RunPending, RunRunning, RunStatus("")}
+	nonTerminal := []RunStatus{RunQueued, RunPending, RunRunning, RunStatus("")}
 	for _, s := range nonTerminal {
 		if s.Terminal() {
 			t.Errorf("status %q: Terminal() = true, want false", s)
+		}
+	}
+}
+
+func TestRunStatusActive(t *testing.T) {
+	for _, s := range []RunStatus{RunQueued, RunPending, RunRunning} {
+		if !s.Active() {
+			t.Errorf("status %q: Active() = false, want true", s)
+		}
+	}
+	for _, s := range []RunStatus{RunCompleted, RunFailed, RunCancelled, RunCIMonitorInterrupted, RunStatus("")} {
+		if s.Active() {
+			t.Errorf("status %q: Active() = true, want false", s)
 		}
 	}
 }

@@ -63,6 +63,11 @@ session_reuse: true
 worktree_roots:
   /Users/you/src/my-repo: /Users/you/work/my-repo-runs
 
+daemon:
+  max_concurrent_runs: 3
+  hold_slot_while_parked: false
+  max_concurrent_agents: 0
+
 forge_profiles:
   github-personal:
     gh_config_dir: ~/.config/gh-personal
@@ -873,8 +878,8 @@ Two more values are refused at daemon startup, because they cannot work:
 - **Inside `NM_HOME`.** It collides with no-mistakes' own state - under `worktrees` a run worktree is indistinguishable from the per-repository directories the default placement owns, and under `logs` a run's worktree *is* its log directory, so removing the worktree at run end would take the run's logs with it.
 - **Inside any checkout.** The run worktree is then an untracked directory in that checkout while the run executes, so the checkout is dirty and [branch synchronization](/no-mistakes/reference/cli/#no-mistakes-sync) refuses to move it until the run finishes. That holds whether the victim is the checkout whose own runs land there or an unrelated gated one, so the daemon refuses a root inside any repository it has registered. Registering a repository *around* an already configured root is refused by `no-mistakes init` itself, so you can still place that checkout elsewhere or repoint the entry; anything that reaches the configuration another way is caught at the next daemon start.
 
-Changing an entry affects new runs only.
-Each run records the directory it was created in, so editing, adding, or removing an entry never retargets a run that already exists - resuming it after a restart, reading its diff, cleaning it up, reaping processes left standing in it, and ejecting its repository all keep using the directory that run actually has, including after you point the checkout somewhere else.
+Placement is resolved and recorded when an admitted run creates its worktree. A queued run has no worktree yet and uses the current setting when it is admitted.
+After placement is recorded, editing, adding, or removing an entry never retargets that run - resuming it after a restart, reading its diff, cleaning it up, reaping processes left standing in it, and ejecting its repository all keep using the directory that run actually has, including after you point the checkout somewhere else.
 
 The key is matched against the checkout path recorded at `init`. After moving a checkout, re-run `no-mistakes init` from the new path and update the key; a key that matches no registered repository is reported in the daemon log at startup and otherwise does nothing.
 
@@ -898,6 +903,36 @@ A run's own worktree is already removed the instant its pipeline finishes, so th
 This reap runs after every finished run and again at daemon startup, the same cadence `test.evidence.retention` uses. Only the default `<NM_HOME>/worktrees` tree is bounded; a checkout you placed with [`worktree_roots`](#worktree_roots) is your own directory, and only the directories no-mistakes' own run records name there are ever touched, per that section's rules.
 
 Global-only, for the same reason `test.evidence`'s local storage fields are: it governs this machine's local disk, so a repository does not get to set the retention budget for a directory every repository on the machine shares.
+
+### daemon
+
+How many pipeline runs the daemon executes at once. Launches beyond the limit are queued instead of competing for the machine.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` |
+
+| Field                         | Type   | Default | Description                                                                                          |
+| ----------------------------- | ------ | ------- | ---------------------------------------------------------------------------------------------------- |
+| `daemon.max_concurrent_runs`  | `int`  | `3`     | Runs that may hold an execution slot at once. `0` means unlimited; a negative value is rejected       |
+| `daemon.hold_slot_while_parked` | `bool` | `false` | Keep the slot while a run is parked at a gate or the CI step is waiting on its PR (the old behaviour) |
+| `daemon.max_concurrent_agents`  | `int`  | `0`     | Agent invocations allowed at once across all runs. `0` means unlimited; a negative value is rejected  |
+
+Without a limit, many sessions launching at once ran every pipeline concurrently. Agents for Review, Test, and fixes, plus the project's own tests and builds, then saturated the machine, and even cheap control calls (`gate_context`, `status`) timed out, which made `axi run` fail at launch and its callers retry, adding more load.
+
+**Queueing.** A launch that cannot acquire a slot is recorded durably with status `queued` and returns immediately. Queued runs start first in, first out as slots free and count as their branch's active run. See [`axi run`](/no-mistakes/reference/cli/#no-mistakes-axi-run) for reattachment, queue output, explicit waiting, and cancellation, and [concurrent push handling](/no-mistakes/concepts/daemon/#concurrent-push-handling) for supersession.
+
+**What holds a slot.** A run holds a slot only while it executes pipeline work. A run parked at a gate (`awaiting_approval` or `fix_review`) releases its slot. When a response resumes work, the run takes a slot back ahead of every queued new run; resumed runs wait in the order they requested a slot. The CI step's PR monitoring poll also releases the slot: monitoring a PR for days no longer occupies a slot. The step takes one back only to run an agent turn (a CI fix or conflict repair), and the run takes one back before any later step runs. A run frees its slot on completion, failure, cancellation, abort, and panic. Set `hold_slot_while_parked: true` to keep the slot through parks and CI monitoring instead; it then behaves as a plain cap on live runs.
+
+**Restart.** The [daemon crash-recovery model](/no-mistakes/concepts/daemon/#crash-recovery) owns queue restoration and admission of recovered runs.
+
+**Agents.** `max_concurrent_agents` is a separate, optional cap on agent subprocess invocations across all runs. It bounds the heaviest work even when `max_concurrent_runs` is raised or unlimited; the invocation waits for a free agent slot before it starts, and its timeouts begin only then.
+
+**Changing the limits without a restart.** The daemon checks the global config file's modification time and size at scheduling decisions and every two seconds, and reloads all three settings when either changes. An unreadable or invalid config keeps the last good limits. [`no-mistakes daemon set max-concurrent-runs N`](/no-mistakes/reference/cli/#no-mistakes-daemon-set-max-concurrent-runs) applies a change immediately. Lowering a cap never kills or pauses running work; it holds back new admissions until usage is below the cap. Raising a cap admits waiting work up to the new limit.
+
+**Seeing usage.** The CLI reference owns [`axi` scheduling output](/no-mistakes/reference/cli/#no-mistakes-axi) and [`doctor` slot usage](/no-mistakes/reference/cli/#no-mistakes-doctor).
+
+Global-only: a repository's `.no-mistakes.yaml` cannot set it, because it describes this machine's capacity.
 
 ### auto_fix
 

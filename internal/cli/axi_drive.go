@@ -541,6 +541,15 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 			return emitError(cmd, 2, "selected launch has a conflicting shipping pin")
 		}
 	}
+	// A launch (or reattach) that landed behind the daemon's run-concurrency
+	// cap has not started: report its place in the queue and succeed with the
+	// run id instead of holding the caller. An explicit --wait opts back into
+	// driving, which simply waits through the queue.
+	if !cmd.Flags().Changed("wait") {
+		if queued, err := getRunInfo(driveCtx, env.p.Socket(), runID); err == nil && queued != nil && queued.Status == types.RunQueued {
+			return renderQueuedRun(cmd, queued)
+		}
+	}
 	run, ciReady, err := driveRun(driveCtx, cmd.ErrOrStderr(), env.client, env.p.Socket(), runID, autoYes)
 	if err != nil {
 		if isAxiWaitElapsed(ctx, driveCtx, err) {
@@ -549,6 +558,34 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
 	}
 	return renderDriveResult(cmd, run, ciReady)
+}
+
+// queuedLine is the one-line queue report: "queued (position N of M)".
+func queuedLine(position, total int) string {
+	if position <= 0 {
+		return "queued"
+	}
+	if total < position {
+		total = position
+	}
+	return fmt.Sprintf("queued (position %d of %d)", position, total)
+}
+
+// renderQueuedRun reports a run the daemon accepted but has not started. It is
+// a success: the run is durable and starts on its own when a slot frees.
+func renderQueuedRun(cmd *cobra.Command, run *ipc.RunInfo) error {
+	rv := runViewFromIPC(run)
+	fmt.Fprintln(cmd.ErrOrStderr(), queuedLine(rv.QueuePosition, rv.QueueTotal))
+	emitDoc(cmd,
+		runObjectField(rv),
+		toon.Field{Key: "outcome", Value: "queued"},
+		toon.Field{Key: "help", Value: []string{
+			queuedLine(rv.QueuePosition, rv.QueueTotal) + ": the daemon is at its concurrent-run limit (daemon.max_concurrent_runs); this run starts on its own when a slot frees.",
+			"Run `no-mistakes axi status` to check progress, or re-run `no-mistakes axi run --wait 8m` to wait for it.",
+			"Run `no-mistakes axi abort --run " + rv.ID + "` to cancel it before it starts.",
+		}},
+	)
+	return nil
 }
 
 func digestLaunchIntent(intent string) string {

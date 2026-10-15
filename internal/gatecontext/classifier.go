@@ -62,6 +62,9 @@ type Inspector struct {
 	DB        *db.DB
 	Paths     *paths.Paths
 	ParentPID func(int) (int, error)
+	// ActiveAgentPIDs supplies live executor ownership for daemon cancellation,
+	// whose authorization must remain available when database reads fail.
+	ActiveAgentPIDs func() []int
 }
 
 // Inspect classifies a caller without mutating repositories, runs, refs,
@@ -161,6 +164,13 @@ type activeAgentStep struct {
 }
 
 func (i Inspector) activeAgentSteps() ([]activeAgentStep, error) {
+	if i.ActiveAgentPIDs != nil {
+		var out []activeAgentStep
+		for _, pid := range i.ActiveAgentPIDs() {
+			out = append(out, activeAgentStep{agentPID: pid})
+		}
+		return out, nil
+	}
 	if i.DB == nil {
 		return nil, nil
 	}

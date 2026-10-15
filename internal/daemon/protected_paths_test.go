@@ -232,7 +232,7 @@ func TestProtectedPathRefusalSurvivesFailedTrustedRecovery(t *testing.T) {
 			assertProtectedWorktreePreserved(t, workDir, head)
 			cleanupOrphanWorktrees(database, p, nil)
 			assertProtectedWorktreePreserved(t, workDir, head)
-			if len(mgr.executors) != 0 {
+			if len(mgr.runs) != 0 {
 				t.Fatal("failed trusted config launched an executor")
 			}
 		})

@@ -56,10 +56,8 @@ func worktreeReapPolicyFor(global *config.GlobalConfig) worktreeReapPolicy {
 // converges a live daemon on the same budget without waiting for a restart.
 //
 // It reuses defaultTreeOrphanWorktrees for directory discovery and
-// eligibility (never a directory whose run is still pending/running, still
-// protected, or unpushed after a CI-monitor interruption - see
-// skipWorktreeCleanup and protectedPathCleanupReason), then applies the same
-// two-rule bound reapEvidence applies to evidence: an eligible directory
+// eligibility (see skipWorktreeCleanup and protectedPathCleanupReason), then
+// applies the same two-rule bound reapEvidence applies to evidence: a directory
 // older than the retention window is removed, and whatever survives is
 // trimmed to the run ceiling, oldest first. Unlike evidence, an eligible
 // worktree is never removed merely for being "empty" - a real checkout is

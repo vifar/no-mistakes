@@ -500,6 +500,10 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 	logStartupPhase("evidence_cleanup", evidenceStarted)
 
 	mgr.resumeRecoveredRuns(plans)
+	// Queued runs were never executing, so recovery leaves them queued. Drain
+	// them only now that the resumed runs hold their slots.
+	mgr.recoverQueuedRuns()
+	mgr.StartLimitWatcher()
 	return staleRuns
 }
 
@@ -999,13 +1003,13 @@ func removeOrphanWorktree(ctx context.Context, wt orphanWorktree) bool {
 // skipWorktreeCleanup reports whether the worktree directory for runID must
 // be left alone during startup cleanup. It is the active-run guard that
 // makes cleanup safe even if the singleton lock were ever bypassed: a
-// worktree is never removed while its run is still pending or running -
+// worktree is never removed while its run is active (RunStatus.Active) -
 // only terminal-run leftovers or directories with no matching run row at
 // all (e.g. a directory left behind after its run row was independently
-// pruned) are eligible for removal. RunManager.startRun always inserts the
-// run row before creating the worktree directory, so on a single daemon a
-// "no matching run" directory is never one whose insert simply hasn't landed
-// yet - it is safe to remove immediately.
+// pruned) are eligible for removal. RunManager.startRunWithIntentSourceLocked
+// inserts the row before admission and launchRun creates the worktree only
+// after admission, so on a single daemon a "no matching run" directory is
+// never one whose insert has not landed yet; it is safe to remove immediately.
 //
 // A run marked RunCIMonitorInterrupted (the daemon restarted while monitoring
 // CI for an already-open PR, issue #361) is terminal and would otherwise leak
@@ -1022,7 +1026,7 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 	if err != nil {
 		return true, fmt.Sprintf("failed to look up run %s: %v", runID, err)
 	}
-	if run != nil && (run.Status == types.RunPending || run.Status == types.RunRunning) {
+	if run != nil && run.Status.Active() {
 		return true, fmt.Sprintf("run %s is %s", runID, run.Status)
 	}
 	if run != nil && run.Status == types.RunCIMonitorInterrupted {
@@ -1251,7 +1255,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			if err != nil {
 				return nil, fmt.Errorf("get steps: %w", err)
 			}
-			return runToInfo(d, run, steps), nil
+			return mgr.annotateQueue(runToInfo(d, run, steps)), nil
 		})
 		if err != nil {
 			return nil, err
@@ -1289,7 +1293,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			if err != nil {
 				return nil, fmt.Errorf("get steps for run %s: %w", r.ID, err)
 			}
-			infos = append(infos, *runToInfo(d, r, steps))
+			infos = append(infos, *mgr.annotateQueue(runToInfo(d, r, steps)))
 		}
 		return &ipc.GetRunsResult{Runs: infos}, nil
 	})
@@ -1309,7 +1313,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			if err != nil {
 				return nil, fmt.Errorf("get steps for run %s: %w", r.ID, err)
 			}
-			infos = append(infos, *runToInfo(d, r, steps))
+			infos = append(infos, *mgr.annotateQueue(runToInfo(d, r, steps)))
 		}
 		return &ipc.GetRunsResult{Runs: infos}, nil
 	})
@@ -1330,7 +1334,20 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err != nil {
 			return nil, fmt.Errorf("get steps: %w", err)
 		}
-		return &ipc.GetActiveRunResult{Run: runToInfo(d, run, steps)}, nil
+		return &ipc.GetActiveRunResult{Run: mgr.annotateQueue(runToInfo(d, run, steps))}, nil
+	})
+
+	srv.Handle(ipc.MethodGetSlots, func(_ context.Context, _ json.RawMessage) (interface{}, error) {
+		usage := mgr.SlotUsage()
+		return &usage, nil
+	})
+
+	srv.Handle(ipc.MethodReloadSlots, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		usage := mgr.ReloadLimits()
+		return &usage, nil
 	})
 
 	srv.Handle(ipc.MethodGateContext, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
@@ -1568,8 +1585,15 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 	})
 
 	srv.Handle(ipc.MethodCancelRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
-		if err := refuseNested(ctx, false); err != nil {
+		result, err := (gatecontext.Inspector{Paths: mgr.paths, ActiveAgentPIDs: mgr.activeAgentPIDs}).Inspect(ctx, gatecontext.Request{
+			PeerPID:   ipc.PeerPID(ctx),
+			DaemonPID: os.Getpid(),
+		})
+		if err != nil {
 			return nil, err
+		}
+		if result.Nested {
+			return nil, fmt.Errorf("%s", gatecontext.RefusalMessage(result))
 		}
 		var p ipc.CancelRunParams
 		if err := json.Unmarshal(params, &p); err != nil {
