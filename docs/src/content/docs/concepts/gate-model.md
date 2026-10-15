@@ -56,7 +56,7 @@ That is a core design choice, not an implementation detail.
 2. The gate repo's `pre-receive` hook asks the daemon to admit the update before Git changes any gate ref. An active validation-step descendant is refused, including a direct push that bypasses the CLI.
 3. Git writes an admitted push into the local bare gate repo.
 4. The gate repo's `post-receive` hook notifies the daemon.
-5. The daemon creates a detached worktree for this run.
+5. The daemon records the run and creates its detached worktree once admitted; see [daemon scheduling](/no-mistakes/reference/global-config/#daemon) for queueing and slot rules.
 6. The nine core steps run in order: `intent -> rebase -> review -> test -> document -> lint -> push -> pr -> ci`. Repository gates, when configured, run immediately after their anchors.
 7. If a step pauses, you can attach with the TUI or use `no-mistakes axi respond` to approve, fix, or skip.
    Use `no-mistakes axi abort` only when you mean to cancel the whole run.
@@ -306,9 +306,7 @@ branch, marking the remaining steps as skipped.
 3. If blocking findings remain, any finding has `action: ask-user`, or Review has a selected finding still awaiting positive rereview verification, pause and wait for user action. The Review carry-forward rule is detailed in the [pipeline-step reference](/no-mistakes/reference/pipeline-steps/#review).
 4. `action: no-op` findings are informational only unless a Review finding was selected for fixing and remains outstanding; the user can approve, fix selected findings, skip, or cancel the run when the step pauses
 
-While the executor is paused at an approval or fix-review gate, it persists a run-level awaiting-agent timestamp that AXI renders as `awaiting_agent: parked <duration>`.
-That timestamp is observability only and does not alter approval behavior.
-When the wait ends, it atomically clears the marker and adds the elapsed wall time to the run's local parked-time total, so a crash cannot leave that time undercounted.
+The [step-status contract](/no-mistakes/reference/pipeline-steps/#step-statuses) owns the awaiting-agent signal, parked-time accounting, and the transition after an accepted gate response.
 While a step is running or fixing, the executor also records the latest meaningful step activity from log lines and native subprocess lifecycle events.
 AXI renders that activity in `active_steps`, including a quiet prefix when no activity has arrived for longer than the configured `step_quiet_warning`.
 

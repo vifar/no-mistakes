@@ -449,6 +449,7 @@ Each step progresses through these statuses:
 
 When a non-terminal run has a step in `awaiting_approval` or `fix_review`, AXI run objects also expose `awaiting_agent: parked <duration>` as a run-level observability signal.
 When a gate response resumes work, the step changes to `running`, clears the parked signal, and publishes the transition before waiting for a run slot. This applies to live gates and gates restored after a daemon restart, including `fix_review` gates. The gate is already answered while capacity is unavailable, so further responses are refused; reattach with `axi run` to follow progress. Cancellation also clears the signal. The signal does not change how gates resolve.
+Clearing the signal and adding elapsed wall time to the run's local parked-time total happen atomically. Waiting for capacity after an accepted response does not count as parked time.
 The global [`daemon` configuration](/no-mistakes/reference/global-config/#daemon) owns slot admission and priority; the [CLI reference](/no-mistakes/reference/cli/#no-mistakes-axi) owns queue and activity output.
 For the `active_steps` status fields, including active-round timing and compatibility with older runs, see [`axi status`](/no-mistakes/reference/cli/#no-mistakes-axi-status).
 If the latest activity is older than `step_quiet_warning`, AXI prefixes it with `quiet` to make possible wedges visible without changing the run state.
