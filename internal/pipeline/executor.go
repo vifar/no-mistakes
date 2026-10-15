@@ -867,9 +867,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 
 	e.mu.Lock()
-	waiting := e.waiting
-	e.mu.Unlock()
-	if waiting {
+	if e.waiting {
 		e.emitStepEventWithFindingsAndError(
 			ipc.EventStepCompleted,
 			run,
@@ -881,6 +879,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			gate.stepResult.DurationMS,
 		)
 	}
+	e.mu.Unlock()
 
 	e.yieldSlot()
 	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, true)
@@ -1895,8 +1894,8 @@ rounds:
 				e.mu.Unlock()
 				return false, "", fmt.Errorf("persist %s approval gate: %w", stepName, dbErr)
 			}
-			e.mu.Unlock()
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
+			e.mu.Unlock()
 
 			e.yieldSlot()
 			response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, effectiveFindings, true)

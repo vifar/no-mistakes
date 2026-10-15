@@ -586,3 +586,130 @@ func TestExecutorAnsweredGateWaitsAsRunning(t *testing.T) {
 		}
 	}
 }
+
+type publicationRunSlot struct {
+	blocked   atomic.Bool
+	acquiring chan struct{}
+}
+
+func (*publicationRunSlot) Yield() {}
+func (s *publicationRunSlot) Acquire(ctx context.Context) error {
+	if !s.blocked.Load() {
+		return nil
+	}
+	s.acquiring <- struct{}{}
+	<-ctx.Done()
+	return context.Cause(ctx)
+}
+
+func TestExecutorParkPublicationPrecedesAcceptedResponse(t *testing.T) {
+	for _, recovered := range []bool{false, true} {
+		for _, parkedStatus := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+			t.Run(map[bool]string{false: "live", true: "recovered"}[recovered]+"/"+string(parkedStatus), func(t *testing.T) {
+				database, p, run, repo := setupTest(t)
+				workDir := completionFixture(t, database, run)
+				findings := `{"findings":[],"summary":"review"}`
+				step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+					return &StepOutcome{NeedsApproval: true, Findings: findings}, nil
+				}}
+				if recovered {
+					if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+						t.Fatal(err)
+					}
+					sr, err := database.InsertStepResult(run.ID, types.StepReview)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := database.StartStep(sr.ID); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := database.InsertReviewStepRound(sr.ID, 1, "initial", &findings, nil, run.HeadSHA, 1); err != nil {
+						t.Fatal(err)
+					}
+					if err := database.ParkStepForApproval(run.ID, sr.ID, parkedStatus, 0, 1, &findings); err != nil {
+						t.Fatal(err)
+					}
+					run, err = database.GetRun(run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				slot := &publicationRunSlot{acquiring: make(chan struct{}, 1)}
+				publishing := make(chan struct{})
+				release := make(chan struct{})
+				var releaseOnce sync.Once
+				unblock := func() { releaseOnce.Do(func() { close(release) }) }
+				var mu sync.Mutex
+				var statuses []string
+				exec := NewExecutor(database, p, nil, nil, []Step{step}, func(event ipc.Event) {
+					if event.StepName == nil || *event.StepName != types.StepReview || event.Status == nil {
+						return
+					}
+					if event.Type == ipc.EventStepCompleted && *event.Status == string(parkedStatus) {
+						slot.blocked.Store(true)
+						close(publishing)
+						<-release
+					}
+					mu.Lock()
+					statuses = append(statuses, *event.Status)
+					mu.Unlock()
+				})
+				exec.SetRunSlot(slot)
+				done := make(chan error, 1)
+				go func() {
+					if recovered {
+						done <- exec.Resume(ctx, run, repo, workDir)
+					} else {
+						done <- exec.Execute(ctx, run, repo, workDir)
+					}
+				}()
+				defer func() { unblock(); cancel(); <-done }()
+				if !recovered && parkedStatus == types.StepStatusFixReview {
+					waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+					if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+						t.Fatal(err)
+					}
+				}
+				select {
+				case <-publishing:
+				case <-ctx.Done():
+					t.Fatal("park event never reached the subscriber")
+				}
+				attempted := make(chan struct{})
+				responseDone := make(chan error, 1)
+				go func() {
+					close(attempted)
+					responseDone <- exec.Respond(types.StepReview, types.ActionApprove, nil)
+				}()
+				<-attempted
+				select {
+				case err := <-responseDone:
+					t.Fatalf("response overtook unfinished park publication: %v", err)
+				case <-time.After(100 * time.Millisecond):
+				}
+				unblock()
+				select {
+				case err := <-responseDone:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-ctx.Done():
+					t.Fatal("response remained blocked after park publication")
+				}
+				select {
+				case <-slot.acquiring:
+				case <-ctx.Done():
+					t.Fatal("answered run never waited for capacity")
+				}
+				mu.Lock()
+				got := append([]string(nil), statuses...)
+				mu.Unlock()
+				if len(got) < 2 || got[len(got)-2] != string(parkedStatus) || got[len(got)-1] != string(types.StepStatusRunning) {
+					t.Fatalf("subscriber statuses = %v, want park followed by running", got)
+				}
+			})
+		}
+	}
+}
