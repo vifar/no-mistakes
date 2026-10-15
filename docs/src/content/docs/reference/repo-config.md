@@ -200,7 +200,7 @@ Declare that this repository intentionally has no CI.
 | Type | `bool` |
 | Default | `false` |
 
-For ordinary runs, when `true` and the forge reports **zero** checks on the PR head, the CI monitor treats that empty result as all-checks-passed and `axi run` may return `outcome: checks-passed`. The monitor log names the declaration (`no_ci: true`) so the positive evidence stays inspectable rather than silently equating every empty forge response with green. [Strict shipping](/no-mistakes/reference/cli/#strict-shipping-and-review-receipts) requires observed live checks even with this declaration; those checks may all be excluded by `ci.external_checks`.
+For ordinary runs, when `true` and the forge reports **zero** checks on the PR head, with no unmet in-scope requirement under the [check-scope rules](#cirequired_checks), the CI monitor treats that empty result as all-checks-passed and `axi run` may return `outcome: checks-passed`. The monitor log names the declaration (`no_ci: true`) so the positive evidence stays inspectable rather than silently equating every empty forge response with green. [Strict shipping](/no-mistakes/reference/cli/#strict-shipping-and-review-receipts) requires observed live checks even with this declaration; those checks may all be excluded by `ci.external_checks`.
 
 Absence of this field means CI is expected. A zero-length check result then stays not-ready for as long as the forge reports no checks - elapsed time, grace periods, workflow-file presence or absence, prior check history, and branch names are not evidence.
 
@@ -870,8 +870,8 @@ ci:
   review_bot_comments: always
 ```
 
-- **`on_failure` (default)** reads them only when the bot's own check failed. A green bot check is green, whatever comments it left. This is the behavior before the key existed.
-- **`always`** also reads them when the bot's check completed green on the current head, or has not registered on it yet once every other check is green, since the bot's threads from an earlier head can still be unresolved. Each unresolved comment becomes the same `ask-user` finding a red bot check produces, anchored to the comment's file and line, so the step parks for a decision instead of reporting `checks-passed`. A green bot with nothing unresolved is still green.
+- **`on_failure` (default)** reads them only when the bot's own in-scope check failed. A green bot check is green, whatever comments it left. This is the behavior before the key existed.
+- **`always`** also reads comments from green or absent bot checks under the conditions below, since the bot's threads from an earlier head can still be unresolved. Each unresolved comment becomes the same `ask-user` finding a red bot check produces, anchored to the comment's file and line, so the step parks for a decision instead of reporting `checks-passed`. A green bot with nothing unresolved is still green.
 
 A review bot can conclude its check `success` while leaving an unresolved comment. The comment most likely to be missed that way is the one on the pipeline's own CI repair commit, which no human has reviewed yet.
 
@@ -879,7 +879,7 @@ Where the comments come from, and how the bot is identified, is provider-specifi
 
 Under `always`:
 
-- Comments are read only once every in-scope check on the current head has completed green, the bot's included when it has an in-scope check, so a review still being posted is not raced. A bot that has not registered a check on the head yet has its comments read too, since its threads from an earlier head can still be unresolved. A registered bot whose checks are all external or informational is excluded from comment findings, including retained findings selected before the scope changed. A head with no checks at all under trusted [`no_ci: true`](#no_ci) has comments read the same way before it is reported ready. Only unresolved threads count, and the same per-gate bound applies as for a red check. A GitLab note counts only when it is resolvable, unresolved, not a system note, and authored by a registered bot, so an ordinary merge request comment is never a finding.
+- Green or absent bot checks have their comments read when the CI step handles a settled observation or verifies readiness. A pending or cancelled in-scope bot check is not treated as green, so a review still being posted is not raced. A registered bot whose checks are all external or informational is excluded from comment findings, including retained findings selected before the scope changed. A head with no checks at all under trusted [`no_ci: true`](#no_ci) has comments read the same way before it is reported ready. Only unresolved threads count, and the same per-gate bound applies as for a red check. A GitLab note counts only when it is resolvable, unresolved, not a system note, and authored by a registered bot, so an ordinary merge request comment is never a finding. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns when an observation is settled.
 - The findings never spend an `auto_fix.ci` attempt. A human decides: approve, skip, or select comments for a fix round.
 - Approving over them records the CI step as passed with an override naming the comments, never as a clean pass.
 - A comment list that cannot be read is not treated as empty: `checks-passed` is withheld, and a read that keeps failing parks for a decision.

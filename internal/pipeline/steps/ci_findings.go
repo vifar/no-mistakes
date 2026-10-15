@@ -35,8 +35,8 @@ type reviewBotCheck struct {
 }
 
 // ciIssues is one settled observation of the pull request: what the monitor
-// concluded is wrong with the head once every check finished and every
-// authorized transient rerun was spent. It is the input to the classifier
+// concluded is wrong with the head once no in-scope check is executing and
+// every authorized transient rerun was spent. It is the input to the classifier
 // that turns each issue into a finding carrying its action.
 type ciIssues struct {
 	provider scm.Provider
@@ -341,6 +341,8 @@ func reviewBotCommentsAlways(sctx *pipeline.StepContext) bool {
 // on a new head yet can still have unresolved comments from an earlier one. A
 // pending or cancelled bot check is excluded: its review may still be
 // posting, and reading comments before the check completes would race it.
+// Excluded checks still establish presence, so an out-of-scope bot cannot
+// return through the absent-check fallback.
 func greenReviewBotChecks(checks []scm.Check, excluded ...scm.Check) []reviewBotCheck {
 	var green []reviewBotCheck
 	present := map[string]bool{}

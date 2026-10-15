@@ -467,14 +467,15 @@ type RepoConfig struct {
 	// or a YAML/JSON null is falsy and preserves current loading.
 	DisableProjectSettings bool `yaml:"disable_project_settings"`
 	// NoCI declares that this repository intentionally has no CI. When true and
-	// the forge reports zero checks, the CI monitor treats that empty result as
-	// all-checks-passed. It is a readiness boundary honored ONLY from the trusted
-	// default-branch copy of .no-mistakes.yaml (see EffectiveRepoConfig): a
+	// the forge reports zero checks with no unmet in-scope requirements, the
+	// ordinary CI monitor treats that empty result as all-checks-passed. Strict
+	// shipping still requires an observed rollup. It is honored ONLY from the
+	// trusted default-branch copy of .no-mistakes.yaml (see EffectiveRepoConfig): a
 	// contributor's pushed branch must not self-declare no-CI and bypass checks.
 	// Default false - absence means CI is expected, and an unproven empty check
 	// list remains not-ready regardless of elapsed time. If checks still appear,
-	// their actual states are processed normally; the declaration never waives a
-	// registered pending or failing check. No inference from workflow files,
+	// their states are processed under CI.CheckScopePolicy; the declaration never
+	// waives an in-scope pending or failing check. No inference from workflow files,
 	// prior history, branch names, or grace-period expiry.
 	NoCI bool `yaml:"no_ci"`
 }
@@ -796,7 +797,8 @@ type CI struct {
 	// and is never sent to the fix agent. When the provider reports no
 	// required checks, or they cannot be read, every check is evaluated.
 	//
-	// "all": every check on the head, regardless of branch protection.
+	// "all": every check on the head, regardless of branch protection, subject
+	// to ExternalChecks below.
 	RequiredChecks string
 	// MustPass lists glob patterns ('*' and '?') for check contexts that are
 	// always required, whatever the target branch requires. A pattern without
@@ -926,8 +928,7 @@ type Config struct {
 	// closed if the resolved harness has no verified suppression knob.
 	DisableProjectSettings bool
 	// NoCI is the resolved, trusted-only declaration that this repository
-	// intentionally has no CI (see the RepoConfig field). When true and the
-	// forge reports zero checks, the CI monitor treats that as all-checks-passed.
+	// intentionally has no CI; see RepoConfig.NoCI for the readiness boundary.
 	NoCI bool
 	// Providers holds the resolved provider-specific settings.
 	Providers Providers

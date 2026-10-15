@@ -53,17 +53,16 @@ const (
 // Execute has the same shape as the review step's: when the executor
 // re-executes it as a fix round (sctx.Fixing), it first repairs the findings
 // selected for that round (sctx.PreviousFindings), then it monitors. Each
-// settled observation - every check finished, every authorized transient
-// rerun spent, at least one issue present - returns one finding per issue
+// settled observation - no in-scope check still executing, every authorized
+// transient rerun spent, at least one issue present - returns one finding per issue
 // carrying its action (ciObservationFindings), and the executor decides what
 // happens next: auto-fix findings enter the auto_fix.ci loop as fix rounds,
 // ask-user findings park for a decision. The step never counts or limits fix
 // rounds itself; the executor does, durably, from the round history.
 //
-// Empty check lists are never treated as green unless the resolved config
-// carries the trusted default-branch `no_ci: true` declaration (config.Config.NoCI).
-// A feature branch cannot self-declare that value. When checks exist, their
-// actual states are always processed normally - even on a declared no-CI repo.
+// Readiness uses scm.CheckScope so an entirely excluded observed rollup is
+// distinguished from an unobserved empty one. Excluded contexts must not
+// re-enter findings or repairs through retained selections or rerun state.
 type CIStep struct {
 	lastFixedChecks      string                    // encoded targets of the last published repair, so a poll that still shows them is not re-escalated
 	lastFixedCompletedAt map[string]checkFreshness // terminally failed check freshness at the observation the last repair targeted
@@ -189,15 +188,13 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 // VerifyApprovalOverride implements pipeline.ApprovalOverrideVerifier. It
 // re-polls the live checks once, synchronously, at the moment a human answers
 // ActionApprove on a CI gate raised by ciFailureOutcome, so an approval over
-// checks that are not genuinely all green can never be silently reported as a
-// plain "outcome=passed" - see the interface doc for the incident this exists
-// for. Resolution uses allChecksPassed - the same trusted all-green semantics
-// the CI step's own polling loop uses (see its allChecksPassed callsite) -
-// rather than the narrower !hasFailingChecks, because an empty check list or
-// a check still pending/cancelled/otherwise unresolved is not evidence of a
-// clean pass either; !hasFailingChecks previously treated all of those as
-// clean. Read-only: unlike Execute and ReconcileApprovalGate, it never fixes,
-// reruns, or pushes anything, and it never blocks the approval itself - it
+// checks that do not satisfy the shared scope can never be silently reported
+// as a plain "outcome=passed" - see the interface doc for the incident this exists
+// for. Resolution uses scm.ScopedChecks.Ready, as the polling loop does,
+// rather than !hasFailingChecks: pending, cancelled, missing, and otherwise
+// unresolved in-scope checks cannot prove a clean pass. Read-only: unlike
+// Execute and ReconcileApprovalGate, it never fixes, reruns, or pushes
+// anything, and it never blocks the approval itself - it
 // only decides how the resulting completion is recorded.
 func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, error) {
 	ctx := sctx.Ctx
@@ -731,7 +728,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		}
 
-		// Check CI status - wait for all checks to complete before escalating
+		// Check CI status - wait for in-scope executions before escalating
 		pr.HeadSHA = sctx.Run.HeadSHA
 		checks, err := host.GetChecks(ctx, pr)
 		if err == nil {
@@ -921,8 +918,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// evidence, so the monitor keeps waiting for the re-run.
 					sctx.Log("fix already attempted for these issues, waiting for CI re-run...")
 				} else {
-					// Every check has finished and every authorized rerun is
-					// spent: this poll is a settled observation. Each issue
+					// No in-scope check is still executing and every authorized
+					// rerun is spent: this poll is a settled observation. Each issue
 					// becomes one finding carrying its action, and the
 					// executor's shared findings machinery decides what
 					// happens next - auto-fix findings enter the auto_fix.ci
