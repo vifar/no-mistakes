@@ -543,3 +543,154 @@ func TestRecoveredGateWaitingForSlotAcceptsResponses(t *testing.T) {
 		})
 	}
 }
+
+// pauseAt installs a one-shot pause in a manager hook and returns a channel
+// that closes when a run reaches it, plus the function that lets it go on.
+func pauseAt(hook *func(string)) (reached <-chan struct{}, resume func()) {
+	r := make(chan struct{})
+	gate := make(chan struct{})
+	var once sync.Once
+	*hook = func(string) {
+		once.Do(func() {
+			close(r)
+			<-gate
+		})
+	}
+	return r, func() { close(gate) }
+}
+
+func (f *faultFixture) completeAndPause(branch string, hook *func(string)) (id string, resume func()) {
+	f.t.Helper()
+	reached, resume := pauseAt(hook)
+	id = f.push(branch)
+	f.waitStarted(id)
+	f.step.release(id)
+	select {
+	case <-reached:
+	case <-time.After(60 * time.Second):
+		f.t.Fatal("run never reached the pause")
+	}
+	f.waitFor("run to be recorded completed", func() bool { return f.status(id) == types.RunCompleted })
+	return id, resume
+}
+
+// R14: an abort that races a run's completion must never turn the completed run
+// into a cancelled one - in the window before the run is marked finishing
+// (conditional persistence) and while it is finishing (no cancellation at all).
+func TestAbortRacingCompletionKeepsCompleted(t *testing.T) {
+	for _, window := range []string{"before-finishing", "finishing"} {
+		t.Run(window, func(t *testing.T) {
+			f := newFaultFixture(t, "1")
+			hook := &f.mgr.afterExecute
+			if window == "finishing" {
+				hook = &f.mgr.whileFinishing
+			}
+			id, resume := f.completeAndPause("race", hook)
+			if err := f.mgr.HandleCancel(id); err != nil {
+				t.Fatalf("abort of a run that just completed: %v", err)
+			}
+			run, err := f.d.GetRun(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if run.Status != types.RunCompleted || (run.Error != nil && *run.Error != "") {
+				t.Fatalf("aborted-during-completion run = status %s error %v, want completed untouched", run.Status, run.Error)
+			}
+			resume()
+			f.mgr.wg.Wait()
+			if got := f.status(id); got != types.RunCompleted {
+				t.Fatalf("status after the run finished = %s, want completed", got)
+			}
+		})
+	}
+}
+
+// Supersede selects claimed and queued runs but never a finishing one: its
+// outcome stays completed and the new push does not wait for its cleanup.
+func TestSupersedeOfClaimedQueuedAndFinishingRuns(t *testing.T) {
+	t.Run("claimed", func(t *testing.T) {
+		f := newFaultFixture(t, "1")
+		old := f.push("same")
+		f.waitStarted(old)
+		replacement := f.push("same")
+		f.waitFor("old run to be superseded", func() bool { return f.status(old) == types.RunCancelled })
+		run, _ := f.d.GetRun(old)
+		if run.Error == nil || *run.Error != types.RunCancelReasonSuperseded {
+			t.Fatalf("superseded run error = %v", run.Error)
+		}
+		f.waitStarted(replacement)
+		f.step.release(replacement)
+		f.waitFor("replacement to complete", func() bool { return f.status(replacement) == types.RunCompleted })
+	})
+	t.Run("queued", func(t *testing.T) {
+		f := newFaultFixture(t, "1")
+		holder := f.push("holder")
+		f.waitStarted(holder)
+		old := f.push("same")
+		if f.status(old) != types.RunQueued {
+			t.Fatalf("run did not queue: %s", f.status(old))
+		}
+		replacement := f.push("same")
+		if got := f.status(old); got != types.RunCancelled {
+			t.Fatalf("superseded queued run status = %s, want cancelled", got)
+		}
+		if f.started(old) {
+			t.Fatal("a superseded queued run started")
+		}
+		info := &ipc.RunInfo{ID: replacement}
+		f.mgr.annotateQueue(info)
+		if info.QueuePosition != 1 || info.QueueTotal != 1 {
+			t.Fatalf("replacement queue snapshot = %+v", info)
+		}
+		f.step.release(holder)
+		f.waitStarted(replacement)
+		f.step.release(replacement)
+	})
+	t.Run("finishing", func(t *testing.T) {
+		f := newFaultFixture(t, "2")
+		old, resume := f.completeAndPause("same", &f.mgr.whileFinishing)
+		pushed := make(chan string, 1)
+		go func() { pushed <- f.push("same") }()
+		var replacement string
+		select {
+		case replacement = <-pushed:
+		case <-time.After(30 * time.Second):
+			resume()
+			t.Fatal("a new push waited for the finishing run's cleanup")
+		}
+		if got := f.status(old); got != types.RunCompleted {
+			t.Fatalf("finishing run status after a new push = %s, want completed", got)
+		}
+		f.waitStarted(replacement)
+		f.step.release(replacement)
+		resume()
+	})
+}
+
+// A recovered gate waiting for a slot is cancelled by an explicit abort without
+// ever needing capacity, and the cap is never exceeded meanwhile.
+func TestAbortOfRecoveredGateWaitingForSlot(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	plans := seedRecoveredQueueGates(f)
+	f.mgr.resumeRecoveredRuns(plans)
+	waiting := plans[1].run.ID
+	info := &ipc.RunInfo{ID: waiting}
+	f.mgr.annotateQueue(info)
+	if !info.WaitingForSlot {
+		t.Fatalf("second recovered gate is not waiting: %+v", info)
+	}
+	if err := f.mgr.HandleCancel(waiting); err != nil {
+		t.Fatalf("abort of the waiting recovered gate: %v", err)
+	}
+	f.waitFor("waiting recovered gate to be cancelled", func() bool { return f.status(waiting) == types.RunCancelled })
+	if got := f.status(plans[0].run.ID); got != types.RunRunning {
+		t.Fatalf("the admitted recovered gate status = %s, want it untouched", got)
+	}
+	if st := f.mgr.sched.stats(); st.Active != 1 || st.Queued != 0 {
+		t.Fatalf("slots after aborting the waiter = %+v, want the admitted gate only", st)
+	}
+	if err := f.mgr.HandleRespond(plans[0].run.ID, types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	f.waitFor("admitted gate to complete", func() bool { return f.status(plans[0].run.ID) == types.RunCompleted })
+}

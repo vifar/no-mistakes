@@ -121,7 +121,16 @@ If you push to the same branch while a run is already active, the daemon:
 
 Pushes to different branches share execution slots. A newer push to a branch whose run is still queued supersedes it without starting it. The control plane (`status`, `respond`, `abort`, `gate_context`, launch) never waits on a slot; aborting a parked run also needs no slot.
 
-The daemon tracks queued, claimed, and recovering-gate ownership in memory under the scheduler's lock. Aborting or superseding a queued run saves cancellation before removing its queue entry; a database write failure leaves its position intact and returns an error. A claimed run's cancel handle is invoked before any database access, and cancellation persistence is best effort with failures logged. Recovered gates register their response controls before waiting for capacity, so an abort response stops a waiting gate without taking a slot.
+Abort and supersede share one cancellation path that consults an in-memory ownership table, under one lock, before the database. Each live run is in exactly one state:
+
+| State | What abort or supersede does |
+| --- | --- |
+| Queued | Saves the cancellation first and removes the queue entry only on success. A database write failure returns the error and leaves the run queued in place, still abortable. |
+| Claimed (launching or executing) | Invokes the run's cancel handle immediately, with no database access before it, so a failing database cannot keep a run alive. The terminal row is then written best effort, and only if the run is still `pending` or `running`. |
+| Recovering gate (a parked gate restored after a restart) | Cancels without needing a slot. Recovered gates register their response controls and cancel handle before they wait for capacity, so an abort stops a gate that is still waiting. |
+| Finishing (the pipeline has returned; cleanup and result collection remain) | Does nothing. The outcome is decided, so an abort racing completion leaves a `completed` run completed, and a new push neither cancels nor waits for a finishing run. |
+
+Recovered gates never take a slot above `daemon.max_concurrent_runs`: they are admitted in arrival order ahead of new runs, within the cap. A queued run whose saved launch spec cannot be read fails with a `read queued run spec` error instead of starting without it.
 
 The global [`daemon` configuration](/no-mistakes/reference/global-config/#daemon) owns the limits, queue ordering, slot release rules, and hot reload behavior. The [CLI reference](/no-mistakes/reference/cli/#no-mistakes-daemon-set-max-concurrent-runs) explains changing the cap with `daemon set`; [`axi` status output](/no-mistakes/reference/cli/#no-mistakes-axi) and [`doctor`](/no-mistakes/reference/cli/#no-mistakes-doctor) report usage.
 

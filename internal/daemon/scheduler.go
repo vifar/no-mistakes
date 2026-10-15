@@ -94,14 +94,8 @@ func (s *slotScheduler) restoreQueue(ids []string) {
 	s.mu.Unlock()
 }
 
-// removeQueued drops a not-yet-started run from the start order. It reports
-// whether the run was still queued; false means it was already dispatched.
-func (s *slotScheduler) removeQueued(runID string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.removeQueuedLocked(runID)
-}
-
+// removeQueuedLocked drops a not-yet-started run from the start order and
+// reports whether it was queued. The caller holds the manager mutex.
 func (s *slotScheduler) removeQueuedLocked(runID string) bool {
 	for i, id := range s.queued {
 		if id == runID {

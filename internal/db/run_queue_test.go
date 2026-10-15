@@ -141,3 +141,30 @@ func TestQueuedRunPersistsAcrossReopen(t *testing.T) {
 		t.Fatalf("reopened queue = %v, want [%s %s]", ids, a.ID, b.ID)
 	}
 }
+
+func TestTerminateActiveRunNeverOverwritesATerminalRun(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
+	for _, status := range []types.RunStatus{types.RunPending, types.RunRunning} {
+		run, _ := d.InsertRun(repo.ID, "active-"+string(status), "head", "base")
+		if err := d.UpdateRunStatus(run.ID, status); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := d.TerminateActiveRun(run.ID, "cancelled: aborted by user", types.RunCancelled); err != nil || !ok {
+			t.Fatalf("terminate %s run = %v, %v; want it applied", status, ok, err)
+		}
+	}
+	for _, status := range []types.RunStatus{types.RunCompleted, types.RunFailed, types.RunCancelled, types.RunQueued} {
+		run, _ := d.InsertRun(repo.ID, "settled-"+string(status), "head", "base")
+		if err := d.UpdateRunStatus(run.ID, status); err != nil {
+			t.Fatal(err)
+		}
+		if ok, err := d.TerminateActiveRun(run.ID, "late cancellation", types.RunCancelled); err != nil || ok {
+			t.Fatalf("terminate %s run = %v, %v; want it left alone", status, ok, err)
+		}
+		got, _ := d.GetRun(run.ID)
+		if got.Status != status || got.Error != nil {
+			t.Fatalf("%s run became %s / %v", status, got.Status, got.Error)
+		}
+	}
+}

@@ -66,10 +66,14 @@ type RunManager struct {
 	// so tests can inject faults and pauses.
 	claimQueued          func(runID string) (bool, error)
 	beforeQueuedRegister func()
-	watchOnce            sync.Once
-	watchStop            chan struct{}
-	limitsMu             sync.Mutex
-	limitsCache          runLimits
+	// afterExecute and whileFinishing run when a run's Execute returns: before
+	// and after it is marked finishing.
+	afterExecute   func(runID string)
+	whileFinishing func(runID string)
+	watchOnce      sync.Once
+	watchStop      chan struct{}
+	limitsMu       sync.Mutex
+	limitsCache    runLimits
 
 	// evalCaptureMu serializes automatic eval collection. Concurrent runs
 	// finishing together would otherwise write the same per-repository object
@@ -93,11 +97,23 @@ type RunManager struct {
 type runOwnership uint8
 
 const (
+	// ownershipQueued: durable row, no executor; position lives in the scheduler.
 	ownershipQueued runOwnership = iota
+	// ownershipClaimed: a cancel handle is registered and the run is launching
+	// or executing.
 	ownershipClaimed
+	// ownershipRecoveringGate: a recovered parked gate that is registered with
+	// its executor and cancel handle before it holds (or waits for) a slot.
 	ownershipRecoveringGate
+	// ownershipFinishing: Execute/Resume has returned and the run's outcome is
+	// decided; eval collection and cleanup are still running. Abort and
+	// supersede leave it alone so they can never rewrite its terminal status.
+	ownershipFinishing
 )
 
+// managedRun is the one in-memory record of a run's ownership. RunManager.mu
+// guards the table and every state transition; abort, supersede, respond and
+// shutdown consult it before the database.
 type managedRun struct {
 	run      *db.Run
 	state    runOwnership
@@ -294,7 +310,7 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		if cause.Error() == types.RunCancelReasonAbortedByUser || cause.Error() == types.RunCancelReasonSuperseded {
 			status = types.RunCancelled
 		}
-		if err := m.db.UpdateRunErrorStatus(runID, cause.Error(), status); err != nil {
+		if _, err := m.db.TerminateActiveRun(runID, cause.Error(), status); err != nil {
 			slog.Warn("failed to persist cancelled dispatch", "run_id", runID, "error", err)
 		}
 		return
@@ -361,6 +377,23 @@ func (m *RunManager) broadcastTerminal(run *db.Run, status types.RunStatus, reas
 	m.closeSubscribers(run.ID)
 }
 
+// markFinishing records that a run's Execute/Resume has returned. Its outcome
+// is decided from here on, so cancellation no longer applies to it.
+// afterExecute and whileFinishing are test seams around the transition.
+func (m *RunManager) markFinishing(runID string) {
+	if m.afterExecute != nil {
+		m.afterExecute(runID)
+	}
+	m.mu.Lock()
+	if owned := m.runs[runID]; owned != nil {
+		owned.state = ownershipFinishing
+	}
+	m.mu.Unlock()
+	if m.whileFinishing != nil {
+		m.whileFinishing(runID)
+	}
+}
+
 // annotateQueue stamps the run's place in the start order onto a snapshot.
 func (m *RunManager) annotateQueue(info *ipc.RunInfo) *ipc.RunInfo {
 	m.sched.annotate(info)
@@ -393,6 +426,17 @@ func (m *RunManager) recoverQueuedRuns() {
 	m.sched.dispatch()
 }
 
+// cancelManagedRun is the single cancellation path for abort and supersede. It
+// consults only the ownership table first:
+//
+//   - queued: the cancellation is persisted first; only on success is the run
+//     dequeued. On error it stays queued in place and abortable.
+//   - claimed or recovering gate: the cancel handle is invoked at once, with no
+//     database access before it, so a failing database cannot keep a run alive
+//     (and a recovering gate needs no slot to be cancelled). The terminal row is
+//     then written best-effort and conditionally.
+//   - finishing: the outcome is already decided, so nothing is cancelled or
+//     rewritten.
 func (m *RunManager) cancelManagedRun(runID, reason string) error {
 	m.mu.Lock()
 	owned := m.runs[runID]
@@ -400,7 +444,8 @@ func (m *RunManager) cancelManagedRun(runID, reason string) error {
 		m.mu.Unlock()
 		return nil
 	}
-	if owned.state == ownershipQueued {
+	switch owned.state {
+	case ownershipQueued:
 		cancelled, err := m.db.CancelQueuedRun(runID, reason)
 		if err != nil {
 			m.mu.Unlock()
@@ -410,19 +455,19 @@ func (m *RunManager) cancelManagedRun(runID, reason string) error {
 			m.mu.Unlock()
 			return fmt.Errorf("queued run %s could not be cancelled", runID)
 		}
-		if owned.handle != nil {
-			owned.handle.cancel(errors.New(reason))
-		}
 		m.sched.removeQueuedLocked(runID)
 		delete(m.runs, runID)
 		m.mu.Unlock()
 		m.broadcastTerminal(owned.run, types.RunCancelled, reason)
 		return nil
+	case ownershipFinishing:
+		m.mu.Unlock()
+		return nil
 	}
 	owned.handle.cancel(errors.New(reason))
 	m.mu.Unlock()
-	if err := m.db.UpdateRunErrorStatus(runID, reason, types.RunCancelled); err != nil {
-		slog.Warn("failed to persist claimed run cancellation", "run_id", runID, "error", err)
+	if _, err := m.db.TerminateActiveRun(runID, reason, types.RunCancelled); err != nil {
+		slog.Warn("failed to persist run cancellation", "run_id", runID, "error", err)
 	}
 	return nil
 }
@@ -809,6 +854,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		m.mu.Unlock()
 		resumeErr := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
 		slot.Release()
+		m.markFinishing(plan.run.ID)
 		if err := resumeErr; err != nil {
 			if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
@@ -2082,7 +2128,7 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	defer func() {
 		if !bgOwnsSlot {
 			if cause := context.Cause(handle.runCtx); cause != nil && (cause.Error() == types.RunCancelReasonAbortedByUser || cause.Error() == types.RunCancelReasonSuperseded) {
-				if err := m.db.UpdateRunErrorStatus(run.ID, cause.Error(), types.RunCancelled); err != nil {
+				if _, err := m.db.TerminateActiveRun(run.ID, cause.Error(), types.RunCancelled); err != nil {
 					slog.Warn("failed to persist cancelled run setup", "run_id", run.ID, "error", err)
 				}
 			}
@@ -2359,8 +2405,11 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 
 		err := executor.Execute(runCtx, run, repo, wtDir)
 		// The pipeline's own work is over: free the slot before the eval
-		// collection below, which is local bookkeeping and not pipeline load.
+		// collection below, which is local bookkeeping and not pipeline load,
+		// and mark the run finishing so abort and supersede leave its decided
+		// outcome alone.
 		slot.Release()
+		m.markFinishing(run.ID)
 		if err != nil {
 			fields := telemetry.Fields{
 				"action":      "finished",
@@ -2868,7 +2917,9 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) error {
 	var ids []string
 	var toWait []chan struct{}
 	for id, owned := range m.runs {
-		if owned.run.RepoID == repoID && owned.run.Branch == branch {
+		// A finishing run's outcome is decided and its pipeline is over, so a
+		// new push neither cancels nor waits for it.
+		if owned.run.RepoID == repoID && owned.run.Branch == branch && owned.state != ownershipFinishing {
 			ids = append(ids, id)
 			if owned.handle != nil && owned.handle.done != nil {
 				toWait = append(toWait, owned.handle.done)

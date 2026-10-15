@@ -1414,6 +1414,21 @@ func (d *DB) ClaimQueuedRun(id string) (bool, error) {
 	return n == 1, err
 }
 
+// TerminateActiveRun records a terminal status for a run only while it is still
+// pending or running. A cancellation or launch failure that loses a race with
+// completion must never overwrite the completed (or already failed) run, so
+// every daemon-side write that is not the executor's own goes through this
+// conditional update. It reports whether the row changed.
+func (d *DB) TerminateActiveRun(id, errMsg string, status types.RunStatus) (bool, error) {
+	result, err := d.sql.Exec(`UPDATE runs SET error = ?, status = ?, push_active = 0, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ? AND status IN (?, ?)`,
+		errMsg, status, now(), id, types.RunPending, types.RunRunning)
+	if err != nil {
+		return false, fmt.Errorf("terminate active run: %w", err)
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
+}
+
 // CancelQueuedRun terminalizes a run that never started. It reports false when
 // the run is not queued any more, so a start that won the race is left alone.
 func (d *DB) CancelQueuedRun(id, reason string) (bool, error) {

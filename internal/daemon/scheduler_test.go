@@ -53,6 +53,13 @@ func (h *schedHarness) startedIDs() []string {
 	return append([]string(nil), h.started...)
 }
 
+// removeQueued mirrors what the manager does under its mutex.
+func (h *schedHarness) removeQueued(id string) bool {
+	h.slotScheduler.mu.Lock()
+	defer h.slotScheduler.mu.Unlock()
+	return h.removeQueuedLocked(id)
+}
+
 func (h *schedHarness) slot(id string) *runSlot {
 	h.mu.Lock()
 	defer h.mu.Unlock()
