@@ -376,7 +376,7 @@ func TestCIStep_VerifyApprovalOverride_GreenReviewBotComments(t *testing.T) {
 			env := append(fakeCIGH(t, "OPEN", greenGreptileChecksJSON), greenGreptileCommentJSON)
 			sctx, _, _, _, _ := newGreenReviewBotContext(t, tc.policy, env)
 			// A gate is raised by Execute, which records the scope it evaluated.
-			if err := recordCIChecksScope(sctx); err != nil {
+			if err := recordCIChecksScope(sctx, nil); err != nil {
 				t.Fatal(err)
 			}
 

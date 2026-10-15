@@ -80,7 +80,7 @@ type CIStep struct {
 	baseBranchTip func(context.Context) (string, bool)
 	// recordCheckScope persists the scope this execution evaluates under.
 	// Overridable for testing; defaults to recordCIChecksScope.
-	recordCheckScope func(*pipeline.StepContext) error
+	recordCheckScope func(*pipeline.StepContext, *scm.CheckScope) error
 }
 
 // SetPollIntervalOverride is a test hook; production leaves the override unset.
@@ -544,9 +544,26 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	if record == nil {
 		record = recordCIChecksScope
 	}
-	if err := record(sctx); err != nil {
+	if err := record(sctx, checkScope); err != nil {
 		clearCIMonitorReady(sctx)
 		return nil, err
+	}
+	// Re-record once the scope resolves its required set, before anything
+	// classified under it can raise a gate.
+	resolutionRecorded := false
+	recordResolution := func() error {
+		if resolutionRecorded {
+			return nil
+		}
+		if _, ok := checkScope.Resolution(); !ok {
+			return nil
+		}
+		if err := record(sctx, checkScope); err != nil {
+			clearCIMonitorReady(sctx)
+			return err
+		}
+		resolutionRecorded = true
+		return nil
 	}
 	if repairRequested {
 		pr.HeadSHA = sctx.Run.HeadSHA
@@ -558,6 +575,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			return nil, err
 		}
 		if err := scopeRetainedCIFindings(sctx, checkScope, pr, checks); err != nil {
+			return nil, err
+		}
+		if err := recordResolution(); err != nil {
 			return nil, err
 		}
 		repairOutcome, err := s.repairFromFindings(sctx, host, pr)
@@ -700,7 +720,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// Re-record the scope this poll classifies under, and stop
 					// if it cannot be: nothing may be classified or repaired
 					// under a scope the approval and receipt paths do not see.
-					if err := record(sctx); err != nil {
+					resolutionRecorded = false
+					if err := record(sctx, checkScope); err != nil {
 						return nil, err
 					}
 				}
@@ -849,7 +870,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			// Scope repair work before classifying failures. Informational and
 			// external checks are logged separately; ScopedChecks.Settled and
 			// reviewBotPresenceMarkers preserve the review-bot comment policy.
+			rollupObserved := len(checks) > 0
 			scoped := checkScope.Apply(ctx, pr, checks)
+			if err := recordResolution(); err != nil {
+				return nil, err
+			}
 			checks = scoped.Relevant
 			excludedChecks := append(scoped.External, scoped.Informational...)
 			if err := s.scopeRetainedCIReruns(sctx, checkScope, pr, checks, excludedChecks); err != nil {
@@ -1042,7 +1067,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// Applies even when no_ci is declared: unresolved in-scope
 					// checks are never waived.
 					lastMonitorLog = logCIMonitorStatus(sctx, ciWaitingMessage(checks), lastMonitorLog)
-				case len(checks) == 0 && !scoped.Ready() && (sctx.Config == nil || !sctx.Config.NoCI || sctx.Run.Shipping != nil):
+				case len(checks) == 0 && (!scoped.Ready() && (sctx.Config == nil || !sctx.Config.NoCI || sctx.Run.Shipping != nil) ||
+					// Strict shipping needs an observed rollup even when the
+					// target requires only the pipeline's own status.
+					!rollupObserved && sctx.Run.Shipping != nil):
 					clearCIMonitorReady(sctx)
 					lastMonitorLog = ""
 					sctx.Log("no CI checks reported yet, waiting for checks to register...")

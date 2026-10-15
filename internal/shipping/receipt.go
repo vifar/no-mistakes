@@ -182,7 +182,7 @@ func Export(ctx context.Context, database *db.DB, repo *db.Repo, runID, phase st
 		}
 		scope := scm.NewCheckScope(host, policy, first.TargetBranch, nil)
 		scoped := scope.Apply(ctx, pr, checks)
-		if len(scoped.Relevant) == 0 && !scoped.Ready() {
+		if len(checks) == 0 || len(scoped.Relevant) == 0 && !scoped.Ready() {
 			return nil, fmt.Errorf("strict readiness requires live checks")
 		}
 		if !scoped.Ready() {

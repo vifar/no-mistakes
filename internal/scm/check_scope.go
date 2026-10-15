@@ -32,12 +32,12 @@ var ErrRequiredChecksUnavailable = errors.New("required status checks are not av
 // (including a legacy commit status, which has no application) does not
 // satisfy it. Zero means any producer, except for SelfStatus below.
 type RequiredCheck struct {
-	Context string
-	AppID   int64
+	Context string `json:"context"`
+	AppID   int64  `json:"app_id,omitempty"`
 	// SelfStatus identifies the provider's pipeline-owned status context.
 	// Same-named check runs still count; only an unbound requirement may
 	// omit a missing-check placeholder to avoid waiting on the pipeline itself.
-	SelfStatus bool
+	SelfStatus bool `json:"self_status,omitempty"`
 }
 
 func (r RequiredCheck) String() string {
@@ -78,6 +78,20 @@ type CheckScopePolicy struct {
 	// that approves the exact head), so neither waiting on nor repairing them
 	// is meaningful. It outranks MustPass and the required set.
 	ExternalChecks []string `json:"external_checks,omitempty"`
+	// Resolved, when set, is the required set a scope already resolved under
+	// this policy. A scope built from it does not read the provider again, so
+	// a recorded gate is judged by the scope that raised it even when a later
+	// read would resolve differently (for example after a transient failure
+	// that made the monitor fall back to every check).
+	Resolved *CheckScopeResolution `json:"resolved,omitempty"`
+}
+
+// CheckScopeResolution is the outcome of resolving a policy's required set:
+// Derived is true when Required is authoritative; false means every check is
+// evaluated.
+type CheckScopeResolution struct {
+	Required []RequiredCheck `json:"required,omitempty"`
+	Derived  bool            `json:"derived,omitempty"`
 }
 
 // CheckRole is how a check participates in CI readiness.
@@ -183,7 +197,34 @@ type CheckScope struct {
 // NewCheckScope builds a scope for host and the PR's target branch. logf may
 // be nil.
 func NewCheckScope(host Host, policy CheckScopePolicy, branch string, logf func(string)) *CheckScope {
-	return &CheckScope{policy: policy, host: host, branch: strings.TrimSpace(branch), logf: logf}
+	s := &CheckScope{policy: policy, host: host, branch: strings.TrimSpace(branch), logf: logf}
+	if policy.Resolved != nil {
+		s.resolved = true
+		s.required = normalizeRequired(policy.Resolved.Required)
+		s.derived = policy.Resolved.Derived && len(s.required) > 0
+	}
+	return s
+}
+
+// Resolution returns the required set this scope resolved, and false while
+// no conclusive read has happened yet.
+func (s *CheckScope) Resolution() (CheckScopeResolution, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.resolved {
+		return CheckScopeResolution{}, false
+	}
+	return CheckScopeResolution{Required: append([]RequiredCheck(nil), s.required...), Derived: s.derived}, true
+}
+
+// Policy returns the policy this scope applies, carrying its resolved
+// required set once one is known, so a recorded copy rebuilds the same scope.
+func (s *CheckScope) Policy() CheckScopePolicy {
+	policy := s.policy
+	if resolution, ok := s.Resolution(); ok {
+		policy.Resolved = &resolution
+	}
+	return policy
 }
 
 func (s *CheckScope) log(msg string) {
@@ -277,7 +318,13 @@ func (s *CheckScope) Includes(ctx context.Context, pr *PR, check Check) bool {
 }
 
 func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck, derived bool) ScopedChecks {
-	out := ScopedChecks{emptyReady: len(checks) > 0 && (derived || s.policy.NoCI), reviewBotCommentsAlways: s.policy.ReviewBotComments == "always"}
+	// An empty observation is ready only with a known required set or trusted
+	// no_ci, and only once something was observed - except when the target
+	// requires nothing but the pipeline's own unbound status. Collection
+	// removes that status from the rollup and the run itself publishes it,
+	// so waiting for an observed check would wait on the pipeline itself.
+	observed := len(checks) > 0 || derived && selfStatusOnly(required)
+	out := ScopedChecks{emptyReady: observed && (derived || s.policy.NoCI), reviewBotCommentsAlways: s.policy.ReviewBotComments == "always"}
 	for _, c := range checks {
 		switch s.classify(c, required, derived) {
 		case CheckRoleExternal:
@@ -332,6 +379,17 @@ func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck,
 		}
 	}
 	return out
+}
+
+// selfStatusOnly reports whether required names only the pipeline's own
+// status, unbound to an application.
+func selfStatusOnly(required []RequiredCheck) bool {
+	for _, r := range required {
+		if !r.SelfStatus || r.AppID > 0 {
+			return false
+		}
+	}
+	return len(required) > 0
 }
 
 // classify reports a single check's role under an already-resolved scope.

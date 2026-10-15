@@ -532,3 +532,59 @@ func TestGetChecksSameRunRerunBlocksStalePass(t *testing.T) {
 		})
 	}
 }
+
+// A green rerun whose current job has not reached the rollup yet must not take
+// over the stale job's identity: nothing current satisfies the job's
+// requirement until the job registers.
+func TestGetChecksGreenJoblessRerunDoesNotSpeakForStaleJobs(t *testing.T) {
+	t.Parallel()
+	job := `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-10-14T09:00:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/7/job/5","checkSuite":{"app":{"slug":"github-actions","databaseId":15368},"workflowRun":{"runAttempt":2,"workflow":{"name":"CI"}}}}`
+	runs := `[{"total_count":1,"workflow_runs":[{"id":7,"workflow_id":10,"run_attempt":2,"name":"CI","event":"push","head_branch":"feature","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/7"}]}]`
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 5 --repo test/repo --json headRefOid --jq .headRefOid":                                       {stdout: "abc123\n"},
+		githubCommitChecksCommand("", "test/repo", "abc123"):                                                     {stdout: githubCommitChecksResponse("[" + job + "]")},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=abc123 -f per_page=100 --paginate --slurp": {stdout: runs},
+	}), nil, "", "test/repo")
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "5", HeadSHA: "abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 1 || !checks[0].WorkflowRun || checks[0].Bucket != scm.CheckBucketPass || len(checks[0].Supersedes) != 0 {
+		t.Fatalf("checks = %+v; want only the green workflow run, superseding nothing", checks)
+	}
+	required := []scm.RequiredCheck{{Context: "build", AppID: 15368}}
+	scope := scm.NewCheckScope(nil, scm.CheckScopePolicy{Resolved: &scm.CheckScopeResolution{Required: required, Derived: true}}, "main", nil)
+	if scoped := scope.Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks); scoped.Ready() {
+		t.Fatalf("a green jobless rerun satisfied the build requirement: %+v", scoped)
+	}
+}
+
+// One workflow run for pull_request and again for workflow_dispatch produces
+// two independent same-named jobs; collapsing one into the other would hide
+// a failure or manufacture one.
+func TestGetChecksCollapseKeepsJobsOfDifferentTriggers(t *testing.T) {
+	t.Parallel()
+	pass := `{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-10-14T10:00:00Z","completedAt":"2026-10-14T10:05:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/1/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`
+	fail := `{"__typename":"CheckRun","databaseId":6,"name":"build","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-14T11:00:00Z","completedAt":"2026-10-14T11:05:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/2/job/6","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}`
+	runs := `[{"total_count":2,"workflow_runs":[` +
+		`{"id":1,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/1"},` +
+		`{"id":2,"workflow_id":10,"name":"CI","event":"workflow_dispatch","head_branch":"feature","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/2"}]}]`
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 5 --repo test/repo --json headRefOid --jq .headRefOid":                                       {stdout: "abc123\n"},
+		githubCommitChecksCommand("", "test/repo", "abc123"):                                                     {stdout: githubCommitChecksResponse("[" + pass + "," + fail + "]")},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=abc123 -f per_page=100 --paginate --slurp": {stdout: runs},
+	}), nil, "", "test/repo")
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "5", HeadSHA: "abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	buckets := map[scm.CheckBucket]int{}
+	for _, c := range checks {
+		if c.Name == "build" {
+			buckets[c.Bucket]++
+		}
+	}
+	if buckets[scm.CheckBucketPass] != 1 || buckets[scm.CheckBucketFail] != 1 {
+		t.Fatalf("checks = %+v; want both triggers' build jobs", checks)
+	}
+}

@@ -23,7 +23,7 @@ func TestCIScopeApprovalUsesSelectedTarget(t *testing.T) {
 	sctx.Env = append(env, `FAKE_CLI_PROTECTION_JSON={"contexts":["build","deploy"]}`, `FAKE_CLI_RULES_JSON=[]`)
 	bindExistingPRMutationFixture(t, sctx, "https://github.com/test/repo/pull/42", "release")
 	// A gate is raised by Execute, which records the scope it evaluated.
-	if err := recordCIChecksScope(sctx); err != nil {
+	if err := recordCIChecksScope(sctx, nil); err != nil {
 		t.Fatal(err)
 	}
 	reason, err := (&CIStep{}).VerifyApprovalOverride(sctx)
@@ -59,7 +59,7 @@ func TestCIScopeApprovalExternalOnlyReadiness(t *testing.T) {
 			sctx, _, _, _, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsAlways, env)
 			sctx.Config.NoCI = tc.noCI
 			sctx.Config.CI.ExternalChecks = []string{"Greptile Review"}
-			if err := recordCIChecksScope(sctx); err != nil {
+			if err := recordCIChecksScope(sctx, nil); err != nil {
 				t.Fatal(err)
 			}
 			reason, err := (&CIStep{}).VerifyApprovalOverride(sctx)
@@ -495,7 +495,7 @@ func TestCIScopeUnrecordableScopeFailsTheExecutionBeforeAnyGate(t *testing.T) {
 	if err := sctx.DB.SetRunCheckScope(sctx.Run.ID, stale); err != nil {
 		t.Fatal(err)
 	}
-	step := &CIStep{recordCheckScope: func(*pipeline.StepContext) error { return errors.New("record CI check scope: disk full") }}
+	step := &CIStep{recordCheckScope: func(*pipeline.StepContext, *scm.CheckScope) error { return errors.New("record CI check scope: disk full") }}
 	outcome, err := step.Execute(sctx)
 	if err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("Execute() = %+v, %v; want the persistence error", outcome, err)
@@ -605,9 +605,11 @@ func TestCIScopeRetargetMidMonitoringReclassifiesBeforeDispatch(t *testing.T) {
 func TestCIScopeRetargetFailsWhenTheScopeCannotBeRecorded(t *testing.T) {
 	sctx, baseFile := retargetFixture(t)
 	records := 0
-	step := (&CIStep{recordCheckScope: func(*pipeline.StepContext) error {
+	// Records: the execution's policy, then the main scope's resolved
+	// required set, then the scope rebuilt for the new target.
+	step := (&CIStep{recordCheckScope: func(*pipeline.StepContext, *scm.CheckScope) error {
 		records++
-		if records > 1 {
+		if records > 2 {
 			return errors.New("injected record failure")
 		}
 		return nil
@@ -617,5 +619,49 @@ func TestCIScopeRetargetFailsWhenTheScopeCannotBeRecorded(t *testing.T) {
 	outcome, err := step.Execute(sctx)
 	if err == nil || !strings.Contains(err.Error(), "injected record failure") || outcome != nil {
 		t.Fatalf("a retarget that cannot be recorded must fail the step: %+v, %v", outcome, err)
+	}
+}
+
+// A gate raised while the required-check read failed was judged on every
+// check. Approval must judge it the same way even when the read succeeds by
+// then: a narrower live scope would reclassify the red check as informational
+// and record the approval as a clean pass.
+func TestCIScopeApprovalReusesTheResolvedScopeThatRaisedTheGate(t *testing.T) {
+	env := append(fakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"lint","state":"FAILURE","bucket":"fail"}]`),
+		`FAKE_CLI_PROTECTION_JSON=403`, `FAKE_CLI_RULES_JSON=[]`)
+	sctx, _, _, _, _ := newGreenReviewBotContext(t, config.CIReviewBotCommentsOnFailure, env)
+	step := (&CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error { return context.Canceled })
+	outcome, err := step.Execute(sctx)
+	if err != nil || outcome == nil || !outcome.NeedsApproval || !strings.Contains(outcome.Findings, `"check":"lint"`) {
+		t.Fatalf("the fallback scope did not raise the lint failure: %+v %v", outcome, err)
+	}
+	sctx.Env = append(sctx.Env, `FAKE_CLI_PROTECTION_JSON={"contexts":["build"]}`)
+	reason, err := step.VerifyApprovalOverride(sctx)
+	if err != nil || !strings.Contains(reason, "lint") {
+		t.Fatalf("approval was judged under a narrower live scope: reason=%q err=%v", reason, err)
+	}
+}
+
+// A selected finding for an app-bound job survives when the next observation
+// replaces that job with a jobless workflow-level failure that supersedes it:
+// the replacement is still the in-scope failure the finding names.
+func TestCIScopeRetainedFindingMatchesThroughSupersededIdentity(t *testing.T) {
+	policy := scm.CheckScopePolicy{Resolved: &scm.CheckScopeResolution{Required: []scm.RequiredCheck{{Context: "build", AppID: 15368}}, Derived: true}}
+	sctx := &pipeline.StepContext{Ctx: context.Background()}
+	encoded, err := types.MarshalFindingsJSON(Findings{Items: []Finding{
+		{ID: "ci-build", Category: types.FindingCategoryCICheck, Check: "build", CheckID: "job-5", Description: "CI check failing: build", Action: types.ActionAutoFix},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.PreviousFindings = encoded
+	scope := scm.NewCheckScope(nil, policy, "main", nil)
+	checks := []scm.Check{{Name: "CI", WorkflowRun: true, Bucket: scm.CheckBucketFail, ProviderID: "github-workflow-run:2",
+		Supersedes: []scm.Check{{Name: "build", Workflow: "CI", Kind: scm.CheckKindRun, App: "github-actions", AppID: 15368}}}}
+	if err := scopeRetainedCIFindings(sctx, scope, &scm.PR{}, checks); err != nil {
+		t.Fatal(err)
+	}
+	if sctx.PreviousFindings != encoded {
+		t.Fatalf("the selected build repair was dropped: %q", sctx.PreviousFindings)
 	}
 }

@@ -724,7 +724,13 @@ func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check) []scm.C
 					check.CompletedAt = time.Time{}
 				} else if !check.CompletedAt.IsZero() && !run.StartedAt.IsZero() && check.CompletedAt.Before(run.StartedAt) {
 					drop[i] = true
-					run.Supersedes = append(run.Supersedes, scm.Check{Name: check.Name, Workflow: check.Workflow, Kind: check.Kind, App: check.App, AppID: check.AppID})
+					// Only a non-green attempt speaks for the jobs it replaced. A
+					// green run whose current jobs have not reached the rollup yet
+					// proves nothing about them: their requirements stay missing
+					// until the jobs register.
+					if run.Bucket != scm.CheckBucketPass && run.Bucket != scm.CheckBucketSkip {
+						run.Supersedes = append(run.Supersedes, scm.Check{Name: check.Name, Workflow: check.Workflow, Kind: check.Kind, App: check.App, AppID: check.AppID})
+					}
 					continue
 				}
 				currentJobs = true
@@ -858,6 +864,13 @@ func (h *Host) sameCheckReplacementGroup(a, b scm.Check) bool {
 	// Missing workflow/run identities may be independent external checks, while
 	// equal run identities may be independent same-name jobs within one run.
 	// Collapsing either case could hide a failing requirement.
+	// Runs of one workflow triggered by different events or for different
+	// branches are independent results, not reruns of each other; only
+	// identities known on both sides can prove the difference.
+	if a.WorkflowEvent != "" && b.WorkflowEvent != "" && a.WorkflowEvent != b.WorkflowEvent ||
+		a.WorkflowBranch != "" && b.WorkflowBranch != "" && a.WorkflowBranch != b.WorkflowBranch {
+		return false
+	}
 	aRunID := h.actionsRunID(a.Link)
 	bRunID := h.actionsRunID(b.Link)
 	return a.WorkflowID != 0 && a.WorkflowID == b.WorkflowID &&

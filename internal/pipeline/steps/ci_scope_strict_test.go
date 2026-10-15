@@ -172,7 +172,9 @@ func TestCIStepRecordsTheScopeItEvaluatedUnder(t *testing.T) {
 	t.Parallel()
 	ci := config.CI{RequiredChecks: "auto", MustPass: []string{"lint*"}, ExternalChecks: []string{"approve"}}
 	_, _, _, _, scope := strictCIRun(t, strictChecks, `{"contexts":["build"]}`, ci)
-	want := `{"required_checks":"auto","must_pass":["lint*"],"external_checks":["approve"]}`
+	// The record carries the required set the scope resolved, so approval and
+	// the receipt rebuild exactly this scope.
+	want := `{"required_checks":"auto","must_pass":["lint*"],"external_checks":["approve"],"resolved":{"required":[{"context":"build"}],"derived":true}}`
 	if scope != want {
 		t.Fatalf("recorded scope = %s, want %s", scope, want)
 	}

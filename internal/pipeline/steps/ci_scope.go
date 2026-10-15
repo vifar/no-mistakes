@@ -49,9 +49,16 @@ func recordedCIChecksScope(sctx *pipeline.StepContext) (policy scm.CheckScopePol
 
 // recordCIChecksScope stores the policy this execution evaluates checks under,
 // so the strict ci-ready receipt, which re-reads live checks in another
-// process, applies exactly the same one.
-func recordCIChecksScope(sctx *pipeline.StepContext) error {
-	encoded, err := json.Marshal(ciCheckScopePolicy(sctx))
+// process, applies exactly the same one. Once scope has resolved its required
+// set, the record carries it too: approval verification and the receipt then
+// judge a gate by the scope that raised it rather than by a fresh read, which
+// could resolve differently after a transient failure.
+func recordCIChecksScope(sctx *pipeline.StepContext, scope *scm.CheckScope) error {
+	policy := ciCheckScopePolicy(sctx)
+	if scope != nil {
+		policy = scope.Policy()
+	}
+	encoded, err := json.Marshal(policy)
 	if err != nil {
 		return fmt.Errorf("encode CI check scope: %w", err)
 	}
@@ -64,7 +71,7 @@ func recordCIChecksScope(sctx *pipeline.StepContext) error {
 func retainedCICheckIncluded(sctx *pipeline.StepContext, scope *scm.CheckScope, pr *scm.PR, checks []scm.Check, name, id string) bool {
 	matched := false
 	for _, check := range checks {
-		if id != "" && check.ProviderID != id || id == "" && check.Name != name && check.DisplayName() != name {
+		if id != "" && check.ProviderID != id || id == "" && !checkAnswersToName(check, name) {
 			continue
 		}
 		matched = true
@@ -80,6 +87,21 @@ func retainedCICheckIncluded(sctx *pipeline.StepContext, scope *scm.CheckScope, 
 		identity.Name, identity.Workflow = job, workflow
 	}
 	return !matched && scope.Includes(sctx.Ctx, pr, identity)
+}
+
+// checkAnswersToName reports whether check is, or now stands for, the check a
+// retained finding or rerun named: a workflow-level check that superseded a
+// job carries that job's identity in Supersedes.
+func checkAnswersToName(check scm.Check, name string) bool {
+	if check.Name == name || check.DisplayName() == name {
+		return true
+	}
+	for _, identity := range check.Supersedes {
+		if checkAnswersToName(identity, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func scopeRetainedCIFindings(sctx *pipeline.StepContext, scope *scm.CheckScope, pr *scm.PR, checks []scm.Check) error {

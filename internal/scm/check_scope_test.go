@@ -594,3 +594,21 @@ func TestCheckScopeReplacementKeepsItsOwnRequirements(t *testing.T) {
 		})
 	}
 }
+
+// When the target requires only the pipeline's own unbound status, collection
+// removes that status and nothing else is observed; readiness must not wait on
+// the pipeline itself. An unknown required set still waits for checks.
+func TestCheckScopeSelfStatusOnlyRequirementIsReadyWithoutObservedChecks(t *testing.T) {
+	selfOnly := NewCheckScope(nil, CheckScopePolicy{Resolved: &CheckScopeResolution{Required: []RequiredCheck{{Context: "no-mistakes", SelfStatus: true}}, Derived: true}}, "main", nil)
+	if scoped := selfOnly.Apply(context.Background(), &PR{}, nil); !scoped.Ready() {
+		t.Fatalf("self-status-only requirement waited on an empty rollup: %+v", scoped)
+	}
+	bound := NewCheckScope(nil, CheckScopePolicy{Resolved: &CheckScopeResolution{Required: []RequiredCheck{{Context: "no-mistakes", AppID: 7, SelfStatus: true}}, Derived: true}}, "main", nil)
+	if scoped := bound.Apply(context.Background(), &PR{}, nil); scoped.Ready() {
+		t.Fatalf("an app-bound self-status requirement was waived: %+v", scoped)
+	}
+	unknown := NewCheckScope(nil, CheckScopePolicy{Resolved: &CheckScopeResolution{}}, "main", nil)
+	if scoped := unknown.Apply(context.Background(), &PR{}, nil); scoped.Ready() {
+		t.Fatalf("an unobserved rollup without a required set became ready: %+v", scoped)
+	}
+}
