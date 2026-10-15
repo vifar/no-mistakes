@@ -165,9 +165,9 @@ func unsettledNames(checks []Check) []string {
 
 // CheckScope decides which of a head's checks are relevant to CI readiness.
 // It is the single definition shared by the CI step and the strict readiness
-// receipt. The target branch's required contexts are read at most once per
-// CheckScope, so a monitor that polls repeatedly costs one extra provider
-// read, not one per poll.
+// receipt. The first conclusive required-context read is cached per CheckScope,
+// so repeated polls reuse it; an interrupted read leaves the cache unresolved
+// and can be retried.
 type CheckScope struct {
 	policy CheckScopePolicy
 	host   Host
