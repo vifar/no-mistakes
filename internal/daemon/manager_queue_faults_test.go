@@ -2,8 +2,13 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -251,4 +256,171 @@ func TestQueueShutdownRacingQueuedLaunchNeverStartsIt(t *testing.T) {
 	if st := f.mgr.sched.stats(); st.Active != 0 {
 		t.Fatalf("slots still in use after shutdown: %+v", st)
 	}
+}
+
+func TestQueueCancellationWriteFailurePreservesOwnership(t *testing.T) {
+	for _, action := range []string{"abort", "supersede", "cancelled-dispatch"} {
+		t.Run(action, func(t *testing.T) {
+			f := newFaultFixture(t, "1")
+			running := f.push("holder")
+			f.waitStarted(running)
+			first := f.push("first")
+			second := f.push("second")
+			raw, err := sql.Open("sqlite", f.p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			if _, err := raw.Exec(`CREATE TRIGGER reject_cancel BEFORE UPDATE OF status ON runs WHEN NEW.status = 'cancelled' BEGIN SELECT RAISE(FAIL, 'injected cancellation write failure'); END`); err != nil {
+				t.Fatal(err)
+			}
+			switch action {
+			case "abort":
+				err = f.mgr.HandleCancel(first)
+			case "supersede":
+				_, err = f.mgr.HandlePushReceived(context.Background(), &ipc.PushReceivedParams{Gate: f.p.RepoDir("fault-repo"), Ref: "refs/heads/first", New: f.head})
+			case "cancelled-dispatch":
+				if !f.mgr.sched.removeQueued(first) {
+					t.Fatal("run was not queued")
+				}
+				ctx, cancel := context.WithCancelCause(context.Background())
+				h := &runHandle{runCtx: ctx, cancel: cancel, done: make(chan struct{})}
+				f.mgr.mu.Lock()
+				f.mgr.cancels[first], f.mgr.dones[first] = cancel, h.done
+				f.mgr.mu.Unlock()
+				cancel(errors.New(types.RunCancelReasonAbortedByUser))
+				f.mgr.launchQueuedRun(first, &runSlot{s: f.mgr.sched, runID: first}, h)
+			}
+			if action != "cancelled-dispatch" && (err == nil || !strings.Contains(err.Error(), "injected cancellation write failure")) {
+				t.Fatalf("cancellation error = %v", err)
+			}
+			if got := f.status(first); got != types.RunQueued {
+				t.Fatalf("status = %s, want queued", got)
+			}
+			for i, id := range []string{first, second} {
+				info := &ipc.RunInfo{ID: id}
+				f.mgr.annotateQueue(info)
+				if info.QueuePosition != i+1 || info.QueueTotal != 2 {
+					t.Fatalf("queue snapshot = %+v", info)
+				}
+			}
+			if _, err := raw.Exec(`DROP TRIGGER reject_cancel`); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.mgr.HandleCancel(first); err != nil {
+				t.Fatalf("retry abort: %v", err)
+			}
+			if f.status(first) != types.RunCancelled || f.started(first) {
+				t.Fatal("retry did not cancel without starting")
+			}
+			f.step.release(running)
+			f.waitStarted(second)
+			f.step.release(second)
+		})
+	}
+}
+
+func TestQueueSpecReadFailureFailsLaunch(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	running := f.push("holder")
+	f.waitStarted(running)
+	queued := f.push("queued")
+	raw, err := sql.Open("sqlite", f.p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`ALTER TABLE runs DROP COLUMN queue_spec`); err != nil {
+		t.Fatal(err)
+	}
+	f.step.release(running)
+	f.waitFor("queue spec read to fail the launch", func() bool { return f.status(queued) == types.RunFailed })
+	run, err := f.d.GetRun(queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Error == nil || !strings.Contains(*run.Error, "read queued run spec:") {
+		t.Fatalf("launch error = %v", run.Error)
+	}
+	if f.started(queued) {
+		t.Fatal("run executed without its persisted spec")
+	}
+}
+
+func TestRecoveredParkedRunsUseBoundedPriorityAdmission(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	if err := config.SetGlobalDaemonSetting(f.p.ConfigFile(), "hold_slot_while_parked", "true"); err != nil {
+		t.Fatal(err)
+	}
+	global, err := config.LoadGlobal(f.p.ConfigFile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Merge(global, &config.RepoConfig{})
+	repo, err := f.d.GetRepo("fault-repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plans []recoveredRunPlan
+	for _, branch := range []string{"recovered-a", "recovered-b"} {
+		run, err := f.d.InsertRun(repo.ID, branch, f.head, f.head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+			t.Fatal(err)
+		}
+		workDir := f.p.WorktreeDir(repo.ID, run.ID)
+		if err := gitpkg.WorktreeAdd(context.Background(), f.p.RepoDir(repo.ID), workDir, f.head); err != nil {
+			t.Fatal(err)
+		}
+		testgit.BindRunComparison(t, f.d, run, workDir, "main", "", "", "")
+		step, err := f.d.InsertStepResult(run.ID, types.StepReview)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.d.StartStep(step.ID); err != nil {
+			t.Fatal(err)
+		}
+		findings := `{"findings":[],"summary":"needs approval"}`
+		if err := f.d.SetStepFindings(step.ID, findings); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.d.InsertReviewStepRound(step.ID, 1, "initial", &findings, nil, f.head, 1); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.d.SetRunAwaitingAgent(run.ID); err != nil {
+			t.Fatal(err)
+		}
+		run, err = f.d.GetRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plans = append(plans, recoveredRunPlan{run: run, repo: repo, workDir: workDir, gateDir: f.p.RepoDir(repo.ID), cfg: cfg, agent: recoveredRunTestAgent{}, steps: []pipeline.Step{&mockApprovalStep{name: types.StepReview}}})
+	}
+	f.mgr.resumeRecoveredRuns(plans)
+	queued := f.push("new")
+	if st := f.mgr.sched.stats(); st.Active != 1 || st.Queued != 2 {
+		t.Fatalf("recovery stats = %+v", st)
+	}
+	info := &ipc.RunInfo{ID: plans[1].run.ID}
+	f.mgr.annotateQueue(info)
+	if !info.WaitingForSlot || info.QueuePosition != 1 {
+		t.Fatalf("recovered waiter = %+v", info)
+	}
+	for i, plan := range plans {
+		f.waitFor("recovered gate to accept approval", func() bool {
+			err := f.mgr.HandleRespond(plan.run.ID, types.StepReview, types.ActionApprove, nil)
+			return err == nil
+		})
+		f.waitFor("recovered run to complete", func() bool { return f.status(plan.run.ID) == types.RunCompleted })
+		if i == 0 && f.started(queued) {
+			t.Fatal("new run started before recovered gates completed")
+		}
+	}
+	f.waitStarted(queued)
+	f.step.release(queued)
 }

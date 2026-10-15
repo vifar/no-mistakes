@@ -280,7 +280,7 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		}
 	}()
 	if handle.runCtx.Err() != nil {
-		m.abandonQueuedLaunch(runID, handle)
+		requeue = m.abandonQueuedLaunch(runID, handle) != nil
 		return
 	}
 	claimed, err := m.claimQueued(runID)
@@ -294,7 +294,7 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		case <-time.After(claimRetryDelay):
 			requeue = true
 		case <-handle.runCtx.Done():
-			m.abandonQueuedLaunch(runID, handle)
+			requeue = m.abandonQueuedLaunch(runID, handle) != nil
 		}
 		return
 	}
@@ -318,7 +318,12 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		return
 	}
 	var spec queueSpec
-	if raw, err := m.db.GetRunQueueSpec(runID); err == nil && raw != "" {
+	raw, err := m.db.GetRunQueueSpec(runID)
+	if err != nil {
+		fail(fmt.Sprintf("read queued run spec: %s", err))
+		return
+	}
+	if raw != "" {
 		if err := json.Unmarshal([]byte(raw), &spec); err != nil {
 			fail(fmt.Sprintf("decode queued run spec: %s", err))
 			return
@@ -343,18 +348,20 @@ var claimRetryDelay = time.Second
 // cancelled before it was claimed. A daemon shutdown leaves the durable row
 // queued for the next start; an abort or a superseding push ends it, since no
 // executor will ever report that.
-func (m *RunManager) abandonQueuedLaunch(runID string, handle *runHandle) {
+func (m *RunManager) abandonQueuedLaunch(runID string, handle *runHandle) error {
 	cause := context.Cause(handle.runCtx)
 	if cause == nil || m.shuttingDown.Load() {
-		return
+		return nil
 	}
 	reason := cause.Error()
 	if reason != types.RunCancelReasonAbortedByUser && reason != types.RunCancelReasonSuperseded {
-		return
+		return nil
 	}
 	if _, err := m.cancelQueuedRun(runID, reason); err != nil {
 		slog.Error("failed to cancel queued run", "run_id", runID, "error", err)
+		return err
 	}
+	return nil
 }
 
 // broadcastTerminal tells subscribers a run that never reached its executor
@@ -380,8 +387,6 @@ func (m *RunManager) annotateQueue(info *ipc.RunInfo) *ipc.RunInfo {
 
 // recoverQueuedRuns reloads the durable queue after a restart and drains it.
 // Queued runs stay queued across a restart: nothing about them was running.
-// Runs the recovery path resumed are already holding slots (beyond the cap if
-// need be) so the queue starts only as they free capacity.
 func (m *RunManager) recoverQueuedRuns() {
 	ids, err := m.db.QueuedRunIDs()
 	if err != nil {
@@ -403,6 +408,13 @@ func (m *RunManager) cancelQueuedRun(runID, reason string) (bool, error) {
 	if err != nil || !cancelled {
 		return false, err
 	}
+	m.mu.Lock()
+	cancel := m.cancels[runID]
+	m.mu.Unlock()
+	if cancel != nil {
+		cancel(errors.New(reason))
+	}
+	m.sched.removeQueued(runID)
 	if run, err := m.db.GetRun(runID); err == nil && run != nil {
 		m.broadcastTerminal(run, types.RunCancelled, reason)
 	}
@@ -728,10 +740,8 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		return
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
-	// A run resumed after a restart counts against the cap even when the cap
-	// is already full: it was executing before the restart, so it is never
-	// queued behind new work. It gives the slot back as soon as it parks.
-	slot := m.sched.forceAcquire(plan.run.ID)
+	slot := &runSlot{s: m.sched, runID: plan.run.ID}
+	waiter := m.sched.requestSlot(plan.run.ID)
 	executor := pipeline.NewExecutor(m.db, m.paths, plan.cfg, plan.agent, plan.steps, m.broadcast)
 	executor.SetRunSlot(slot)
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
@@ -786,14 +796,20 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			m.mu.Unlock()
 		}()
 
-		resumeErr := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
+		resumeErr := slot.waitForSlot(runCtx, waiter)
+		if resumeErr == nil {
+			resumeErr = executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
+		}
 		slot.Release()
 		if err := resumeErr; err != nil {
 			if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
 				plan.run.Status = types.RunFailed
+				if runCtx.Err() != nil {
+					plan.run.Status = types.RunCancelled
+				}
 				plan.run.Error = &errMsg
-				if dbErr := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, types.RunFailed); dbErr != nil {
+				if dbErr := m.db.UpdateRunErrorStatus(plan.run.ID, errMsg, plan.run.Status); dbErr != nil {
 					slog.Error("failed to mark recovered run failed", "run_id", plan.run.ID, "error", dbErr)
 				}
 			}
@@ -1897,7 +1913,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}
 	}
 	// Cancel any active run for this repo+branch.
-	m.cancelActiveRuns(repo.ID, branch)
+	if err := m.cancelActiveRuns(repo.ID, branch); err != nil {
+		return "", err
+	}
 
 	storedIntent := intent
 	if source != db.RunIntentSourceRerun && launchNonce == "" && plan == nil {
@@ -2776,17 +2794,12 @@ func (m *RunManager) Shutdown() {
 
 // HandleCancel stops an active run and propagates cancellation to the executor.
 func (m *RunManager) HandleCancel(runID string) error {
-	// A run still waiting in the queue has no executor: take it out of the
-	// start order and end it without ever starting it.
-	if m.sched.removeQueued(runID) {
-		cancelled, err := m.cancelQueuedRun(runID, types.RunCancelReasonAbortedByUser)
-		if err != nil {
-			return err
-		}
-		if cancelled {
-			return nil
-		}
-		// Lost the race to a claim: the run is starting, fall through.
+	cancelled, err := m.cancelQueuedRun(runID, types.RunCancelReasonAbortedByUser)
+	if err != nil {
+		return err
+	}
+	if cancelled {
+		return nil
 	}
 	m.mu.Lock()
 	cancel, ok := m.cancels[runID]
@@ -2805,11 +2818,11 @@ func (m *RunManager) HandleCancel(runID string) error {
 // concurrent pushes to upstream.
 // The cancellation cause is propagated to the executor via context.Cause,
 // which uses it as the run's error message in the DB.
-func (m *RunManager) cancelActiveRuns(repoID, branch string) {
+func (m *RunManager) cancelActiveRuns(repoID, branch string) error {
 	runs, err := m.db.GetRunsByRepo(repoID)
 	if err != nil {
 		slog.Error("failed to query active runs for cancellation", "repo", repoID, "branch", branch, "error", err)
-		return
+		return err
 	}
 
 	var toWait []chan struct{}
@@ -2820,12 +2833,13 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 		if !run.Status.Active() {
 			continue
 		}
-		if run.Status == types.RunQueued && m.sched.removeQueued(run.ID) {
+		if run.Status == types.RunQueued {
 			// A newer push supersedes a run that never started.
-			if _, err := m.cancelQueuedRun(run.ID, types.RunCancelReasonSuperseded); err != nil {
-				slog.Error("failed to cancel superseded queued run", "run_id", run.ID, "error", err)
+			if cancelled, err := m.cancelQueuedRun(run.ID, types.RunCancelReasonSuperseded); err != nil {
+				return err
+			} else if cancelled {
+				continue
 			}
-			continue
 		}
 
 		m.mu.Lock()
@@ -2849,7 +2863,8 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 		case <-done:
 		case <-timeout:
 			slog.Warn("timed out waiting for cancelled runs to finish")
-			return
+			return fmt.Errorf("timed out waiting for cancelled runs")
 		}
 	}
+	return nil
 }

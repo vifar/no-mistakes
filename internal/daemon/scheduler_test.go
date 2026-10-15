@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
 
 // newTestScheduler returns a scheduler with fixed limits whose start callback
@@ -70,8 +72,25 @@ func equalIDs(a, b []string) bool {
 }
 
 func TestSchedulerDispatchCancellationHandoff(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, head := setupTestGitRepo(t, p, database, "handoff")
 	for i := 0; i < 40; i++ {
-		m := NewRunManager(nil, nil, nil)
+		run, err := database.InsertRun(repo.ID, "feature", head, head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := database.MarkRunQueued(run.ID, ""); err != nil {
+			t.Fatal(err)
+		}
+		m := NewRunManager(database, p, nil)
 		m.sched = newSlotScheduler(func() (int, bool) { return 1, false })
 		preparing := make(chan struct{})
 		proceed := make(chan struct{})
@@ -83,12 +102,12 @@ func TestSchedulerDispatchCancellationHandoff(t *testing.T) {
 			close(registered)
 			return func() {}
 		}
-		m.sched.restoreQueue([]string{"queued"})
+		m.sched.restoreQueue([]string{run.ID})
 		dispatched := make(chan struct{})
 		go func() { m.sched.dispatch(); close(dispatched) }()
 		<-preparing
 		cancelled := make(chan error, 1)
-		go func() { cancelled <- m.HandleCancel("queued") }()
+		go func() { cancelled <- m.HandleCancel(run.ID) }()
 		select {
 		case err := <-cancelled:
 			t.Errorf("cancellation crossed the unregistered handoff: %v", err)
@@ -213,10 +232,8 @@ func TestSchedulerParkedRunReleasesSlotAndResumedRunHasPriority(t *testing.T) {
 func TestSchedulerResumedRunsAreServedInArrivalOrder(t *testing.T) {
 	h := newSchedHarness(1, false)
 	blocker, _ := h.tryAdmit("blocker")
-	a := h.forceAcquire("a")
-	a.Yield()
-	b := h.forceAcquire("b")
-	b.Yield()
+	a := &runSlot{s: h.slotScheduler, runID: "a"}
+	b := &runSlot{s: h.slotScheduler, runID: "b"}
 	order := make(chan string, 2)
 	go func() { _ = a.Acquire(context.Background()); order <- "a" }()
 	waitForSchedCondition(t, func() bool { _, _, w := position(h, "a"); return w })
@@ -261,17 +278,33 @@ func TestSchedulerLimitsApplyLive(t *testing.T) {
 	}
 }
 
-func TestSchedulerForceAcquireCountsBeyondTheCap(t *testing.T) {
-	h := newSchedHarness(1, false)
-	a := h.forceAcquire("recovered-a")
-	b := h.forceAcquire("recovered-b")
-	if _, ok := h.tryAdmit("new"); ok {
-		t.Fatal("new launch admitted while recovered runs exceed the cap")
+func TestSchedulerRecoveredParkedRunsRespectCapAndPriority(t *testing.T) {
+	h := newSchedHarness(1, true)
+	a := &runSlot{s: h.slotScheduler, runID: "recovered-a"}
+	b := &runSlot{s: h.slotScheduler, runID: "recovered-b"}
+	wa := h.requestSlot(a.runID)
+	wb := h.requestSlot(b.runID)
+	if err := a.waitForSlot(context.Background(), wa); err != nil {
+		t.Fatal(err)
 	}
+	a.Yield()
 	h.enqueue("new")
+	if st := h.stats(); st.Active != 1 || st.Queued != 2 {
+		t.Fatalf("recovery stats = %+v", st)
+	}
+	if pos, _, waiting := position(h, b.runID); pos != 1 || !waiting {
+		t.Fatalf("second recovered run position = %d, waiting = %v", pos, waiting)
+	}
 	a.Release()
+	if err := b.waitForSlot(context.Background(), wb); err != nil {
+		t.Fatal(err)
+	}
+	b.Yield()
 	if got := h.startedIDs(); len(got) != 0 {
-		t.Fatalf("queued run started while one recovered run still holds the cap: %v", got)
+		t.Fatalf("new run started ahead of recovered parked run: %v", got)
+	}
+	if st := h.stats(); st.Active != 1 {
+		t.Fatalf("recovery stats = %+v", st)
 	}
 	b.Release()
 	if got := h.startedIDs(); !equalIDs(got, []string{"new"}) {
@@ -303,8 +336,7 @@ func TestSchedulerRemoveQueuedShiftsPositions(t *testing.T) {
 func TestSchedulerAcquireCancelledWhileWaitingLeavesNoWaiter(t *testing.T) {
 	h := newSchedHarness(1, false)
 	holder, _ := h.tryAdmit("holder")
-	waiter := h.forceAcquire("waiter")
-	waiter.Yield()
+	waiter := &runSlot{s: h.slotScheduler, runID: "waiter"}
 	ctx, cancel := context.WithCancelCause(context.Background())
 	errc := make(chan error, 1)
 	go func() { errc <- waiter.Acquire(ctx) }()
@@ -406,7 +438,7 @@ func TestSchedulerLoweredCapAdmitsNothingUntilUsageDropsBelowIt(t *testing.T) {
 func TestSchedulerConcurrentAcquireTakesOneSlot(t *testing.T) {
 	for iter := 0; iter < 10; iter++ {
 		h := newSchedHarness(4, false)
-		run := h.forceAcquire("run")
+		run, _ := h.tryAdmit("run")
 		run.Yield()
 		if st := h.stats(); st.Active != 0 || st.Yielded != 1 {
 			t.Fatalf("setup stats = %+v", st)
@@ -453,8 +485,7 @@ func TestSchedulerConcurrentAcquireTakesOneSlot(t *testing.T) {
 func TestSchedulerSecondAcquireWaitsForFirstAndSurvivesItsCancel(t *testing.T) {
 	h := newSchedHarness(1, false)
 	holder, _ := h.tryAdmit("holder")
-	run := h.forceAcquire("run")
-	run.Yield()
+	run := &runSlot{s: h.slotScheduler, runID: "run"}
 
 	ctx1, cancel1 := context.WithCancelCause(context.Background())
 	first := make(chan error, 1)

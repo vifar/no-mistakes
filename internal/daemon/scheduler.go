@@ -81,16 +81,6 @@ func (s *slotScheduler) tryAdmit(runID string) (*runSlot, bool) {
 	return &runSlot{s: s, runID: runID, held: true}, true
 }
 
-// forceAcquire gives a recovered run its slot even beyond the cap. Runs that
-// were already executing when the daemon restarted are never queued behind
-// new work; they count against the cap so new launches wait for them.
-func (s *slotScheduler) forceAcquire(runID string) *runSlot {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.active++
-	return &runSlot{s: s, runID: runID, held: true}
-}
-
 // enqueue appends a run to the start order and starts whatever now fits.
 func (s *slotScheduler) enqueue(runID string) {
 	s.mu.Lock()
@@ -305,18 +295,26 @@ func (t *runSlot) Acquire(ctx context.Context) error {
 
 // acquire waits for a slot on behalf of the single in-flight Acquire.
 func (t *runSlot) acquire(ctx context.Context) error {
-	s := t.s
+	return t.waitForSlot(ctx, t.s.requestSlot(t.runID))
+}
+
+func (s *slotScheduler) requestSlot(runID string) *slotWaiter {
 	s.refresh()
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	w := &slotWaiter{runID: runID, ready: make(chan struct{})}
 	if s.capacityLocked() && len(s.prio) == 0 {
 		s.active++
-		s.mu.Unlock()
-		t.setHeld()
-		return nil
+		w.granted = true
+		close(w.ready)
+	} else {
+		s.prio = append(s.prio, w)
 	}
-	w := &slotWaiter{runID: t.runID, ready: make(chan struct{})}
-	s.prio = append(s.prio, w)
-	s.mu.Unlock()
+	return w
+}
+
+func (t *runSlot) waitForSlot(ctx context.Context, w *slotWaiter) error {
+	s := t.s
 
 	select {
 	case <-w.ready:
