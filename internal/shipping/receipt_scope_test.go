@@ -17,9 +17,13 @@ type protectedReceiptForge struct {
 	reads    int
 }
 
-func (h *protectedReceiptForge) GetRequiredCheckContexts(context.Context, *scm.PR, string) ([]string, error) {
+func (h *protectedReceiptForge) GetRequiredChecks(context.Context, *scm.PR, string) ([]scm.RequiredCheck, error) {
 	h.reads++
-	return h.required, nil
+	var required []scm.RequiredCheck
+	for _, c := range h.required {
+		required = append(required, scm.RequiredCheck{Context: c})
+	}
+	return required, nil
 }
 
 func recordScope(t *testing.T, f *exportFixture, policy scm.CheckScopePolicy) {
@@ -46,8 +50,9 @@ func TestCIReadyReceiptUsesTheRecordedCheckScope(t *testing.T) {
 		{Name: "approval-status", Bucket: scm.CheckBucketPending},
 	}
 
-	// The default policy reads the target branch's required checks, so the
+	// An auto policy reads the target branch's required checks, so the
 	// external approval contexts that are not required do not block readiness.
+	recordScope(t, f, scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAuto})
 	if _, err := Export(ctx, f.database, f.repo, f.run.ID, "ci-ready", forge); err != nil {
 		t.Fatalf("non-required failing checks blocked the receipt: %v", err)
 	}
@@ -125,5 +130,30 @@ func TestCIReadyReceiptExternalOnlyUsesSharedReadiness(t *testing.T) {
 				t.Fatalf("receipt error=%v want ready=%v", err, tc.ready)
 			}
 		})
+	}
+}
+
+// A run started before check scoping recorded no policy. It was judged on
+// every check then, so the receipt must not quietly widen what it accepts.
+func TestCIReadyReceiptWithoutRecordedScopeJudgesEveryCheck(t *testing.T) {
+	ctx := context.Background()
+	f := newExportFixture(t)
+	if err := f.database.SetRunCIReadyWithReason(f.run.ID, true, false); err != nil {
+		t.Fatal(err)
+	}
+	if raw, err := f.database.GetRunCheckScope(f.run.ID); err != nil || raw != "" {
+		t.Fatalf("fixture recorded a scope: %q, %v", raw, err)
+	}
+	forge := &protectedReceiptForge{receiptForge: f.forge, required: []string{"build"}}
+	f.forge.checks = []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass}, {Name: "approve", Bucket: scm.CheckBucketFail}}
+	if _, err := Export(ctx, f.database, f.repo, f.run.ID, "ci-ready", forge); err == nil || !strings.Contains(err.Error(), "all live checks green") {
+		t.Fatalf("a failing non-required check must refuse a legacy run's receipt, got %v", err)
+	}
+	if forge.reads != 0 {
+		t.Fatalf("legacy scope read branch protection %d times", forge.reads)
+	}
+	f.forge.checks = []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass}, {Name: "approve", Bucket: scm.CheckBucketPass}}
+	if _, err := Export(ctx, f.database, f.repo, f.run.ID, "ci-ready", forge); err != nil {
+		t.Fatalf("all-green legacy run was refused: %v", err)
 	}
 }

@@ -627,14 +627,16 @@ func fakeCIGHRequiredChecksAPI(args []string) {
 	if len(args) == 0 || args[0] != "api" {
 		return
 	}
-	endpoint := args[len(args)-1]
 	var env string
-	switch {
-	case strings.Contains(endpoint, "/protection/required_status_checks"):
-		env = "FAKE_CLI_PROTECTION_JSON"
-	case strings.Contains(endpoint, "/rules/branches/"):
-		env = "FAKE_CLI_RULES_JSON"
-	default:
+	for _, arg := range args[1:] {
+		switch {
+		case strings.Contains(arg, "/protection/required_status_checks"):
+			env = "FAKE_CLI_PROTECTION_JSON"
+		case strings.Contains(arg, "/rules/branches/"):
+			env = "FAKE_CLI_RULES_JSON"
+		}
+	}
+	if env == "" {
 		return
 	}
 	switch body := os.Getenv(env); body {
@@ -645,6 +647,11 @@ func fakeCIGHRequiredChecksAPI(args []string) {
 		fmt.Fprintln(os.Stderr, "gh: Resource not accessible by integration (HTTP 403)")
 		os.Exit(1)
 	default:
+		// gh api --paginate --slurp wraps each page in an outer array; the
+		// body is a single page.
+		if env == "FAKE_CLI_RULES_JSON" && strings.Contains(strings.Join(args, " "), "--slurp") {
+			body = "[" + body + "]"
+		}
 		fmt.Print(body)
 		os.Exit(0)
 	}
@@ -1310,6 +1317,8 @@ func printFakeCommitChecks(raw string, args []string) {
 		App string `json:"app"`
 		// Workflow is the emitting workflow's name (checkSuite.workflowRun.workflow.name).
 		Workflow string `json:"workflow"`
+		// AppID is the producing app's numeric ID (checkSuite.app.databaseId).
+		AppID int64 `json:"appId"`
 	}
 	if err := json.Unmarshal([]byte(raw), &checks); err != nil {
 		fmt.Println(raw)
@@ -1349,10 +1358,14 @@ func printFakeCommitChecks(raw string, args []string) {
 			"__typename": "CheckRun", "name": check.Name, "status": status,
 			"conclusion": conclusion, "completedAt": check.CompletedAt, "detailsUrl": link,
 		}
-		if check.App != "" || check.Workflow != "" {
+		if check.App != "" || check.Workflow != "" || check.AppID != 0 {
 			suite := map[string]any{}
-			if check.App != "" {
-				suite["app"] = map[string]any{"slug": check.App}
+			if check.App != "" || check.AppID != 0 {
+				app := map[string]any{"slug": check.App}
+				if check.AppID != 0 {
+					app["databaseId"] = check.AppID
+				}
+				suite["app"] = app
 			}
 			if check.Workflow != "" {
 				suite["workflowRun"] = map[string]any{"workflow": map[string]any{"name": check.Workflow}}

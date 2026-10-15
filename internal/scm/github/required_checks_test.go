@@ -13,13 +13,17 @@ import (
 
 const (
 	protectionCmd = "gh api --method GET repos/test/repo/branches/main/protection/required_status_checks"
-	rulesCmd      = "gh api --method GET repos/test/repo/rules/branches/main?per_page=100"
+	rulesCmd      = "gh api --method GET repos/test/repo/rules/branches/main?per_page=100 --paginate --slurp"
 )
 
 func requiredContexts(t *testing.T, responses map[string]githubTestResponse) ([]string, error) {
 	t.Helper()
 	host := New(githubTestCmdFactory(responses), nil, "", "test/repo")
-	contexts, err := host.GetRequiredCheckContexts(context.Background(), &scm.PR{Number: "1"}, "main")
+	required, err := host.GetRequiredChecks(context.Background(), &scm.PR{Number: "1"}, "main")
+	var contexts []string
+	for _, r := range required {
+		contexts = append(contexts, r.Context)
+	}
 	sort.Strings(contexts)
 	return contexts, err
 }
@@ -28,8 +32,8 @@ func TestGetRequiredCheckContextsUnionsProtectionAndRules(t *testing.T) {
 	t.Parallel()
 	contexts, err := requiredContexts(t, map[string]githubTestResponse{
 		protectionCmd: {stdout: `{"strict":true,"contexts":["build","lint"],"checks":[{"context":"build","app_id":1},{"context":"test (ubuntu)","app_id":-1}]}`},
-		rulesCmd: {stdout: `[{"type":"pull_request","parameters":{}},` +
-			`{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"test (ubuntu)"},{"context":"ruleset-only"}]}}]`},
+		rulesCmd: {stdout: `[[{"type":"pull_request","parameters":{}},` +
+			`{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"test (ubuntu)"},{"context":"ruleset-only"}]}}]]`},
 	})
 	if err != nil {
 		t.Fatalf("GetRequiredCheckContexts() error = %v", err)
@@ -56,7 +60,7 @@ func TestGetRequiredCheckContextsRejectsPartialSources(t *testing.T) {
 			t.Run(source+failure, func(t *testing.T) {
 				responses := map[string]githubTestResponse{
 					protectionCmd: {stdout: `{"contexts":["build"]}`},
-					rulesCmd:      {stdout: `[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"test"}]}}]`},
+					rulesCmd:      {stdout: `[[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"test"}]}}]]`},
 				}
 				responses[source] = githubTestResponse{stderr: failure, code: 1}
 				host := New(githubTestCmdFactory(responses), nil, "", "test/repo")
@@ -104,7 +108,7 @@ func TestGetRequiredCheckContextsReportsOtherFailures(t *testing.T) {
 	t.Parallel()
 	_, err := requiredContexts(t, map[string]githubTestResponse{
 		protectionCmd: {stderr: "gh: Bad Gateway (HTTP 502)", code: 1},
-		rulesCmd:      {stdout: `[]`},
+		rulesCmd:      {stdout: `[[]]`},
 	})
 	if err == nil || errors.Is(err, scm.ErrRequiredChecksUnavailable) {
 		t.Fatalf("error = %v, want a read failure that is not ErrRequiredChecksUnavailable", err)
@@ -132,5 +136,64 @@ func TestGetChecksReadsWorkflowName(t *testing.T) {
 	}
 	if len(checks) != 1 || checks[0].Workflow != "Final Approval" || checks[0].DisplayName() != "Final Approval / approve" {
 		t.Fatalf("checks = %+v, want workflow name surfaced", checks)
+	}
+}
+
+func TestGetRequiredChecksPaginatesRules(t *testing.T) {
+	t.Parallel()
+	contexts, err := requiredContexts(t, map[string]githubTestResponse{
+		protectionCmd: {stdout: `{"contexts":[],"checks":[]}`},
+		// The required_status_checks rule is only on the second page.
+		rulesCmd: {stdout: `[[{"type":"pull_request","parameters":{}},{"type":"deletion"}],` +
+			`[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"page-two"}]}}]]`},
+	})
+	if err != nil || !reflect.DeepEqual(contexts, []string{"page-two"}) {
+		t.Fatalf("contexts = %v, err = %v, want the rule from page 2", contexts, err)
+	}
+}
+
+func TestGetRequiredChecksKeepsApplicationIdentity(t *testing.T) {
+	t.Parallel()
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		protectionCmd: {stdout: `{"contexts":["build","legacy"],"checks":[{"context":"build","app_id":15368},{"context":"any","app_id":-1},{"context":"null-app","app_id":null}]}`},
+		rulesCmd: {stdout: `[[{"type":"required_status_checks","parameters":{"required_status_checks":` +
+			`[{"context":"ruleset","integration_id":42},{"context":"unbound-rule"}]}}]]`},
+	}), nil, "", "test/repo")
+	got, err := host.GetRequiredChecks(context.Background(), &scm.PR{Number: "1"}, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []scm.RequiredCheck{
+		{Context: "build", AppID: 15368},
+		{Context: "any"},
+		{Context: "null-app"},
+		{Context: "legacy"},
+		{Context: "ruleset", AppID: 42},
+		{Context: "unbound-rule"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("required checks = %+v, want %+v (the legacy contexts list must not unbind build)", got, want)
+	}
+}
+
+func TestGetChecksReadsProducingAppID(t *testing.T) {
+	t.Parallel()
+	nodes := `[{"__typename":"CheckRun","databaseId":1,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","checkSuite":{"app":{"slug":"github-actions","databaseId":15368}}},` +
+		`{"__typename":"StatusContext","id":"s1","context":"legacy","state":"SUCCESS"}]`
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 5 --repo test/repo --json headRefOid --jq .headRefOid":                                       {stdout: "abc123\n"},
+		githubCommitChecksCommand("", "test/repo", "abc123"):                                                     {stdout: githubCommitChecksResponse(nodes)},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=abc123 -f per_page=100 --paginate --slurp": {stdout: `[{"total_count":0,"workflow_runs":[]}]`},
+	}), nil, "", "test/repo")
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "5", HeadSHA: "abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]int64{}
+	for _, c := range checks {
+		byName[c.Name] = c.AppID
+	}
+	if byName["build"] != 15368 || byName["legacy"] != 0 || len(byName) != 2 {
+		t.Fatalf("app IDs = %v, want build=15368 and the legacy status unattributed", byName)
 	}
 }

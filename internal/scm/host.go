@@ -251,6 +251,12 @@ type Check struct {
 	// so the CI step can tell a third-party review bot's verdict from the
 	// repository's own CI without matching names. Empty when unknown.
 	App string
+	// AppID is the numeric ID of the application that produced the check, when
+	// the provider reports one (GitHub: the check suite's app databaseId). A
+	// required check bound to an application is satisfied only by a check
+	// carrying that ID. Zero when unknown, which includes legacy commit
+	// statuses.
+	AppID int64
 	// Workflow is the name of the workflow that emitted the check, when the
 	// provider reports one (GitHub Actions). Together with Name it forms the
 	// "workflow / job" display form that check-scope patterns may match.

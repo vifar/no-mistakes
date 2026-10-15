@@ -245,3 +245,16 @@ func TestCIStep_RequiredChecksAreReadOncePerExecution(t *testing.T) {
 		t.Fatalf("protection reads = %d, rules reads = %d across four polls, want one of each:\n%s", protection, rules, r.ghLog)
 	}
 }
+
+func TestCIStep_RequiredCheckBoundToAnAppIgnoresSameNamedChecksFromOthers(t *testing.T) {
+	t.Parallel()
+	env := []string{`FAKE_CLI_PROTECTION_JSON={"contexts":["build"],"checks":[{"context":"build","app_id":15368}]}`}
+	otherApp := `{"name":"build","state":"SUCCESS","bucket":"pass","app":"some-other-app","appId":99}`
+	r := runScoped(t, rollup(otherApp), env, config.CI{}, 2)
+	if !errors.Is(r.err, context.Canceled) || r.outcome != nil || r.reportedPassed() || r.ciReady {
+		t.Fatalf("a same-named check from another app satisfied the bound requirement: outcome=%+v err=%v logs=%v", r.outcome, r.err, r.logs)
+	}
+	owner := `{"name":"build","state":"SUCCESS","bucket":"pass","app":"github-actions","appId":15368}`
+	r = runScoped(t, rollup(owner), env, config.CI{}, 1)
+	assertReady(t, r)
+}

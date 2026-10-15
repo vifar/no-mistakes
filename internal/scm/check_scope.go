@@ -25,15 +25,37 @@ const (
 // permission to read them. Callers fall back to evaluating every check.
 var ErrRequiredChecksUnavailable = errors.New("required status checks are not available for this branch")
 
+// RequiredCheck is one status check a target branch requires before merging.
+// Context is the provider's own check name, matched exactly against
+// Check.Name. AppID, when positive, binds the requirement to the application
+// that must produce the check: a same-named check from any other producer
+// (including a legacy commit status, which has no application) does not
+// satisfy it. Zero means any producer.
+type RequiredCheck struct {
+	Context string
+	AppID   int64
+}
+
+func (r RequiredCheck) String() string {
+	if r.AppID > 0 {
+		return fmt.Sprintf("%s (app %d)", r.Context, r.AppID)
+	}
+	return r.Context
+}
+
+// satisfiedBy reports whether c is the check this requirement names.
+func (r RequiredCheck) satisfiedBy(c Check) bool {
+	return c.Name == r.Context && (r.AppID <= 0 || c.AppID == r.AppID)
+}
+
 // RequiredChecksReader is implemented by providers that can name the status
-// check contexts a target branch requires before merging. Contexts are the
-// provider's own check names, matched exactly against Check.Name.
+// checks a target branch requires before merging.
 //
 // An implementation returns ErrRequiredChecksUnavailable (possibly wrapped)
 // when the branch has no readable required-check configuration, and any other
 // error when the read itself failed.
 type RequiredChecksReader interface {
-	GetRequiredCheckContexts(ctx context.Context, pr *PR, branch string) ([]string, error)
+	GetRequiredChecks(ctx context.Context, pr *PR, branch string) ([]RequiredCheck, error)
 }
 
 // CheckScopePolicy selects which checks on a PR head decide CI readiness and
@@ -127,7 +149,7 @@ type CheckScope struct {
 
 	mu       sync.Mutex
 	resolved bool
-	required []string
+	required []RequiredCheck
 	derived  bool
 }
 
@@ -145,7 +167,7 @@ func (s *CheckScope) log(msg string) {
 
 // requiredContexts returns the target branch's required contexts and whether
 // they are authoritative. The first conclusive answer is cached.
-func (s *CheckScope) requiredContexts(ctx context.Context, pr *PR) ([]string, bool) {
+func (s *CheckScope) requiredContexts(ctx context.Context, pr *PR) ([]RequiredCheck, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.resolved {
@@ -162,7 +184,7 @@ func (s *CheckScope) requiredContexts(ctx context.Context, pr *PR) ([]string, bo
 		s.resolved = true
 		return nil, false
 	}
-	contexts, err := reader.GetRequiredCheckContexts(ctx, pr, s.branch)
+	contexts, err := reader.GetRequiredChecks(ctx, pr, s.branch)
 	switch {
 	case err != nil && ctx.Err() != nil:
 		// An interrupted read says nothing about the branch; ask again later.
@@ -174,26 +196,42 @@ func (s *CheckScope) requiredContexts(ctx context.Context, pr *PR) ([]string, bo
 	case len(contexts) == 0:
 		s.log(fmt.Sprintf("CI scope: %q has no required status checks; evaluating all checks", s.branch))
 	default:
-		s.required = normalizeContexts(contexts)
-		s.derived = true
-		s.log(fmt.Sprintf("CI scope: %q requires %d status check(s): %s", s.branch, len(s.required), strings.Join(s.required, ", ")))
+		s.required = normalizeRequired(contexts)
+		s.derived = len(s.required) > 0
+		labels := make([]string, len(s.required))
+		for i, r := range s.required {
+			labels[i] = r.String()
+		}
+		if s.derived {
+			s.log(fmt.Sprintf("CI scope: %q requires %d status check(s): %s", s.branch, len(s.required), strings.Join(labels, ", ")))
+		} else {
+			s.log(fmt.Sprintf("CI scope: %q has no required status checks; evaluating all checks", s.branch))
+		}
 	}
 	s.resolved = true
 	return s.required, s.derived
 }
 
-func normalizeContexts(contexts []string) []string {
-	seen := make(map[string]bool, len(contexts))
-	out := make([]string, 0, len(contexts))
-	for _, c := range contexts {
-		c = strings.TrimSpace(c)
-		if c == "" || seen[c] {
+func normalizeRequired(required []RequiredCheck) []RequiredCheck {
+	seen := make(map[RequiredCheck]bool, len(required))
+	out := make([]RequiredCheck, 0, len(required))
+	for _, r := range required {
+		r.Context = strings.TrimSpace(r.Context)
+		if r.AppID < 0 {
+			r.AppID = 0
+		}
+		if r.Context == "" || seen[r] {
 			continue
 		}
-		seen[c] = true
-		out = append(out, c)
+		seen[r] = true
+		out = append(out, r)
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Context != out[j].Context {
+			return out[i].Context < out[j].Context
+		}
+		return out[i].AppID < out[j].AppID
+	})
 	return out
 }
 
@@ -211,12 +249,10 @@ func (s *CheckScope) Includes(ctx context.Context, pr *PR, check Check) bool {
 	return s.classify(check, required, derived) == CheckRoleRequired
 }
 
-func (s *CheckScope) partition(pr *PR, checks []Check, required []string, derived bool) ScopedChecks {
+func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck, derived bool) ScopedChecks {
 	out := ScopedChecks{emptyReady: len(checks) > 0 && (derived || s.policy.NoCI)}
-	reported := make(map[string]bool, len(checks))
 	reportedForms := make(map[string]bool, len(checks)*2)
 	for _, c := range checks {
-		reported[c.Name] = true
 		reportedForms[c.Name] = true
 		reportedForms[c.DisplayName()] = true
 		switch s.classify(c, required, derived) {
@@ -228,29 +264,39 @@ func (s *CheckScope) partition(pr *PR, checks []Check, required []string, derive
 			out.Relevant = append(out.Relevant, c)
 		}
 	}
-	expected := append([]string(nil), required...)
+	expected := append([]RequiredCheck(nil), required...)
 	for _, p := range s.policy.MustPass {
 		if p = strings.TrimSpace(p); p != "" && !strings.ContainsAny(p, "*?") && !reportedForms[p] {
-			expected = append(expected, p)
+			expected = append(expected, RequiredCheck{Context: p})
 		}
 	}
 	head := ""
 	if pr != nil {
 		head = pr.HeadSHA
 	}
-	seen := make(map[string]bool, len(expected))
-	for _, name := range expected {
-		if reported[name] || seen[name] || MatchesAnyCheckPattern(s.policy.ExternalChecks, name) {
+	seen := make(map[RequiredCheck]bool, len(expected))
+	for _, want := range expected {
+		if seen[want] || MatchesAnyCheckPattern(s.policy.ExternalChecks, want.Context) {
 			continue
 		}
-		seen[name] = true
-		out.Relevant = append(out.Relevant, Check{Name: name, HeadSHA: head, Bucket: CheckBucketPending, State: "EXPECTED", Kind: CheckKindStatus})
+		seen[want] = true
+		satisfied := false
+		for _, c := range checks {
+			if want.satisfiedBy(c) {
+				satisfied = true
+				break
+			}
+		}
+		if satisfied {
+			continue
+		}
+		out.Relevant = append(out.Relevant, Check{Name: want.Context, AppID: want.AppID, HeadSHA: head, Bucket: CheckBucketPending, State: "EXPECTED", Kind: CheckKindStatus})
 	}
 	return out
 }
 
 // classify reports a single check's role under an already-resolved scope.
-func (s *CheckScope) classify(c Check, required []string, derived bool) CheckRole {
+func (s *CheckScope) classify(c Check, required []RequiredCheck, derived bool) CheckRole {
 	if MatchesAnyCheckPattern(s.policy.ExternalChecks, c.Name) || MatchesAnyCheckPattern(s.policy.ExternalChecks, c.DisplayName()) {
 		return CheckRoleExternal
 	}
@@ -261,7 +307,7 @@ func (s *CheckScope) classify(c Check, required []string, derived bool) CheckRol
 		return CheckRoleRequired
 	}
 	for _, r := range required {
-		if r == c.Name {
+		if r.satisfiedBy(c) {
 			return CheckRoleRequired
 		}
 	}

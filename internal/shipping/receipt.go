@@ -215,7 +215,8 @@ func Export(ctx context.Context, database *db.DB, repo *db.Repo, runID, phase st
 }
 
 // recordedCheckScope returns the check-scope policy the CI step recorded for
-// the run. A run that recorded none is evaluated under the default policy.
+// the run. A run that recorded none predates check scoping, so it keeps the
+// legacy behavior of judging every check rather than the auto default.
 func recordedCheckScope(database *db.DB, runID string) (scm.CheckScopePolicy, error) {
 	var policy scm.CheckScopePolicy
 	raw, err := database.GetRunCheckScope(runID)
@@ -223,7 +224,7 @@ func recordedCheckScope(database *db.DB, runID string) (scm.CheckScopePolicy, er
 		return policy, err
 	}
 	if raw == "" {
-		return policy, nil
+		return scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAll}, nil
 	}
 	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
 		return policy, fmt.Errorf("invalid recorded CI check scope")

@@ -540,7 +540,7 @@ func (h *Host) getPRChecks(ctx context.Context, selector string) ([]scm.Check, e
 // carries its check suite's app slug: that is the structural identity the CI
 // step uses to tell a third-party review bot's check (scm.ReviewBots) from the
 // repository's own Actions jobs, without matching check names.
-const commitChecksQuery = `query($owner:String!,$name:String!,$oid:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$oid){... on Commit{statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{databaseId name status conclusion completedAt startedAt detailsUrl checkSuite{app{slug} workflowRun{workflow{name}}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}`
+const commitChecksQuery = `query($owner:String!,$name:String!,$oid:String!,$cursor:String){repository(owner:$owner,name:$name){object(expression:$oid){... on Commit{statusCheckRollup{contexts(first:100,after:$cursor){nodes{__typename ... on CheckRun{databaseId name status conclusion completedAt startedAt detailsUrl checkSuite{app{slug databaseId} workflowRun{workflow{name}}}} ... on StatusContext{id context state targetUrl}} pageInfo{hasNextPage endCursor}}}}}}}`
 
 const reviewThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){nodes{isResolved comments(first:100){nodes{databaseId body path line url createdAt author{login}}}} pageInfo{hasNextPage endCursor}}}}}`
 
@@ -584,7 +584,8 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 									DetailsURL  string `json:"detailsUrl"`
 									CheckSuite  *struct {
 										App *struct {
-											Slug string `json:"slug"`
+											Slug       string `json:"slug"`
+											DatabaseID int64  `json:"databaseId"`
 										} `json:"app"`
 										WorkflowRun *struct {
 											Workflow *struct {
@@ -636,6 +637,7 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 				check.Link = strings.TrimSpace(node.DetailsURL)
 				if node.CheckSuite != nil && node.CheckSuite.App != nil {
 					check.App = strings.TrimSpace(node.CheckSuite.App.Slug)
+					check.AppID = node.CheckSuite.App.DatabaseID
 				}
 				if node.CheckSuite != nil && node.CheckSuite.WorkflowRun != nil && node.CheckSuite.WorkflowRun.Workflow != nil {
 					check.Workflow = strings.TrimSpace(node.CheckSuite.WorkflowRun.Workflow.Name)

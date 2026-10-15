@@ -11,13 +11,18 @@ import (
 type requiredChecksHost struct {
 	Host
 	contexts []string
+	bound    []RequiredCheck
 	err      error
 	calls    int
 }
 
-func (h *requiredChecksHost) GetRequiredCheckContexts(context.Context, *PR, string) ([]string, error) {
+func (h *requiredChecksHost) GetRequiredChecks(context.Context, *PR, string) ([]RequiredCheck, error) {
 	h.calls++
-	return h.contexts, h.err
+	required := append([]RequiredCheck(nil), h.bound...)
+	for _, c := range h.contexts {
+		required = append(required, RequiredCheck{Context: c})
+	}
+	return required, h.err
 }
 
 func names(checks []Check) []string {
@@ -236,5 +241,56 @@ func TestCheckScopeReadinessDistinguishesExcludedFromUnobserved(t *testing.T) {
 				t.Fatalf("Ready()=%v want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestCheckScopeBoundRequirementNeedsItsApplication(t *testing.T) {
+	t.Parallel()
+	const app = 15368
+	bound := &requiredChecksHost{bound: []RequiredCheck{{Context: "build", AppID: app}}}
+	for _, tc := range []struct {
+		name         string
+		checks       []Check
+		wantReady    bool
+		wantRelevant int
+	}{
+		{"producer matches", []Check{{Name: "build", AppID: app, Bucket: CheckBucketPass}}, true, 1},
+		{"same name from another app stays missing", []Check{{Name: "build", AppID: 99, Bucket: CheckBucketPass}}, false, 1},
+		{"same name legacy status stays missing", []Check{{Name: "build", Kind: CheckKindStatus, Bucket: CheckBucketPass}}, false, 1},
+		{"other app failing does not count either", []Check{{Name: "build", AppID: 99, Bucket: CheckBucketFail}, {Name: "build", AppID: app, Bucket: CheckBucketPass}}, true, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scoped := NewCheckScope(bound, CheckScopePolicy{}, "main", nil).Apply(context.Background(), &PR{HeadSHA: "h"}, tc.checks)
+			if scoped.Ready() != tc.wantReady || len(scoped.Relevant) != tc.wantRelevant {
+				t.Fatalf("ready=%v relevant=%+v, want ready=%v with %d relevant", scoped.Ready(), scoped.Relevant, tc.wantReady, tc.wantRelevant)
+			}
+			if !tc.wantReady {
+				placeholder := scoped.Relevant[len(scoped.Relevant)-1]
+				if placeholder.State != "EXPECTED" || placeholder.Bucket != CheckBucketPending || placeholder.AppID != app {
+					t.Fatalf("missing bound requirement = %+v, want a pending placeholder for app %d", placeholder, app)
+				}
+			}
+		})
+	}
+}
+
+func TestCheckScopeUnboundRequirementKeepsNameOnlyMatching(t *testing.T) {
+	t.Parallel()
+	host := &requiredChecksHost{bound: []RequiredCheck{{Context: "build", AppID: -1}, {Context: "lint"}}}
+	scoped := NewCheckScope(host, CheckScopePolicy{}, "main", nil).Apply(context.Background(), &PR{}, []Check{
+		{Name: "build", AppID: 7, Bucket: CheckBucketPass},
+		{Name: "lint", Kind: CheckKindStatus, Bucket: CheckBucketPass},
+	})
+	if !scoped.Ready() || len(scoped.Relevant) != 2 {
+		t.Fatalf("unbound requirements must accept any producer: %+v", scoped)
+	}
+}
+
+func TestCheckScopeBoundAndUnboundRequirementsBothMustHold(t *testing.T) {
+	t.Parallel()
+	host := &requiredChecksHost{bound: []RequiredCheck{{Context: "build", AppID: 15368}, {Context: "build"}}}
+	scoped := NewCheckScope(host, CheckScopePolicy{}, "main", nil).Apply(context.Background(), &PR{}, []Check{{Name: "build", AppID: 99, Bucket: CheckBucketPass}})
+	if scoped.Ready() {
+		t.Fatalf("a ruleset that accepts any producer must not waive a protection rule bound to an app: %+v", scoped)
 	}
 }
