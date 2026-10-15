@@ -480,8 +480,11 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 			return nil, err
 		}
 		checks = h.appendUnrepresentedWorkflowRuns(checks, runs)
-		checks = h.collapseLatestByName(checks)
+		// Supersede before collapsing: a job named like its workflow would
+		// otherwise collapse into the newer workflow-level check and drop the
+		// identity that check must carry.
 		checks = h.supersedeStaleJobResults(checks)
+		checks = h.collapseLatestByName(checks)
 		for i := range checks {
 			checks[i].HeadSHA = headSHA
 		}

@@ -345,6 +345,33 @@ func TestGetChecksNewerWorkflowRunWithoutJobsSupersedesStaleJobResults(t *testin
 	}
 }
 
+// A job named like its workflow (both "CI") must not be collapsed into the
+// newer job-less workflow run before supersession records its identity: the
+// workflow-level failure would lose the app that binds the required context.
+func TestGetChecksSupersedesSameNameJobBeforeCollapsing(t *testing.T) {
+	t.Parallel()
+	job := `{"__typename":"CheckRun","databaseId":5,"name":"CI","status":"COMPLETED","conclusion":"SUCCESS","detailsUrl":"https://github.com/test/repo/actions/runs/1/job/5","checkSuite":{"app":{"slug":"github-actions","databaseId":15368},"workflowRun":{"workflow":{"name":"CI"}}}}`
+	runs := `[{"total_count":2,"workflow_runs":[` +
+		`{"id":1,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/1"},` +
+		`{"id":2,"workflow_id":10,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"failure","run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/2"}]}]`
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh pr view 5 --repo test/repo --json headRefOid --jq .headRefOid":                                       {stdout: "abc123\n"},
+		githubCommitChecksCommand("", "test/repo", "abc123"):                                                     {stdout: githubCommitChecksResponse("[" + job + "]")},
+		"gh api --method GET repos/test/repo/actions/runs -f head_sha=abc123 -f per_page=100 --paginate --slurp": {stdout: runs},
+	}), nil, "", "test/repo")
+	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "5", HeadSHA: "abc123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("checks = %+v, want only the newer workflow-level failure", checks)
+	}
+	want := []scm.Check{{Name: "CI", Workflow: "CI", Kind: scm.CheckKindRun, App: "github-actions", AppID: 15368}}
+	if ci := checks[0]; ci.Bucket != scm.CheckBucketFail || !reflect.DeepEqual(ci.Supersedes, want) {
+		t.Fatalf("CI run = %+v, want a failure superseding the app-bound CI job", ci)
+	}
+}
+
 func checksForWorkflowRuns(t *testing.T, secondRunEvent string) map[string]scm.Check {
 	return checksForWorkflowRunsAt(t, secondRunEvent, "completed", `"conclusion":"failure"`)
 }
