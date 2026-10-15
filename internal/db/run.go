@@ -23,13 +23,12 @@ type Run struct {
 	Branch   string
 	HeadSHA  string
 	BaseSHA  string
-	// WorktreeDir is the directory this run's worktree was created in, resolved
-	// once at run creation from the operator's configured placement (see
-	// internal/worktrees). Every consumer of an existing run's worktree reads
-	// it instead of re-deriving placement, so editing that configuration while
-	// a run exists cannot retarget the run. It is nil only for runs recorded
-	// before the column existed, which worktrees.RecordedDir resolves to the
-	// default placement.
+	// WorktreeDir pins placement when an admitted run creates its worktree (see
+	// internal/worktrees). Consumers read it instead of re-deriving placement,
+	// so later configuration edits cannot retarget that worktree. It is nil
+	// before placement, including while queued; for legacy runs that created a
+	// worktree without recording placement, worktrees.RecordedDir uses the
+	// default directory.
 	WorktreeDir      *string
 	SubmittedHeadSHA *string
 	// NoMistakesVersion and NoMistakesBuildSHA identify the binary that created

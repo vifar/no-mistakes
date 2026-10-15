@@ -1338,7 +1338,7 @@ no-mistakes reaps its recorded run directories itself rather than relying on an 
 - A finished run that produced no artifacts leaves nothing behind.
 - Recorded run directories older than `retention` are removed.
 - Whatever recorded run evidence survives is trimmed to `max_runs`, oldest first.
-- A run that is still pending or running is never touched.
+- A run that is still queued, pending, or running is never touched.
 
 Reaping runs after each finished run and again at daemon startup. An upgraded daemon also drains the pre-relocation directory in the system temp directory under the same rules; nothing is migrated, because absolute paths recorded in older pull request bodies name the old location.
 

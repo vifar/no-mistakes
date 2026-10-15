@@ -45,6 +45,9 @@ func (e *Executor) acquireSlot(ctx context.Context) error {
 	return e.slot.Acquire(ctx)
 }
 
+// acceptApprovalGate persists and publishes the consumed gate before its
+// response can wait for capacity. The caller holds e.mu, the same lock held
+// through park publication, so a stale park cannot overtake this running event.
 func (e *Executor) acceptApprovalGate() error {
 	row, err := e.db.GetStepResult(e.waitingStepResultID)
 	if err != nil {

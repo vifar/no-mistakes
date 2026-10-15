@@ -131,8 +131,8 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 
 **Parked / Awaiting-Agent Signal**
 
-- `runs.awaiting_agent_since` is non-nil **iff** a step is actually parked at an `awaiting_approval`/`fix_review` gate: the executor sets it on gate entry, clears it when `waitForApproval` returns, and `RecoverStaleRuns` clears it on crash recovery. It is observability only (rendered as `awaiting_agent: parked <duration>` in `axi status`) and never changes gate resolution, auto-resume, or the `--yes` default.
-- Tests: `internal/db/run_test.go`, `internal/pipeline/executor_approval_test.go`, `internal/cli/axi_test.go`, e2e `TestAxiParkedAwaitingAgentSignal`.
+- `db.ParkStepForApproval` persists the park and `Executor.acceptApprovalGate` consumes it through `db.ResumeStepFromApproval`; response acceptance and reconciliation share that helper. Its comment in `internal/pipeline/slot.go` owns the publication ordering invariant. `RegisterRecoveredGate` installs response controls before the manager's initial slot wait. `RecoverStaleRunsExcept` preserves validated recoverable gates and clears the signal on runs it terminalizes. User-facing state semantics are owned by `docs/src/content/docs/reference/pipeline-steps.md` (Step statuses), and output by `reference/cli.md`.
+- Tests: `internal/db/run_test.go`, `internal/pipeline/executor_approval_test.go`, `TestExecutorAnsweredGateWaitsAsRunning`, `TestExecutorParkPublicationPrecedesAcceptedResponse`, `TestRecoveredGateWaitingForSlotAcceptsResponses`, `internal/cli/axi_test.go`, e2e `TestAxiParkedAwaitingAgentSignal`.
 
 **Approval Override Is Never a Silent Clean Pass (`pipeline.ApprovalOverrideVerifier`)**
 
