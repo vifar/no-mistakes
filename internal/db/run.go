@@ -942,21 +942,6 @@ func (d *DB) VerifyTerminalRunHeadRewrite(id string, status types.RunStatus, rec
 	return updated == 1, err
 }
 
-// VerifyTerminalRunRecordedHead stamps a terminal run's recorded head as its
-// verified head without moving it. It is a compare-and-swap on everything the
-// caller's proof read - status, recorded head, review authority, no earlier
-// stamp, custody not yet returned - so a run that changed while the proof was
-// being built is left alone and the caller refuses.
-func (d *DB) VerifyTerminalRunRecordedHead(id string, status types.RunStatus, recordedHead, reviewedHead string) (bool, error) {
-	ts := now()
-	result, err := d.sql.Exec(`UPDATE runs SET push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status = ? AND head_sha = ? AND review_approved_head_sha = ? AND terminal_head_verified_at IS NULL AND custody_returned_at IS NULL`, ts, ts, id, status, recordedHead, reviewedHead)
-	if err != nil {
-		return false, fmt.Errorf("verify terminal run recorded head: %w", err)
-	}
-	updated, err := result.RowsAffected()
-	return updated == 1, err
-}
-
 // RecordRunTerminalHeadEvidence records a managed worktree head that was
 // verified immediately before crash recovery makes the run terminal. The
 // subsequent stale-run status transition deliberately preserves this stamp.
