@@ -457,28 +457,36 @@ func TestCheckScopeSupersedingWorkflowRunStandsForTheRequiredJob(t *testing.T) {
 func TestCheckScopeSupersededContextPrecedenceAndIdentity(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name     string
-		required []RequiredCheck
-		policy   CheckScopePolicy
-		rerun    Check
-		relevant []string
-		external []string
-		missing  int
-		ready    bool
+		name          string
+		required      []RequiredCheck
+		policy        CheckScopePolicy
+		rerun         Check
+		relevant      []string
+		external      []string
+		informational []string
+		missing       int
+		ready         bool
 	}{
 		{
 			name:     "qualified external approval outranks required and must pass",
 			required: []RequiredCheck{{Context: "build"}, {Context: "approve"}},
 			policy:   CheckScopePolicy{ExternalChecks: []string{"Final Approval / approve*"}, MustPass: []string{"approve"}},
 			rerun:    Check{Name: "Final Approval", Supersedes: []Check{{Name: "approve", Workflow: "Final Approval", Kind: CheckKindRun}}},
-			relevant: []string{"build"}, external: []string{"Final Approval"}, ready: true,
+			relevant: []string{"build"}, informational: []string{"Final Approval"}, ready: true,
 		},
 		{
-			name:     "excluded workflow cannot satisfy required job",
+			name:     "excluded workflow still blocks as non-external required job",
 			required: []RequiredCheck{{Context: "build"}, {Context: "other"}},
 			policy:   CheckScopePolicy{ExternalChecks: []string{"CI"}},
 			rerun:    Check{Name: "CI", Supersedes: []Check{{Name: "build", Workflow: "CI", Kind: CheckKindRun}}},
-			relevant: []string{"other", "build"}, external: []string{"CI"}, missing: 1,
+			relevant: []string{"other", "CI"},
+		},
+		{
+			name:     "every identity external",
+			required: []RequiredCheck{{Context: "build"}, {Context: "approve"}},
+			policy:   CheckScopePolicy{ExternalChecks: []string{"Final Approval", "Final Approval / approve*"}},
+			rerun:    Check{Name: "Final Approval", Supersedes: []Check{{Name: "approve", Workflow: "Final Approval", Kind: CheckKindRun}}},
+			relevant: []string{"build"}, external: []string{"Final Approval"}, ready: true,
 		},
 		{
 			name:     "non-external required sibling blocks",
@@ -491,7 +499,7 @@ func TestCheckScopeSupersededContextPrecedenceAndIdentity(t *testing.T) {
 			name:     "wrong app cannot satisfy bound requirement",
 			required: []RequiredCheck{{Context: "build", AppID: 99}},
 			rerun:    Check{Name: "CI", AppID: 99, Supersedes: []Check{{Name: "build", Workflow: "CI", Kind: CheckKindRun, AppID: 42}}},
-			relevant: []string{"build"}, missing: 1,
+			relevant: []string{"build"}, informational: []string{"CI"}, missing: 1,
 		},
 		{
 			name:     "matching app satisfies bound requirement",
@@ -504,7 +512,7 @@ func TestCheckScopeSupersededContextPrecedenceAndIdentity(t *testing.T) {
 			required: []RequiredCheck{{Context: "other"}},
 			policy:   CheckScopePolicy{MustPass: []string{"CI / build"}},
 			rerun:    Check{Name: "Docs", Supersedes: []Check{{Name: "build", Workflow: "Docs", Kind: CheckKindRun}}},
-			relevant: []string{"other", "build"}, missing: 1,
+			relevant: []string{"other", "build"}, informational: []string{"Docs"}, missing: 1,
 		},
 		{
 			name:     "matching workflow satisfies qualified must pass",
@@ -531,6 +539,9 @@ func TestCheckScopeSupersededContextPrecedenceAndIdentity(t *testing.T) {
 			if got := names(scoped.External); strings.Join(got, ",") != strings.Join(tc.external, ",") {
 				t.Fatalf("external = %v, want %v", got, tc.external)
 			}
+			if got := names(scoped.Informational); strings.Join(got, ",") != strings.Join(tc.informational, ",") {
+				t.Fatalf("informational = %v, want %v", got, tc.informational)
+			}
 			missing := 0
 			includesRerun := false
 			for _, c := range scoped.Relevant {
@@ -545,6 +556,40 @@ func TestCheckScopeSupersededContextPrecedenceAndIdentity(t *testing.T) {
 			}
 			if scope.Includes(context.Background(), &PR{}, tc.rerun) != includesRerun {
 				t.Fatal("repair inclusion disagrees with readiness scope")
+			}
+		})
+	}
+}
+
+func TestCheckScopeReplacementKeepsItsOwnRequirements(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		required []RequiredCheck
+		policy   CheckScopePolicy
+	}{
+		{name: "wildcard must pass", policy: CheckScopePolicy{MustPass: []string{"CI*"}}},
+		{name: "literal must pass", policy: CheckScopePolicy{MustPass: []string{"CI"}}},
+		{name: "qualified must pass", policy: CheckScopePolicy{MustPass: []string{"CI / CI"}}},
+		{name: "required workflow", required: []RequiredCheck{{Context: "CI", AppID: 42}}},
+		{name: "all checks", policy: CheckScopePolicy{RequiredChecks: RequiredChecksAll}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			required := append([]RequiredCheck{{Context: "build"}}, tc.required...)
+			scope := NewCheckScope(&requiredChecksHost{bound: required}, tc.policy, "main", nil)
+			for _, bucket := range []CheckBucket{CheckBucketFail, CheckBucketPass} {
+				rerun := Check{Name: "CI", Workflow: "CI", Kind: CheckKindRun, AppID: 42, Bucket: bucket,
+					Supersedes: []Check{{Name: "unit", Workflow: "CI", Kind: CheckKindRun, AppID: 42}}}
+				scoped := scope.Apply(context.Background(), &PR{}, []Check{{Name: "build", Bucket: CheckBucketPass}, rerun})
+				if got := names(scoped.Relevant); !reflect.DeepEqual(got, []string{"build", "CI"}) {
+					t.Fatalf("%s: relevant=%v, want build and actionable CI without a placeholder", bucket, got)
+				}
+				if scoped.Relevant[1].ExpectedMissing || scoped.Relevant[1].Bucket != bucket {
+					t.Fatalf("workflow result replaced by a placeholder: %+v", scoped.Relevant[1])
+				}
+				if scoped.Ready() != (bucket == CheckBucketPass) || !scope.Includes(context.Background(), &PR{}, rerun) {
+					t.Fatalf("%s: workflow's own requirement did not decide readiness and repair inclusion", bucket)
+				}
 			}
 		})
 	}

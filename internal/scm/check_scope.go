@@ -336,20 +336,24 @@ func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck,
 
 // classify reports a single check's role under an already-resolved scope.
 func (s *CheckScope) classify(c Check, required []RequiredCheck, derived bool) CheckRole {
+	role := s.classifyIdentity(c, required, derived)
+	if role == CheckRoleRequired {
+		return role
+	}
+	for _, identity := range c.Supersedes {
+		switch s.classify(identity, required, derived) {
+		case CheckRoleRequired:
+			return CheckRoleRequired
+		case CheckRoleInformational:
+			role = CheckRoleInformational
+		}
+	}
+	return role
+}
+
+func (s *CheckScope) classifyIdentity(c Check, required []RequiredCheck, derived bool) CheckRole {
 	if matchesCheckIdentity(s.policy.ExternalChecks, c) {
 		return CheckRoleExternal
-	}
-	if len(c.Supersedes) > 0 {
-		role := CheckRoleExternal
-		for _, identity := range c.Supersedes {
-			switch s.classify(identity, required, derived) {
-			case CheckRoleRequired:
-				return CheckRoleRequired
-			case CheckRoleInformational:
-				role = CheckRoleInformational
-			}
-		}
-		return role
 	}
 	if matchesCheckIdentity(s.policy.MustPass, c) {
 		return CheckRoleRequired
@@ -366,18 +370,15 @@ func (s *CheckScope) classify(c Check, required []RequiredCheck, derived bool) C
 }
 
 func (s *CheckScope) satisfies(c Check, want RequiredCheck, workflow string, required []RequiredCheck, derived bool) bool {
-	if s.classify(c, required, derived) != CheckRoleRequired {
-		return false
+	if s.classifyIdentity(c, required, derived) == CheckRoleRequired && want.satisfiedBy(c) && (workflow == "" || c.Workflow == workflow) {
+		return true
 	}
-	if len(c.Supersedes) > 0 {
-		for _, identity := range c.Supersedes {
-			if s.satisfies(identity, want, workflow, required, derived) {
-				return true
-			}
+	for _, identity := range c.Supersedes {
+		if s.satisfies(identity, want, workflow, required, derived) {
+			return true
 		}
-		return false
 	}
-	return want.satisfiedBy(c) && (workflow == "" || c.Workflow == workflow)
+	return false
 }
 
 func matchesCheckIdentity(patterns []string, check Check) bool {
