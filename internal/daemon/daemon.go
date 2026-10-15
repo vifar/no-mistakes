@@ -1003,13 +1003,13 @@ func removeOrphanWorktree(ctx context.Context, wt orphanWorktree) bool {
 // skipWorktreeCleanup reports whether the worktree directory for runID must
 // be left alone during startup cleanup. It is the active-run guard that
 // makes cleanup safe even if the singleton lock were ever bypassed: a
-// worktree is never removed while its run is still pending or running -
+// worktree is never removed while its run is active (RunStatus.Active) -
 // only terminal-run leftovers or directories with no matching run row at
 // all (e.g. a directory left behind after its run row was independently
-// pruned) are eligible for removal. RunManager.startRun always inserts the
-// run row before creating the worktree directory, so on a single daemon a
-// "no matching run" directory is never one whose insert simply hasn't landed
-// yet - it is safe to remove immediately.
+// pruned) are eligible for removal. RunManager.startRunWithIntentSourceLocked
+// inserts the row before admission and launchRun creates the worktree only
+// after admission, so on a single daemon a "no matching run" directory is
+// never one whose insert has not landed yet; it is safe to remove immediately.
 //
 // A run marked RunCIMonitorInterrupted (the daemon restarted while monitoring
 // CI for an already-open PR, issue #361) is terminal and would otherwise leak

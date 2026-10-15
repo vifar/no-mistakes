@@ -283,8 +283,8 @@ func (m *RunManager) startQueuedRun(runID string, slot *runSlot) (func(), bool) 
 }
 
 // launchQueuedRun finishes the launch of a run taken off the queue, rebuilding
-// everything from its row. Failures end the run as failed (as an inline launch
-// does); there is no caller left to return them to.
+// everything from its row. Setup failures use failRunSetup to preserve a prior
+// cancellation cause; there is no caller left to return them to.
 func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHandle) {
 	defer func() {
 		// launchRun transfers the handle to the run goroutine once the
@@ -344,6 +344,9 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 	_, _ = m.launchRun(handle.runCtx, repo, run, globalCfg, spec.Trigger, spec.SkipSteps, slot, handle)
 }
 
+// failRunSetup preserves cancellation over the error from interrupted setup.
+// Its conditional write leaves terminal outcomes alone, and subscribers see
+// the saved verdict rather than a competing local failure reason.
 func (m *RunManager) failRunSetup(ctx context.Context, runID, reason string) {
 	m.mu.Lock()
 	status := types.RunFailed
@@ -2334,8 +2337,8 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		}()
 	})
 
-	// Track executor. A queue-started run registered its cancel/done pair
-	// before setup; an inline launch registers them now.
+	// Attach the executor to the handle registered before setup, so cancellation
+	// keeps the same owner as setup hands off to background execution.
 	done := handle.done
 	m.mu.Lock()
 	m.runs[run.ID].executor = executor

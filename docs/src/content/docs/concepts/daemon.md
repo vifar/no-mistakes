@@ -86,7 +86,7 @@ When a push arrives via the post-receive hook, the daemon records the run. If
 no execution slot is available, it queues the run durably without creating a
 worktree or executor. Once admitted, it:
 
-1. Creates a detached worktree at `~/.no-mistakes/worktrees/<repoID>/<runID>/`, or at `<root>/<runID>` when [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) names a directory for that repository. The placement is resolved once, at run creation, and recorded on the run, so editing the setting never retargets a run that already exists
+1. Creates a detached worktree at `~/.no-mistakes/worktrees/<repoID>/<runID>/`, or in a configured root; [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) owns placement and when it becomes fixed for a run
 2. Starts the pipeline executor in that worktree
 3. Streams events to any connected TUI clients and serves request/response state to AXI clients
 4. Cleans up the worktree when the run finishes (success or failure), subject to the retention rules below
@@ -130,7 +130,7 @@ Abort and supersede share one cancellation path that consults an in-memory owner
 | Recovering gate (a parked gate restored after a restart) | Cancels without needing a slot. Recovered gates register their response controls and cancel handle before they wait for capacity, so an abort stops a gate that is still waiting. |
 | Finishing (the pipeline has returned; cleanup and result collection remain) | Does nothing. The outcome is decided, so an abort racing completion leaves a `completed` run completed, and a new push neither cancels nor waits for a finishing run. |
 
-Recovered gates never take a slot above `daemon.max_concurrent_runs`: they are admitted in arrival order ahead of new runs, within the cap. A queued run whose saved launch spec cannot be read fails with a `read queued run spec` error instead of starting without it.
+An abort or supersession during launch setup remains `cancelled` with its original reason, even when the interrupted setup operation returns an error or panics. An ordinary setup failure records `failed`; neither outcome overwrites an already terminal run. Subscribers receive the saved status and reason. A queued run whose saved launch spec cannot be read fails with a `read queued run spec` error instead of starting without it. [Crash recovery](#crash-recovery) owns admission of recovered gates.
 
 The global [`daemon` configuration](/no-mistakes/reference/global-config/#daemon) owns the limits, queue ordering, slot release rules, and hot reload behavior. The [CLI reference](/no-mistakes/reference/cli/#no-mistakes-daemon-set-max-concurrent-runs) explains changing the cap with `daemon set`; [`axi` status output](/no-mistakes/reference/cli/#no-mistakes-axi) and [`doctor`](/no-mistakes/reference/cli/#no-mistakes-doctor) report usage.
 
@@ -139,7 +139,7 @@ reason about in one long-lived process than inside independent hook invocations.
 
 ## Crash recovery
 
-On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
+On startup, the daemon checks for interrupted `pending` or `running` runs and restores the durable queue:
 
 - Never certifies a run from a stored `merged` or `closed` observation alone; current comparison and support evidence must pass before completion
 - Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
@@ -152,7 +152,7 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - Leaves `queued` runs queued (nothing about them was running) and starts them first in, first out as capacity becomes available. Recovered runs acquire slots in recovery order ahead of queued new runs, without exceeding `daemon.max_concurrent_runs`. With `daemon.hold_slot_while_parked: true`, recovered parked runs retain admitted slots; the rest wait in priority order
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
 - Terminates processes a crashed daemon left running in worktrees no run owns any more, using the same working-directory scoping as run cleanup plus a ten-minute age floor so a run starting concurrently with startup is never mistaken for a leak
-- Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `pending` or `running`, or whose unresolved refusal requires [retention](#what-it-does); under `~/.no-mistakes/worktrees/` that means eligible leftovers from terminal runs plus directories with no matching run record, while in a [configured worktree root](/no-mistakes/reference/global-config/#worktree_roots) only the directories run records name are ever swept or removed. A `ci_monitor_interrupted` worktree is also kept when its checked-out commit differs from the run's last pushed commit, since it may still hold an unpushed CI auto-fix commit
+- Removes orphaned worktree directories via `git worktree remove --force` - but never one whose run is still `queued`, `pending`, or `running`, or whose unresolved refusal requires [retention](#what-it-does); under `~/.no-mistakes/worktrees/` that means eligible leftovers from terminal runs plus directories with no matching run record, while in a [configured worktree root](/no-mistakes/reference/global-config/#worktree_roots) only the directories run records name are ever swept or removed. A `ci_monitor_interrupted` worktree is also kept when its checked-out commit differs from the run's last pushed commit, since it may still hold an unpushed CI auto-fix commit
 - Migrates gates named by authoritative repository records, plus legacy directories with the strict `<repoID>.git` shape. Before changing an unstamped candidate, it validates that the directory is a bare repository without relying on the current directory or ancestor Git discovery; unrelated and malformed directories are rejected without hook or Git mutation
 - For a validated legacy gate, installs or refreshes the no-mistakes-managed pre-receive admission and post-receive notification hooks, preserving an existing custom pre-receive hook behind the admission wrapper, then enables push-option support and reapplies per-worktree hook-path isolation
 - Records a content-versioned gate configuration stamp only after the whole migration succeeds. Normal restarts check current stamped gates from the filesystem without rerunning the mutating Git commands
