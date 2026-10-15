@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -257,4 +258,37 @@ func TestCIStep_RequiredCheckBoundToAnAppIgnoresSameNamedChecksFromOthers(t *tes
 	owner := `{"name":"build","state":"SUCCESS","bucket":"pass","app":"github-actions","appId":15368}`
 	r = runScoped(t, rollup(owner), env, config.CI{}, 1)
 	assertReady(t, r)
+}
+
+func TestCIStep_MissingRequiredCheckDoesNotDelayBuildRepair(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
+	ag := &stepstest.MockAgent{AgentName: "test", RunFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return nil, errors.New("stop after repair dispatch")
+	}}
+	sctx := stepstest.NewTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = append(stepstest.FakeCIGHSequence(t, "OPEN", rollup(buildFail)),
+		`FAKE_CLI_PROTECTION_JSON={"contexts":["build","lint"]}`, "FAKE_CLI_RULES_JSON=[]")
+	stepstest.BindCurrentPRComparison(t, sctx, "https://github.com/test/repo/pull/42", "test/repo", "main")
+	sctx.Config.CITimeout = 10 * time.Minute
+	sctx.Config.AutoFix.CI = 1
+	waits := 0
+	step := (&steps.CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error {
+		waits++
+		return context.Canceled
+	})
+	_, _ = stepstest.ExecuteWithAutoFix(t, step, sctx, 0)
+	if len(ag.Calls) != 1 || waits != 0 {
+		t.Fatalf("repair calls = %d, poll waits = %d; want immediate repair dispatch", len(ag.Calls), waits)
+	}
+	if !strings.Contains(sctx.PreviousFindings, `"check":"build"`) || strings.Contains(sctx.PreviousFindings, `"check":"lint"`) {
+		t.Fatalf("repair selection = %s, want only build", sctx.PreviousFindings)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.CIReadyAt != nil {
+		t.Fatal("missing lint must keep readiness blocked")
+	}
 }

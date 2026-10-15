@@ -54,7 +54,7 @@ func hasPendingChecks(checks []scm.Check) bool {
 // of the other checks' failures.
 func hasExecutingPendingChecks(checks []scm.Check) bool {
 	for _, c := range checks {
-		if c.Pending() && !c.AwaitingApproval {
+		if c.Pending() && !c.AwaitingApproval && !c.ExpectedMissing {
 			return true
 		}
 	}
@@ -193,11 +193,11 @@ func pendingCheckMatchesLastFixed(checks []scm.Check, lastFixedChecks string) bo
 	}
 
 	if len(issues.Checks) == 0 {
-		return issues.MergeConflict && hasPendingChecks(checks)
+		return issues.MergeConflict && hasExecutingPendingChecks(checks)
 	}
 
 	for _, c := range checks {
-		if !c.Pending() {
+		if !c.Pending() || c.AwaitingApproval || c.ExpectedMissing {
 			continue
 		}
 		for _, target := range issues.Checks {

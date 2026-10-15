@@ -106,7 +106,7 @@ func TestCheckScopeMissingRequiredContextBlocksAsPending(t *testing.T) {
 		t.Fatalf("relevant = %v, want build plus an expected placeholder for literal must_pass lint only", got)
 	}
 	placeholder := scoped.Relevant[1]
-	if placeholder.Bucket != CheckBucketPending || placeholder.HeadSHA != "h" || !placeholder.Pending() {
+	if !placeholder.ExpectedMissing || placeholder.Bucket != CheckBucketPending || placeholder.HeadSHA != "h" || !placeholder.Pending() {
 		t.Fatalf("placeholder = %+v, want pending on the head", placeholder)
 	}
 }
@@ -266,7 +266,7 @@ func TestCheckScopeBoundRequirementNeedsItsApplication(t *testing.T) {
 			}
 			if !tc.wantReady {
 				placeholder := scoped.Relevant[len(scoped.Relevant)-1]
-				if placeholder.State != "EXPECTED" || placeholder.Bucket != CheckBucketPending || placeholder.AppID != app {
+				if !placeholder.ExpectedMissing || placeholder.State != "EXPECTED" || placeholder.Bucket != CheckBucketPending || placeholder.AppID != app {
 					t.Fatalf("missing bound requirement = %+v, want a pending placeholder for app %d", placeholder, app)
 				}
 			}
@@ -292,5 +292,38 @@ func TestCheckScopeBoundAndUnboundRequirementsBothMustHold(t *testing.T) {
 	scoped := NewCheckScope(host, CheckScopePolicy{}, "main", nil).Apply(context.Background(), &PR{}, []Check{{Name: "build", AppID: 99, Bucket: CheckBucketPass}})
 	if scoped.Ready() {
 		t.Fatalf("a ruleset that accepts any producer must not waive a protection rule bound to an app: %+v", scoped)
+	}
+}
+
+func TestCheckScopeMissingRequirementIsExplicit(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		required []RequiredCheck
+		policy   CheckScopePolicy
+		checks   []Check
+	}{
+		{name: "required context", required: []RequiredCheck{{Context: "lint"}}},
+		{name: "wrong app", required: []RequiredCheck{{Context: "lint", AppID: 7}}, checks: []Check{{Name: "lint", AppID: 8, Bucket: CheckBucketPass}}},
+		{name: "literal must_pass", policy: CheckScopePolicy{MustPass: []string{"lint"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scoped := NewCheckScope(&requiredChecksHost{bound: tc.required}, tc.policy, "main", nil).Apply(context.Background(), &PR{HeadSHA: "h"}, tc.checks)
+			if scoped.Ready() {
+				t.Fatal("an unmet requirement must block readiness")
+			}
+			missing := 0
+			for _, check := range scoped.Relevant {
+				if check.ExpectedMissing {
+					missing++
+					if check.Name != "lint" || !check.Pending() {
+						t.Fatalf("missing requirement = %+v", check)
+					}
+				}
+			}
+			if missing != 1 {
+				t.Fatalf("missing placeholders = %d, want 1", missing)
+			}
+		})
 	}
 }

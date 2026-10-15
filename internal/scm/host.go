@@ -202,11 +202,12 @@ const (
 
 // Check is a single CI check result on a PR.
 type Check struct {
-	Name       string
-	ProviderID string `json:"provider_id,omitempty"`
-	HeadSHA    string
-	Bucket     CheckBucket
-	Kind       CheckKind
+	ExpectedMissing bool
+	Name            string
+	ProviderID      string `json:"provider_id,omitempty"`
+	HeadSHA         string
+	Bucket          CheckBucket
+	Kind            CheckKind
 	// State is the provider's own outcome string for the check (GitHub
 	// conclusions such as FAILURE, TIMED_OUT, CANCELLED). Buckets collapse
 	// several outcomes into one value, so callers that must tell an

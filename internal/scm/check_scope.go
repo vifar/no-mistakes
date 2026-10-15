@@ -290,7 +290,7 @@ func (s *CheckScope) partition(pr *PR, checks []Check, required []RequiredCheck,
 		if satisfied {
 			continue
 		}
-		out.Relevant = append(out.Relevant, Check{Name: want.Context, AppID: want.AppID, HeadSHA: head, Bucket: CheckBucketPending, State: "EXPECTED", Kind: CheckKindStatus})
+		out.Relevant = append(out.Relevant, Check{Name: want.Context, AppID: want.AppID, HeadSHA: head, Bucket: CheckBucketPending, State: "EXPECTED", Kind: CheckKindStatus, ExpectedMissing: true})
 	}
 	return out
 }

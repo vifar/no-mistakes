@@ -172,3 +172,32 @@ func TestTerminalFailureCompletionTimesStillCoverFailingChecks(t *testing.T) {
 		t.Fatalf("completion times = %v, want nothing recorded for non-failures", quiet)
 	}
 }
+
+func TestMissingChecksDoNotCountAsExecutingOrVerifyRepairs(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name          string
+		check         scm.Check
+		wantExecuting bool
+	}{
+		{"missing", scm.Check{Name: "lint", Bucket: scm.CheckBucketPending, ExpectedMissing: true}, false},
+		{"held", scm.Check{Name: "lint", Bucket: scm.CheckBucketPending, AwaitingApproval: true}, false},
+		{"running", scm.Check{Name: "lint", Bucket: scm.CheckBucketPending}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checks := []scm.Check{tc.check}
+			if hasExecutingPendingChecks(checks) != tc.wantExecuting {
+				t.Fatalf("executing = %v, want %v", hasExecutingPendingChecks(checks), tc.wantExecuting)
+			}
+			if !hasPendingChecks(checks) || (scm.ScopedChecks{Relevant: checks}).Ready() {
+				t.Fatal("pending requirements must block readiness")
+			}
+			for _, targets := range [][]scm.CheckTarget{nil, {{Name: "lint"}}} {
+				lastFixed := encodeLastFixedChecks(targets, true)
+				if got := pendingCheckMatchesLastFixed(checks, lastFixed); got != tc.wantExecuting {
+					t.Fatalf("pending repair evidence = %v, want %v", got, tc.wantExecuting)
+				}
+			}
+		})
+	}
+}
