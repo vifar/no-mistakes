@@ -225,6 +225,11 @@ func (e *Executor) acquireAnsweredGateSlot(ctx context.Context, runID, stepID st
 		return err
 	}
 	if err := e.db.ResumeStepFromApproval(runID, stepID, "gate resumed", parkedMS); err != nil {
+		// The caller fails the step and the run; the run must not stay
+		// durably marked as parked, and the accepted gate's wait still counts.
+		if dbErr := e.db.CompleteRunAwaitingAgent(runID, parkedMS); dbErr != nil {
+			slog.Warn("failed to complete awaiting-agent state in db", "run", runID, "error", dbErr)
+		}
 		return fmt.Errorf("resume answered gate: %w", err)
 	}
 	return nil

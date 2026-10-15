@@ -490,7 +490,7 @@ func (d *DB) CompleteReviewStep(id, runID, approvedHeadSHA string, exitCode int,
 // FailStep marks a step as failed with an error message and duration.
 func (d *DB) FailStep(id string, errMsg string, durationMS int64) error {
 	_, err := d.sql.Exec(
-		`UPDATE step_results SET status = ?, error = ?, duration_ms = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ?`,
+		`UPDATE step_results SET status = ?, error = ?, duration_ms = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, pending_response = NULL WHERE id = ?`,
 		types.StepStatusFailed, errMsg, durationMS, now(), now(), "step failed: "+errMsg, id,
 	)
 	if err != nil {
