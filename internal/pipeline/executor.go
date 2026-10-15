@@ -80,7 +80,7 @@ type Executor struct {
 	workDir  string
 
 	mu                     sync.Mutex
-	activeAgentPID         atomic.Int64 // live lifecycle ownership, independent of SQLite
+	activeAgentPID         atomic.Int64          // live lifecycle ownership, independent of SQLite
 	approvalCh             chan approvalResponse // buffered channel for approval responses
 	waiting                bool                  // true when blocked on approval
 	waitingStep            types.StepName        // which step is currently awaiting approval
