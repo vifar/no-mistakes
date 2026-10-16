@@ -1176,8 +1176,8 @@ func TestPRTargetingReadsFailClosedWithoutIdentity(t *testing.T) {
 	}
 }
 
-// GetPRState and GetMergeableState share the same selector boundary as
-// GetChecks, so a URL-only PR must target the URL there too.
+// URL-only PR reads must target that URL explicitly, after any method-specific
+// identity checks, rather than letting gh infer a branch.
 func TestPRStateAndMergeableTargetKnownPRByURL(t *testing.T) {
 	t.Parallel()
 
