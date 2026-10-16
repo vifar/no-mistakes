@@ -514,14 +514,15 @@ type ShutdownResult struct {
 
 // RunInfo is the IPC representation of a pipeline run.
 type RunInfo struct {
-	VerificationPlan *verificationplan.Snapshot `json:"verification_plan"`
-	Shipping         *types.ShippingOptions     `json:"shipping,omitempty"`
-	ReviewGeneration int64                      `json:"review_generation,omitempty"`
-	SourceRepo       string                     `json:"source_repo,omitempty"`
-	SourceBranch     string                     `json:"source_branch,omitempty"`
-	TargetBranch     string                     `json:"target_branch,omitempty"`
-	TargetSHA        string                     `json:"target_sha,omitempty"`
-	PiProfile        *agentcfg.PiProfile        `json:"pi_profile,omitempty"`
+	TargetAdvanceRewinds int64                      `json:"target_advance_rewinds"`
+	VerificationPlan     *verificationplan.Snapshot `json:"verification_plan"`
+	Shipping             *types.ShippingOptions     `json:"shipping,omitempty"`
+	ReviewGeneration     int64                      `json:"review_generation,omitempty"`
+	SourceRepo           string                     `json:"source_repo,omitempty"`
+	SourceBranch         string                     `json:"source_branch,omitempty"`
+	TargetBranch         string                     `json:"target_branch,omitempty"`
+	TargetSHA            string                     `json:"target_sha,omitempty"`
+	PiProfile            *agentcfg.PiProfile        `json:"pi_profile,omitempty"`
 
 	ID               string          `json:"id"`
 	RepoID           string          `json:"repo_id"`

@@ -396,3 +396,35 @@ func TestRecoveredRunCleanupRemovesItsEmptyEvidenceDir(t *testing.T) {
 		t.Error("a resumed run left its empty evidence directory behind")
 	}
 }
+
+func TestTargetRewindEmptyEvidenceGenerationsAreReapedWithoutDeletingArtifacts(t *testing.T) {
+	f := newEvidenceFixture(t)
+	m := NewRunManager(f.db, f.p, nil)
+	empty := f.seed("generation-empty", types.RunCompleted, time.Minute, nil)
+	for _, path := range []string{"g1", "superseded/g0"} {
+		if err := os.MkdirAll(filepath.Join(f.root, empty, path), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	kept := f.seed("generation-artifacts", types.RunCompleted, time.Minute, nil)
+	for path, content := range map[string]string{"superseded/g0/old.log": "old evidence", "g1/new.log": "current evidence"} {
+		full := filepath.Join(f.root, kept, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{})
+	m.cleanupRunEvidence(cfg, empty)
+	m.cleanupRunEvidence(cfg, kept)
+	if f.exists(empty) {
+		t.Fatal("empty generation directories kept the finished run's empty evidence root alive")
+	}
+	for _, path := range []string{"superseded/g0/old.log", "g1/new.log"} {
+		if _, err := os.Stat(filepath.Join(f.root, kept, path)); err != nil {
+			t.Fatalf("deleted evidence %s: %v", path, err)
+		}
+	}
+}

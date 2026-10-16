@@ -117,19 +117,20 @@ type stepView struct {
 
 // runView is a render-ready view of a pipeline run.
 type runView struct {
-	Shipping           *types.ShippingOptions
-	ShippingComparison *shipping.StatusIdentity
-	SubmittedHeadSHA   *string
-	PiProfile          *agentcfg.PiProfile
-	VerificationPlan   *verificationplan.Snapshot
-	ID                 string
-	Branch             string
-	Status             string
-	HeadSHA            string
-	ReviewGeneration   *int64
-	PRURL              string
-	CIReady            bool
-	CIReadyNoCI        bool
+	TargetAdvanceRewinds int64
+	Shipping             *types.ShippingOptions
+	ShippingComparison   *shipping.StatusIdentity
+	SubmittedHeadSHA     *string
+	PiProfile            *agentcfg.PiProfile
+	VerificationPlan     *verificationplan.Snapshot
+	ID                   string
+	Branch               string
+	Status               string
+	HeadSHA              string
+	ReviewGeneration     *int64
+	PRURL                string
+	CIReady              bool
+	CIReadyNoCI          bool
 	// AwaitingAgentSince is the unix-seconds time the run parked at a gate
 	// awaiting the driving agent, or nil when the run is not parked. It powers
 	// the top-level parked signal in the run object.
@@ -165,6 +166,7 @@ func ordinaryReviewGeneration(r *ipc.RunInfo) *int64 {
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
 	rv := runView{
+		TargetAdvanceRewinds:  r.TargetAdvanceRewinds,
 		Shipping:              r.Shipping,
 		SubmittedHeadSHA:      r.SubmittedHeadSHA,
 		ID:                    r.ID,
@@ -230,18 +232,19 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 
 func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 	rv := runView{
-		Shipping:           r.Shipping,
-		SubmittedHeadSHA:   r.SubmittedHeadSHA,
-		CIReady:            r.CIReadyAt != nil,
-		CIReadyNoCI:        r.CIReadyNoCI,
-		PiProfile:          r.PiProfile,
-		VerificationPlan:   r.VerificationPlan,
-		ID:                 r.ID,
-		Branch:             r.Branch,
-		Status:             string(r.Status),
-		HeadSHA:            r.HeadSHA,
-		AwaitingAgentSince: r.AwaitingAgentSince,
-		ExternalCIOwner:    r.ExternalCIOwner,
+		TargetAdvanceRewinds: r.TargetAdvanceRewinds,
+		Shipping:             r.Shipping,
+		SubmittedHeadSHA:     r.SubmittedHeadSHA,
+		CIReady:              r.CIReadyAt != nil,
+		CIReadyNoCI:          r.CIReadyNoCI,
+		PiProfile:            r.PiProfile,
+		VerificationPlan:     r.VerificationPlan,
+		ID:                   r.ID,
+		Branch:               r.Branch,
+		Status:               string(r.Status),
+		HeadSHA:              r.HeadSHA,
+		AwaitingAgentSince:   r.AwaitingAgentSince,
+		ExternalCIOwner:      r.ExternalCIOwner,
 	}
 	if database != nil {
 		if r.Status == types.RunQueued {
@@ -581,7 +584,7 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 		}
 	}
 	fields = append(fields, toon.Field{Key: "head", Value: shortSHA(rv.HeadSHA)})
-	fields = append(fields, toon.Field{Key: "head_sha", Value: rv.HeadSHA})
+	fields = append(fields, toon.Field{Key: "head_sha", Value: rv.HeadSHA}, toon.Field{Key: "target_advance_rewinds", Value: rv.TargetAdvanceRewinds})
 	if rv.Shipping != nil {
 		var sourceRepo, targetSHA, generation any
 		target := rv.Shipping.TargetBranch

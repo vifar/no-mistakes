@@ -1155,6 +1155,7 @@ func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
 		}
 	}
 	root := m.paths.EvidenceRoot(configured)
+	pruneEmptyEvidenceGenerations(filepath.Join(root, runID))
 	if err := os.Remove(filepath.Join(root, runID)); err != nil && !os.IsNotExist(err) {
 		slog.Debug("run evidence kept", "run_id", runID, "reason", err)
 	}

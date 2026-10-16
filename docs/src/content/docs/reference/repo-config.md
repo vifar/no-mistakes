@@ -8,7 +8,7 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `staging_exclude`, `max_file_size_bytes`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `ci.required_checks`, `ci.must_pass`, `ci.external_checks`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `rebase.strategy`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
+The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `staging_exclude`, `max_file_size_bytes`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `ci.required_checks`, `ci.must_pass`, `ci.external_checks`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `rebase.strategy`, `rebase.max_target_advance_rewinds`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
@@ -1080,6 +1080,17 @@ Integration publishes as a fast-forward under `merge`. A CI merge-conflict repai
 **The cost is a merge commit per integration.** On a squash-merged default branch (one commit per PR) those commits collapse at landing and never reach it. On a merge-committed one they do, so the history is a graph rather than a line.
 
 This value is read only from the trusted default-branch copy of this file, regardless of [`allow_repo_commands`](#allow_repo_commands). It decides whether integrating a moved base leaves auditable evidence behind, so a pushed branch must not be able to change it in either direction. A value set here wins over the operator's own [`rebase.strategy`](/no-mistakes/reference/global-config/#rebasestrategy).
+
+### rebase.max_target_advance_rewinds
+
+Maximum committed target fast-forward rewinds per run. The default is `3`; `0` disables them. Set a non-negative integer:
+
+```yaml
+rebase:
+  max_target_advance_rewinds: 3
+```
+
+This setting is read from the trusted default-branch configuration, regardless of `allow_repo_commands`. A repository value overrides the operator's global default. Initial binding, local fix commits, first PR attachment, failed transactions, and identical retries do not spend this budget. Reaching it stops the run with a message naming the cap. See [Target advances before publication](/no-mistakes/reference/pipeline-steps/#target-advances-before-publication) for eligibility and pending-conflict rules.
 
 ### commit.fix_message
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -183,4 +184,33 @@ func reapLegacyEvidence(d *db.DB, current string, policy evidenceReapPolicy, now
 	// Remove the root itself once it is empty; os.Remove fails harmlessly while
 	// anything remains.
 	_ = os.Remove(legacy)
+}
+
+// Remove only empty generation containers. Artifact files and conversation
+// history are never removed by per-run empty-directory cleanup.
+func pruneEmptyEvidenceGenerations(root string) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	prune := func(dir string) {
+		generations, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, entry := range generations {
+			name := entry.Name()
+			if entry.IsDir() && len(name) > 1 && name[0] == 'g' && strings.Trim(name[1:], "0123456789") == "" {
+				_ = os.Remove(filepath.Join(dir, name))
+			}
+		}
+	}
+	prune(root)
+	for _, entry := range entries {
+		if entry.Name() == "superseded" && entry.IsDir() {
+			dir := filepath.Join(root, entry.Name())
+			prune(dir)
+			_ = os.Remove(dir)
+		}
+	}
 }

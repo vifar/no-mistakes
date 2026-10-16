@@ -330,3 +330,26 @@ func TestPublishRunEvidence_NeverPublishesTheReviewConversation(t *testing.T) {
 		}
 	}
 }
+
+func TestPublishRunEvidenceUsesOnlyCurrentRewindGeneration(t *testing.T) {
+	c, remote := newEvidencePublishContext(t, "feature/rewind-evidence")
+	root := c.EvidenceDir
+	c.EvidenceDir = filepath.Join(root, "superseded", "g0")
+	writeRunEvidence(t, c, map[string]string{"obsolete.log": "superseded evidence"})
+	c.EvidenceDir = filepath.Join(root, "g1")
+	writeRunEvidence(t, c, map[string]string{"current.log": "current evidence"})
+	if publishRunEvidence(c) == nil {
+		t.Fatal("current generation was not published")
+	}
+	tree := gitCmd(t, remote, "ls-tree", "-r", "--name-only", "refs/heads/no-mistakes/evidence")
+	if !strings.Contains(tree, "current.log") || strings.Contains(tree, "obsolete") || strings.Contains(tree, "superseded") {
+		t.Fatalf("generation leak in evidence publication:\n%s", tree)
+	}
+	// Even an explicit old absolute artifact path is outside the renderer's
+	// current evidence allowlist.
+	steps, rounds := testStepWithArtifacts(fmt.Sprintf(`{"kind":"log","label":"obsolete","path":%q}`, filepath.Join(root, "superseded", "g0", "obsolete.log")))
+	rendered := BuildTestingSummaryForPR(steps, rounds, c.Repo.UpstreamURL, c.Run.HeadSHA, c.WorkDir, c.EvidenceDir, nil)
+	if strings.Contains(rendered, "superseded evidence") {
+		t.Fatalf("consumer read old evidence: %s", rendered)
+	}
+}
