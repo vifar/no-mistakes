@@ -105,8 +105,16 @@ func TestPipelineAttachCommitStatus(t *testing.T) {
 			// Model a crash after A's failure POST but before its LastState
 			// write. Recovery must really try to post again unless B retires A;
 			// deduplication of A's initial failure must not mask broken ownership.
+			// The pending ledger state was written while A was still active; a
+			// terminal run refuses any non-failure ledger write.
 			publication.LastState = "pending"
+			if err := sc.DB.UpdateRunStatus(sc.Run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
 			if err := sc.DB.PutCommitStatusPublication(sc.Run.ID, publication); err != nil {
+				t.Fatal(err)
+			}
+			if err := sc.DB.UpdateRunStatus(sc.Run.ID, sc.Run.Status); err != nil {
 				t.Fatal(err)
 			}
 			run, err := sc.DB.InsertRun(sc.Repo.ID, sc.Run.Branch, head, base)
