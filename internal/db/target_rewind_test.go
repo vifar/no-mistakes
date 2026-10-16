@@ -1,6 +1,7 @@
 package db
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -50,10 +51,23 @@ func TestTargetRewindTransactionChargesOnlyCommittedFastForward(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = d.sql.Exec(`UPDATE step_results SET status='completed',findings_json='old',pending_response='old' WHERE id=?`, review.ID); err != nil {
+	round, err := d.InsertStepRound(review.ID, 1, "initial", nil, nil, 1)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = d.InsertStepRound(review.ID, 1, "initial", nil, nil, 1); err != nil {
+	if err = d.ParkStepForApproval(id, review.ID, types.StepStatusAwaitingApproval, 0, 1, nil, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	parked, err := d.GetStepResult(review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldGate := parked.GateIdentity()
+	response, err := json.Marshal(map[string]any{"gate": oldGate, "action": types.ActionApprove})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = d.SetStepPendingResponse(review.ID, string(response), "answered", oldGate); err != nil {
 		t.Fatal(err)
 	}
 	if err = d.UpdateRunReviewApprovedHeadSHA(id, c.LocalHeadSHA); err != nil {
@@ -65,8 +79,14 @@ func TestTargetRewindTransactionChargesOnlyCommittedFastForward(t *testing.T) {
 	}
 	assertRewindCharge(t, d, id, 1, true)
 	row, err := d.GetStepResult(review.ID)
-	if err != nil || row.Status != types.StepStatusPending || row.FindingsJSON != nil || row.PendingResponse != nil {
+	if err != nil || row.Status != types.StepStatusPending || row.FindingsJSON != nil || row.PendingResponse != nil || row.GateNonce != nil || row.GateRoundID != nil {
 		t.Fatalf("stale gate survived: %+v %v", row, err)
+	}
+	if err := d.SetStepPendingResponse(review.ID, `{"action":"approve"}`, "obsolete response", oldGate); err == nil {
+		t.Fatal("pre-rewind gate still accepted a response")
+	}
+	if err := d.ResumeStepFromApproval(id, review.ID, "obsolete dispatch", 1, oldGate); err == nil {
+		t.Fatal("pre-rewind response was dispatched")
 	}
 	rounds, err := d.GetRoundsByStep(review.ID)
 	if err != nil || len(rounds) != 0 {

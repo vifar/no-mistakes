@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -155,6 +156,22 @@ func TestTargetAdvanceExistingPRJourney(t *testing.T) {
 			head := h.CommitChange(branch, "feature.txt", "feature\n", "add feature")
 			gitIn(t, h, h.WorkDir, "push", "origin", branch)
 			writeStatefulGH(t, state, statefulGHState{PRs: map[string]*statefulGHPR{branch: {Number: 42, URL: "https://github.com/example/closes/pull/42", Title: "Prior PR", Body: "prior-run body", Base: "main", Head: branch, State: "OPEN"}}})
+			attachFailure := filepath.Join(t.TempDir(), "attach-observation-failed")
+			if kind == "attached without G" {
+				// G cannot adopt when its initial remote observation is unavailable.
+				// Fail that observation once in the managed pipeline worktree; all
+				// guard observations and later publication use the real Git binary.
+				realGit, err := testgit.RealGit()
+				if err != nil {
+					t.Fatal(err)
+				}
+				script := "#!/bin/sh\ncase \"$PWD\" in\n*/worktrees/*)\n" +
+					"if [ \"$1\" = ls-remote ] && [ \"${3-}\" = refs/heads/" + branch + " ] && [ ! -f " + shellQuote(attachFailure) + " ]; then\n" +
+					"  : > " + shellQuote(attachFailure) + "; echo 'attach observation unavailable' >&2; exit 1\nfi;;\nesac\nexec " + shellQuote(realGit) + " \"$@\"\n"
+				if err := os.WriteFile(filepath.Join(h.BinDir, "git"), []byte(script), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if kind == "unattached" {
 				head = h.CommitChange(branch, "unpublished.txt", "unpublished\n", "extend unpublished source")
 			}
@@ -178,17 +195,29 @@ func TestTargetAdvanceExistingPRJourney(t *testing.T) {
 			} else if active.PRURL == nil || *active.PRURL != "https://github.com/example/closes/pull/42" {
 				t.Fatal("existing PR was not pinned before Test")
 			}
+			d, err := db.OpenReadOnly(filepath.Join(h.NMHome, "state.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			publication, pubErr := d.GetCommitStatusPublication(t.Context(), active.ID, db.CommitStatusPublication{SHA: head, Host: "github.com", Repo: "example/closes"})
+			attempt, attemptErr := d.GetCommitStatusAttempt(active.ID)
+			_ = d.Close()
+			if pubErr != nil || attemptErr != nil {
+				t.Fatalf("read real attach provenance: %v %v", pubErr, attemptErr)
+			}
 			if kind == "G attached" {
-				d, err := db.Open(filepath.Join(h.NMHome, "state.sqlite"))
-				if err != nil {
-					t.Fatal(err)
+				if publication == nil || publication.Validated || publication.CIEligible {
+					t.Fatalf("real G attach publication missing or credited validation: %+v", publication)
 				}
-				err = d.PutCommitStatusPublication(active.ID, db.CommitStatusPublication{SHA: head, Host: "github.com", Repo: "example/closes", LastState: "pending"})
-				_ = d.Close()
-				if err != nil {
-					t.Fatal(err)
+			} else if publication != nil || attempt != nil {
+				t.Fatalf("fixture unexpectedly gained publication provenance: %+v %+v", publication, attempt)
+			}
+			if kind == "attached without G" {
+				if _, err := os.Stat(attachFailure); err != nil {
+					t.Fatalf("did not exercise unavailable attach observation: %v", err)
 				}
 			}
+
 			target := advanceMain(t, h, "new-target.md", "docs-only advance\n", "advance target during Test")
 			if err := os.WriteFile(release, []byte("ready"), 0600); err != nil {
 				t.Fatal(err)

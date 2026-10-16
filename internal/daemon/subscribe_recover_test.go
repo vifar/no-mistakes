@@ -731,7 +731,7 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 						errorText = *persisted.Error
 					}
 					if persisted.Status != types.RunFailed || persisted.Error == nil ||
-						!strings.Contains(errorText, "check PR context before ci:") ||
+						!strings.Contains(errorText, "check PR context after ci:") ||
 						!strings.Contains(errorText, tc.wantError) ||
 						!reflect.DeepEqual(persisted.PRStateObservedAt, before.PRStateObservedAt) ||
 						!reflect.DeepEqual(persisted.PRState, before.PRState) ||

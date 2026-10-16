@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,15 +35,15 @@ func pendingRewindExecutor(t *testing.T) (*Executor, *db.Run, string) {
 	if err = d.SetStepDuration(sr.ID, 1); err != nil {
 		t.Fatal(err)
 	}
-	if err = d.UpdateStepStatus(sr.ID, types.StepStatusAwaitingApproval); err != nil {
-		t.Fatal(err)
-	}
-
 	findings := `{"findings":[{"id":"conflict","severity":"warning","file":"feature.txt","description":"conflict","action":"ask-user"}]}`
 	if err := d.SetStepFindings(sr.ID, findings); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 1); err != nil {
+	round, err := d.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = d.ParkStepForApproval(r.ID, sr.ID, types.StepStatusAwaitingApproval, 0, 1, &findings, round.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.UpdateRunStatus(r.ID, types.RunRunning); err != nil {
@@ -59,6 +60,8 @@ func pendingRewindExecutor(t *testing.T) (*Executor, *db.Run, string) {
 	e.waiting = true
 	e.waitingStep = types.StepRebase
 	e.waitingStepResultID = sr.ID
+	e.waitingRoundID = round.ID
+	e.gate = databaseGateSnapshot(t, d, sr.ID)
 	return e, r, dir
 }
 
@@ -79,8 +82,19 @@ func TestTargetRewindAdmissionRefusesApproveSkipBeforeAnyDelivery(t *testing.T) 
 				e.slot = slot
 				// Both live and recovered gates enter the same admission function; no
 				// network or step execution is needed to refuse these unsafe responses.
-				if _, err := e.RespondWithAcceptedGaps(types.StepRebase, action, nil, nil, nil, nil, "", nil); err == nil {
-					t.Fatal("pending Rebase was bypassed")
+				current := e.CurrentGate()
+				stale := current
+				stale.Nonce += "-stale"
+				for _, expected := range []*types.GateIdentity{nil, &stale, &current} {
+					_, err := e.RespondWithAcceptedGaps(types.StepRebase, action, nil, nil, nil, nil, "", nil, expected)
+					var superseded *GateSupersededError
+					if expected != &current {
+						if !errors.As(err, &superseded) || superseded.Current != current {
+							t.Fatalf("identity refusal must precede rewind refusal: %v", err)
+						}
+					} else if err == nil || errors.As(err, &superseded) || !strings.Contains(err.Error(), "pending target rewind") {
+						t.Fatalf("correctly identified response bypassed pending Rebase: %v", err)
+					}
 				}
 				if len(slot.log()) != 0 {
 					t.Fatalf("refusal touched slot: %v", slot.log())
@@ -107,7 +121,7 @@ func TestTargetRewindAdmissionRefusesApproveSkipBeforeAnyDelivery(t *testing.T) 
 
 func TestTargetRewindAdmissionAllowsAbortWithoutRemoteAccess(t *testing.T) {
 	e, _, _ := pendingRewindExecutor(t)
-	if err := e.Respond(types.StepRebase, types.ActionAbort, nil); err != nil {
+	if err := e.Respond(types.StepRebase, types.ActionAbort, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -215,11 +229,12 @@ func TestTargetRewindDropsObsoleteRecoveredResponseAndCachedAuthority(t *testing
 
 func TestTargetRewindRecoveryKeepsAcceptedFixForTheExistingGeneration(t *testing.T) {
 	original, r, dir := pendingRewindExecutor(t)
-	raw, err := encodePendingResponse(&approvalResponse{action: types.ActionFix, findingIDs: []string{"conflict"}}, 1)
+	identity := original.CurrentGate()
+	raw, err := encodePendingResponse(&approvalResponse{gate: identity, action: types.ActionFix, findingIDs: []string{"conflict"}}, 1, identity)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = original.db.SetStepPendingResponse(original.waitingStepResultID, raw, "already answered; waiting for a run slot"); err != nil {
+	if err = original.db.SetStepPendingResponse(original.waitingStepResultID, raw, "already answered; waiting for a run slot", identity); err != nil {
 		t.Fatal(err)
 	}
 	e := NewExecutor(original.db, original.paths, nil, nil, original.steps, nil)

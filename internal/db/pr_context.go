@@ -281,8 +281,11 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 			started_at=NULL, round_started_at=NULL, completed_at=NULL,
 			last_activity_at=NULL, last_activity=NULL, agent_pid=NULL,
 			auto_fix_limit=NULL, ci_fix_attempts=0, override_reason=NULL,
-			approval_reason=NULL, accepted_gaps_json=NULL, skip_reason=NULL, pending_response=CASE WHEN ? THEN NULL ELSE pending_response END
-			WHERE run_id=? AND step_order>=?`, preserveSkips, types.StepStatusPending, rewindRun != nil, runID, resetFrom.Order()); err != nil {
+			approval_reason=NULL, accepted_gaps_json=NULL, skip_reason=NULL,
+			pending_response=CASE WHEN ? THEN NULL ELSE pending_response END,
+			gate_nonce=CASE WHEN ? THEN NULL ELSE gate_nonce END,
+			gate_round_id=CASE WHEN ? THEN NULL ELSE gate_round_id END
+			WHERE run_id=? AND step_order>=?`, preserveSkips, types.StepStatusPending, rewindRun != nil, rewindRun != nil, rewindRun != nil, runID, resetFrom.Order()); err != nil {
 			return PRContextBindResult{}, fmt.Errorf("bind run PR context: reset dependent steps: %w", err)
 		}
 	}

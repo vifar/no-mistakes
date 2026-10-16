@@ -184,7 +184,7 @@ func (s *diagnosticAnswerStep) Execute(c *pipeline.StepContext) (*pipeline.StepO
 		}
 	}
 	if int(call) == questionTurn {
-		dir := reviewqa.Dir(c.EvidenceDir)
+		dir := c.ReviewConversationDir
 		appendAgentQuestionLine(s.t, dir, `{"id":"q1","question":"keep this behavior?","options":["keep","remove"]}`)
 		return &pipeline.StepOutcome{Findings: `{"findings":[{"id":"question-q1","severity":"warning","description":"question awaiting answer","action":"ask-user","category":"review-question"}],"summary":"question"}`}, nil
 	}

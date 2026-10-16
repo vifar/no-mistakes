@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -562,5 +564,53 @@ func TestTargetRewindPermitsEarlierOwnedFixButRejectsAtTheCap(t *testing.T) {
 	r, err := c.DB.GetRun(c.Run.ID)
 	if err != nil || r.TargetAdvanceRewinds != 1 {
 		t.Fatalf("cap refusal charged: %+v %v", r, err)
+	}
+}
+
+// G's real attachment writes publication provenance even without a Push step.
+// That provenance must exclude the run from both guard and transaction rewinds.
+func TestTargetRewindRefusesRealAttachPublication(t *testing.T) {
+	c, selected := rewindFixture(t)
+	eligible, err := c.DB.CanRewindTarget(c.Run.ID, types.StepTest)
+	if err != nil || !eligible {
+		t.Fatalf("unpublished fixture ineligible: %t %v", eligible, err)
+	}
+	remote := c.Repo.UpstreamURL
+	forgeURL := "https://github.com/test/repo"
+	gitCmd(t, c.WorkDir, "config", "url."+remote+".insteadOf", forgeURL)
+	c.Repo.UpstreamURL = forgeURL
+	c.Repo.URLsVerified = true
+	c.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"}
+	forge := &attachStatusForge{posts: map[string][]string{}}
+	server := httptest.NewServer(forge)
+	t.Cleanup(server.Close)
+	env, _ := fakeGH(t, "")
+	c.Env = append(env, "FAKE_CLI_STATUS_API_URL="+server.URL)
+	(&PushStep{}).AttachPublishedHeadStatus(c)
+	publication, err := c.DB.GetCommitStatusPublication(c.Ctx, c.Run.ID, db.CommitStatusPublication{SHA: c.Run.HeadSHA, Host: "github.com", Repo: "test/repo"})
+	if err != nil || publication == nil || publication.Validated || publication.CIEligible {
+		t.Fatalf("real G attachment missing or credited validation: %+v %v", publication, err)
+	}
+	if states := forge.states("test/repo", c.Run.HeadSHA); len(states) != 1 || states[0] != "pending" {
+		t.Fatalf("real G attach status POSTs = %v", states)
+	}
+	if eligible, err = c.DB.CanRewindTarget(c.Run.ID, types.StepTest); err != nil || eligible {
+		t.Fatalf("G-attached run eligible: %t %v", eligible, err)
+	}
+	advanceRewindTarget(t, c)
+	if _, err = guardPRContextWithSelection(c, types.StepTest, selected, false); err == nil || !strings.Contains(err.Error(), "start a new run") {
+		t.Fatalf("G-attached run did not keep the existing refusal: %v", err)
+	}
+	receipt, err := c.DB.GetRunPRContext(c.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate := db.PRContextCandidate{LocalHeadSHA: receipt.LocalHeadSHA, TargetBranch: receipt.TargetBranch, TargetSHA: gitCmd(t, c.WorkDir, "rev-parse", "main"), MergeBaseSHA: receipt.MergeBaseSHA, DiffDigest: receipt.DiffDigest}
+	if _, err = c.DB.RewindRunPRContext(c.Run.ID, candidate, db.TargetAdvanceRewindRequest{ExpectedGeneration: receipt.Generation, Step: types.StepTest, MaxRewinds: 3}); err == nil {
+		t.Fatal("transaction accepted G-attached run")
+	}
+	run, err := c.DB.GetRun(c.Run.ID)
+	if err != nil || run.TargetAdvanceRewinds != 0 || run.PendingTargetRewindID != nil {
+		t.Fatalf("G-attached run charged or left pending: %+v %v", run, err)
 	}
 }
