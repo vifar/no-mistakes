@@ -676,8 +676,8 @@ no-mistakes sync --adopt-published
 | `--bind-archive-ref` | `string` | (none)  | Bind one existing `refs/heads/archive/*` commit as exact keep-local recovery evidence without changing Git refs |
 | `--adopt-published`  | `bool`   | `false` | Adopt a clean diverged local head into its stale gate lane only when the configured push target has that exact head |
 
-Without `--yes`, apply prints the exact full-SHA plan and requires TTY confirmation; `--recover` and `--adopt-published` also prompt before their guarded changes. Rewritten-remote recovery confirms that it will anchor the superseded head and rebind the recorded push binding without moving the worktree. Archive binding is itself explicit, does not prompt, and cannot be combined with synchronization, recovery, or `--yes`.
-A non-TTY apply or recovery refuses with a direct `--yes` hint.
+Without `--yes`, apply prints the exact full-SHA plan and requires TTY confirmation when synchronization remains eligible; `--recover` and `--adopt-published` also prompt before their guarded changes. Rewritten-remote recovery confirms that it will anchor the superseded head and rebind the recorded push binding without moving the worktree. Archive binding is itself explicit, does not prompt, and cannot be combined with synchronization, recovery, or `--yes`.
+When confirmation is required, non-TTY input refuses with a direct `--yes` hint.
 The command uses the same service and safety contract as `no-mistakes axi sync`, including the guarded equivalent advance and custody recovery documented there; it never stashes, rebases, creates a merge commit, switches branches, deletes a branch, or updates an external remote.
 
 ## no-mistakes status
