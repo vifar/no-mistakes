@@ -199,29 +199,12 @@ func runTestDaemon(t *testing.T, p *paths.Paths, d *db.DB, sf StepFactory, stopW
 	waitForDaemonReadyOrExit(t, p, exited)
 }
 
-// recoveryTestOption makes bypassing the production PR guard explicit.
-type recoveryTestOption int
-
-const withoutRecoveryPRContextGuard recoveryTestOption = iota + 1
-
 // runRecoveryTestDaemon uses the real Rebase core step so RunManager installs
 // GuardPRContext before reconciling CI, exactly as production startup does.
 // The Rebase step is already completed in these recovered-run fixtures.
-func runRecoveryTestDaemon(t *testing.T, p *paths.Paths, d *db.DB, options ...recoveryTestOption) {
+func runRecoveryTestDaemon(t *testing.T, p *paths.Paths, d *db.DB) {
 	t.Helper()
-	withGuard := true
-	for _, option := range options {
-		switch option {
-		case withoutRecoveryPRContextGuard:
-			withGuard = false
-		default:
-			t.Fatalf("unknown recovery test option: %d", option)
-		}
-	}
 	runTestDaemon(t, p, d, func() []pipeline.Step {
-		if !withGuard {
-			return []pipeline.Step{&steps.CIStep{}}
-		}
 		return []pipeline.Step{&steps.RebaseStep{}, &steps.CIStep{}}
 	}, 35*time.Second)
 }
