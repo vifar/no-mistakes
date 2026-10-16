@@ -37,21 +37,22 @@ var ErrParkedAtShutdown = errors.New("run left parked at an approval gate by dae
 
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
-	Ctx                context.Context
-	Run                *db.Run
-	Repo               *db.Repo
-	WorkDir            string
-	GateDir            string
-	Agent              agent.Agent
-	Config             *config.Config
-	ForgeContext       *forgecontext.Context
-	PRTarget           *PRTargetSelection
-	PRContext          *db.PRContext
-	PRContextAfterStep bool // guard observes a completed step's own published head
-	DB                 *db.DB
-	Log                func(string) // discrete log line (newline-terminated, user-visible + file)
-	LogChunk           func(string) // raw streaming chunk (user-visible + file)
-	LogFile            func(string) // file-only log callback (not shown to user)
+	Ctx                      context.Context
+	Run                      *db.Run
+	Repo                     *db.Repo
+	WorkDir                  string
+	GateDir                  string
+	Agent                    agent.Agent
+	Config                   *config.Config
+	ForgeContext             *forgecontext.Context
+	PRTarget                 *PRTargetSelection
+	PRContext                *db.PRContext
+	PRContextRebaseCompleted bool // successful integration, never a parked round
+	PRContextAfterStep       bool // guard observes a completed step's own published head
+	DB                       *db.DB
+	Log                      func(string) // discrete log line (newline-terminated, user-visible + file)
+	LogChunk                 func(string) // raw streaming chunk (user-visible + file)
+	LogFile                  func(string) // file-only log callback (not shown to user)
 	// Slot is the run's daemon concurrency slot (nil: no cap); see RunSlot.
 	Slot             RunSlot
 	Fixing           bool // true when re-executing after a "fix" action
@@ -102,8 +103,9 @@ type StepContext struct {
 	// (honoring test.evidence.local_root) so every consumer - the test step's
 	// prompt and the PR step's publisher - names the same directory. Empty only
 	// in embeddings that never gather evidence.
-	EvidenceDir string
-	Env         []string // extra environment variables for subprocesses (used in tests)
+	EvidenceDir           string
+	ReviewConversationDir string
+	Env                   []string // extra environment variables for subprocesses (used in tests)
 	// UserIntent is a short, possibly-empty summary of what the change author
 	// was trying to accomplish. It's surfaced in step prompts so agents have
 	// context beyond the diff. Its authority depends on IntentSource: an

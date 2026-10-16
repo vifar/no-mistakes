@@ -158,6 +158,9 @@ const (
 	// repository that never asked for it. See Rebase.Strategy for what the
 	// merge shape buys.
 	DefaultRebaseStrategy = RebaseStrategyRebase
+
+	// DefaultMaxTargetAdvanceRewinds bounds unpublished target fast-forwards per run.
+	DefaultMaxTargetAdvanceRewinds = 3
 	// DefaultEvalMaxCases caps the auto-captured local eval corpus. Cases
 	// share one object pool per repository, so the marginal cost of a case is
 	// its JSON records plus the objects its commits actually introduced, not a
@@ -844,7 +847,8 @@ func (c CI) CheckScopePolicy() scm.CheckScopePolicy {
 
 // RebaseRaw is the YAML representation of rebase-step settings.
 type RebaseRaw struct {
-	Strategy string `yaml:"strategy"`
+	Strategy                string `yaml:"strategy"`
+	MaxTargetAdvanceRewinds *int   `yaml:"max_target_advance_rewinds"`
 }
 
 // Rebase holds the resolved rebase-step settings.
@@ -871,7 +875,8 @@ type Rebase struct {
 	//
 	// The cost is a merge commit per integration. On a squash-merged default
 	// branch they never reach it; on a merge-committed one they do.
-	Strategy string
+	MaxTargetAdvanceRewinds int
+	Strategy                string
 }
 
 // AutoFix holds resolved per-step auto-fix attempt limits.
@@ -3756,7 +3761,7 @@ func ciDefaults() CI {
 
 // rebaseDefaults returns the default rebase-step settings.
 func rebaseDefaults() Rebase {
-	return Rebase{Strategy: DefaultRebaseStrategy}
+	return Rebase{Strategy: DefaultRebaseStrategy, MaxTargetAdvanceRewinds: DefaultMaxTargetAdvanceRewinds}
 }
 
 // applyRebaseOverrides applies a raw strategy onto resolved defaults.
@@ -3764,6 +3769,9 @@ func rebaseDefaults() Rebase {
 // reach here; an empty string is treated as "not set" so a repository can
 // comment the key out without inventing a third meaning.
 func applyRebaseOverrides(dst *Rebase, src *RebaseRaw) {
+	if src.MaxTargetAdvanceRewinds != nil {
+		dst.MaxTargetAdvanceRewinds = *src.MaxTargetAdvanceRewinds
+	}
 	if v := strings.TrimSpace(src.Strategy); v != "" {
 		dst.Strategy = v
 	}
@@ -3773,6 +3781,9 @@ func applyRebaseOverrides(dst *Rebase, src *RebaseRaw) {
 // Silently falling back to the default would let a typo ("merges") quietly keep
 // rewriting history a maintainer asked to stop rewriting.
 func validateRebaseRaw(r RebaseRaw) error {
+	if r.MaxTargetAdvanceRewinds != nil && *r.MaxTargetAdvanceRewinds < 0 {
+		return fmt.Errorf("rebase.max_target_advance_rewinds must be non-negative")
+	}
 	switch strings.TrimSpace(r.Strategy) {
 	case "", RebaseStrategyRebase, RebaseStrategyMerge:
 		return nil
