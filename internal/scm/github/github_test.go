@@ -288,8 +288,8 @@ func TestGetChecksDoesNotDuplicateWorkflowRunsRepresentedByRollup(t *testing.T) 
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
 		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
-		"gh pr checks 123 --repo test/repo --json name,state,bucket,completedAt,link": {
-			stdout: `[{"name":"build","state":"CANCELLED","bucket":"cancel","link":"https://github.com/test/repo/actions/runs/101/job/201"}]` + "\n",
+		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
+			stdout: githubCommitChecksResponse(`[{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"CANCELLED","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201","checkSuite":{"app":{"slug":"github-actions"}}}]`),
 		},
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
 			stdout: `[{"total_count":2,"workflow_runs":[
@@ -325,8 +325,8 @@ func TestGetChecksCollapsesSupersededSameNameCheckToLatestAtOneHead(t *testing.T
 		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
 		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
 			stdout: githubCommitChecksResponse(`[
-				{"__typename":"CheckRun","name":"gate","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
-				{"__typename":"CheckRun","name":"gate","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
+				{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"gate","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
+				{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"gate","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
 			]`),
 		},
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
@@ -370,8 +370,8 @@ func TestGetChecksCollapseOrderingDoesNotLetWorkflowRunUnionResurrectSupersededC
 		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
 		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
 			stdout: githubCommitChecksResponse(`[
-				{"__typename":"CheckRun","name":"gate","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
-				{"__typename":"CheckRun","name":"gate","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
+				{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"gate","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
+				{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"gate","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
 			]`),
 		},
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
@@ -401,7 +401,7 @@ func TestGetChecksPreservesIndependentSameNameWorkflows(t *testing.T) {
 		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
 		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
 			stdout: githubCommitChecksResponse(`[
-				{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
+				{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
 			]`),
 		},
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
@@ -435,8 +435,8 @@ func TestGetChecksPreservesSameNameJobsWithinOneWorkflowRun(t *testing.T) {
 		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
 		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
 			stdout: githubCommitChecksResponse(`[
-				{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/201"},
-				{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
+				{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"build","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/201"},
+				{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
 			]`),
 		},
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
@@ -502,8 +502,8 @@ func TestGetChecksCollapseComparesNewestRunWithEverySameNameCandidate(t *testing
 		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
 			stdout: githubCommitChecksResponse(`[
 				{"__typename":"CheckRun","name":"gate","status":"QUEUED","conclusion":null,"startedAt":null,"completedAt":null,"detailsUrl":"https://checks.example.com/runs/pending"},
-				{"__typename":"CheckRun","name":"gate","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
-				{"__typename":"CheckRun","name":"gate","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
+				{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"gate","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
+				{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"gate","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
 			]`),
 		},
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
@@ -537,7 +537,7 @@ func TestGetChecksPreservesSameNameStatusContextAndCheckRun(t *testing.T) {
 		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
 		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
 			stdout: githubCommitChecksResponse(`[
-				{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"},
+				{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"build","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:39:44Z","completedAt":"2026-08-26T08:39:50Z","detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"},
 				{"__typename":"StatusContext","context":"build","state":"FAILURE","targetUrl":"https://ci.example.com/build/42"}
 			]`),
 		},
@@ -570,8 +570,8 @@ func TestGetChecksKeepsQueuedReplacementWithEqualStartTime(t *testing.T) {
 		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
 		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
 			stdout: githubCommitChecksResponse(`[
-				{"__typename":"CheckRun","name":"CI","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
-				{"__typename":"CheckRun","name":"CI","status":"QUEUED","conclusion":null,"startedAt":null,"completedAt":null,"detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
+				{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"CI","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
+				{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"CI","status":"QUEUED","conclusion":null,"startedAt":null,"completedAt":null,"detailsUrl":"https://github.com/test/repo/actions/runs/102/job/202"}
 			]`),
 		},
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
@@ -605,7 +605,7 @@ func TestGetChecksPreservesUnorderedExternalPendingReplacement(t *testing.T) {
 		"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
 		githubCommitChecksCommand("", "test/repo", "deadbeef"): {
 			stdout: githubCommitChecksResponse(`[
-				{"__typename":"CheckRun","name":"CI","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
+				{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"CI","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"},
 				{"__typename":"CheckRun","name":"CI","status":"QUEUED","conclusion":null,"startedAt":null,"completedAt":null,"detailsUrl":"https://checks.example.com/runs/replacement"}
 			]`),
 		},
@@ -649,7 +649,7 @@ func TestGetChecksUsesWorkflowRunStartTimeWhenCollapsingSameNameChecks(t *testin
 				"gh pr view 123 --repo test/repo --json headRefOid --jq .headRefOid": {stdout: "deadbeef\n"},
 				githubCommitChecksCommand("", "test/repo", "deadbeef"): {
 					stdout: githubCommitChecksResponse(`[
-						{"__typename":"CheckRun","name":"CI","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"}
+						{"__typename":"CheckRun","checkSuite":{"app":{"slug":"github-actions"}},"name":"CI","status":"COMPLETED","conclusion":"SUCCESS","startedAt":"2026-08-26T08:25:50Z","completedAt":"2026-08-26T08:25:56Z","detailsUrl":"https://github.com/test/repo/actions/runs/101/job/201"}
 					]`),
 				},
 				"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {

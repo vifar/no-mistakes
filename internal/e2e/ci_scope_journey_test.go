@@ -550,6 +550,56 @@ func TestCIScopeActionsLinkedStatusStillBlocksReadiness(t *testing.T) {
 	}
 }
 
+// A third-party app owns its check even when its details URL names an Actions
+// run. A passing rerun must not erase that check from any readiness consumer.
+func TestCIScopeActionsLinkedThirdPartyCheckStillBlocksReadiness(t *testing.T) {
+	j := newScopeJourney(t, SetupOpts{Agent: "claude"})
+	j.setTrusted("ci:\n  must_pass:\n    - audit-*\n")
+	j.init()
+	forgeFor := func(branch, conclusion string) forgeState {
+		build := greenCheck("build")
+		build.DatabaseID, build.Workflow = 5, "CI"
+		build.DetailsURL = "https://github.com/example/closes/actions/runs/7/job/5"
+		audit := actionsCheck("audit-security", conclusion)
+		audit.DatabaseID, audit.AppSlug, audit.AppID = 9, "security-audit", 1234
+		audit.DetailsURL = "https://github.com/example/closes/actions/runs/7"
+		return forgeState{
+			Protection:  protectionJSON("build@15368"),
+			Checks:      []forgeCheck{build, audit},
+			Runs:        []json.RawMessage{json.RawMessage(fmt.Sprintf(`{"id":7,"workflow_id":10,"run_attempt":2,"name":"CI","event":"push","head_branch":%q,"status":"completed","conclusion":"success","run_started_at":"2026-10-15T10:00:00Z","html_url":"https://github.com/example/closes/actions/runs/7"}`, branch))},
+			AttemptJobs: map[string][]int64{"7/2": {5}},
+		}
+	}
+
+	strictBranch := "feature/scope-third-party-receipt"
+	j.setForge(forgeFor(strictBranch, "SUCCESS"))
+	wt, strict, out := j.strictRun(strictBranch)
+	if !strict.CIReady || !strings.Contains(out, "outcome: checks-passed") {
+		t.Fatalf("baseline green check did not establish readiness: %s", out)
+	}
+	j.setForge(forgeFor(strictBranch, "FAILURE"))
+	receipt, err := j.receipt(wt, strict.ID)
+	if err == nil || !strings.Contains(receipt, "strict readiness requires all live checks green") {
+		t.Fatalf("receipt ignored the independent failing app check: err=%v\n%s", err, receipt)
+	}
+	j.finish(strictBranch)
+
+	branch := "feature/scope-third-party-monitor"
+	j.setForge(forgeFor(branch, "FAILURE"))
+	j.push(branch)
+	run, checks := j.expectGate(branch)
+	if !sameSet(checks, "audit-security") {
+		t.Fatalf("independent failing app check must reach the gate, findings=%v", checks)
+	}
+	j.h.Respond(run.ID, types.StepCI, types.ActionApprove)
+	done := j.h.WaitForRun(branch, scopeCheckWaitTime)
+	if done.Status != types.RunCompleted || !strings.Contains(done.CIOverrideReason, "audit-security") {
+		t.Fatalf("approval must record the failing app check: status=%s override=%q", done.Status, done.CIOverrideReason)
+	}
+	t.Logf("approval over the independent failing app check: status=%s override=%q", done.Status, done.CIOverrideReason)
+	j.finish(branch)
+}
+
 // TestCIScopeStrictReadinessIgnoresNonRequiredAndExternalChecks (scenario 1): a
 // strict run reaches checks-passed, and the ci-ready receipt is issued, while
 // a non-required check and an explicitly external approval check stay red.

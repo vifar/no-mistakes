@@ -438,7 +438,7 @@ func TestSupersedeReplacesSameEventRetrigger(t *testing.T) {
 func TestSupersedeNeedsAKnownEventAndDistinctRun(t *testing.T) {
 	t.Parallel()
 	h := New(nil, nil, "", "test/repo")
-	job := scm.Check{Name: "build", Kind: scm.CheckKindRun, Workflow: "CI", Bucket: scm.CheckBucketPass,
+	job := scm.Check{Name: "build", Kind: scm.CheckKindRun, App: "github-actions", Workflow: "CI", Bucket: scm.CheckBucketPass,
 		StartedAt: time.Date(2026, 10, 14, 10, 0, 0, 0, time.UTC), CompletedAt: time.Date(2026, 10, 14, 10, 5, 0, 0, time.UTC),
 		Link: "https://github.com/test/repo/actions/runs/7/job/1"}
 	run := func(id int64, event, branch string, start time.Time) scm.Check {
@@ -1043,6 +1043,64 @@ func TestGetChecksFirstAttemptPreservesCompletedJobs(t *testing.T) {
 				t.Fatalf("required build verdict was masked by pending approval: %+v", scoped)
 			}
 		})
+	}
+}
+
+// An Actions URL does not make a check an Actions job. Only the publishing
+// app can establish ownership, including when the current attempt omits the
+// check, a newer run retires the linked run, or an unknown attempt is pending.
+func TestGetChecksPreservesActionsLinkedNonActionsChecks(t *testing.T) {
+	t.Parallel()
+	for _, app := range []string{"security-audit", ""} {
+		for _, scenario := range []string{"rerun", "retirement", "unknown-pending-attempt"} {
+			t.Run(fmt.Sprintf("app=%q/%s", app, scenario), func(t *testing.T) {
+				run7 := `{"id":7,"workflow_id":10,"run_attempt":2,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"success","run_started_at":"2026-10-14T10:00:00Z","html_url":"https://github.com/test/repo/actions/runs/7"}`
+				buildRun := 7
+				runCount := 1
+				var extraRun string
+				switch scenario {
+				case "retirement":
+					run7 = strings.Replace(run7, `"run_attempt":2`, `"run_attempt":1`, 1)
+					extraRun = `,{"id":8,"workflow_id":10,"run_attempt":1,"name":"CI","event":"pull_request","head_branch":"feature","status":"completed","conclusion":"success","run_started_at":"2026-10-14T11:00:00Z","html_url":"https://github.com/test/repo/actions/runs/8"}`
+					buildRun = 8
+					runCount = 2
+				case "unknown-pending-attempt":
+					run7 = strings.Replace(run7, `"run_attempt":2`, `"run_attempt":0`, 1)
+					run7 = strings.Replace(run7, `"status":"completed","conclusion":"success"`, `"status":"in_progress","conclusion":null`, 1)
+				}
+				jobs := fmt.Sprintf(`[
+					{"__typename":"CheckRun","databaseId":9,"name":"audit-security","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-10-14T11:00:00Z","completedAt":"2026-10-14T12:00:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/7","checkSuite":{"app":{"slug":%q,"databaseId":1234},"workflowRun":{"workflow":{"name":"Audit"}}}},
+					{"__typename":"CheckRun","databaseId":5,"name":"build","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-10-14T12:00:00Z","detailsUrl":"https://github.com/test/repo/actions/runs/%d/job/5","checkSuite":{"app":{"slug":"github-actions"},"workflowRun":{"workflow":{"name":"CI"}}}}
+				]`, app, buildRun)
+				checks := checksForAttempts(t, jobs, fmt.Sprintf(`[{"total_count":%d,"workflow_runs":[%s%s]}]`, runCount, run7, extraRun), 5)
+				want := scm.Check{
+					Name: "audit-security", ProviderID: "github-check-run:9", Kind: scm.CheckKindRun,
+					App: app, AppID: 1234, Workflow: "Audit", Bucket: scm.CheckBucketFail, State: "FAILURE",
+					StartedAt: time.Date(2026, 10, 14, 11, 0, 0, 0, time.UTC), CompletedAt: time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC),
+					Link: "https://github.com/test/repo/actions/runs/7", HeadSHA: "abc123",
+				}
+				var audit *scm.Check
+				for i := range checks {
+					if checks[i].ProviderID == want.ProviderID {
+						audit = &checks[i]
+					}
+				}
+				if audit == nil {
+					t.Errorf("independent failing check disappeared: %+v", checks)
+				} else if !reflect.DeepEqual(*audit, want) {
+					t.Errorf("independent check was altered: got %+v, want %+v", *audit, want)
+				}
+				for _, policy := range []scm.CheckScopePolicy{
+					{RequiredChecks: scm.RequiredChecksAll},
+					{RequiredChecks: scm.RequiredChecksAuto, MustPass: []string{"audit-*"}, Resolved: &scm.CheckScopeResolution{Required: []scm.RequiredCheck{{Context: "build"}}, Derived: true}},
+				} {
+					scoped := scm.NewCheckScope(nil, policy, "main", nil).Apply(context.Background(), &scm.PR{HeadSHA: "abc123"}, checks)
+					if scoped.Ready() {
+						t.Errorf("%s: independent failing check allowed readiness: %+v", policy.RequiredChecks, scoped)
+					}
+				}
+			})
+		}
 	}
 }
 

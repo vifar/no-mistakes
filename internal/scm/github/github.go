@@ -716,8 +716,9 @@ func (h *Host) repoSlug() string {
 // state; only an unknown attempt number makes represented jobs pending while
 // the run is unfinished and not held for approval. Without membership data,
 // completions predating the attempt are retired otherwise. Only check runs
-// participate: a commit status linking to an Actions run is still independent
-// evidence and must not be changed or retired with that run's jobs.
+// published by the github-actions app participate. Other apps, unknown apps,
+// and commit statuses remain independent evidence regardless of their links
+// and must not be changed or retired with that run's jobs.
 //
 // Attempts of one trigger - the same workflow, event, and head branch - are
 // then judged as GitHub's newest meaningful attempt, ordered by when each
@@ -734,7 +735,7 @@ func (h *Host) repoSlug() string {
 func (h *Host) appendUnrepresentedWorkflowRuns(checks, runs []scm.Check, attemptJobs map[int64]map[string]bool) []scm.Check {
 	represented := make(map[string][]int, len(checks))
 	for i, check := range checks {
-		if check.Kind != scm.CheckKindRun {
+		if check.Kind != scm.CheckKindRun || check.App != "github-actions" {
 			continue
 		}
 		if runID := h.actionsRunID(check.Link); runID != "" {
