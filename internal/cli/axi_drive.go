@@ -1497,8 +1497,8 @@ func getRunInfo(ctx context.Context, socketPath, runID string) (*ipc.RunInfo, er
 
 // sendRespond issues an approval action to the daemon for a step and returns
 // what it recorded. A response the daemon refused is returned as a
-// *respondRefusalError - the gate is still parked and the response can be
-// corrected.
+// *respondRefusalError. A superseded gate requires a fresh status read and
+// decision; the response must not be retried against a replacement gate.
 func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, added []types.Finding, approvalReason string, acceptGaps []string, coveredBy string, expected *types.GateIdentity) (ipc.RespondResult, error) {
 	params := &ipc.RespondParams{
 		RunID:            runID,

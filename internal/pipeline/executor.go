@@ -257,8 +257,9 @@ func (e *Executor) SetGateReconcileTimings(interval, timeout time.Duration) {
 }
 
 // Respond sends a user approval action to the currently waiting step.
-// The step parameter must match the step currently awaiting approval.
-// Returns an error if no step is awaiting approval or if the step name doesn't match.
+// Except for abort, expected must identify the caller's observed park and step
+// must match the waiting step. A missing or stale identity returns
+// GateSupersededError without releasing the current gate.
 func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, findingIDs []string, expected *types.GateIdentity) error {
 	_, err := e.RespondWithOverrides(step, action, findingIDs, nil, nil, nil, "", expected)
 	return err

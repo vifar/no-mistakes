@@ -289,6 +289,8 @@ type SubscribeParams struct {
 // already decided it, and the daemon refuses the response (leaving the gate
 // parked) when one is left out. An omission is never a decline.
 type RespondParams struct {
+	// ExpectedGate is required for every action except abort. Missing or stale
+	// bindings return gate_superseded with CurrentGate, without admission.
 	ExpectedGate     *types.GateIdentity  `json:"expected_gate"`
 	RunID            string               `json:"run_id"`
 	Step             types.StepName       `json:"step"`
@@ -425,9 +427,10 @@ type RerunResult struct {
 // instead of two rounds later. Kept names the findings the response omitted
 // that an earlier round of the same step had already decided.
 //
-// A refusal is a result rather than a transport error because it is not a
-// transport failure: the gate is intact, the caller's response was wrong, and
-// the caller can correct it. Refusal is non-empty exactly when OK is false.
+// A refusal is a result rather than a transport error: no action was admitted.
+// For gate_superseded, CurrentGate describes the current or last gate with its
+// current status; the caller must re-read state before deciding on a response.
+// Refusal is non-empty exactly when OK is false.
 type RespondResult struct {
 	Code        string              `json:"code,omitempty"`
 	CurrentGate *types.GateIdentity `json:"current_gate,omitempty"`
