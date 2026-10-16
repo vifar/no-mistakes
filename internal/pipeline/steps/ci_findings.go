@@ -27,10 +27,9 @@ const (
 type reviewBotCheck struct {
 	check scm.Check
 	bot   scm.ReviewBot
-	// green marks a bot check that completed without failing, or a
-	// registered bot with no check on the head yet. It is only
-	// observed under ci.review_bot_comments: always, and unlike a red check
-	// it produces nothing when the bot left no unresolved comment.
+	// green marks a candidate from scm.ReviewBotCommentChecks under
+	// ci.review_bot_comments: always. Unlike an in-scope red check, it
+	// produces nothing when the bot left no unresolved comment.
 	green bool
 }
 
@@ -54,14 +53,11 @@ type ciIssues struct {
 	behindBase bool
 	// reruns reports how many transient reruns this run spent on a check.
 	reruns func(string) int
-	// botComments are the unresolved review-thread comments left by
-	// registered review bots, fetched only when such a bot's check is red,
-	// or, under ci.review_bot_comments: always, when it completed green or
-	// has not registered on the head yet.
+	// botComments are the unresolved review-thread comments collected under
+	// ci.review_bot_comments; the repo-config reference owns that policy.
 	botComments []scm.ReviewComment
-	// greenBots asks the classifier to also read the registered review bots
-	// whose check completed green or has not registered on the head yet
-	// (ci.review_bot_comments: always).
+	// greenBots includes the additional candidates selected by
+	// scm.ReviewBotCommentChecks (ci.review_bot_comments: always).
 	greenBots      bool
 	excludedChecks []scm.Check
 }
@@ -81,9 +77,8 @@ type ciIssues struct {
 //     is the bot's opinion about the change, not a verdict on it, so it
 //     becomes one ask-user warning per unresolved bot comment, anchored to
 //     the file and line the comment is about; under
-//     ci.review_bot_comments: always the same rule covers a bot check that
-//     completed green or has not registered yet, whose unresolved comments
-//     are findings too;
+//     ci.review_bot_comments: always, scm.ReviewBotCommentChecks selects
+//     additional bots whose unresolved comments are findings too;
 //   - a provider-attributed outcome no rerun will replace is an ask-user
 //     warning, exactly as before findings existed: nothing a fix agent does
 //     can clear it.
