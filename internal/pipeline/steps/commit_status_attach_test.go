@@ -353,8 +353,14 @@ func TestImmutablePromotionAttachCommitStatus(t *testing.T) {
 			if _, err := push.Execute(sc); err != nil {
 				t.Fatal(err)
 			}
-			// Exact-head CI readiness cannot rescue a skipped or unvalidated gate.
-			push.ReportPublishedHeadStatus(sc, "success", head)
+			switch scenario {
+			case "validated":
+				assertStates("pending", "success")
+			case "unattached":
+				assertStates()
+			default:
+				assertStates("pending")
+			}
 			sc.Run.Status = types.RunCompleted
 			if scenario == "failed Lint" {
 				sc.Run.Status = types.RunFailed

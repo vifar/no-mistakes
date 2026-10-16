@@ -46,7 +46,11 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 				statusWarning(sctx.Log, "record verified publication", err)
 			}
 			if publication != nil {
-				commitStatusReporter(sctx, publication)(sctx.Ctx, "pending", "", sctx.Log)
+				report := commitStatusReporter(sctx, publication)
+				report(sctx.Ctx, "pending", "", sctx.Log)
+				if localValidationPassed(sctx, sctx.Run.HeadSHA) {
+					report(sctx.Ctx, "success", "", sctx.Log)
+				}
 			}
 		}
 		sctx.Log("verified already published immutable source; no push performed")
