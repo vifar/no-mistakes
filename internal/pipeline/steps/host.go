@@ -45,7 +45,10 @@ func NewPRStateLookup(globalCfg *config.GlobalConfig, workDir string) branchsync
 // ReadPRState observes the recorded PR using the same provider, profile, and
 // subprocess credentials as the PR and CI steps. It does not mutate the run.
 func ReadPRState(sctx *pipeline.StepContext) (scm.PRState, error) {
-	prURL := runPRURL(sctx)
+	prURL, err := recordedPRURL(sctx)
+	if err != nil {
+		return "", err
+	}
 	number, err := scm.ExtractPRNumber(prURL)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", scm.ErrPRIdentity, err)
@@ -58,6 +61,25 @@ func ReadPRState(sctx *pipeline.StepContext) (scm.PRState, error) {
 		return "", err
 	}
 	return host.GetPRState(sctx.Ctx, &scm.PR{Number: number, URL: prURL})
+}
+
+// recordedPRURL reads durable PR identity, never a branch lookup or current
+// repository configuration. Older run rows may lack the URL while their
+// comparison receipt still holds it. A nonempty run URL remains authoritative.
+func recordedPRURL(sctx *pipeline.StepContext) (string, error) {
+	if prURL := runPRURL(sctx); prURL != "" {
+		return prURL, nil
+	}
+	if sctx != nil && sctx.Run != nil && sctx.DB != nil {
+		receipt, err := sctx.DB.GetRunPRContext(sctx.Run.ID)
+		if err != nil {
+			return "", fmt.Errorf("read recorded PR identity: %w", err)
+		}
+		if receipt != nil && strings.TrimSpace(receipt.PRURL) != "" {
+			return strings.TrimSpace(receipt.PRURL), nil
+		}
+	}
+	return "", fmt.Errorf("%w: no recorded PR identity on run or comparison receipt", scm.ErrPRIdentity)
 }
 
 func ShippingProofHost(sctx *pipeline.StepContext) (scm.Host, error) {
