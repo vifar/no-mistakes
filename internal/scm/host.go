@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+// ErrPRIdentity refuses a recorded URL that cannot safely identify a PR in
+// the configured lookup repository. Callers may show this credential-free hint.
+var ErrPRIdentity = errors.New("recorded PR URL is invalid or belongs to a different repository than the current target")
+
 // ExtractHost returns the lowercased host (without any port) from a git
 // remote URL. It handles both scp-like syntax (git@host:group/project) and
 // URL forms (https://host/group/project, ssh://git@host:22/group/project).

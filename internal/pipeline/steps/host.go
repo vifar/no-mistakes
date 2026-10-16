@@ -48,7 +48,7 @@ func ReadPRState(sctx *pipeline.StepContext) (scm.PRState, error) {
 	prURL := runPRURL(sctx)
 	number, err := scm.ExtractPRNumber(prURL)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %v", scm.ErrPRIdentity, err)
 	}
 	host, reason := buildHost(sctx, resolvedProvider(sctx))
 	if host == nil {

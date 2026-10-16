@@ -429,6 +429,14 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	if err != nil {
 		return "", err
 	}
+	if pr.URL != "" {
+		if _, err := parsePullRequestURL(pr.URL, h.host, h.repoSlug()); err != nil {
+			return "", fmt.Errorf("%w: %v", scm.ErrPRIdentity, err)
+		}
+		// A number is only unique within one repository. Validate against the
+		// actual host target, then query the recorded URL even if Number is set.
+		selector = strings.TrimSpace(pr.URL)
+	}
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "state", "--jq", ".state")
 	cmd := h.cmd(ctx, "gh", args...)

@@ -32,8 +32,12 @@ func TestAxiSyncConfirmsMergedPRAfterCIMonitorInterrupted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Model a real GitHub upstream while keeping all push I/O in the local fork.
+	if _, err := database.UpdateRepoMetadataWithFork(run.RepoID, "https://github.com/example/repo.git", h.UpstreamDir, "main"); err != nil {
+		t.Fatal(err)
+	}
 	for _, err := range []error{
-		database.UpdateRunPushBinding(run.ID, db.PushBinding{HeadSHA: head, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(h.UpstreamDir), Ref: "refs/heads/" + branch}),
+		database.UpdateRunPushBinding(run.ID, db.PushBinding{HeadSHA: head, TargetKind: "fork", TargetFingerprint: branchsync.TargetFingerprint(h.UpstreamDir), Ref: "refs/heads/" + branch}),
 		database.UpdateRunPRURL(run.ID, "https://github.com/example/repo/pull/42"),
 		database.UpdateRunPRState(run.ID, "open"),
 		database.UpdateRunErrorStatus(run.ID, types.RunCIMonitorInterruptedReason, types.RunCIMonitorInterrupted),

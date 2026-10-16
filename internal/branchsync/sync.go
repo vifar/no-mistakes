@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -412,6 +413,9 @@ func (s *Service) refresh(ctx context.Context, persistPRState bool) State {
 				state.State = StateRemoteMissing
 				state.Safety = "blocked_remote_missing"
 				state.Error = "the pipeline-bound remote branch no longer exists and its PR state could not be confirmed; retry no-mistakes axi sync --check; no files or refs were changed"
+				if errors.Is(err, scm.ErrPRIdentity) {
+					state.Error = "the pipeline-bound remote branch no longer exists and its PR state could not be confirmed: " + scm.ErrPRIdentity.Error() + "; no files or refs were changed"
+				}
 				state.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --check"}
 				return state
 			}

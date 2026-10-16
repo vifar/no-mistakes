@@ -2,16 +2,20 @@ package tui
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -338,8 +342,19 @@ func TestActivePipelineOwnedStateOffersNoRecoveryAction(t *testing.T) {
 }
 
 func TestBranchSyncActionPersistsRetirementAcrossCachedRefresh(t *testing.T) {
-	for _, live := range []scm.PRState{scm.PRStateMerged, scm.PRStateClosed} {
-		t.Run(string(live), func(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		live  scm.PRState
+		prURL string
+	}{
+		{name: "MERGED", live: scm.PRStateMerged},
+		{name: "CLOSED", live: scm.PRStateClosed},
+		{name: "changed upstream", prURL: "https://github.com/original/repo/pull/42"},
+		{name: "changed host", prURL: "https://other.example/replacement/repo/pull/42"},
+		{name: "unparseable URL", prURL: "not-a-url/42"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			live := tt.live
 			root := t.TempDir()
 			t.Setenv("NM_HOME", t.TempDir())
 			t.Setenv("NO_MISTAKES_TELEMETRY", "off")
@@ -403,6 +418,25 @@ func TestBranchSyncActionPersistsRetirementAcrossCachedRefresh(t *testing.T) {
 				lookupCalls++
 				return live, nil
 			}}
+			if tt.prURL != "" {
+				repo, err = database.UpdateRepoMetadataWithFork(repo.ID, "https://github.com/replacement/repo.git", remote, "main")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.UpdateRunPushBinding(run.ID, db.PushBinding{HeadSHA: pushed, TargetKind: "fork", TargetFingerprint: branchsync.TargetFingerprint(remote), Ref: "refs/heads/feature"}); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.UpdateRunPRURL(run.ID, tt.prURL); err != nil {
+					t.Fatal(err)
+				}
+				bin := t.TempDir()
+				if err := os.WriteFile(filepath.Join(bin, "gh"), []byte("#!/bin/sh\ncase \"$*\" in\n  auth*) exit 0 ;;\n  *) echo MERGED ;;\nesac\n"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+				service.Repo = repo
+				service.LookupPRState = steps.NewPRStateLookup(&config.GlobalConfig{}, root)
+			}
 			info := &ipc.RunInfo{ID: run.ID, Branch: "feature", Status: types.RunCIMonitorInterrupted}
 			m := NewModel("socket", nil, info)
 			m.setSyncService(service)
@@ -410,6 +444,10 @@ func TestBranchSyncActionPersistsRetirementAcrossCachedRefresh(t *testing.T) {
 				t.Fatalf("passive attach = %+v, lookups=%d", m.branchSync, lookupCalls)
 			}
 			refsBefore := git("show-ref")
+			runBefore, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
 			next, cmd := m.handleKey(keyMsg("u"))
 			m = next.(Model)
 			if cmd == nil {
@@ -417,6 +455,19 @@ func TestBranchSyncActionPersistsRetirementAcrossCachedRefresh(t *testing.T) {
 			}
 			next, _ = m.Update(cmd())
 			m = next.(Model)
+			if tt.prURL != "" {
+				stored, err := database.GetRun(run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if m.branchSync == nil || m.branchSync.Safety != "blocked_remote_missing" || !strings.Contains(m.branchSync.Error, "recorded PR") || !reflect.DeepEqual(runBefore, stored) || m.syncConfirm {
+					t.Fatalf("u accepted mismatched PR: sync=%+v, run=%+v", m.branchSync, stored)
+				}
+				if git("show-ref") != refsBefore || git("rev-parse", "HEAD") != old {
+					t.Fatal("refused lookup changed Git refs or HEAD")
+				}
+				return
+			}
 			wantState := branchsync.StateMergedRemoteRemoved
 			if live == scm.PRStateClosed {
 				wantState = branchsync.StateClosed
