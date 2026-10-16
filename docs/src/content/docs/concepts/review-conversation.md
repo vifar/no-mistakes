@@ -39,8 +39,6 @@ The approve and skip paths described below apply to ordinary runs. The
 [strict shipping contract](/no-mistakes/reference/cli/#strict-shipping-and-review-receipts)
 refuses those shortcuts at Review and requires independent certification.
 
-Answer delivery binds its gate release to the identity captured before the answer is appended. If automatic resumption has already consumed that gate, the answer stays recorded and reports `reviewer_resumed: false` with the reason. A later code-only gate remains parked for its own decision; the delayed answer cannot dispatch another finalization turn.
-
 ## The file protocol
 
 Every run owns a review-conversation directory under the run's evidence
@@ -311,11 +309,18 @@ checkpoints. That is not idling and not a wait: it is a file read interleaved
 with work it was doing anyway, and it is what lets an early answer redirect the
 pass before the effort is spent.
 
-While the reviewer is *parked*, no reviewer process is alive. `axi answer`
-appends the answer and, once no question is open, sends one
-`respond --action answer` to the daemon. The executor then resumes the reviewer's own session with the answers as
-its next message. From the reviewer's side an answer arrives as a message it did
-not ask for - a push - and it never learns that time passed.
+While the reviewer is *parked*, no reviewer process is alive. The daemon's
+`axi answer` handler captures the gate identity before appending the answer.
+Once no question is open, it attempts to release only that park with the
+internal `answer` action. On acceptance, the executor resumes the reviewer's
+own session with the answers as its next message. From the reviewer's side an
+answer arrives as a message it did not ask for - a push - and it never learns
+that time passed.
+
+If automatic resumption has already consumed that gate, the answer stays
+recorded and reports `reviewer_resumed: false` with the reason. A later
+code-only gate remains parked for its own decision; the delayed answer cannot
+dispatch another finalization turn.
 
 The caller is pushed to as well. The answer that closes the last open question
 does not return once it is recorded: like `axi respond`, it follows the run to
