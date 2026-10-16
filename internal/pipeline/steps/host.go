@@ -22,6 +22,24 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm/plugin"
 )
 
+// ReadPRState observes the recorded PR using the same provider, profile, and
+// subprocess credentials as the PR and CI steps. It does not mutate the run.
+func ReadPRState(sctx *pipeline.StepContext) (scm.PRState, error) {
+	prURL := runPRURL(sctx)
+	number, err := scm.ExtractPRNumber(prURL)
+	if err != nil {
+		return "", err
+	}
+	host, reason := buildHost(sctx, resolvedProvider(sctx))
+	if host == nil {
+		return "", fmt.Errorf("cannot check PR state: %s", reason)
+	}
+	if err := host.Available(sctx.Ctx); err != nil {
+		return "", err
+	}
+	return host.GetPRState(sctx.Ctx, &scm.PR{Number: number, URL: prURL})
+}
+
 func ShippingProofHost(sctx *pipeline.StepContext) (scm.Host, error) {
 	if resolvedProvider(sctx) != scm.ProviderGitHub {
 		return nil, fmt.Errorf("exact shipping proof is supported only by GitHub")

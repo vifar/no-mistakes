@@ -19,6 +19,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/shipping"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -156,8 +157,8 @@ type Service struct {
 	GateDir string
 	Paths   *paths.Paths
 
-	// RemoteTimeout bounds each individual remote Git operation (ls-remote,
-	// fetch) performed by Refresh/Apply. Production callers set it from the
+	// RemoteTimeout bounds each individual remote operation (ls-remote,
+	// fetch, PR state lookup) performed by Refresh/Apply. Callers set it from the
 	// operator's global config (config.GlobalConfig.BranchSyncRemoteTimeout,
 	// key branch_sync_remote_timeout); it is never sourced from a repo's
 	// .no-mistakes.yaml - RepoConfig has no matching field, so a pushed
@@ -166,6 +167,11 @@ type Service struct {
 	// explicitly setting it, including every test) falls back to
 	// config.DefaultBranchSyncRemoteTimeout.
 	RemoteTimeout time.Duration
+
+	// LookupPRState reads the recorded PR through the caller's configured SCM
+	// host and credential context. Nil means no host is available. Refresh and
+	// Apply bound the lookup with RemoteTimeout, like the remote Git reads.
+	LookupPRState func(context.Context, *db.Repo, *db.Run) (scm.PRState, error)
 
 	// Remote operation seams are service-local so tests can substitute
 	// controlled fakes without changing process-wide state observed by
@@ -209,6 +215,40 @@ func (s *Service) runFetchRemote(ctx context.Context, dir, remote, branch, local
 		return s.fetchRemote(ctx, dir, remote, branch, localRef)
 	}
 	return git.FetchRemoteBranchToPrivateRef(ctx, dir, remote, branch, localRef)
+}
+
+func (s *Service) confirmPRState(ctx context.Context, repo *db.Repo, run *db.Run, persist bool) (string, error) {
+	if strings.TrimSpace(ptr(run.PRURL)) == "" || s.LookupPRState == nil {
+		return "", fmt.Errorf("no PR URL or SCM host available")
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, s.remoteTimeout())
+	defer cancel()
+	observed, err := s.LookupPRState(lookupCtx, repo, run)
+	if err != nil {
+		return "", err
+	}
+	if err := lookupCtx.Err(); err != nil {
+		return "", err
+	}
+	switch observed {
+	case scm.PRStateOpen, scm.PRStateMerged, scm.PRStateClosed:
+	default:
+		return "", fmt.Errorf("unrecognized PR state %q", observed)
+	}
+	state := strings.ToLower(string(observed))
+	if persist {
+		if err := s.DB.UpdateRunPRState(run.ID, state); err != nil {
+			return "", err
+		}
+		// The setter preserves terminal observations monotonically. Read its
+		// result so a concurrent terminal observation also wins in this plan.
+		current, err := s.DB.GetRun(run.ID)
+		if err != nil || current == nil {
+			return "", fmt.Errorf("could not reload observed PR state")
+		}
+		state = normalizePRState(current.PRState)
+	}
+	return state, nil
 }
 
 // OpenCurrent opens a service for the invoking registered worktree. The caller
@@ -290,8 +330,20 @@ func (s *Service) InspectCached(ctx context.Context) State {
 }
 
 // Refresh explicitly verifies the exact configured push ref into a private
-// no-mistakes ref. It never updates an ordinary remote-tracking ref.
+// no-mistakes ref. It never updates an ordinary remote-tracking ref or run
+// metadata. A live PR observation is applied only to the returned plan.
 func (s *Service) Refresh(ctx context.Context) State {
+	return s.refresh(ctx, false)
+}
+
+// RefreshForApply plans an applying command without moving the worktree. It
+// also records confirmed PR state, including when a retired branch needs no
+// subsequent Apply call. Checks use Refresh to leave run metadata unchanged.
+func (s *Service) RefreshForApply(ctx context.Context) State {
+	return s.refresh(ctx, true)
+}
+
+func (s *Service) refresh(ctx context.Context, persistPRState bool) State {
 	state, run, ok := s.inspect(ctx)
 	if run != nil && run.Shipping != nil && run.Shipping.Mode == types.ShippingImmutableSource {
 		resolveCtx, resolveCancel := context.WithTimeout(ctx, s.remoteTimeout())
@@ -351,6 +403,18 @@ func (s *Service) Refresh(ctx context.Context) State {
 	if live == "" {
 		state.Relation = RelationUnknown
 		state.NextAction = nil
+		state.PRState = normalizePRState(freshRun.PRState)
+		if state.PRState != "merged" && state.PRState != "closed" {
+			observed, err := s.confirmPRState(ctx, freshRepo, freshRun, persistPRState)
+			if err != nil {
+				state.State = StateRemoteMissing
+				state.Safety = "blocked_remote_missing"
+				state.Error = "the pipeline-bound remote branch no longer exists and its PR state could not be confirmed; retry no-mistakes axi sync --check; no files or refs were changed"
+				state.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --check"}
+				return state
+			}
+			state.PRState = observed
+		}
 		if state.PRState == "merged" {
 			state.State = StateMergedRemoteRemoved
 			state.Safety = "already_retired"
@@ -464,7 +528,7 @@ func (s *Service) Apply(ctx context.Context) State {
 	if refusal, blocked := s.gateContextRefusal(ctx); blocked {
 		return refusal
 	}
-	plan := s.Refresh(ctx)
+	plan := s.refresh(ctx, true)
 	if plan.State == StateSynchronized || plan.State == StateMergedRemoteRemoved {
 		plan.Changed = false
 		return plan
