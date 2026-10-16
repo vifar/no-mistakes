@@ -1576,10 +1576,9 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		}
 		dispositions, err := mgr.HandleRespondWithAcceptedGaps(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason, gaps, p.ExpectedGate)
 		if err != nil {
-			// A refused fix response is the caller's input to fix, not a
-			// transport failure: the gate is still parked. Report it as a
-			// structured result so the CLI can name the unaccounted findings
-			// and help, and the caller can send a corrected response.
+			// Admission refusals are structured results, not transport failures.
+			// A superseded gate requires a fresh decision; finding-selection
+			// refusals let the caller correct its input for the same gate.
 			var stale *pipeline.GateSupersededError
 			if errors.As(err, &stale) {
 				return &ipc.RespondResult{OK: false, Code: "gate_superseded", Refusal: stale.Error(), CurrentGate: &stale.Current, Help: "Read `no-mistakes axi status` and respond to the current gate"}, nil

@@ -210,8 +210,8 @@ func (m Model) respondCmd(action types.ApprovalAction) tea.Cmd {
 			}
 		}
 		if !result.OK {
-			// The daemon refused the response (the gate stays parked): show
-			// what it named rather than silently dropping the keypress.
+			// Show the refusal even if the displayed gate has already been
+			// superseded, rather than silently dropping the keypress.
 			message := result.Refusal
 			if message == "" {
 				message = "the daemon refused the response"

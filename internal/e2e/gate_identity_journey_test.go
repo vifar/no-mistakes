@@ -31,6 +31,15 @@ import (
 // These journeys use the user intent as the oracle: only the exact observed
 // park authorizes a response. An implementation that matches just the step,
 // accepts a missing identity, or replays an answer at a later park must fail.
+func gateJourneyEvidence(t *testing.T, label string, value any) {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("%s: %s", label, raw)
+}
+
 func gateJourneyStart(t *testing.T, h *Harness, branch string) types.GateIdentity {
 	t.Helper()
 	if out, err := h.Run("init"); err != nil {
@@ -59,6 +68,7 @@ func gateJourneyWait(t *testing.T, h *Harness, runID, previousNonce string) type
 				if g.RunID != runID || g.StepResultID == "" || g.RoundID == "" || g.Nonce == "" {
 					t.Fatalf("incomplete IPC gate identity: %+v", g)
 				}
+				gateJourneyEvidence(t, "IPC parked gate", g)
 				return g
 			}
 		}
@@ -84,6 +94,8 @@ func gateJourneyRespond(t *testing.T, socket string, runID string, action types.
 	}, &result); err != nil {
 		t.Fatal(err)
 	}
+	gateJourneyEvidence(t, "IPC respond request", ipc.RespondParams{RunID: runID, Step: types.StepReview, Action: action, ExpectedGate: expected})
+	gateJourneyEvidence(t, "IPC respond result", result)
 	return result
 }
 
@@ -105,6 +117,7 @@ func gateJourneyRounds(t *testing.T, h *Harness, gate types.GateIdentity) []*db.
 	if err != nil {
 		t.Fatal(err)
 	}
+	gateJourneyEvidence(t, "persisted review rounds", rounds)
 	return rounds
 }
 
@@ -135,6 +148,7 @@ func TestGateIdentityJourney_StaleAndUnboundResponsesAndStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	gateJourneyRefusal(t, missing, b)
+	gateJourneyEvidence(t, "IPC respond result with omitted expected_gate", missing)
 	if got := gateJourneyWait(t, h, a.RunID, ""); got != b {
 		t.Fatalf("refused responses changed B: %+v", got)
 	}
@@ -145,6 +159,7 @@ func TestGateIdentityJourney_StaleAndUnboundResponsesAndStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("axi status: %v\n%s", err, out)
 	}
+	t.Logf("axi status output:\n%s", out)
 	var status struct {
 		Gate struct {
 			RunID        string `toon:"run_id"`
@@ -243,6 +258,7 @@ func TestGateIdentityJourney_DelayedClosingAnswer(t *testing.T) {
 		if got.err != nil || !got.result.OK || !got.result.ClosedLast || got.result.Resumed || !strings.Contains(got.result.Note, "superseded") {
 			t.Fatalf("late answer result: %+v, %v", got.result, got.err)
 		}
+		gateJourneyEvidence(t, "delayed answer result", got.result)
 	case <-time.After(10 * time.Second):
 		t.Fatal("late answer handler did not return")
 	}
@@ -250,6 +266,7 @@ func TestGateIdentityJourney_DelayedClosingAnswer(t *testing.T) {
 	if err != nil || len(conv.Open()) != 0 || len(conv.Answered()) != 1 || conv.Answered()[0].Answer.Answer != "keep" {
 		t.Fatalf("answer was lost: %+v, %v", conv, err)
 	}
+	gateJourneyEvidence(t, "persisted answered conversation", conv.Answered())
 	if got := gateJourneyWait(t, h, a.RunID, ""); got != b {
 		t.Fatalf("late answer released B: %+v", got)
 	}
@@ -402,6 +419,7 @@ func gateJourneyObservedResponse(t *testing.T, tui bool) {
 		if params.ExpectedGate == nil || *params.ExpectedGate != a {
 			t.Fatalf("caller did not send the snapshot it observed: %+v; want %+v", params, a)
 		}
+		gateJourneyEvidence(t, "intercepted caller request", params)
 	case <-ctx.Done():
 		t.Fatal("CLI did not submit a response")
 	}
@@ -416,12 +434,13 @@ func gateJourneyObservedResponse(t *testing.T, tui bool) {
 			if got.err != nil || !strings.Contains(string(got.out), "gate already resolved or superseded") {
 				t.Fatalf("TUI did not display the refusal: %v\n%s", got.err, got.out)
 			}
-			t.Logf("TUI refusal frame:\n%s", lastScreenFrame(string(got.out)))
+			t.Logf("TUI terminal transcript:\n%s", got.out)
 		} else if got.err == nil || cmd.ProcessState == nil || cmd.ProcessState.ExitCode() != 2 {
 			t.Fatalf("stale CLI response did not exit with refusal: %v\n%s", got.err, got.out)
 		}
 		out := string(got.out)
 		if !tui {
+			t.Logf("axi respond refusal (exit %d):\n%s", cmd.ProcessState.ExitCode(), out)
 			for _, want := range []string{"gate_superseded", "current_gate:", b.RunID, b.StepResultID, b.RoundID, b.Nonce} {
 				if !strings.Contains(out, want) {
 					t.Fatalf("CLI refusal omits %q:\n%s", want, out)
@@ -483,6 +502,8 @@ func TestGateIdentityJourney_ReparkSameRoundAndUnboundAbort(t *testing.T) {
 	}
 	if run := h.WaitForRun(branch, 30*time.Second); run.Status != types.RunFailed || run.Error == nil || !strings.Contains(*run.Error, "aborted by user") {
 		t.Fatalf("abort did not terminate the original run: status=%s error=%v", run.Status, run.Error)
+	} else {
+		gateJourneyEvidence(t, "aborted run", run)
 	}
 	if rounds := gateJourneyRounds(t, h, b); len(rounds) != 1 {
 		t.Fatalf("stale nonce or abort dispatched work: %d rounds", len(rounds))
@@ -522,6 +543,7 @@ func gateJourneyPending(t *testing.T, h *Harness, gate types.GateIdentity) strin
 	if err != nil || row.PendingResponse == nil || row.Status != types.StepStatusAwaitingApproval {
 		t.Fatalf("response not durably parked while waiting for capacity: %+v, %v", row, err)
 	}
+	t.Logf("persisted pending response: %s", *row.PendingResponse)
 	return *row.PendingResponse
 }
 
@@ -606,6 +628,7 @@ func TestGateIdentityJourney_PendingResponseRecovery(t *testing.T) {
 				if run.Status != types.RunFailed || run.Error == nil || !strings.Contains(*run.Error, "superseded") {
 					t.Fatalf("invalid pending response did not fail closed: %+v", run)
 				}
+				gateJourneyEvidence(t, "recovered invalid pending run", run)
 				if len(gateJourneyRounds(t, h, a)) != 1 {
 					t.Fatal("invalid pending response dispatched another turn")
 				}
@@ -618,6 +641,7 @@ func TestGateIdentityJourney_PendingResponseRecovery(t *testing.T) {
 			if !recovered.WaitingForSlot || !step.ResponsePending || len(gateJourneyRounds(t, h, a)) != 1 {
 				t.Fatalf("recovered response not waiting inertly for capacity: %+v", recovered)
 			}
+			gateJourneyEvidence(t, "recovered run waiting for capacity", recovered)
 			if got := gateJourneyPending(t, h, a); got != raw {
 				t.Fatalf("restart changed the pending response: %s, want %s", got, raw)
 			}
@@ -647,6 +671,7 @@ func TestGateIdentityJourney_PendingResponseRecovery(t *testing.T) {
 				if run.Status != types.RunFailed || run.Error == nil || !strings.Contains(*run.Error, "superseded") || len(gateJourneyRounds(t, h, a)) != 1 {
 					t.Fatalf("slot dispatch reused stale response: %+v", run)
 				}
+				gateJourneyEvidence(t, "superseded slot dispatch run", run)
 				t.Log("scenario 4: gate changed after recovery registration; slot dispatch refused stale authority")
 				return
 			}
