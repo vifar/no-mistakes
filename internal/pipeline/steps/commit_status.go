@@ -118,6 +118,20 @@ func attachCommitStatusPublication(sctx *pipeline.StepContext) (*db.CommitStatus
 	return &publication, nil
 }
 
+// Only an owned attachment permits a status update when no push is needed.
+func hasAttachedCommitStatusPublication(sctx *pipeline.StepContext, sha, target string) bool {
+	if suppressPluginCommitStatus(sctx) || resolvedProvider(sctx) != scm.ProviderGitHub {
+		return false
+	}
+	publication, err := sctx.DB.GetCommitStatusPublication(sctx.Ctx, sctx.Run.ID, db.CommitStatusPublication{
+		SHA: sha, Host: resolvedHost(sctx, target), Repo: github.RepoSlug(target),
+	})
+	if err != nil {
+		statusWarning(sctx.Log, "read attached publication", err)
+	}
+	return publication != nil
+}
+
 func recordCommitStatusAttempt(sctx *pipeline.StepContext, sha, target, ref string, validated, ciEligible bool) error {
 	if suppressPluginCommitStatus(sctx) || resolvedProvider(sctx) != scm.ProviderGitHub || scm.ExtractHost(target) == "" {
 		return nil

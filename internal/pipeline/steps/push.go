@@ -16,7 +16,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
-	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 	"github.com/kunchenguid/no-mistakes/internal/shipping"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -33,6 +32,22 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		}
 		if err := assertReviewApprovedPushHead(sctx, sctx.Run.HeadSHA); err != nil {
 			return nil, err
+		}
+		target := resolvePushURL(sctx)
+		if hasAttachedCommitStatusPublication(sctx, sctx.Run.HeadSHA, target) {
+			ref := normalizedBranchRef(sctx.Run.Branch)
+			// Immutable promotions use this run's exact-head gates, rather than
+			// carrying an earlier attestation forward as an unvalidated CI repair.
+			if err := recordCommitStatusAttempt(sctx, sctx.Run.HeadSHA, target, ref, localValidationPassed(sctx, sctx.Run.HeadSHA), false); err != nil {
+				statusWarning(sctx.Log, "record immutable publication", err)
+			}
+			publication, err := confirmVerifiedCommitStatus(sctx, sctx.Run.HeadSHA, target, ref)
+			if err != nil {
+				statusWarning(sctx.Log, "record verified publication", err)
+			}
+			if publication != nil {
+				commitStatusReporter(sctx, publication)(sctx.Ctx, "pending", "", sctx.Log)
+			}
 		}
 		sctx.Log("verified already published immutable source; no push performed")
 		return &pipeline.StepOutcome{}, nil
@@ -236,16 +251,7 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		return err
 	}
 
-	recordStatus := !decision.upToDate
-	if decision.upToDate && !suppressPluginCommitStatus(sctx) && resolvedProvider(sctx) == scm.ProviderGitHub {
-		publication, err := sctx.DB.GetCommitStatusPublication(ctx, sctx.Run.ID, db.CommitStatusPublication{
-			SHA: headBeingPushed, Host: resolvedHost(sctx, pushURL), Repo: github.RepoSlug(pushURL),
-		})
-		if err != nil {
-			statusWarning(sctx.Log, "read attached publication", err)
-		}
-		recordStatus = publication != nil
-	}
+	recordStatus := !decision.upToDate || hasAttachedCommitStatusPublication(sctx, headBeingPushed, pushURL)
 	if recordStatus {
 		if err := recordCommitStatusAttempt(sctx, headBeingPushed, pushURL, ref, attestationSteps != nil && localValidationPassed(sctx, headBeingPushed), attestationSteps == nil && localValidationPassed(sctx, "")); err != nil {
 			statusWarning(sctx.Log, "record publication before push", err)

@@ -275,3 +275,119 @@ func TestPipelineAttachCommitStatus(t *testing.T) {
 		})
 	}
 }
+
+// Immutable promotions verify a published source without taking the ordinary
+// publication path. They must still settle an owned attachment using this run's
+// exact-head gate evidence, without creating a status for an unattached run.
+func TestImmutablePromotionAttachCommitStatus(t *testing.T) {
+	for _, scenario := range []string{"validated", "skipped Test", "unvalidated Test", "failed Lint", "unattached"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			sc := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+			remote := t.TempDir()
+			gitCmd(t, remote, "init", "--bare", ".")
+			target := "https://github.com/test/repo"
+			gitCmd(t, dir, "config", "url."+remote+".insteadOf", target)
+			gitCmd(t, dir, "push", target, "main", "feature")
+			sc.Repo.URLsVerified = true
+			sc.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"}
+			run, err := sc.DB.InsertRunWithShipping(sc.Repo.ID, "refs/heads/feature", head, base, nil, "", "", "", "main", false, nil,
+				&types.ShippingOptions{Mode: types.ShippingImmutableSource, TargetBranch: "main", TargetSHA: base})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sc.Run = run
+			forge := &attachStatusForge{posts: map[string][]string{}}
+			server := httptest.NewServer(forge)
+			t.Cleanup(server.Close)
+			env, _ := fakeGH(t, "")
+			sc.Env = append(env, "FAKE_CLI_STATUS_API_URL="+server.URL)
+			assertStates := func(want ...string) {
+				t.Helper()
+				if got := forge.states("test/repo", head); !slices.Equal(got, want) {
+					t.Fatalf("status POSTs = %v, want %v", got, want)
+				}
+			}
+			push := &PushStep{}
+			if scenario != "unattached" {
+				push.AttachPublishedHeadStatus(sc)
+				assertStates("pending")
+			}
+			comparison, err := sc.DB.CaptureReviewComparison(run.ID, db.ReviewComparison{
+				SourceRepo: "test/repo", SourceBranch: "feature", TargetBranch: "main", TargetSHA: base,
+				HeadSHA: head, MergeBaseSHA: base, DiffDigest: strings.Repeat("b", 64),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint} {
+				step, err := sc.DB.InsertStepResult(run.ID, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if name == types.StepReview {
+					err = sc.DB.CompleteReviewStep(step.ID, run.ID, head, 0, 1, "", comparison.Generation)
+				} else {
+					status := types.StepStatusCompleted
+					if name == types.StepTest {
+						testedHead := head
+						if scenario == "unvalidated Test" {
+							testedHead = base
+						}
+						if err := sc.DB.SetStepFindings(step.ID, fmt.Sprintf(`{"findings":[],"tested_head_sha":%q}`, testedHead)); err != nil {
+							t.Fatal(err)
+						}
+						if scenario == "skipped Test" {
+							status = types.StepStatusSkipped
+						}
+					}
+					if name == types.StepLint && scenario == "failed Lint" {
+						status = types.StepStatusFailed
+					}
+					err = sc.DB.UpdateStepStatusWithDuration(step.ID, status, 1)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := push.Execute(sc); err != nil {
+				t.Fatal(err)
+			}
+			// Exact-head CI readiness cannot rescue a skipped or unvalidated gate.
+			push.ReportPublishedHeadStatus(sc, "success", head)
+			sc.Run.Status = types.RunCompleted
+			if scenario == "failed Lint" {
+				sc.Run.Status = types.RunFailed
+			}
+			if err := sc.DB.UpdateRunStatus(run.ID, sc.Run.Status); err != nil {
+				t.Fatal(err)
+			}
+			if sc.Run.Status == types.RunFailed {
+				push.ReportPublishedHeadStatus(sc, "failure", "")
+			} else {
+				push.ReportPublishedHeadStatus(sc, "success", "")
+			}
+			switch scenario {
+			case "validated":
+				assertStates("pending", "success")
+			case "unattached":
+				assertStates()
+				attempt, err := sc.DB.GetCommitStatusAttempt(run.ID)
+				if err != nil || attempt != nil {
+					t.Fatalf("unattached immutable attempt = %+v, %v", attempt, err)
+				}
+			default:
+				assertStates("pending", "failure")
+			}
+			if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != head {
+				t.Fatalf("immutable local head changed: %s", got)
+			}
+			if got := gitCmd(t, dir, "status", "--porcelain"); got != "" {
+				t.Fatalf("immutable worktree changed: %s", got)
+			}
+			if got := gitCmd(t, remote, "rev-parse", "refs/heads/feature"); got != head {
+				t.Fatalf("immutable remote head changed: %s", got)
+			}
+		})
+	}
+}
