@@ -750,6 +750,7 @@ Legacy alias: `auto_fix.babysit`.
 
 How many times the CI step may re-run a single provider-attributed check before that check reaches an approval gate.
 This covers cancellations on supported providers and, when the value is positive, opts GitHub into detecting jobs that failed before any repository step ran.
+This policy applies only to checks in the [CI step's scope](#cirequired_checks).
 
 | | |
 |---|---|
