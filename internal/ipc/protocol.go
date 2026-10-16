@@ -461,15 +461,10 @@ type AnswerReviewQuestionParams struct {
 }
 
 // AnswerReviewQuestionResult reports what the recorded answer did. Open counts
-// the questions still unanswered after it, and Resumed is true when that count
-// reached zero and the reviewer's own session was resumed to finish its pass.
-// Resumed false with Open zero covers TWO cases, and Note distinguishes them:
-// the reviewer is still working and reads the answer at its next checkpoint, so
-// there is no gate to release; or this answer closed no question that was open
-// before it was appended - an id nobody asked, or a correction sent after the
-// last question was already answered - in which case it is recorded durably and
-// deliberately releases nothing, because the gate may be parked on ordinary
-// findings that are the operator's to answer.
+// the questions still unanswered. Resumed reports acceptance of this handler's
+// gate-bound release, not whether another path resumed the reviewer. Note
+// explains why a recorded answer released no gate. Answer delivery is owned by
+// docs/src/content/docs/concepts/review-conversation.md.
 type AnswerReviewQuestionResult struct {
 	OK      bool     `json:"ok"`
 	Open    int      `json:"open"`
