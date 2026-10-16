@@ -2812,24 +2812,9 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 // executor's live gate share db.StepResult.AcceptedGapRefusal.
 func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps, expected *types.GateIdentity) (pipeline.RespondDispositions, error) {
 	if action == types.ActionAbort {
-		m.mu.Lock()
-		owned := m.runs[runID]
-		var executor *pipeline.Executor
-		var cancel context.CancelCauseFunc
-		if owned != nil {
-			executor = owned.executor
-			if owned.state == ownershipRecoveringGate {
-				cancel = owned.handle.cancel
-			}
-		}
-		m.mu.Unlock()
-		if executor != nil {
-			result, err := executor.RespondWithOverrides(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, nil)
-			if err == nil && cancel != nil {
-				cancel(errors.New(types.RunCancelReasonAbortedByUser))
-			}
-			return result, err
-		}
+		// Cancellation belongs to run ownership, independently of whether a
+		// gate is parked, already answered, recovering, or executing.
+		return pipeline.RespondDispositions{}, m.HandleCancel(runID)
 	}
 	run, err := m.db.GetRun(runID)
 	if err != nil {

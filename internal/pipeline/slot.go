@@ -226,15 +226,16 @@ func (e *Executor) endGateWait(runID string, parkStart time.Time, waitErr error)
 // then begins dispatch: the step moves to running and the pending response and
 // awaiting-agent marker are cleared together. Until then the gate stays
 // recoverable.
-func (e *Executor) acquireAnsweredGateSlot(ctx context.Context, runID, stepID string) error {
+func (e *Executor) acquireAnsweredGateSlot(ctx context.Context, runID, stepID string, expected types.GateIdentity) error {
 	e.mu.Lock()
 	parkedMS := e.answeredParkedMS
-	expected := e.gate
 	pending := e.slotWaitStep != ""
 	e.mu.Unlock()
 	defer func() {
 		e.mu.Lock()
-		e.slotWaitStep = ""
+		if expected.SameGate(e.gate) {
+			e.slotWaitStep = ""
+		}
 		e.mu.Unlock()
 	}()
 	if err := e.acquireSlot(ctx); err != nil {
@@ -247,6 +248,16 @@ func (e *Executor) acquireAnsweredGateSlot(ctx context.Context, runID, stepID st
 			slog.Warn("failed to complete awaiting-agent state in db", "run", runID, "error", dbErr)
 		}
 		return err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	// Cancellation may race a capacity grant. Never dispatch an accepted
+	// response after abort, even when Acquire returned a slot successfully.
+	if err := context.Cause(ctx); err != nil {
+		return err
+	}
+	if !expected.SameGate(e.gate) {
+		return &GateSupersededError{Current: e.gate}
 	}
 	row, err := e.db.GetStepResult(stepID)
 	if err != nil {

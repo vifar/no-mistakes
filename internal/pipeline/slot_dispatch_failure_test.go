@@ -58,7 +58,7 @@ func TestAnsweredGateDispatchFailureClearsTheParkedState(t *testing.T) {
 	exec.SetRunSlot(&publicationRunSlot{})
 	saved, _ := database.GetStepResult(row.ID)
 	exec.gate = saved.GateIdentity()
-	if err := exec.acquireAnsweredGateSlot(context.Background(), run.ID, row.ID); err == nil {
+	if err := exec.acquireAnsweredGateSlot(context.Background(), run.ID, row.ID, exec.gate); err == nil {
 		t.Fatal("dispatch succeeded despite the failed write")
 	}
 	got, err := database.GetRun(run.ID)

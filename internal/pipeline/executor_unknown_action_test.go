@@ -91,7 +91,7 @@ func TestExecutor_GateLoopFailsStepOnUnrecognizedAction(t *testing.T) {
 
 	// Bypass Respond's vocabulary check and hand the loop a response it
 	// cannot dispatch.
-	exec.approvalCh <- approvalResponse{action: types.ApprovalAction("bogus")}
+	exec.approvalCh <- approvalResponse{action: types.ApprovalAction("bogus"), gate: exec.CurrentGate()}
 
 	select {
 	case err := <-done:

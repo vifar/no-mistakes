@@ -121,7 +121,7 @@ If you push to the same branch while a run is already active, the daemon:
 2. Waits for it to finish
 3. Submits a new run with the latest push for admission
 
-Pushes to different branches share execution slots. A newer push to a branch whose run is still queued supersedes it without starting it. The control plane (`status`, `respond`, `abort`, `gate_context`, launch) never waits on a slot; aborting a parked run also needs no slot.
+Pushes to different branches share execution slots. A newer push to a branch whose run is still queued supersedes it without starting it. The control plane (`status`, `respond`, `abort`, `gate_context`, launch) never waits on a slot. An identity-less `respond --action abort` uses the run's cancel handle, including while a response is already accepted and waiting for capacity or recovery has not dispatched it. Once cancellation stops the workload, the run is `cancelled`, its saved pending response is cleared, and its slot or reservation is released. A restart cannot replay that response.
 
 Abort and supersede share one cancellation path that consults an in-memory ownership table, under one lock, before the database. Each live run is in exactly one state:
 

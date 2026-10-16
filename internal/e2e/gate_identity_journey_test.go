@@ -500,7 +500,7 @@ func TestGateIdentityJourney_ReparkSameRoundAndUnboundAbort(t *testing.T) {
 	if result := gateJourneyRespond(t, socket, a.RunID, types.ActionAbort, nil); !result.OK {
 		t.Fatalf("unbound abort refused: %+v", result)
 	}
-	if run := h.WaitForRun(branch, 30*time.Second); run.Status != types.RunFailed || run.Error == nil || !strings.Contains(*run.Error, "aborted by user") {
+	if run := h.WaitForRun(branch, 30*time.Second); run.Status != types.RunCancelled || run.Error == nil || !strings.Contains(*run.Error, "aborted by user") {
 		t.Fatalf("abort did not terminate the original run: status=%s error=%v", run.Status, run.Error)
 	} else {
 		gateJourneyEvidence(t, "aborted run", run)
