@@ -27,6 +27,14 @@ type RespondDispositions struct {
 	Kept []string
 }
 
+// ResponsePendingError means the gate was answered and is waiting for capacity.
+// Abort must cancel that wait instead of enqueueing a second gate response.
+type ResponsePendingError struct{ Step types.StepName }
+
+func (e *ResponsePendingError) Error() string {
+	return fmt.Sprintf("step %s already answered; waiting for a run slot", e.Step)
+}
+
 // RespondRefusal is a fix response the executor refused without touching the
 // gate. The gate stays parked, so the caller can correct the response and
 // send it again.

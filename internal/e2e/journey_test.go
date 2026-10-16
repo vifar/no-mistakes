@@ -1365,8 +1365,8 @@ func assertRebaseConflictRun(t *testing.T, h *Harness) {
 	}
 	h.Respond(run.ID, types.StepRebase, types.ActionAbort)
 	completed := h.WaitForRun("rebase-conflict", 60*time.Second)
-	if completed.Status != types.RunCancelled {
-		t.Fatalf("rebase-conflict run status after abort = %s, want cancelled", completed.Status)
+	if completed.Status != types.RunFailed {
+		t.Fatalf("rebase-conflict run status after abort = %s, want failed", completed.Status)
 	}
 }
 
@@ -1597,8 +1597,8 @@ func assertDocumentLegacyFindingRun(t *testing.T, h *Harness) {
 	}
 	h.Respond(run.ID, types.StepDocument, types.ActionAbort)
 	completed := h.WaitForRun("document-legacy-finding", 60*time.Second)
-	if completed.Status != types.RunCancelled {
-		t.Fatalf("document-legacy-finding run status after abort = %s, want cancelled", completed.Status)
+	if completed.Status != types.RunFailed {
+		t.Fatalf("document-legacy-finding run status after abort = %s, want failed", completed.Status)
 	}
 }
 
@@ -1808,8 +1808,8 @@ func assertDocumentWarningRun(t *testing.T, h *Harness) {
 	}
 	h.Respond(run.ID, types.StepDocument, types.ActionAbort)
 	completed := h.WaitForRun("document-warning", 60*time.Second)
-	if completed.Status != types.RunCancelled {
-		t.Fatalf("document-warning run status after abort = %s, want cancelled", completed.Status)
+	if completed.Status != types.RunFailed {
+		t.Fatalf("document-warning run status after abort = %s, want failed", completed.Status)
 	}
 }
 
@@ -1837,8 +1837,8 @@ func assertDocumentInfoRun(t *testing.T, h *Harness) {
 	}
 	h.Respond(run.ID, types.StepDocument, types.ActionAbort)
 	completed := h.WaitForRun("document-info", 60*time.Second)
-	if completed.Status != types.RunCancelled {
-		t.Fatalf("document-info run status after abort = %s, want cancelled", completed.Status)
+	if completed.Status != types.RunFailed {
+		t.Fatalf("document-info run status after abort = %s, want failed", completed.Status)
 	}
 }
 
@@ -1966,8 +1966,8 @@ func assertReviewWarningRun(t *testing.T, h *Harness) {
 	}
 	h.Respond(run.ID, types.StepReview, types.ActionAbort)
 	completed := h.WaitForRun("review-warning", 60*time.Second)
-	if completed.Status != types.RunCancelled {
-		t.Fatalf("review-warning run status after abort = %s, want cancelled", completed.Status)
+	if completed.Status != types.RunFailed {
+		t.Fatalf("review-warning run status after abort = %s, want failed", completed.Status)
 	}
 	completedReviewStep, ok := findStep(completed.Steps, types.StepReview)
 	if !ok {

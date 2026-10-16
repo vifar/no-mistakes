@@ -500,7 +500,9 @@ func TestGateIdentityJourney_ReparkSameRoundAndUnboundAbort(t *testing.T) {
 	if result := gateJourneyRespond(t, socket, a.RunID, types.ActionAbort, nil); !result.OK {
 		t.Fatalf("unbound abort refused: %+v", result)
 	}
-	if run := h.WaitForRun(branch, 30*time.Second); run.Status != types.RunCancelled || run.Error == nil || !strings.Contains(*run.Error, "aborted by user") {
+	// Recovery has dispatched and yielded its slot at the waiting gate, so
+	// this is a gate response (failed), not a pre-dispatch cancellation.
+	if run := h.WaitForRun(branch, 30*time.Second); run.Status != types.RunFailed || run.Error == nil || *run.Error != "step review: aborted by user" {
 		t.Fatalf("abort did not terminate the original run: status=%s error=%v", run.Status, run.Error)
 	} else {
 		gateJourneyEvidence(t, "aborted run", run)

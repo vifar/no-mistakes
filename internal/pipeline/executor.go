@@ -328,7 +328,7 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 	if !e.waiting {
 		if e.slotWaitStep == step {
 			e.mu.Unlock()
-			return RespondDispositions{}, fmt.Errorf("step %s already answered; waiting for a run slot", step)
+			return RespondDispositions{}, &ResponsePendingError{Step: step}
 		}
 		e.mu.Unlock()
 		return RespondDispositions{}, fmt.Errorf("no step awaiting approval")

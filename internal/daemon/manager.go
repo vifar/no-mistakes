@@ -2812,9 +2812,30 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 // executor's live gate share db.StepResult.AcceptedGapRefusal.
 func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps, expected *types.GateIdentity) (pipeline.RespondDispositions, error) {
 	if action == types.ActionAbort {
-		// Cancellation belongs to run ownership, independently of whether a
-		// gate is parked, already answered, recovering, or executing.
-		return pipeline.RespondDispositions{}, m.HandleCancel(runID)
+		m.mu.Lock()
+		owned := m.runs[runID]
+		var executor *pipeline.Executor
+		recovering := owned != nil && owned.state == ownershipRecoveringGate
+		if owned != nil {
+			executor = owned.executor
+		}
+		m.mu.Unlock()
+		// Recovery has not dispatched the run and may have no slot. Stop
+		// it through the same cancellation path as a standalone run abort.
+		if recovering {
+			return pipeline.RespondDispositions{}, m.HandleCancel(runID)
+		}
+		if executor != nil {
+			// A waiting gate keeps its original failed outcome and reporting.
+			// Admission checks under the executor lock distinguish an accepted
+			// response, which cannot consume another response while slot-bound.
+			result, err := executor.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, gaps, expected)
+			var pending *pipeline.ResponsePendingError
+			if errors.As(err, &pending) {
+				return pipeline.RespondDispositions{}, m.HandleCancel(runID)
+			}
+			return result, err
+		}
 	}
 	run, err := m.db.GetRun(runID)
 	if err != nil {

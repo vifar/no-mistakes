@@ -19,11 +19,15 @@ import (
 )
 
 func TestManager_AbortPendingResponseClearsRecoveryAndSlot(t *testing.T) {
-	testAbortAcceptedGate(t, false)
+	testAbortGate(t, false, true)
 }
 
 func TestManager_AbortRecoveringResponseBeforeDispatch(t *testing.T) {
-	testAbortAcceptedGate(t, true)
+	testAbortGate(t, true, true)
+}
+
+func TestManager_AbortParkedGateFailsRun(t *testing.T) {
+	testAbortGate(t, false, false)
 }
 
 // Observe real slot calls rather than sleeping until admission probably ran.
@@ -45,7 +49,20 @@ func (s *abortObservedSlot) Acquire(ctx context.Context) error {
 	return s.runSlot.Acquire(ctx)
 }
 
-type abortGateStep struct{ calls atomic.Int32 }
+type abortGateStep struct {
+	calls            atomic.Int32
+	failureStatus    string
+	failureRunStatus types.RunStatus
+	failureError     string
+}
+
+func (s *abortGateStep) ReportPublishedHeadStatus(sctx *pipeline.StepContext, state, _ string) {
+	s.failureStatus = state
+	s.failureRunStatus = sctx.Run.Status
+	if sctx.Run.Error != nil {
+		s.failureError = *sctx.Run.Error
+	}
+}
 
 func (*abortGateStep) Name() types.StepName { return types.StepReview }
 func (s *abortGateStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
@@ -56,7 +73,7 @@ func (s *abortGateStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutco
 	return &pipeline.StepOutcome{NeedsApproval: true, Findings: `{"findings":[],"summary":"operator decision"}`}, nil
 }
 
-func testAbortAcceptedGate(t *testing.T, recovering bool) {
+func testAbortGate(t *testing.T, recovering, pending bool) {
 	t.Helper()
 	p := paths.WithRoot(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {
@@ -84,6 +101,7 @@ func testAbortAcceptedGate(t *testing.T, recovering bool) {
 	var done <-chan struct{}
 	var holder *runSlot
 	var rowID string
+	var events []ipc.Event
 	if recovering {
 		if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 			t.Fatal(err)
@@ -131,6 +149,7 @@ func testAbortAcceptedGate(t *testing.T, recovering bool) {
 	} else {
 		parked := make(chan struct{}, 1)
 		executor := pipeline.NewExecutor(database, p, cfg, nil, []pipeline.Step{step}, func(event ipc.Event) {
+			events = append(events, event)
 			if event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
 				parked <- struct{}{}
 			}
@@ -167,13 +186,15 @@ func testAbortAcceptedGate(t *testing.T, recovering bool) {
 		holder, _ = m.sched.tryAdmit("holder")
 		gate := executor.CurrentGate()
 		rowID = gate.StepResultID
-		if err := m.HandleRespond(run.ID, types.StepReview, types.ActionAnswer, nil, &gate); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case <-slot.acquireCh:
-		case <-time.After(5 * time.Second):
-			t.Fatal("response did not wait for capacity")
+		if pending {
+			if err := m.HandleRespond(run.ID, types.StepReview, types.ActionAnswer, nil, &gate); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-slot.acquireCh:
+			case <-time.After(5 * time.Second):
+				t.Fatal("response did not wait for capacity")
+			}
 		}
 	}
 	if holder == nil {
@@ -189,24 +210,48 @@ func testAbortAcceptedGate(t *testing.T, recovering bool) {
 		}
 	})
 	row, err := database.GetStepResult(rowID)
-	if err != nil || row.PendingResponse == nil {
-		t.Fatalf("response not durably pending: %+v, %v", row, err)
+	if err != nil || (row.PendingResponse != nil) != pending {
+		t.Fatalf("pending response: %+v, %v; want pending=%v", row, err, pending)
 	}
 	if err := m.HandleRespond(run.ID, types.StepReview, types.ActionAbort, nil, nil); err != nil {
-		t.Fatalf("identity-less abort refused while response pending: %v", err)
+		t.Fatalf("identity-less abort refused: %v", err)
 	}
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
-		t.Fatal("abort did not cancel pending run")
+		t.Fatal("abort did not stop the run")
+	}
+	wantStatus := types.RunCancelled
+	wantError := types.RunCancelReasonAbortedByUser
+	if !pending {
+		wantStatus = types.RunFailed
+		wantError = "step review: aborted by user"
 	}
 	stored, err := database.GetRun(run.ID)
-	if err != nil || stored.Status != types.RunCancelled || stored.AwaitingAgentSince != nil {
+	if err != nil || stored.Status != wantStatus || stored.Error == nil || *stored.Error != wantError || stored.AwaitingAgentSince != nil {
 		t.Fatalf("abort outcome: %+v, %v", stored, err)
 	}
 	row, err = database.GetStepResult(rowID)
 	if err != nil || row.PendingResponse != nil {
 		t.Fatalf("abort left replayable response: %+v, %v", row, err)
+	}
+	if !pending {
+		if row.Status != types.StepStatusFailed || row.Error == nil || *row.Error != "aborted by user" {
+			t.Fatalf("parked abort step: %+v", row)
+		}
+		if step.failureStatus != "failure" || step.failureRunStatus != types.RunFailed || step.failureError != wantError {
+			t.Fatalf("parked abort commit status: %+v", step)
+		}
+		if len(events) < 2 {
+			t.Fatalf("missing terminal events: %+v", events)
+		}
+		stepEvent, runEvent := events[len(events)-2], events[len(events)-1]
+		if stepEvent.Type != ipc.EventStepCompleted || stepEvent.Status == nil || *stepEvent.Status != "failed" || stepEvent.Error == nil || *stepEvent.Error != "aborted by user" {
+			t.Fatalf("parked abort step event: %+v", stepEvent)
+		}
+		if runEvent.Type != ipc.EventRunCompleted || runEvent.Status == nil || *runEvent.Status != "failed" || runEvent.Error == nil || *runEvent.Error != wantError {
+			t.Fatalf("parked abort run event: %+v", runEvent)
+		}
 	}
 	m.mu.Lock()
 	reserved := len(m.sched.prio)
@@ -234,6 +279,6 @@ func testAbortAcceptedGate(t *testing.T, recovering bool) {
 	defer reopened.Close()
 	restarted := NewRunManager(reopened, p, nil)
 	if plans := restarted.recoverableParkedRuns(context.Background()); len(plans) != 0 {
-		t.Fatalf("restart would reapply cancelled response: %+v", plans)
+		t.Fatalf("restart would reapply aborted response: %+v", plans)
 	}
 }
