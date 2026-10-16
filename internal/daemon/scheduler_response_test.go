@@ -64,7 +64,7 @@ func TestGateResponseReservesPriorityBeforeAcknowledgement(t *testing.T) {
 					t.Fatal(err)
 				}
 				acknowledged := make(chan error, 1)
-				go func() { acknowledged <- executor.Respond(types.StepReview, action, nil) }()
+				go func() { acknowledged <- executor.Respond(types.StepReview, action, nil, gateSnapshot(executor)) }()
 				select {
 				case err := <-acknowledged:
 					if err != nil {

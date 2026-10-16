@@ -432,7 +432,7 @@ func TestRecoveredParkedRunsUseBoundedPriorityAdmission(t *testing.T) {
 	}
 	for i, plan := range plans {
 		f.waitFor("recovered gate to accept approval", func() bool {
-			err := f.mgr.HandleRespond(plan.run.ID, types.StepReview, types.ActionApprove, nil)
+			err := f.mgr.HandleRespond(plan.run.ID, types.StepReview, types.ActionApprove, nil, managerGateSnapshot(t, f.mgr, plan.run.ID, types.StepReview))
 			return err == nil
 		})
 		f.waitFor("recovered run to complete", func() bool { return f.status(plan.run.ID) == types.RunCompleted })
@@ -535,7 +535,7 @@ func TestRecoveredGateWaitingForSlotAcceptsResponses(t *testing.T) {
 					if _, ok := sub.Next(ctx); !ok {
 						t.Fatal("missing initial stream gap")
 					}
-					if err := f.mgr.HandleRespond(waitingID, types.StepReview, action, nil); err != nil {
+					if err := f.mgr.HandleRespond(waitingID, types.StepReview, action, nil, managerGateSnapshot(t, f.mgr, waitingID, types.StepReview)); err != nil {
 						t.Fatalf("respond before admission: %v", err)
 					}
 					if action == types.ActionAbort {
@@ -559,7 +559,7 @@ func TestRecoveredGateWaitingForSlotAcceptsResponses(t *testing.T) {
 						if run.Status != types.RunRunning || run.AwaitingAgentSince == nil {
 							t.Fatalf("answered run is not durably parked for recovery: %+v", run)
 						}
-						if err := f.mgr.HandleRespond(waitingID, types.StepReview, action, nil); err == nil || !strings.Contains(err.Error(), "already answered; waiting for a run slot") {
+						if err := f.mgr.HandleRespond(waitingID, types.StepReview, action, nil, managerGateSnapshot(t, f.mgr, waitingID, types.StepReview)); err == nil || !strings.Contains(err.Error(), "gate already resolved or superseded") {
 							t.Fatalf("duplicate response: %v", err)
 						}
 						event, ok := sub.Next(ctx)
@@ -573,7 +573,7 @@ func TestRecoveredGateWaitingForSlotAcceptsResponses(t *testing.T) {
 					if f.started(queued) {
 						t.Fatal("new work overtook recovered gates")
 					}
-					if err := f.mgr.HandleRespond(plans[0].run.ID, types.StepReview, types.ActionApprove, nil); err != nil {
+					if err := f.mgr.HandleRespond(plans[0].run.ID, types.StepReview, types.ActionApprove, nil, managerGateSnapshot(t, f.mgr, plans[0].run.ID, types.StepReview)); err != nil {
 						t.Fatal(err)
 					}
 					if action == types.ActionApprove {
@@ -732,7 +732,7 @@ func TestAbortOfRecoveredGateWaitingForSlot(t *testing.T) {
 	if st := f.mgr.sched.stats(); st.Active != 1 || st.Queued != 0 {
 		t.Fatalf("slots after aborting the waiter = %+v, want the admitted gate only", st)
 	}
-	if err := f.mgr.HandleRespond(plans[0].run.ID, types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := f.mgr.HandleRespond(plans[0].run.ID, types.StepReview, types.ActionApprove, nil, managerGateSnapshot(t, f.mgr, plans[0].run.ID, types.StepReview)); err != nil {
 		t.Fatal(err)
 	}
 	f.waitFor("admitted gate to complete", func() bool { return f.status(plans[0].run.ID) == types.RunCompleted })
@@ -952,8 +952,9 @@ func TestFailedQueueRestoreLeavesParkedGatesRecoverable(t *testing.T) {
 	for _, plan := range plans {
 		deadline := time.Now().Add(30 * time.Second)
 		for {
-			err := client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: plan.run.ID, Step: types.StepReview, Action: types.ActionApprove}, nil)
-			if err == nil {
+			var response ipc.RespondResult
+			err := client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: plan.run.ID, Step: types.StepReview, Action: types.ActionApprove, ExpectedGate: ipcGateSnapshot(t, client, plan.run.ID, types.StepReview)}, &response)
+			if err == nil && response.OK {
 				break
 			}
 			if time.Now().After(deadline) {

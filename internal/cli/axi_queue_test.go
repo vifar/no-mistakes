@@ -381,13 +381,16 @@ func TestAnsweredGateWaitingForSlotRendersAsAnswered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := database.InsertStepRound(step.ID, 1, "initial", nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
 	if err := database.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.SetStepPendingResponse(step.ID, `{"action":"approve"}`, "already answered; waiting for a run slot"); err != nil {
+	if err := database.SetStepPendingResponse(step.ID, `{"action":"approve"}`, "already answered; waiting for a run slot", databaseGateSnapshot(t, database, step.ID)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -412,7 +415,7 @@ func TestAnsweredGateWaitingForSlotRendersAsAnswered(t *testing.T) {
 	}
 
 	// Once dispatch begins the marker and the parked status are gone together.
-	if err := database.ResumeStepFromApproval(run.ID, step.ID, "gate resumed", 0); err != nil {
+	if err := database.ResumeStepFromApproval(run.ID, step.ID, "gate resumed", 0, databaseGateSnapshot(t, database, step.ID)); err != nil {
 		t.Fatal(err)
 	}
 	steps, _ = database.GetStepsByRun(run.ID)

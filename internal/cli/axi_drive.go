@@ -1499,7 +1499,7 @@ func getRunInfo(ctx context.Context, socketPath, runID string) (*ipc.RunInfo, er
 // what it recorded. A response the daemon refused is returned as a
 // *respondRefusalError - the gate is still parked and the response can be
 // corrected.
-func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, added []types.Finding, approvalReason string, acceptGaps []string, coveredBy string, expected ...*types.GateIdentity) (ipc.RespondResult, error) {
+func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, added []types.Finding, approvalReason string, acceptGaps []string, coveredBy string, expected *types.GateIdentity) (ipc.RespondResult, error) {
 	params := &ipc.RespondParams{
 		RunID:            runID,
 		Step:             step,
@@ -1512,9 +1512,7 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 		AcceptGaps:       acceptGaps,
 		CoveredBy:        coveredBy,
 	}
-	if len(expected) > 0 {
-		params.ExpectedGate = expected[0]
-	}
+	params.ExpectedGate = expected
 	var result ipc.RespondResult
 	if err := client.Call(ipc.MethodRespond, params, &result); err != nil {
 		return ipc.RespondResult{}, err

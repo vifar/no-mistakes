@@ -75,7 +75,7 @@ func TestExecutor_AcceptedApprovalWinsReconciliationRace(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("gate reconciliation did not start")
 	}
-	if err := exec.Respond(types.StepCI, types.ActionAbort, nil); err != nil {
+	if err := exec.Respond(types.StepCI, types.ActionAbort, nil, nil); err != nil {
 		t.Fatalf("Respond() error = %v", err)
 	}
 	close(step.release)
@@ -175,7 +175,7 @@ func TestExecutor_ReconcileErrorPreservesGateFailClosed(t *testing.T) {
 		t.Fatalf("reconcile calls = %d, want repeated bounded checks", step.calls.Load())
 	}
 
-	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	step.release <- struct{}{}
@@ -208,7 +208,7 @@ func TestExecutor_FatalReconcileErrorFailsRun(t *testing.T) {
 	if got.Status != types.RunFailed || got.AwaitingAgentSince != nil {
 		t.Fatalf("run after fatal reconciliation = status %s awaiting %v", got.Status, got.AwaitingAgentSince)
 	}
-	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err == nil {
+	if err := exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec)); err == nil {
 		t.Fatal("fatal reconciliation left the gate approvable")
 	}
 }
@@ -282,7 +282,7 @@ func TestExecutor_GateRecheckIsBoundedAndApprovalWinsAfterTimeout(t *testing.T) 
 	case <-time.After(3 * time.Second):
 		t.Fatal("gate reconciliation did not start")
 	}
-	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -337,7 +337,7 @@ func TestExecutor_AppliesGateReconcileTimingsFromGlobalConfig(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("gate reconciliation did not start")
 	}
-	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -384,7 +384,7 @@ func TestExecutor_AppliesGateReconcileIntervalFromGlobalConfig(t *testing.T) {
 		t.Fatalf("reconcile calls = %d within 500ms, want >= 2 from configured 10ms interval (default 2m would not recheck yet)", step.calls.Load())
 	}
 
-	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -405,7 +405,7 @@ func TestExecutor_GateRecheckStopsAfterApprovalCancelAndShutdown(t *testing.T) {
 		{
 			name: "approval",
 			finish: func(exec *Executor, _ context.CancelCauseFunc) error {
-				return exec.Respond(types.StepCI, types.ActionApprove, nil)
+				return exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec))
 			},
 		},
 		{
@@ -519,7 +519,7 @@ func TestExecutor_RecoveredReconciliationPreservesPendingOnTransientError(t *tes
 				t.Fatal(err)
 			}
 			pendingMarker := boundPendingFixture(t, database, row.ID, `{"kind":"reconcile"}`)
-			if err := database.SetStepPendingResponse(row.ID, pendingMarker, answeredActivity); err != nil {
+			if err := database.SetStepPendingResponse(row.ID, pendingMarker, answeredActivity, databaseGateSnapshot(t, database, row.ID)); err != nil {
 				t.Fatal(err)
 			}
 			run, err = database.GetRun(run.ID)
@@ -559,7 +559,7 @@ func TestExecutor_RecoveredReconciliationPreservesPendingOnTransientError(t *tes
 				if err != nil || persisted.Status != status || !persisted.AnsweredWaitingForSlot() || persisted.PendingResponse == nil || *persisted.PendingResponse != pendingMarker {
 					t.Fatalf("attempt %d lost pending reconciliation: %+v, %v", attempt, persisted, err)
 				}
-				if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err == nil {
+				if err := exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec)); err == nil {
 					t.Fatal("pending reconciliation accepted another response")
 				}
 				if attempt == 2 {
@@ -619,7 +619,7 @@ func TestExecutor_RecoveredReconciliationFatalErrorFailsInsteadOfRetrying(t *tes
 	if err := database.ParkStepForApproval(run.ID, row.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.SetStepPendingResponse(row.ID, boundPendingFixture(t, database, row.ID, `{"kind":"reconcile"}`), answeredActivity); err != nil {
+	if err := database.SetStepPendingResponse(row.ID, boundPendingFixture(t, database, row.ID, `{"kind":"reconcile"}`), answeredActivity, databaseGateSnapshot(t, database, row.ID)); err != nil {
 		t.Fatal(err)
 	}
 	run, err = database.GetRun(run.ID)

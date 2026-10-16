@@ -180,7 +180,7 @@ func TestExecutor_AutoFixDuplicateIDsKeepUnselectedFindingParked(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("executor neither parked nor finished")
 	}
-	if err := exec.Respond(types.StepTest, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepTest, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitExecutorDone(t, done)
@@ -249,7 +249,7 @@ func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 	}
 
 	// Now approve manually to finish
-	exec.Respond(types.StepLint, types.ActionApprove, nil)
+	exec.Respond(types.StepLint, types.ActionApprove, nil, gateSnapshot(exec))
 	waitExecutorDone(t, done)
 }
 
@@ -282,7 +282,7 @@ func TestExecutor_AutoFixDisabledWithZero(t *testing.T) {
 		t.Errorf("expected 1 call (no auto-fix), got %d", callCount)
 	}
 
-	exec.Respond(types.StepReview, types.ActionApprove, nil)
+	exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec))
 	waitExecutorDone(t, done)
 }
 
@@ -313,7 +313,7 @@ func TestExecutor_AutoFixNilConfigUsesDefaults(t *testing.T) {
 		t.Errorf("expected 1 call (nil config, no auto-fix), got %d", callCount)
 	}
 
-	exec.Respond(types.StepReview, types.ActionAbort, nil)
+	exec.Respond(types.StepReview, types.ActionAbort, nil, nil)
 	<-done
 }
 
@@ -381,7 +381,7 @@ func TestExecutor_DoesNotAutoFixManualApprovalOutcome(t *testing.T) {
 		t.Fatalf("expected 1 call for manual approval outcome, got %d", callCount)
 	}
 
-	if err := exec.Respond(types.StepTest, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepTest, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("respond error: %v", err)
 	}
 	waitExecutorDone(t, done)
@@ -459,7 +459,7 @@ func TestExecutor_AutoFixInfoFindingNoOpParksAfterBudget(t *testing.T) {
 		t.Fatal("selected info finding was allowed to complete without verification")
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	waitExecutorDone(t, done)
@@ -495,7 +495,7 @@ func TestExecutor_AutoFixSkipsHumanReviewFindings(t *testing.T) {
 		t.Fatalf("expected 1 call (no auto-fix for ask-user findings), got %d", callCount)
 	}
 
-	exec.Respond(types.StepReview, types.ActionApprove, nil)
+	exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec))
 	waitExecutorDone(t, done)
 }
 
@@ -519,7 +519,7 @@ func TestExecutor_HumanReviewFindingsRequireApprovalWithoutNeedsApprovalFlag(t *
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 
-	exec.Respond(types.StepReview, types.ActionApprove, nil)
+	exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec))
 	waitExecutorDone(t, done)
 }
 
@@ -576,7 +576,7 @@ func TestExecutor_AutoFixMixedFindings(t *testing.T) {
 		t.Errorf("expected 2 calls (initial + 1 auto-fix), got %d", callCount)
 	}
 
-	exec.Respond(types.StepReview, types.ActionApprove, nil)
+	exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec))
 	waitExecutorDone(t, done)
 }
 

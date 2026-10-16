@@ -229,7 +229,7 @@ func TestExecutorAbortDoesNotWaitForOccupiedSlot(t *testing.T) {
 				time.Sleep(time.Millisecond)
 			}
 			beforeAcquire, beforeGuard := slot.acquires.Load(), guards.Load()
-			if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+			if err := exec.Respond(types.StepReview, types.ActionAbort, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			select {
@@ -292,7 +292,7 @@ func TestExecutor_YieldsSlotWhileParkedAndReacquiresOnResponse(t *testing.T) {
 	if got := slot.log(); len(got) != 2 || got[0] != "acquire" || got[1] != "yield" {
 		t.Fatalf("slot events while parked = %v, want [acquire yield] (taken for the step, yielded at the gate)", got)
 	}
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -332,7 +332,7 @@ func TestExecutor_FailsRunWhenSlotWaitIsCancelled(t *testing.T) {
 	slot.mu.Lock()
 	slot.acquireOK = cancelled
 	slot.mu.Unlock()
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -536,7 +536,7 @@ func TestExecutorAnsweredGateWaitsAsRunning(t *testing.T) {
 				for len(events) > 0 {
 					<-events
 				}
-				if err := exec.Respond(types.StepReview, action, nil); err != nil {
+				if err := exec.Respond(types.StepReview, action, nil, gateSnapshot(exec)); err != nil {
 					t.Fatal(err)
 				}
 				select {
@@ -564,7 +564,7 @@ func TestExecutorAnsweredGateWaitsAsRunning(t *testing.T) {
 				if current.AwaitingAgentSince == nil {
 					t.Fatal("answered gate lost its parked marker before dispatch; a restart could not recover it")
 				}
-				if err := exec.Respond(types.StepReview, action, nil); err == nil || !strings.Contains(err.Error(), "already answered; waiting for a run slot") {
+				if err := exec.Respond(types.StepReview, action, nil, gateSnapshot(exec)); err == nil || !strings.Contains(err.Error(), "gate already resolved or superseded") {
 					t.Fatalf("second response: %v", err)
 				}
 				select {
@@ -675,7 +675,7 @@ func TestExecutorParkPublicationPrecedesAcceptedResponse(t *testing.T) {
 				defer func() { unblock(); cancel(); <-done }()
 				if !recovered && parkedStatus == types.StepStatusFixReview {
 					waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-					if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+					if err := exec.Respond(types.StepReview, types.ActionFix, nil, gateSnapshot(exec)); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -688,7 +688,7 @@ func TestExecutorParkPublicationPrecedesAcceptedResponse(t *testing.T) {
 				responseDone := make(chan error, 1)
 				go func() {
 					close(attempted)
-					responseDone <- exec.Respond(types.StepReview, types.ActionApprove, nil)
+					responseDone <- exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec))
 				}()
 				<-attempted
 				select {
@@ -754,7 +754,7 @@ func TestExecutorReconciliationWaitsDurablyForCapacity(t *testing.T) {
 				if err := database.ParkStepForApproval(run.ID, row.ID, status, 0, 1, &findings); err != nil {
 					t.Fatal(err)
 				}
-				if err := database.SetStepPendingResponse(row.ID, boundPendingFixture(t, database, row.ID, `{"kind":"reconcile"}`), answeredActivity); err != nil {
+				if err := database.SetStepPendingResponse(row.ID, boundPendingFixture(t, database, row.ID, `{"kind":"reconcile"}`), answeredActivity, databaseGateSnapshot(t, database, row.ID)); err != nil {
 					t.Fatal(err)
 				}
 				run, err = database.GetRun(run.ID)
@@ -807,7 +807,7 @@ func TestExecutorReconciliationWaitsDurablyForCapacity(t *testing.T) {
 			if status != "" && step.calls.Load() != 0 {
 				t.Fatal("recovered reconciliation ran before admission")
 			}
-			if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err == nil || !strings.Contains(err.Error(), answeredActivity) {
+			if err := exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec)); err == nil || !strings.Contains(err.Error(), "gate already resolved or superseded") {
 				t.Fatalf("repeat response = %v", err)
 			}
 			release()

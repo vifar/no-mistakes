@@ -209,16 +209,38 @@ func TestPendingGateResponseLifecycle(t *testing.T) {
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
 	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
 	step, _ := d.InsertStepResult(run.ID, types.StepReview)
-	if err := d.SetStepPendingResponse(step.ID, `{"action":"approve"}`, "x"); err == nil {
+	if err := d.SetStepPendingResponse(step.ID, `{"action":"approve"}`, "x", databaseGateSnapshot(t, d, step.ID)); err == nil {
 		t.Fatal("a response was recorded for a step that is not parked")
+	}
+	if _, err := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0); err != nil {
+		t.Fatal(err)
 	}
 	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusFixReview, 0, 1, nil); err != nil {
 		t.Fatal(err)
 	}
+	current := databaseGateSnapshot(t, d, step.ID)
+	for _, operation := range []func() error{
+		func() error {
+			return d.SetStepPendingResponse(step.ID, `{"action":"approve"}`, "answered", types.GateIdentity{})
+		},
+		func() error {
+			return d.ResumeStepFromApproval(run.ID, step.ID, "gate resumed", 5, types.GateIdentity{})
+		},
+	} {
+		err := operation()
+		refusal, ok := err.(*types.GateSupersededError)
+		if !ok || refusal.Current != current {
+			t.Fatalf("unbound storage operation: %v", err)
+		}
+		row, err := d.GetStepResult(step.ID)
+		if err != nil || row.Status != types.StepStatusFixReview || row.PendingResponse != nil {
+			t.Fatalf("unbound operation changed gate: %+v, %v", row, err)
+		}
+	}
 	if err := d.SetRunAwaitingAgent(run.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.SetStepPendingResponse(step.ID, `{"action":"approve"}`, "answered"); err != nil {
+	if err := d.SetStepPendingResponse(step.ID, `{"action":"approve"}`, "answered", databaseGateSnapshot(t, d, step.ID)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := d.GetStepResult(step.ID)
@@ -233,10 +255,10 @@ func TestPendingGateResponseLifecycle(t *testing.T) {
 		t.Fatalf("a new park kept the old pending response: %v", *got.PendingResponse)
 	}
 	// Dispatch clears the response, the parked status and the marker together.
-	if err := d.SetStepPendingResponse(step.ID, `{"action":"skip"}`, "answered"); err != nil {
+	if err := d.SetStepPendingResponse(step.ID, `{"action":"skip"}`, "answered", databaseGateSnapshot(t, d, step.ID)); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.ResumeStepFromApproval(run.ID, step.ID, "gate resumed", 5); err != nil {
+	if err := d.ResumeStepFromApproval(run.ID, step.ID, "gate resumed", 5, databaseGateSnapshot(t, d, step.ID)); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = d.GetStepResult(step.ID)

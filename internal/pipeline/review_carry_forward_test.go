@@ -79,7 +79,7 @@ func TestExecutor_ReviewCarryForward_RecoverySeedsPendingVerification(t *testing
 	deadline := time.Now().Add(5 * time.Second)
 	var respondErr error
 	for time.Now().Before(deadline) {
-		if respondErr = exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); respondErr == nil {
+		if respondErr = exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}, gateSnapshot(exec)); respondErr == nil {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -163,7 +163,7 @@ func TestExecutor_ReviewCarryForward_RecoveryPersistsRemappedSelection(t *testin
 	if !containsFindingID(persistedUserFindings.Items, "user-2") || containsFindingID(persistedUserFindings.Items, "user-1") {
 		t.Fatalf("persisted user finding IDs = %v, want remapped user-2 without user-1", findingIDs(persistedUserFindings.Items))
 	}
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -316,7 +316,7 @@ func TestExecutor_ReviewCarryForward_NoOpFixKeepsFindingParked(t *testing.T) {
 
 	// Approving is the explicit operator action that clears what silence may
 	// not: the operator may still ship past the finding deliberately.
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	waitExecutorDone(t, done)
@@ -351,7 +351,7 @@ func TestExecutor_ReviewCarryForward_UserAddedFindingStaysOutstanding(t *testing
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	added := []types.Finding{{Severity: types.FindingSeverityWarning, File: "logger.go", Description: "audit logger setup", Action: types.ActionAskUser}}
-	if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, nil, nil, added, ""); err != nil {
+	if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, nil, nil, added, "", gateSnapshot(exec)); err != nil {
 		t.Fatalf("fix with added finding: %v", err)
 	}
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
@@ -374,7 +374,7 @@ func TestExecutor_ReviewCarryForward_UserAddedFindingStaysOutstanding(t *testing
 		t.Fatalf("user-added finding was dropped from outstanding carry: %s", *steps[0].FindingsJSON)
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	waitExecutorDone(t, done)
@@ -438,7 +438,7 @@ func TestExecutor_ReviewCarryForward_RemintsUserAddedCollisionForPendingVerifica
 		}
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	waitExecutorDone(t, done)
@@ -530,7 +530,7 @@ func TestExecutor_ReviewCarryForward_PendingSelectionsSurviveLaterRounds(t *test
 		t.Fatalf("finding B was not preserved while A was verified: %s", *steps[0].FindingsJSON)
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	waitExecutorDone(t, done)
@@ -561,7 +561,7 @@ func TestExecutor_ReviewCarryForward_PositiveCoverageClearsFinding(t *testing.T)
 	done, _ := startExecutor(t, exec, run, repo, workDir)
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitExecutorDone(t, done)
@@ -624,7 +624,7 @@ func TestExecutor_ReviewCarryForward_AnOpenQuestionDoesNotBlockVerification(t *t
 	done, _ := startExecutor(t, exec, run, repo, workDir)
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
@@ -643,7 +643,7 @@ func TestExecutor_ReviewCarryForward_AnOpenQuestionDoesNotBlockVerification(t *t
 		t.Fatalf("the open question is missing from the gate: %s", *steps[0].FindingsJSON)
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitExecutorDone(t, done)
@@ -687,7 +687,7 @@ func TestExecutor_ReviewCarryForward_AnUnreadableHistoryDoesNotBlockVerification
 	done, _ := startExecutor(t, exec, run, repo, workDir)
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
@@ -706,7 +706,7 @@ func TestExecutor_ReviewCarryForward_AnUnreadableHistoryDoesNotBlockVerification
 		t.Fatalf("the unreadable-history marker is missing from the gate: %s", *steps[0].FindingsJSON)
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitExecutorDone(t, done)
@@ -756,7 +756,7 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundWithdrawsByName(t *testing.T) 
 	done, _ := startExecutor(t, exec, run, repo, workDir)
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitExecutorDone(t, done)
@@ -814,7 +814,7 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundSilenceKeepsAnUnrelatedFinding
 	done, _ := startExecutor(t, exec, run, repo, workDir)
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	// Respond returns before the round runs, so the pre-answer snapshot is
@@ -848,7 +848,7 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundSilenceKeepsAnUnrelatedFinding
 	}
 
 	waitForParkedGate(t, exec, time.Now().Add(20*time.Second))
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitExecutorDone(t, done)
@@ -1200,7 +1200,7 @@ func TestExecutor_ReviewCarryForward_AFixRoundCannotWithdraw(t *testing.T) {
 		t.Fatal("run completed over a finding a fix round retracted without verifying")
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitExecutorDone(t, done)
@@ -1253,7 +1253,7 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundDoesNotCarryItsOwnQuestions(t 
 	done, _ := startExecutor(t, exec, run, repo, workDir)
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitExecutorDone(t, done)
@@ -1365,7 +1365,7 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundCannotWithdrawTheOperatorsOwnF
 		t.Fatalf("fixture did not produce the operator-authored user-1 finding: %s", *steps[0].FindingsJSON)
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	// The gate is already fix_review, so the status cannot say the answer round
@@ -1414,7 +1414,7 @@ func TestExecutor_ReviewCarryForward_AnAnswerRoundCannotWithdrawTheOperatorsOwnF
 	}
 
 	// The same id still clears the ordinary way: the operator's own verdict.
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitExecutorDone(t, done)
@@ -1508,7 +1508,7 @@ func TestExecutor_ReviewCarryForward_ARetractionIsRecordedOnlyOnTheRoundThatMade
 	done, _ := startExecutor(t, exec, run, repo, workDir)
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	steps := waitForFindings(t, exec, database, run.ID, "answer round finding")
@@ -1522,7 +1522,7 @@ func TestExecutor_ReviewCarryForward_ARetractionIsRecordedOnlyOnTheRoundThatMade
 	// way in; the round then reports nothing of its own, taking the merge
 	// branch that rebuilds the set from itself. Its row must carry no
 	// retraction: it made none.
-	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	rounds := waitForRounds(t, exec, database, steps[0].ID, 3)
@@ -1534,7 +1534,7 @@ func TestExecutor_ReviewCarryForward_ARetractionIsRecordedOnlyOnTheRoundThatMade
 		t.Fatalf("a round that retracted nothing recorded %v; the record belongs to the round that made it: %s", got, *last.FindingsJSON)
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitExecutorDone(t, done)
@@ -1583,7 +1583,7 @@ func TestExecutor_ReviewCarryForward_AnEmptyOutstandingSetRecordsNoRetraction(t 
 	done, _ := startExecutor(t, exec, run, repo, workDir)
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	steps := waitForFindings(t, exec, database, run.ID, "finalize turn finding")
@@ -1591,7 +1591,7 @@ func TestExecutor_ReviewCarryForward_AnEmptyOutstandingSetRecordsNoRetraction(t 
 		t.Fatalf("a retraction the executor never applied was recorded as if it had been: %v (%s)", got, *steps[0].FindingsJSON)
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitExecutorDone(t, done)
@@ -1692,7 +1692,7 @@ func TestExecutor_ReviewCarryForward_ARecoveredRoundInheritsNoRetractionRecord(t
 	deadline := time.Now().Add(5 * time.Second)
 	var respondErr error
 	for time.Now().Before(deadline) {
-		if respondErr = exec.Respond(types.StepReview, types.ActionAnswer, nil); respondErr == nil {
+		if respondErr = exec.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(exec)); respondErr == nil {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -1710,7 +1710,7 @@ func TestExecutor_ReviewCarryForward_ARecoveredRoundInheritsNoRetractionRecord(t
 		t.Fatalf("a recovered round that retracted nothing inherited the record %v: %s", got, *last.FindingsJSON)
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	waitExecutorDone(t, done)

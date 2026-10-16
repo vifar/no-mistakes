@@ -81,7 +81,7 @@ func testApprovalOfParkedVerdict(t *testing.T, verdict string, exception, recove
 			t.Fatalf("executor exited before approval: %v", err)
 		default:
 		}
-		_, err = executor.RespondWithOverrides(types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason)
+		_, err = executor.RespondWithOverrides(types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, gateSnapshot(executor))
 		if err == nil {
 			break
 		}
@@ -123,7 +123,7 @@ func TestExecutor_ApprovalReasonCannotChangeOtherActions(t *testing.T) {
 		step   types.StepName
 		action types.ApprovalAction
 	}{{types.StepReview, types.ActionApprove}, {types.StepCI, types.ActionApprove}, {types.StepTest, types.ActionFix}, {types.StepTest, types.ActionSkip}} {
-		if _, err := executor.RespondWithOverrides(tc.step, tc.action, nil, nil, nil, nil, "reason"); err == nil || !strings.Contains(err.Error(), "only to Test approval") {
+		if _, err := executor.RespondWithOverrides(tc.step, tc.action, nil, nil, nil, nil, "reason", gateSnapshot(executor)); err == nil || !strings.Contains(err.Error(), "only to Test approval") {
 			t.Fatalf("reason accepted for %s/%s: %v", tc.step, tc.action, err)
 		}
 	}
@@ -151,7 +151,7 @@ func TestExecutor_UnvalidatedTestWorkRefusesApprovalUntilFixValidatesIt(t *testi
 	go func() { done <- exec.Execute(context.Background(), run, repo, completionDir) }()
 	waitForStepStatus(t, database, run.ID, types.StepTest, types.StepStatusAwaitingApproval)
 
-	_, err := exec.RespondWithOverrides(types.StepTest, types.ActionApprove, nil, nil, nil, nil, "ship it anyway")
+	_, err := exec.RespondWithOverrides(types.StepTest, types.ActionApprove, nil, nil, nil, nil, "ship it anyway", gateSnapshot(exec))
 	if err == nil || !strings.Contains(err.Error(), "use fix to validate it") {
 		t.Fatalf("approve error = %v, want approval refused while unvalidated work remains", err)
 	}

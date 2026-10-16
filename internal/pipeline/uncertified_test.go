@@ -161,7 +161,7 @@ func TestParkedReview_DoesNotClearUncertifiedRange(t *testing.T) {
 	if got == nil || got.ToSHA != run.HeadSHA {
 		t.Fatalf("parked review cleared uncertified range: %#v", got)
 	}
-	if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionAbort, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	<-done

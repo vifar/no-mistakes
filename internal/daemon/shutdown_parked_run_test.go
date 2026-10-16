@@ -161,13 +161,13 @@ func approveResumedRun(t *testing.T, p *paths.Paths, d *db.DB, runID string) {
 	for {
 		client, err := ipc.Dial(p.Socket())
 		if err == nil {
+			var response ipc.RespondResult
 			err = client.Call(ipc.MethodRespond, &ipc.RespondParams{
 				RunID:  runID,
 				Step:   types.StepDocument,
-				Action: types.ActionApprove,
-			}, &ipc.RespondResult{})
+				Action: types.ActionApprove, ExpectedGate: ipcGateSnapshot(t, client, runID, types.StepDocument)}, &response)
 			_ = client.Close()
-			if err == nil {
+			if err == nil && response.OK {
 				break
 			}
 		}

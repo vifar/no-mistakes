@@ -56,11 +56,30 @@ func TestShippingApprovalRejectsUnsupportedCommandException(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, 1, 1, nil); err != nil {
+	raw := `{"findings":[]}`
+	if err := d.StartStep(sr.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertStepRound(sr.ID, 1, "initial", &raw, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, 1, 1, &raw); err != nil {
 		t.Fatal(err)
 	}
 	m := NewRunManager(d, p, nil)
-	if _, err := m.HandleRespondWithOverrides(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, ""); err == nil || !strings.Contains(err.Error(), "command overrides") {
+	executor := pipeline.NewExecutor(d, p, nil, nil, []pipeline.Step{&mockPassStep{name: types.StepTest}}, nil)
+	parked, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.RegisterRecoveredGate(parked); err != nil {
+		t.Fatal(err)
+	}
+	m.runs[run.ID] = &managedRun{run: parked, executor: executor}
+	if _, err := m.HandleRespondWithOverrides(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, "", managerGateSnapshot(t, m, run.ID, types.StepTest)); err == nil || !strings.Contains(err.Error(), "command overrides") {
 		t.Fatalf("command exception = %v", err)
 	}
 }

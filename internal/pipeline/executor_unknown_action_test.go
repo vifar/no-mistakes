@@ -35,7 +35,7 @@ func TestExecutor_RespondRefusesUnrecognizedActionAndKeepsGateParked(t *testing.
 	}()
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 
-	err := exec.Respond(types.StepReview, types.ApprovalAction("approv"), nil)
+	err := exec.Respond(types.StepReview, types.ApprovalAction("approv"), nil, gateSnapshot(exec))
 	if err == nil {
 		t.Fatal("Respond with an unrecognized action returned nil, want an error")
 	}
@@ -50,7 +50,7 @@ func TestExecutor_RespondRefusesUnrecognizedActionAndKeepsGateParked(t *testing.
 		t.Fatalf("executor returned %v after a refused action, want it still parked", err)
 	case <-time.After(200 * time.Millisecond):
 	}
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("valid respond after refusal: %v", err)
 	}
 	select {

@@ -22,9 +22,9 @@ func (e *Executor) currentGateLocked() types.GateIdentity {
 	return g
 }
 
-func (e *Executor) validateGateLocked(expected types.GateIdentity) error {
+func (e *Executor) validateGateLocked(expected *types.GateIdentity) error {
 	current := e.currentGateLocked()
-	if !e.waiting || !expected.SameGate(current) {
+	if !e.waiting || expected == nil || !expected.SameGate(current) {
 		return &GateSupersededError{Current: current}
 	}
 	return nil

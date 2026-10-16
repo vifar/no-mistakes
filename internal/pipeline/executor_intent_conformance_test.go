@@ -96,7 +96,7 @@ func TestExecutor_AutoFixContradictingIntentParksForApproval(t *testing.T) {
 	}
 
 	// Resolve so the executor goroutine exits cleanly.
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("approve fix review: %v", err)
 	}
 	waitExecutorDone(t, done)

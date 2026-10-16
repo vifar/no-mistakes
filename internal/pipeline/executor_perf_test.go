@@ -199,7 +199,7 @@ func TestExecutor_AccumulatesParkedDuration(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	time.Sleep(50 * time.Millisecond)
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("respond: %v", err)
 	}
 	select {

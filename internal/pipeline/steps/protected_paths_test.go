@@ -202,7 +202,7 @@ func TestCIStep_ProtectedPathRetryUsesPersistedRepair(t *testing.T) {
 					}
 				}
 			}
-			if _, err := executor.RespondWithOverrides(types.StepCI, types.ActionFix, selected, ignored, nil, added, ""); err != nil {
+			if _, err := executor.RespondWithOverrides(types.StepCI, types.ActionFix, selected, ignored, nil, added, "", gateSnapshot(executor)); err != nil {
 				t.Fatal(err)
 			}
 			select {

@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 	"time"
 
@@ -113,7 +112,7 @@ esac
 	// This serialized record is the durable acceptance contract, not a mock
 	// of recovery: the pending reconciliation froze ten seconds at acceptance.
 	pendingMarker := boundPendingFixture(t, database, row.ID, `{"kind":"reconcile","parked_ms":10000}`)
-	if err := database.SetStepPendingResponse(row.ID, pendingMarker, "already answered; waiting for a run slot"); err != nil {
+	if err := database.SetStepPendingResponse(row.ID, pendingMarker, "already answered; waiting for a run slot", databaseGateSnapshot(t, database, row.ID)); err != nil {
 		t.Fatal(err)
 	}
 	// Restore a crash snapshot taken 120 seconds after parking, despite the
@@ -167,8 +166,9 @@ esac
 	}
 	wire, _ := json.MarshalIndent(snapshot, "", "  ")
 	t.Logf("get_run during transient forge failure:\n%s\npersisted pending_response: %s", wire, *persisted.PendingResponse)
-	err = client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: run.ID, Step: types.StepCI, Action: types.ActionApprove}, nil)
-	if err == nil || !strings.Contains(err.Error(), "already answered; waiting for a run slot") {
+	var refusal ipc.RespondResult
+	err = client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: run.ID, Step: types.StepCI, Action: types.ActionApprove, ExpectedGate: ipcGateSnapshot(t, client, run.ID, types.StepCI)}, &refusal)
+	if err != nil || refusal.OK || refusal.Code != "gate_superseded" {
 		t.Fatalf("second response: %v", err)
 	}
 	t.Logf("second respond refused: %v", err)

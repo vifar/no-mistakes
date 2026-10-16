@@ -77,8 +77,7 @@ subscribeNow:
 	err = client.Call(ipc.MethodRespond, &ipc.RespondParams{
 		RunID:  pushResult.RunID,
 		Step:   types.StepReview,
-		Action: types.ActionApprove,
-	}, &respondResult)
+		Action: types.ActionApprove, ExpectedGate: ipcGateSnapshot(t, client, pushResult.RunID, types.StepReview)}, &respondResult)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,10 +549,9 @@ func TestRecoverOnStartup_ResumesParkedRun(t *testing.T) {
 			err = client.Call(ipc.MethodRespond, &ipc.RespondParams{
 				RunID:  run.ID,
 				Step:   types.StepReview,
-				Action: types.ActionApprove,
-			}, &response)
+				Action: types.ActionApprove, ExpectedGate: ipcGateSnapshot(t, client, run.ID, types.StepReview)}, &response)
 			_ = client.Close()
-			if err == nil {
+			if err == nil && response.OK {
 				break
 			}
 			lastErr = err

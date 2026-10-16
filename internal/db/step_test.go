@@ -666,13 +666,16 @@ func TestResumeStepFromApprovalRollsBackOnRunWriteFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusFixReview, 0, 100, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.sql.Exec(`CREATE TRIGGER deny_resume BEFORE UPDATE OF awaiting_agent_since ON runs BEGIN SELECT RAISE(FAIL, 'run write failed'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.ResumeStepFromApproval(run.ID, step.ID, "waiting for slot", 250); err == nil {
+	if err := d.ResumeStepFromApproval(run.ID, step.ID, "waiting for slot", 250, databaseGateSnapshot(t, d, step.ID)); err == nil {
 		t.Fatal("accepted a partial gate transition")
 	}
 	gotStep, err := d.GetStepResult(step.ID)
@@ -689,7 +692,7 @@ func TestResumeStepFromApprovalRollsBackOnRunWriteFailure(t *testing.T) {
 	if _, err := d.sql.Exec(`DROP TRIGGER deny_resume`); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.ResumeStepFromApproval(run.ID, step.ID, "waiting for slot", 250); err != nil {
+	if err := d.ResumeStepFromApproval(run.ID, step.ID, "waiting for slot", 250, databaseGateSnapshot(t, d, step.ID)); err != nil {
 		t.Fatal(err)
 	}
 	gotStep, err = d.GetStepResult(step.ID)

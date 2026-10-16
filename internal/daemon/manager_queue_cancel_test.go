@@ -117,7 +117,7 @@ func TestClaimedCancellationWaitsForAgentExit(t *testing.T) {
 						t.Fatal(err)
 					}
 					f.mgr.resumeRecoveredRun(plan)
-					if err := f.mgr.HandleRespond(id, types.StepReview, types.ActionApprove, nil); err != nil {
+					if err := f.mgr.HandleRespond(id, types.StepReview, types.ActionApprove, nil, managerGateSnapshot(t, f.mgr, id, types.StepReview)); err != nil {
 						t.Fatal(err)
 					}
 				} else {

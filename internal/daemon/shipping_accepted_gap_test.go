@@ -117,42 +117,42 @@ func TestAcceptedGapApprovalManagerAndExecutor(t *testing.T) {
 				}
 				if strict {
 					refused("plain strict approve", func() error {
-						_, err := manager.HandleRespondWithOverrides(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, "")
+						_, err := manager.HandleRespondWithOverrides(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, "", managerGateSnapshot(t, manager, run.ID, types.StepTest))
 						return err
 					})
 					refused("strict approve with a Test exception reason", func() error {
-						_, err := manager.HandleRespondWithOverrides(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason)
+						_, err := manager.HandleRespondWithOverrides(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, managerGateSnapshot(t, manager, run.ID, types.StepTest))
 						return err
 					})
 					refused("executor plain strict approve", func() error {
-						_, err := executor.RespondWithOverrides(types.StepTest, types.ActionApprove, nil, nil, nil, nil, "")
+						_, err := executor.RespondWithOverrides(types.StepTest, types.ActionApprove, nil, nil, nil, nil, "", gateSnapshot(executor))
 						return err
 					})
 					refused("unknown finding", func() error {
-						_, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, &db.AcceptedGaps{FindingIDs: []string{"missing"}, Reason: reason, CoveredBy: coveredBy})
+						_, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, &db.AcceptedGaps{FindingIDs: []string{"missing"}, Reason: reason, CoveredBy: coveredBy}, managerGateSnapshot(t, manager, run.ID, types.StepTest))
 						return err
 					})
 					refused("gap on a fix action", func() error {
-						_, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionFix, []string{"test-verdict"}, nil, nil, nil, reason, gaps)
+						_, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionFix, []string{"test-verdict"}, nil, nil, nil, reason, gaps, managerGateSnapshot(t, manager, run.ID, types.StepTest))
 						return err
 					})
 				} else {
 					refused("non-strict accept-gap", func() error {
-						_, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, gaps)
+						_, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, gaps, managerGateSnapshot(t, manager, run.ID, types.StepTest))
 						return err
 					})
 					refused("executor non-strict accept-gap", func() error {
-						_, err := executor.RespondWithAcceptedGaps(types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, gaps)
+						_, err := executor.RespondWithAcceptedGaps(types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, gaps, gateSnapshot(executor))
 						return err
 					})
-					if err := executor.Respond(types.StepTest, types.ActionAbort, nil); err != nil {
+					if err := executor.Respond(types.StepTest, types.ActionAbort, nil, nil); err != nil {
 						t.Fatal(err)
 					}
 					<-done
 					return
 				}
 
-				if _, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, gaps); err != nil {
+				if _, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, gaps, managerGateSnapshot(t, manager, run.ID, types.StepTest)); err != nil {
 					t.Fatalf("valid accepted gap refused: %v", err)
 				}
 				if err := <-done; err != nil {
@@ -266,14 +266,14 @@ func TestAcceptedGapSurvivesACrashBetweenRecordAndCompletion(t *testing.T) {
 			}
 
 			if response == "plain-with-reason" {
-				if _, err := manager.HandleRespondWithOverrides(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, "another reason entirely"); err == nil {
+				if _, err := manager.HandleRespondWithOverrides(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, "another reason entirely", managerGateSnapshot(t, manager, run.ID, types.StepTest)); err == nil {
 					t.Fatal("a plain approval carrying its own reason was admitted over a recorded gap")
 				}
 				got, err := database.GetStepResult(sr.ID)
 				if err != nil || got.Status != types.StepStatusAwaitingApproval || got.ApprovalReason != nil || got.ValidAcceptedGaps() == nil {
 					t.Fatalf("refusal damaged the recorded gap: %+v, %v", got, err)
 				}
-				if err := executor.Respond(types.StepTest, types.ActionAbort, nil); err != nil {
+				if err := executor.Respond(types.StepTest, types.ActionAbort, nil, nil); err != nil {
 					t.Fatal(err)
 				}
 				<-done
@@ -285,7 +285,7 @@ func TestAcceptedGapSurvivesACrashBetweenRecordAndCompletion(t *testing.T) {
 				gaps = &db.AcceptedGaps{FindingIDs: []string{"test-verdict"}, Reason: reason, CoveredBy: coveredBy}
 				approvalReason = reason
 			}
-			if _, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, approvalReason, gaps); err != nil {
+			if _, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, approvalReason, gaps, managerGateSnapshot(t, manager, run.ID, types.StepTest)); err != nil {
 				t.Fatalf("approval over the recorded gap refused: %v", err)
 			}
 			if err := <-done; err != nil {

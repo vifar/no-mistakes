@@ -45,7 +45,7 @@ func TestExecutor_RestartWithOwnFindingsParksBeforeRestarting(t *testing.T) {
 	if err != nil || len(parsed.Items) != 1 || parsed.Items[0].ID != "repair-defect" {
 		t.Fatalf("CI gate findings = %#v, %v; want its own repair-defect", parsed, err)
 	}
-	if err := exec.Respond(types.StepCI, types.ActionAbort, nil); err != nil {
+	if err := exec.Respond(types.StepCI, types.ActionAbort, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	<-done

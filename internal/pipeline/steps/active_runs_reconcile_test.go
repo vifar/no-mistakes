@@ -102,7 +102,7 @@ func TestCIGateReconciliationPreservesOpenErrorAndUnknownStates(t *testing.T) {
 			if persisted.Status != types.RunRunning || persisted.AwaitingAgentSince == nil || len(active) != 1 {
 				t.Fatalf("state %s did not fail closed: status=%s awaiting=%v active=%d", state, persisted.Status, persisted.AwaitingAgentSince, len(active))
 			}
-			if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
+			if err := exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 				t.Fatal(err)
 			}
 			select {

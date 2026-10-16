@@ -339,9 +339,10 @@ func slowWatcher(t *testing.T, interval time.Duration) {
 
 func (f *schedFixture) respondApprove(runID string) {
 	f.t.Helper()
-	err := f.client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: runID, Step: types.StepReview, Action: types.ActionApprove}, nil)
-	if err != nil {
-		f.t.Fatalf("approve %s: %v", runID, err)
+	var result ipc.RespondResult
+	err := f.client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: runID, Step: types.StepReview, Action: types.ActionApprove, ExpectedGate: ipcGateSnapshot(f.t, f.client, runID, types.StepReview)}, &result)
+	if err != nil || !result.OK {
+		f.t.Fatalf("approve %s: result=%+v, error=%v", runID, result, err)
 	}
 }
 
@@ -629,7 +630,7 @@ func TestQueueControlPlaneAnswersPromptlyWhileSlotsAreFull(t *testing.T) {
 	})
 	within("respond", func() error {
 		// There is no gate on a running or queued run: an error, but fast.
-		_ = f.client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: queued, Step: types.StepReview, Action: types.ActionApprove}, nil)
+		_ = f.client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: queued, Step: types.StepReview, Action: types.ActionApprove, ExpectedGate: ipcGateSnapshot(t, f.client, queued, types.StepReview)}, nil)
 		return nil
 	})
 	f.step.release(running)

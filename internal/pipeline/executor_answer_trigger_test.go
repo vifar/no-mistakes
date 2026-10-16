@@ -82,7 +82,7 @@ func TestExecutor_RecoveredAnswerRoundIsTriggeredAsAnAnswer(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err == nil {
+		if err := exec.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(exec)); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -142,7 +142,7 @@ func TestExecutor_AnswerActionIsRefusedForAnyStepButReview(t *testing.T) {
 	go func() { done <- exec.Execute(context.Background(), run, repo, completionDir) }()
 	waitForStepStatus(t, database, run.ID, types.StepDocument, types.StepStatusAwaitingApproval)
 
-	if err := exec.Respond(types.StepDocument, types.ActionAnswer, nil); err != nil {
+	if err := exec.Respond(types.StepDocument, types.ActionAnswer, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("Respond() error = %v", err)
 	}
 
@@ -251,7 +251,7 @@ func TestExecutor_RecoveredAnswerRoundInheritsAFixReviewGatesContext(t *testing.
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err == nil {
+		if err := exec.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(exec)); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -369,7 +369,7 @@ func TestExecutor_RecoveredAnswerRoundKeepsTheOutstandingFindings(t *testing.T) 
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err == nil {
+		if err := exec.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(exec)); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -394,7 +394,7 @@ func TestExecutor_RecoveredAnswerRoundKeepsTheOutstandingFindings(t *testing.T) 
 		t.Fatalf("the recovered answer round dropped the outstanding findings: %+v", got)
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	select {

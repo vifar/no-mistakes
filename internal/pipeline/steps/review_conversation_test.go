@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -205,11 +206,15 @@ func TestReviewStep_AnswersResumeTheSameSessionAndFinalize(t *testing.T) {
 	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
 
 	waitForReviewStatus(t, database, run.ID, types.StepStatusAwaitingApproval)
+	expected := exec.CurrentGate()
 	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "keep", AnsweredBy: "captain", AskOrdinal: 1}); err != nil {
 		t.Fatalf("append answer: %v", err)
 	}
-	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
-		t.Fatalf("respond with answers: %v", err)
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil, &expected); err != nil {
+		var superseded *pipeline.GateSupersededError
+		if !errors.As(err, &superseded) {
+			t.Fatalf("respond with answers: %v", err)
+		}
 	}
 
 	select {
@@ -634,11 +639,15 @@ func TestReviewStep_AnsweringARereviewQuestionDoesNotReRunTheFixer(t *testing.T)
 	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
 
 	waitForReviewStatus(t, database, run.ID, types.StepStatusFixReview)
+	expected := exec.CurrentGate()
 	if err := reviewqa.AppendAnswer(convDir, reviewqa.Answer{ID: "q1", Answer: "yes", AskOrdinal: 1}); err != nil {
 		t.Fatalf("append answer: %v", err)
 	}
-	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
-		t.Fatalf("respond with answers: %v", err)
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil, &expected); err != nil {
+		var superseded *pipeline.GateSupersededError
+		if !errors.As(err, &superseded) {
+			t.Fatalf("respond with answers: %v", err)
+		}
 	}
 
 	select {

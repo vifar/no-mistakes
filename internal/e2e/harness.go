@@ -565,10 +565,23 @@ func (h *Harness) respondError(runID string, step types.StepName, action types.A
 	if action == types.ActionFix {
 		ignoreIDs = h.unselectedFindingIDs(runID, step, findingIDs)
 	}
+	var status ipc.GetRunResult
+	if err := client.Call(ipc.MethodGetRun, &ipc.GetRunParams{RunID: runID}, &status); err != nil {
+		return err
+	}
+	var expected *types.GateIdentity
+	if status.Run != nil {
+		for _, row := range status.Run.Steps {
+			if row.StepName == step {
+				expected = row.Gate
+				break
+			}
+		}
+	}
 	var result ipc.RespondResult
 	call := func() error {
 		result = ipc.RespondResult{}
-		return client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: runID, Step: step, Action: action, FindingIDs: findingIDs, IgnoreFindingIDs: ignoreIDs}, &result)
+		return client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: runID, Step: step, Action: action, FindingIDs: findingIDs, IgnoreFindingIDs: ignoreIDs, ExpectedGate: expected}, &result)
 	}
 	if err := call(); err != nil {
 		return err

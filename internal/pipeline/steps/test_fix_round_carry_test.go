@@ -304,7 +304,7 @@ func testDeferredAskUserFindingParksUntilAHumanDecidesIt(t *testing.T, severity,
 
 	// A human fix response that declines it is that decision.
 	added := []types.Finding{{Severity: types.FindingSeverityInfo, Description: "rename the fixture", Action: types.ActionAutoFix}}
-	if _, err := executor.RespondWithOverrides(types.StepTest, types.ActionFix, []string{}, ignoredIDs, nil, added, ""); err != nil {
+	if _, err := executor.RespondWithOverrides(types.StepTest, types.ActionFix, []string{}, ignoredIDs, nil, added, "", gateSnapshot(executor)); err != nil {
 		t.Fatal(err)
 	}
 	select {

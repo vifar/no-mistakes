@@ -425,10 +425,10 @@ func TestStrictReviewResolutionRecoveredGateCertification(t *testing.T) {
 				t.Fatal("review did not park")
 			}
 			wait()
-			if err := e.Respond(types.StepReview, types.ActionApprove, nil); err == nil {
+			if err := e.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(e)); err == nil {
 				t.Fatal("operator approval granted independent authority")
 			}
-			if _, err := e.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-3"}, []string{"review-1"}, nil, nil, ""); err != nil {
+			if _, err := e.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-3"}, []string{"review-1"}, nil, nil, "", gateSnapshot(e)); err != nil {
 				t.Fatal(err)
 			}
 			if complete {
@@ -478,7 +478,7 @@ func TestStrictReviewResolutionRecoveredGateCertification(t *testing.T) {
 				if err != nil || len(items.Items) != 2 {
 					t.Fatalf("unproven findings cleared: %+v, %v", items, err)
 				}
-				if err := e.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+				if err := e.Respond(types.StepReview, types.ActionAbort, nil, nil); err != nil {
 					t.Fatal(err)
 				}
 				select {
@@ -520,7 +520,7 @@ func TestReviewResolutionRecoveredAnswerCannotRetractSelectedFix(t *testing.T) {
 	go func() { done <- e.Resume(ctx, recovered, repo, workDir) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if err := e.Respond(types.StepReview, types.ActionAnswer, nil); err == nil {
+		if err := e.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(e)); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -548,7 +548,7 @@ func TestReviewResolutionRecoveredAnswerCannotRetractSelectedFix(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if err := e.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+	if err := e.Respond(types.StepReview, types.ActionAbort, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	select {

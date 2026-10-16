@@ -45,7 +45,7 @@ func TestExecutor_FixResponseRefusedWhenTheDecisionWriteFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1"}, []string{"R2", "R3"}, nil, nil, ""); err == nil {
+	if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1"}, []string{"R2", "R3"}, nil, nil, "", gateSnapshot(exec)); err == nil {
 		t.Fatal("a response whose decision cannot be recorded must be refused, never echoed")
 	} else if !strings.Contains(err.Error(), "record") {
 		t.Fatalf("err = %v, want the failed write named", err)
@@ -63,13 +63,13 @@ func TestExecutor_FixResponseRefusedWhenTheDecisionWriteFails(t *testing.T) {
 	if _, err := raw.Exec(`DROP TRIGGER deny_decision`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1"}, []string{"R2", "R3"}, nil, nil, ""); err != nil {
+	if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1"}, []string{"R2", "R3"}, nil, nil, "", gateSnapshot(exec)); err != nil {
 		t.Fatalf("the still-parked gate refused the corrected response: %v", err)
 	}
 
 	approvalDeadline := time.Now().Add(5 * time.Second)
 	for {
-		if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err == nil {
+		if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err == nil {
 			break
 		} else if time.Now().After(approvalDeadline) {
 			t.Fatalf("gate never accepted approval: %v", err)
@@ -112,7 +112,7 @@ func TestExecutor_ReansweredRoundPreservesAcknowledgedFindingContent(t *testing.
 				}
 				parked, _ := database.GetStepResult(sr.ID)
 				exec.gate = parked.GateIdentity()
-				got, err := exec.RespondWithOverrides(step, types.ActionFix, ids, ignored, notes, added, "")
+				got, err := exec.RespondWithOverrides(step, types.ActionFix, ids, ignored, notes, added, "", gateSnapshot(exec))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -228,7 +228,7 @@ func TestExecutor_RecoveredAcceptedResponseIsReapplied(t *testing.T) {
 	crashed.gate = parked.GateIdentity()
 	acceptedGate := crashed.gate
 	accepted := []types.Finding{{Description: "repair logger", UserInstructions: "keep compatibility"}}
-	if _, err := crashed.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1"}, []string{"R2"}, map[string]string{"R1": "preserve logger format"}, accepted, ""); err != nil {
+	if _, err := crashed.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1"}, []string{"R2"}, map[string]string{"R1": "preserve logger format"}, accepted, "", gateSnapshot(crashed)); err != nil {
 		t.Fatal(err)
 	}
 	if row, err := database.GetStepResult(stepResult.ID); err != nil || row.Status != types.StepStatusAwaitingApproval || !row.AnsweredWaitingForSlot() {

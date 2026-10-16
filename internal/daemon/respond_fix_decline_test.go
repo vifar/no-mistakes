@@ -18,7 +18,7 @@ import (
 func TestHandleRespondWithOverrides_IgnoreOnlyFixResponseIsRecorded(t *testing.T) {
 	m, _, runID, exec := liveParkedGateFixture(t)
 
-	dispositions, err := m.HandleRespondWithOverrides(runID, types.StepReview, types.ActionFix, nil, []string{"review-1"}, nil, nil, "")
+	dispositions, err := m.HandleRespondWithOverrides(runID, types.StepReview, types.ActionFix, nil, []string{"review-1"}, nil, nil, "", managerGateSnapshot(t, m, runID, types.StepReview))
 	if err != nil {
 		t.Fatalf("an ignore-only fix response must be accepted: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestHandleRespondWithOverrides_IgnoreOnlyFixResponseIsRecorded(t *testing.T
 	// End the run so the fixture's cleanup observes the executor finishing.
 	approvalDeadline := time.Now().Add(5 * time.Second)
 	for {
-		if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err == nil {
+		if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err == nil {
 			break
 		} else if time.Now().After(approvalDeadline) {
 			t.Fatalf("gate never accepted approval: %v", err)

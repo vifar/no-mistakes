@@ -251,7 +251,7 @@ func TestPipelineAttachCommitStatus(t *testing.T) {
 				if err = executor.RegisterRecoveredGate(run); err != nil {
 					t.Fatal(err)
 				}
-				if err = executor.Respond(types.StepRebase, types.ActionApprove, nil); err != nil {
+				if err = executor.Respond(types.StepRebase, types.ActionApprove, nil, gateSnapshot(executor)); err != nil {
 					t.Fatal(err)
 				}
 				err = executor.Resume(context.Background(), run, sc.Repo, dir)

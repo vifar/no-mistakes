@@ -172,7 +172,7 @@ func TestExecutor_RequestedSkipsSurviveParkAndRecovery(t *testing.T) {
 							t.Fatalf("executor ended before approval: %v", err)
 						default:
 						}
-						if err := executor.Respond(gate, types.ActionApprove, nil); err == nil {
+						if err := executor.Respond(gate, types.ActionApprove, nil, gateSnapshot(executor)); err == nil {
 							break
 						} else if time.Now().After(deadline) {
 							t.Fatalf("gate refused approval: %v", err)
@@ -293,7 +293,7 @@ func TestExecutor_SkipRemainingPreservesRequestedSkipsAfterRecovery(t *testing.T
 			}
 			deadline := time.Now().Add(5 * time.Second)
 			for {
-				if err := executor.Respond(gate, action, nil); err == nil {
+				if err := executor.Respond(gate, action, nil, gateSnapshot(executor)); err == nil {
 					break
 				} else if time.Now().After(deadline) {
 					cancel()

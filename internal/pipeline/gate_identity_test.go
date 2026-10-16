@@ -53,6 +53,13 @@ func TestExecutor_ResponseBoundToParkedRound(t *testing.T) {
 	}
 	nextIdentityPark(t, parks)
 	b := e.CurrentGate()
+	for _, action := range []types.ApprovalAction{types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAnswer} {
+		err := e.Respond(types.StepReview, action, nil, nil)
+		var refusal *GateSupersededError
+		if !errors.As(err, &refusal) || refusal.Current != b {
+			t.Fatalf("unbound %s response: %v", action, err)
+		}
+	}
 	err := e.Respond(types.StepReview, types.ActionAnswer, nil, &a)
 	var stale *GateSupersededError
 	if !errors.As(err, &stale) {
@@ -131,7 +138,7 @@ func TestExecutor_RecoveredPendingResponseRejectsSupersededGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	old.SetRunSlot(&recordingSlot{})
-	if err := old.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+	if err := old.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(old)); err != nil {
 		t.Fatal(err)
 	}
 	accepted, _ := database.GetStepResult(row.ID)
@@ -143,7 +150,7 @@ func TestExecutor_RecoveredPendingResponseRejectsSupersededGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Model a stale saved response restored beside a later park (same round).
-	if err := database.SetStepPendingResponse(row.ID, raw, answeredActivity); err != nil {
+	if err := database.SetStepPendingResponse(row.ID, raw, answeredActivity, databaseGateSnapshot(t, database, row.ID)); err != nil {
 		t.Fatal(err)
 	}
 	fresh := NewExecutor(database, p, nil, nil, []Step{step}, nil)
@@ -227,7 +234,7 @@ func TestExecutor_ResumeRechecksPreviouslyRegisteredPendingIdentity(t *testing.T
 			if err := old.RegisterRecoveredGate(recovered); err != nil {
 				t.Fatal(err)
 			}
-			if err := old.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
+			if err := old.Respond(types.StepReview, types.ActionAnswer, nil, gateSnapshot(old)); err != nil {
 				t.Fatal(err)
 			}
 			e := NewExecutor(database, p, nil, nil, []Step{step}, nil)
@@ -299,5 +306,26 @@ func TestExecutor_FailedRoundWriteCannotBorrowPreviousGateRound(t *testing.T) {
 	}
 	if err := e.Respond(types.StepReview, types.ActionAbort, nil, &a); err != nil {
 		t.Fatalf("abort was bound to the incomplete gate: %v", err)
+	}
+}
+
+func TestExecutor_RecoveredPendingResponseRequiresIdentity(t *testing.T) {
+	database, p, run, _ := setupTest(t)
+	row, recovered := seedRecoveredReviewGate(t, database, run, gateFindingsThree, types.StepStatusAwaitingApproval, "")
+	current := databaseGateSnapshot(t, database, row.ID)
+	if err := database.SetStepPendingResponse(row.ID, `{"action":"approve"}`, answeredActivity, current); err != nil {
+		t.Fatal(err)
+	}
+	current.Status = types.StepStatusRunning
+	step := &adaptiveCallStep{name: types.StepReview}
+	e := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	err := e.RegisterRecoveredGate(recovered)
+	var refusal *GateSupersededError
+	if !errors.As(err, &refusal) || refusal.Current != current {
+		t.Fatalf("unbound saved response admitted: %v", err)
+	}
+	saved, err := database.GetStepResult(row.ID)
+	if err != nil || saved.Status != types.StepStatusAwaitingApproval || saved.PendingResponse == nil {
+		t.Fatalf("recovery changed the gate: %+v, %v", saved, err)
 	}
 }

@@ -220,7 +220,7 @@ func TestExecutor_RecoveredCIGateApprovalRestartsAPendingCarryAtTest(t *testing.
 	done := make(chan error, 1)
 	go func() { done <- exec.Resume(context.Background(), run, repo, workDir) }()
 	deadline := time.Now().Add(5 * time.Second)
-	for exec.Respond(types.StepCI, types.ActionApprove, nil) != nil {
+	for exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec)) != nil {
 		if time.Now().After(deadline) {
 			t.Fatal("recovered CI gate never accepted approval")
 		}
@@ -362,7 +362,7 @@ func TestExecutor_RevalidationClearsReviewCarry(t *testing.T) {
 	exec := NewExecutor(database, p, nil, nil, []Step{review, ci}, nil)
 	done, _ := startExecutor(t, exec, run, repo, workDir)
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("approve initial review: %v", err)
 	}
 	waitExecutorDone(t, done)

@@ -49,7 +49,7 @@ func (f *faultFixture) assertAnsweredWaiting(m *RunManager, id, phase string) {
 	if err != nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil {
 		f.t.Fatalf("%s: persisted run = %+v, %v; it must stay a recoverable parked run", phase, run, err)
 	}
-	if err := m.HandleRespond(id, types.StepReview, types.ActionApprove, nil); err == nil || !strings.Contains(err.Error(), "already answered; waiting for a run slot") {
+	if err := m.HandleRespond(id, types.StepReview, types.ActionApprove, nil, managerGateSnapshot(f.t, m, id, types.StepReview)); err == nil || !strings.Contains(err.Error(), "gate already resolved or superseded") {
 		f.t.Fatalf("%s: second response = %v, want the already-answered refusal", phase, err)
 	}
 }
@@ -68,7 +68,7 @@ func TestAcceptedResponseSurvivesCrashWhileWaitingForSlot(t *testing.T) {
 		t.Fatalf("setup: gate %s is not waiting for capacity: %+v", waiting, info)
 	}
 
-	if err := f.mgr.HandleRespond(waiting, types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := f.mgr.HandleRespond(waiting, types.StepReview, types.ActionApprove, nil, managerGateSnapshot(t, f.mgr, waiting, types.StepReview)); err != nil {
 		t.Fatalf("accept response while the only slot is held: %v", err)
 	}
 	f.assertAnsweredWaiting(f.mgr, waiting, "before the crash")
@@ -96,7 +96,7 @@ func TestAcceptedResponseSurvivesCrashWhileWaitingForSlot(t *testing.T) {
 
 	// The holder finishes; the answered gate is admitted and its recorded
 	// approval executes with no new response.
-	if err := next.HandleRespond(holder, types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := next.HandleRespond(holder, types.StepReview, types.ActionApprove, nil, managerGateSnapshot(t, next, holder, types.StepReview)); err != nil {
 		t.Fatalf("approve the slot holder: %v", err)
 	}
 	deadline := time.Now().Add(60 * time.Second)
@@ -120,7 +120,7 @@ func TestRecoveredReconciliationIsReportedAsAnsweredBeforeAdmission(t *testing.T
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("parked step: %+v, %v", rows, err)
 	}
-	if err := f.d.SetStepPendingResponse(rows[0].ID, boundPendingFixture(t, f.d, rows[0].ID, `{"kind":"reconcile"}`), "already answered; waiting for a run slot"); err != nil {
+	if err := f.d.SetStepPendingResponse(rows[0].ID, boundPendingFixture(t, f.d, rows[0].ID, `{"kind":"reconcile"}`), "already answered; waiting for a run slot", databaseGateSnapshot(t, f.d, rows[0].ID)); err != nil {
 		t.Fatal(err)
 	}
 	f.mgr.resumeRecoveredRuns(plans)
@@ -146,7 +146,7 @@ func TestAnsweredRecoveredGateKeepsItsPriorityHandoffSlot(t *testing.T) {
 	if info := f.answeredInfo(f.mgr, gate); !info.WaitingForSlot {
 		t.Fatalf("setup: recovered gate is not waiting behind the executing run: %+v", info)
 	}
-	if err := f.mgr.HandleRespond(gate, types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := f.mgr.HandleRespond(gate, types.StepReview, types.ActionApprove, nil, managerGateSnapshot(t, f.mgr, gate, types.StepReview)); err != nil {
 		t.Fatalf("approve after registration: %v", err)
 	}
 	queued := f.push("queued")
@@ -379,7 +379,7 @@ func TestDisablingHoldReleasesAlreadyParkedSlots(t *testing.T) {
 	}
 
 	// The gate resumes with priority over the run that queued after it parked.
-	if err := f.mgr.HandleRespond(parked, types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := f.mgr.HandleRespond(parked, types.StepReview, types.ActionApprove, nil, managerGateSnapshot(t, f.mgr, parked, types.StepReview)); err != nil {
 		t.Fatal(err)
 	}
 	f.step.release(blocked)

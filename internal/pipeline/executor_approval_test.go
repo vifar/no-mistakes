@@ -42,7 +42,7 @@ func TestExecutor_ApprovalFix(t *testing.T) {
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 
 	// Send fix action
-	exec.Respond(types.StepReview, types.ActionFix, nil)
+	exec.Respond(types.StepReview, types.ActionFix, nil, gateSnapshot(exec))
 
 	// Wait for step to re-execute and complete (it passes on second call)
 	select {
@@ -102,7 +102,7 @@ func TestExecutor_AwaitingAgentMarkerSetOnGateClearedOnRespond(t *testing.T) {
 
 	// Responding clears it as the run resumes, so the marker is non-nil only
 	// while the run is actually parked awaiting the agent.
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("respond: %v", err)
 	}
 	select {
@@ -221,7 +221,7 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"})
+		err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}, gateSnapshot(exec))
 		if err == nil {
 			break
 		}
@@ -259,7 +259,7 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	// outstanding, so the gate parks again for the operator rather than the run
 	// completing on a fix that nothing verified.
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("respond to re-parked gate: %v", err)
 	}
 	select {
@@ -332,7 +332,7 @@ func TestExecutor_ResumePromotesDurableReviewedCandidateOnApproval(t *testing.T)
 	go func() { done <- exec.Resume(context.Background(), run, repo, workDir) }()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err == nil {
+		if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {

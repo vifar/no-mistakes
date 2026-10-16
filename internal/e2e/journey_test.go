@@ -190,7 +190,7 @@ func runHappyPath(t *testing.T, agentName string) {
 	assertDaemonPIDFile(t, h)
 	assertAttachMissingRun(t, h)
 	assertDaemonNotifyPushUnknownRepo(t, h)
-	assertRespondNoActiveExecutor(t, h)
+	assertRespondMissingRun(t, h)
 	assertDaemonRestartWhileRunning(t, h)
 	assertInitAlreadyInitialized(t, h)
 	assertRunsEmpty(t, h)
@@ -909,14 +909,14 @@ func assertDaemonNotifyPushUnknownRepo(t *testing.T, h *Harness) {
 	}
 }
 
-func assertRespondNoActiveExecutor(t *testing.T, h *Harness) {
+func assertRespondMissingRun(t *testing.T, h *Harness) {
 	t.Helper()
 	err := h.RespondError("missing-run", types.StepReview, types.ActionApprove)
 	if err == nil {
 		t.Fatal("respond to missing run should fail")
 	}
-	if !strings.Contains(err.Error(), "no active executor") {
-		t.Fatalf("respond to missing run error = %v, want no active executor", err)
+	if !strings.Contains(err.Error(), "run not found") {
+		t.Fatalf("respond to missing run error = %v, want run not found", err)
 	}
 }
 
@@ -1961,8 +1961,8 @@ func assertReviewWarningRun(t *testing.T, h *Harness) {
 	if wrongStepErr == nil {
 		t.Fatal("responding to the wrong awaiting step should fail")
 	}
-	if !strings.Contains(wrongStepErr.Error(), "step mismatch") {
-		t.Fatalf("wrong-step response error = %v, want step mismatch", wrongStepErr)
+	if !strings.Contains(wrongStepErr.Error(), "gate already resolved or superseded") {
+		t.Fatalf("wrong-step response error = %v, want a superseded gate refusal", wrongStepErr)
 	}
 	h.Respond(run.ID, types.StepReview, types.ActionAbort)
 	completed := h.WaitForRun("review-warning", 60*time.Second)
@@ -2176,7 +2176,7 @@ func assertRespondNoWaitingStepRun(t *testing.T, h *Harness) {
 	if err == nil {
 		t.Fatal("respond while no step is awaiting approval should fail")
 	}
-	if !strings.Contains(err.Error(), "no step awaiting approval") {
+	if !strings.Contains(err.Error(), "gate already resolved or superseded") {
 		t.Fatalf("respond while no step awaiting approval error = %v", err)
 	}
 	completed := h.WaitForRun("respond-no-waiting", 60*time.Second)

@@ -83,7 +83,7 @@ func TestExecutor_GateAutoFixBudget(t *testing.T) {
 				}
 			}
 			if tc.wantStatus != types.StepStatusCompleted {
-				exec.Respond(name, types.ActionApprove, nil)
+				exec.Respond(name, types.ActionApprove, nil, gateSnapshot(exec))
 			}
 			waitExecutorDone(t, done)
 		})

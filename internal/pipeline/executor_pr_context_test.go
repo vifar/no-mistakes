@@ -81,7 +81,9 @@ func TestExecutorParkedApprovalRevalidatesPRTargetBeforeFinalStepCompletes(t *te
 	executor = NewExecutor(database, p, nil, nil, steps, func(event ipc.Event) {
 		if event.Type == ipc.EventStepCompleted && event.StepName != nil && *event.StepName == types.StepReview &&
 			event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
-			go func() { responseDone <- executor.Respond(types.StepReview, types.ActionApprove, nil) }()
+			go func() {
+				responseDone <- executor.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(executor))
+			}()
 		}
 	})
 	checks := 0
@@ -894,7 +896,9 @@ func TestExecutorRecoveredApprovalRevalidatesMovedPRTargetBeforeUsingParkedVerdi
 			if len(rounds) != 2 {
 				t.Fatalf("approval used parked review before revalidation: rounds=%d", len(rounds))
 			}
-			go func() { responseDone <- executor.Respond(types.StepReview, types.ActionApprove, nil) }()
+			go func() {
+				responseDone <- executor.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(executor))
+			}()
 		}
 	})
 	executor.workDir = workDir

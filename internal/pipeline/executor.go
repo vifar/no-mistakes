@@ -259,8 +259,8 @@ func (e *Executor) SetGateReconcileTimings(interval, timeout time.Duration) {
 // Respond sends a user approval action to the currently waiting step.
 // The step parameter must match the step currently awaiting approval.
 // Returns an error if no step is awaiting approval or if the step name doesn't match.
-func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, findingIDs []string, expected ...*types.GateIdentity) error {
-	_, err := e.RespondWithOverrides(step, action, findingIDs, nil, nil, nil, "", expected...)
+func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, findingIDs []string, expected *types.GateIdentity) error {
+	_, err := e.RespondWithOverrides(step, action, findingIDs, nil, nil, nil, "", expected)
 	return err
 }
 
@@ -275,8 +275,8 @@ func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, fin
 //
 // It returns the dispositions the response recorded, which the daemon echoes
 // to the caller.
-func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, expected ...*types.GateIdentity) (RespondDispositions, error) {
-	return e.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, nil, expected...)
+func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, expected *types.GateIdentity) (RespondDispositions, error) {
+	return e.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, nil, expected)
 }
 
 // RespondWithAcceptedGaps is RespondWithOverrides for an approval that may
@@ -284,7 +284,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 // by db.StepResult.AcceptedGapRefusal and recorded durably before the step
 // completes; its reason comes from gaps and is not stored as a Test exception
 // reason.
-func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps, expected ...*types.GateIdentity) (RespondDispositions, error) {
+func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps, expected *types.GateIdentity) (RespondDispositions, error) {
 	if gaps != nil && (step != types.StepTest || action != types.ActionApprove) {
 		return RespondDispositions{}, fmt.Errorf("an accepted gap applies only to Test approval")
 	}
@@ -315,10 +315,8 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 		return RespondDispositions{}, fmt.Errorf("unrecognized approval action %q (valid: approve, fix, skip, abort, answer)", action)
 	}
 	e.mu.Lock()
-	// Omitted identity means an explicit operation on the current gate. Bind it
-	// under this lock. Asynchronous callers must pass their earlier snapshot.
-	if action != types.ActionAbort && len(expected) > 0 && expected[0] != nil {
-		if err := e.validateGateLocked(*expected[0]); err != nil {
+	if action != types.ActionAbort {
+		if err := e.validateGateLocked(expected); err != nil {
 			e.mu.Unlock()
 			return RespondDispositions{}, err
 		}

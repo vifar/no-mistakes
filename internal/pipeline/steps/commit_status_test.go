@@ -810,7 +810,7 @@ func TestPipeline_GitHubCommitStatuses(t *testing.T) {
 				case <-ctx.Done():
 					t.Fatal("Test did not park for approval")
 				}
-				if _, respondErr := exec.RespondWithOverrides(types.StepTest, types.ActionApprove, nil, nil, nil, nil, "accept live validation exception"); respondErr != nil {
+				if _, respondErr := exec.RespondWithOverrides(types.StepTest, types.ActionApprove, nil, nil, nil, nil, "accept live validation exception", gateSnapshot(exec)); respondErr != nil {
 					t.Fatal(respondErr)
 				}
 				select {

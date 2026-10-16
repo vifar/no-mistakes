@@ -47,7 +47,7 @@ func runApprovalOverrideCase(t *testing.T, step Step) *string {
 	go func() { done <- exec.Execute(context.Background(), run, repo, completionDir) }()
 
 	waitForStepStatus(t, database, run.ID, step.Name(), types.StepStatusAwaitingApproval)
-	if err := exec.Respond(step.Name(), types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(step.Name(), types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("Respond(approve) error = %v", err)
 	}
 
@@ -199,7 +199,7 @@ func TestExecutor_ApprovalOverride_RecoveredPathStillFailing(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	var respondErr error
 	for time.Now().Before(deadline) {
-		if respondErr = exec.Respond(types.StepCI, types.ActionApprove, nil); respondErr == nil {
+		if respondErr = exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec)); respondErr == nil {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -300,7 +300,7 @@ func TestExecutor_ApprovalOverride_RunCompletedEventCarriesReason(t *testing.T) 
 	go func() { done <- exec.Execute(context.Background(), run, repo, completionDir) }()
 
 	waitForStepStatus(t, database, run.ID, step.Name(), types.StepStatusAwaitingApproval)
-	if err := exec.Respond(step.Name(), types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(step.Name(), types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("Respond(approve) error = %v", err)
 	}
 	select {

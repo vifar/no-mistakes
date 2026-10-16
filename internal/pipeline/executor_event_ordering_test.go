@@ -170,7 +170,7 @@ func TestExecutor_ApprovalPersistenceFailureDoesNotPublishOrWaitAtGate(t *testin
 	if err == nil || !strings.Contains(err.Error(), "persist review approval gate") {
 		t.Fatalf("Execute error = %v, want approval persistence failure", err)
 	}
-	if responseErr := exec.Respond(types.StepReview, types.ActionApprove, nil); responseErr == nil {
+	if responseErr := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); responseErr == nil {
 		t.Fatal("executor remained parked after approval persistence failed")
 	}
 

@@ -88,7 +88,7 @@ func TestTestRepairCommitRestartsThroughReview(t *testing.T) {
 				}
 				// Answer from another goroutine, as the daemon's IPC does: the
 				// park is published under the lock that accepts responses.
-				go func() { responseDone <- ex.Respond(types.StepTest, types.ActionFix, selected) }()
+				go func() { responseDone <- ex.Respond(types.StepTest, types.ActionFix, selected, gateSnapshot(ex)) }()
 			}
 		}
 	})

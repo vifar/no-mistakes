@@ -103,7 +103,7 @@ func respondFixPartialWithOverrides(t *testing.T, exec *Executor, step types.Ste
 		}
 		ignored = append(ignored, id)
 	}
-	_, err := exec.RespondWithOverrides(step, types.ActionFix, selected, ignored, instructions, added, "")
+	_, err := exec.RespondWithOverrides(step, types.ActionFix, selected, ignored, instructions, added, "", gateSnapshot(exec))
 	return err
 }
 

@@ -244,15 +244,12 @@ func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, 
 // whose run must wait for a run slot. The step keeps its parked status and the
 // run keeps its awaiting-agent marker, so the gate is still recovered as a gate
 // if the daemon stops during the wait; activity is what status surfaces show.
-func (d *DB) SetStepPendingResponse(stepID, response, activity string, expected ...types.GateIdentity) error {
-	var nonce any
-	var gate types.GateIdentity
-	if len(expected) > 0 {
-		gate = expected[0]
-		nonce = gate.Nonce
+func (d *DB) SetStepPendingResponse(stepID, response, activity string, gate types.GateIdentity) error {
+	if !gate.SameGate(gate) {
+		return d.gateSupersededError(stepID)
 	}
-	result, err := d.sql.Exec(`UPDATE step_results SET pending_response = ?, last_activity_at = ?, last_activity = ? WHERE id = ? AND status IN (?, ?) AND (? IS NULL OR (gate_nonce = ? AND gate_round_id = ? AND run_id = ? AND step_name = ? AND id = ? AND pending_response IS NULL))`,
-		response, now(), activity, stepID, types.StepStatusAwaitingApproval, types.StepStatusFixReview, nonce, nonce, gate.RoundID, gate.RunID, gate.Step, gate.StepResultID)
+	result, err := d.sql.Exec(`UPDATE step_results SET pending_response = ?, last_activity_at = ?, last_activity = ? WHERE id = ? AND status IN (?, ?) AND (gate_nonce = ? AND gate_round_id = ? AND run_id = ? AND step_name = ? AND id = ? AND pending_response IS NULL)`,
+		response, now(), activity, stepID, types.StepStatusAwaitingApproval, types.StepStatusFixReview, gate.Nonce, gate.RoundID, gate.RunID, gate.Step, gate.StepResultID)
 	if err != nil {
 		return fmt.Errorf("record pending gate response: %w", err)
 	}
@@ -267,19 +264,16 @@ func (d *DB) SetStepPendingResponse(stepID, response, activity string, expected 
 // ResumeStepFromApproval moves a parked step to running when its response is
 // dispatched, clearing any pending response and the run's awaiting-agent marker
 // in one transaction.
-func (d *DB) ResumeStepFromApproval(runID, stepID, activity string, parkedMS int64, expected ...types.GateIdentity) error {
-	var nonce any
-	var gate types.GateIdentity
-	if len(expected) > 0 {
-		gate = expected[0]
-		nonce = gate.Nonce
+func (d *DB) ResumeStepFromApproval(runID, stepID, activity string, parkedMS int64, gate types.GateIdentity) error {
+	if !gate.SameGate(gate) {
+		return d.gateSupersededError(stepID)
 	}
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE step_results SET status = ?, pending_response = NULL, last_activity_at = ?, last_activity = ? WHERE id = ? AND run_id = ? AND (? IS NULL OR (gate_nonce = ? AND gate_round_id = ? AND run_id = ? AND step_name = ? AND id = ? AND status IN (?, ?)))`, types.StepStatusRunning, now(), activity, stepID, runID, nonce, nonce, gate.RoundID, gate.RunID, gate.Step, gate.StepResultID, types.StepStatusAwaitingApproval, types.StepStatusFixReview)
+	result, err := tx.Exec(`UPDATE step_results SET status = ?, pending_response = NULL, last_activity_at = ?, last_activity = ? WHERE id = ? AND run_id = ? AND (gate_nonce = ? AND gate_round_id = ? AND run_id = ? AND step_name = ? AND id = ? AND status IN (?, ?))`, types.StepStatusRunning, now(), activity, stepID, runID, gate.Nonce, gate.RoundID, gate.RunID, gate.Step, gate.StepResultID, types.StepStatusAwaitingApproval, types.StepStatusFixReview)
 	if err != nil {
 		return err
 	}

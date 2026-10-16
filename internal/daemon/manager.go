@@ -2791,22 +2791,22 @@ func (m *RunManager) activeAgentPIDs() []int {
 }
 
 // HandleRespond routes a user approval action to the executor for the given run.
-func (m *RunManager) HandleRespond(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string) error {
-	_, err := m.HandleRespondWithOverrides(runID, step, action, findingIDs, nil, nil, nil, "")
+func (m *RunManager) HandleRespond(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string, expected *types.GateIdentity) error {
+	_, err := m.HandleRespondWithOverrides(runID, step, action, findingIDs, nil, nil, nil, "", expected)
 	return err
 }
 
 // HandleRespondWithOverrides is like HandleRespond but also forwards explicit
 // declines, user instructions, and user-authored findings to the executor, and
 // returns the dispositions the response recorded.
-func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string) (pipeline.RespondDispositions, error) {
-	return m.HandleRespondWithAcceptedGaps(runID, step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, nil)
+func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, expected *types.GateIdentity) (pipeline.RespondDispositions, error) {
+	return m.HandleRespondWithAcceptedGaps(runID, step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, nil, expected)
 }
 
 // HandleRespondWithAcceptedGaps is HandleRespondWithOverrides for an approval
 // that may carry an owner-accepted Test gap. The pre-check here and the
 // executor's live gate share db.StepResult.AcceptedGapRefusal.
-func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps, expected ...*types.GateIdentity) (pipeline.RespondDispositions, error) {
+func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps, expected *types.GateIdentity) (pipeline.RespondDispositions, error) {
 	if action == types.ActionAbort {
 		m.mu.Lock()
 		owned := m.runs[runID]
@@ -2820,7 +2820,7 @@ func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.Step
 		}
 		m.mu.Unlock()
 		if executor != nil {
-			result, err := executor.RespondWithOverrides(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason)
+			result, err := executor.RespondWithOverrides(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, nil)
 			if err == nil && cancel != nil {
 				cancel(errors.New(types.RunCancelReasonAbortedByUser))
 			}
@@ -2833,7 +2833,7 @@ func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.Step
 	}
 	// A completed run may no longer have an executor. A bound late response
 	// still gets the typed current identity rather than a transport error.
-	if action != types.ActionAbort && len(expected) > 0 && expected[0] != nil {
+	if action != types.ActionAbort {
 		m.mu.Lock()
 		owned := m.runs[runID]
 		var executor *pipeline.Executor
@@ -2859,7 +2859,7 @@ func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.Step
 				}
 			}
 		}
-		if executor == nil || !expected[0].SameGate(current) {
+		if executor == nil || expected == nil || !expected.SameGate(current) {
 			return pipeline.RespondDispositions{}, &pipeline.GateSupersededError{Current: current}
 		}
 	}
@@ -2916,7 +2916,7 @@ func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.Step
 		return pipeline.RespondDispositions{}, fmt.Errorf("no active executor for run %s", runID)
 	}
 
-	return exec.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, gaps, expected...)
+	return exec.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, gaps, expected)
 }
 
 // HandleAnswerReviewQuestion records one operator answer to a question the

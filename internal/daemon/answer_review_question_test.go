@@ -329,14 +329,14 @@ func liveParkedGateFixture(t *testing.T) (*RunManager, *paths.Paths, string, *pi
 	// the real step name would answer it.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		err := exec.Respond(types.StepTest, types.ActionApprove, nil)
+		err := exec.Respond(types.StepTest, types.ActionApprove, nil, gateSnapshot(exec))
 		if err == nil {
 			t.Fatal("a probe naming another step must never be accepted")
 		}
 		if strings.Contains(err.Error(), "step mismatch") {
 			break
 		}
-		if !strings.Contains(err.Error(), "no step awaiting approval") {
+		if !strings.Contains(err.Error(), "gate already resolved or superseded") {
 			t.Fatalf("unexpected probe error: %v", err)
 		}
 		if time.Now().After(deadline) {
@@ -380,7 +380,7 @@ func TestAnswerReviewQuestionOrphanAnswerLeavesAParkedGateAlone(t *testing.T) {
 	}
 
 	// The property that matters: the operator's verdict is still possible.
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("the orphan answer stole the operator's verdict: %v", err)
 	}
 }
@@ -420,7 +420,7 @@ func TestAnswerReviewQuestionDuplicateAnswerLeavesAParkedGateAlone(t *testing.T)
 	if readErr != nil || !strings.Contains(string(answers), "behind a flag") {
 		t.Fatalf("the corrected answer was not recorded: err=%v content=%q", readErr, answers)
 	}
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("the duplicate answer stole the operator's verdict: %v", err)
 	}
 }
@@ -444,7 +444,7 @@ func TestAnswerReviewQuestionClosingAnswerOnAParkedGateResumesAndClosesLast(t *t
 	// executor finishes.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		err := exec.Respond(types.StepReview, types.ActionApprove, nil)
+		err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec))
 		if err == nil {
 			break
 		}

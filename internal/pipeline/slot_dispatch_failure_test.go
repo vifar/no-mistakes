@@ -34,7 +34,7 @@ func TestAnsweredGateDispatchFailureClearsTheParkedState(t *testing.T) {
 	if err := database.ParkStepForApproval(run.ID, row.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.SetStepPendingResponse(row.ID, boundPendingFixture(t, database, row.ID, `{"action":"approve"}`), answeredActivity); err != nil {
+	if err := database.SetStepPendingResponse(row.ID, boundPendingFixture(t, database, row.ID, `{"action":"approve"}`), answeredActivity, databaseGateSnapshot(t, database, row.ID)); err != nil {
 		t.Fatal(err)
 	}
 	control, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
@@ -114,7 +114,7 @@ func TestRecoveredGateFailuresClearPendingState(t *testing.T) {
 					}
 					if marker != "" {
 						marker = boundPendingFixture(t, database, row.ID, marker)
-						if err := database.SetStepPendingResponse(row.ID, marker, answeredActivity); err != nil {
+						if err := database.SetStepPendingResponse(row.ID, marker, answeredActivity, databaseGateSnapshot(t, database, row.ID)); err != nil {
 							t.Fatal(err)
 						}
 					}

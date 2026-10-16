@@ -39,13 +39,13 @@ func TestShippingReviewGateCannotBeApprovedWithoutFullReview(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if err := e.Respond(types.StepReview, types.ActionApprove, nil); err == nil || !strings.Contains(err.Error(), "strict Review") {
+	if err := e.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(e)); err == nil || !strings.Contains(err.Error(), "strict Review") {
 		t.Fatalf("coverage gate approval = %v", err)
 	}
-	if err := e.Respond(types.StepReview, types.ActionSkip, nil); err == nil {
+	if err := e.Respond(types.StepReview, types.ActionSkip, nil, gateSnapshot(e)); err == nil {
 		t.Fatal("strict skip accepted")
 	}
-	if err := e.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+	if err := e.Respond(types.StepReview, types.ActionAbort, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -211,10 +211,10 @@ func TestShippingReviewRestartInsideFixRoundIsHonored(t *testing.T) {
 				if err != nil || len(parsed.Items) != 1 || parsed.Items[0].ID != tc.parkedOn {
 					t.Fatalf("restarted review parked on %s (%v), want only the declined %s", gate, err, tc.parkedOn)
 				}
-				if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err == nil || !strings.Contains(err.Error(), "strict Review") {
+				if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err == nil || !strings.Contains(err.Error(), "strict Review") {
 					t.Fatalf("strict approval of the declined finding = %v", err)
 				}
-				if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+				if err := exec.Respond(types.StepReview, types.ActionAbort, nil, nil); err != nil {
 					t.Fatal(err)
 				}
 				<-done
@@ -269,7 +269,7 @@ func TestRecoveredReviewRestartInsideFixRoundKeepsTheDeclinedFinding(t *testing.
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, []string{"review-2"}, nil, nil, ""); err == nil {
+		if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, []string{"review-2"}, nil, nil, "", gateSnapshot(exec)); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -298,7 +298,7 @@ func TestRecoveredReviewRestartInsideFixRoundKeepsTheDeclinedFinding(t *testing.
 	if rebases.Load() != 1 {
 		t.Fatalf("restart rebased %d times, want once", rebases.Load())
 	}
-	if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionAbort, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	<-done

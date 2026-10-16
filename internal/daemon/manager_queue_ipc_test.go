@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -156,8 +155,10 @@ func TestQueueParkResponseEventOrderThroughIPC(t *testing.T) {
 		if info.AwaitingAgentSince != nil || len(info.Steps) != 1 || info.Steps[0].Status != types.StepStatusRunning {
 			t.Fatalf("answered snapshot is still parked: %+v", info)
 		}
-		err = f.client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: id, Step: types.StepReview, Action: types.ActionApprove}, nil)
-		if err == nil || !strings.Contains(err.Error(), "already answered; waiting for a run slot") {
+		var refusal ipc.RespondResult
+
+		err = f.client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: id, Step: types.StepReview, Action: types.ActionApprove, ExpectedGate: ipcGateSnapshot(t, f.client, id, types.StepReview)}, &refusal)
+		if err != nil || refusal.OK || refusal.Code != "gate_superseded" {
 			t.Fatalf("second response: %v", err)
 		}
 		t.Logf("response/park race %d: subscriber review statuses %v; snapshot running, awaiting_agent_since absent; second respond: %v", i+1, statuses, err)
@@ -230,8 +231,10 @@ func TestQueueRecoveredAcceptedGateStateThroughIPC(t *testing.T) {
 			}
 			wire, _ := json.MarshalIndent(info, "", "  ")
 			t.Logf("get_run after approving a recovered gate while the other gate holds the only slot:\n%s", wire)
-			err = f.client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: waitingID, Step: types.StepReview, Action: types.ActionApprove}, nil)
-			if err == nil || !strings.Contains(err.Error(), "already answered; waiting for a run slot") {
+			var refusal ipc.RespondResult
+
+			err = f.client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: waitingID, Step: types.StepReview, Action: types.ActionApprove, ExpectedGate: ipcGateSnapshot(t, f.client, waitingID, types.StepReview)}, &refusal)
+			if err != nil || refusal.OK || refusal.Code != "gate_superseded" {
 				t.Fatalf("duplicate response refusal: %v", err)
 			}
 			t.Logf("second respond refused: %v", err)

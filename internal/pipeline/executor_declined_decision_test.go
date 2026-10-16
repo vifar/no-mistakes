@@ -33,7 +33,7 @@ func runGateAndRespond(t *testing.T, action types.ApprovalAction, findings strin
 	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	exec.Respond(types.StepReview, action, nil)
+	exec.Respond(types.StepReview, action, nil, gateSnapshot(exec))
 
 	select {
 	case <-done:
@@ -152,7 +152,7 @@ func TestExecutor_RecoveredGateResolutionsWithoutASelectionRecordTheDecline(t *t
 
 			deadline := time.Now().Add(5 * time.Second)
 			for {
-				if err := exec.Respond(types.StepTest, tc.action, nil); err == nil {
+				if err := exec.Respond(types.StepTest, tc.action, nil, gateSnapshot(exec)); err == nil {
 					break
 				}
 				if time.Now().After(deadline) {
@@ -219,7 +219,7 @@ func TestExecutor_FixResolutionStillRecordsAUserSelection(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	exec.Respond(types.StepReview, types.ActionFix, []string{"journal-version-deduplication"})
+	exec.Respond(types.StepReview, types.ActionFix, []string{"journal-version-deduplication"}, gateSnapshot(exec))
 
 	select {
 	case err := <-done:

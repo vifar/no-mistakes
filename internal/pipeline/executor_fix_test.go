@@ -55,7 +55,7 @@ func TestExecutor_FixEmitsFixReviewStatusWithoutStreamingTheDiff(t *testing.T) {
 	}
 
 	// Send fix action
-	exec.Respond(types.StepReview, types.ActionFix, nil)
+	exec.Respond(types.StepReview, types.ActionFix, nil, gateSnapshot(exec))
 
 	// The gate is announced by status alone. The working-tree diff is
 	// derived state served on demand (ipc.MethodGetStepDiff); it is
@@ -74,7 +74,7 @@ func TestExecutor_FixEmitsFixReviewStatusWithoutStreamingTheDiff(t *testing.T) {
 	// Approve to end
 	execGit(t, workDir, "commit", "-m", "agent fix")
 	advanceCompletionFixture(t, database, run, workDir)
-	exec.Respond(types.StepReview, types.ActionApprove, nil)
+	exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec))
 
 	select {
 	case err := <-done:
@@ -126,7 +126,7 @@ func TestExecutor_FixEmitsFixingStatusImmediately(t *testing.T) {
 	for time.Now().Unix() <= initialRoundStartedAt {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionFix, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -212,7 +212,7 @@ func TestExecutor_FixingEventIncludesFindingStats(t *testing.T) {
 
 	close(releaseFix)
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -252,14 +252,14 @@ func TestExecutor_FixReviewNoChanges(t *testing.T) {
 	}()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	exec.Respond(types.StepReview, types.ActionFix, nil)
+	exec.Respond(types.StepReview, types.ActionFix, nil, gateSnapshot(exec))
 
 	fixEvent := waitForEvent(t, events, ipc.EventStepCompleted, string(types.StepStatusFixReview))
 	if fixEvent.Status == nil || *fixEvent.Status != string(types.StepStatusFixReview) {
 		t.Errorf("expected fix_review status, got %v", fixEvent.Status)
 	}
 
-	exec.Respond(types.StepReview, types.ActionApprove, nil)
+	exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec))
 	select {
 	case err := <-done:
 		if err != nil {
@@ -304,7 +304,7 @@ func TestExecutor_FixSetsPreviousFindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -381,7 +381,7 @@ func TestExecutor_AssignsFindingIDsBeforePersistingAndEmitting(t *testing.T) {
 		t.Fatalf("unexpected stored finding IDs: %#v", storedItems)
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionAbort, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	<-done
@@ -422,7 +422,7 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -519,7 +519,7 @@ func TestExecutor_FixUsesSelectedFindingIDsOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -571,7 +571,7 @@ func TestExecutor_FixClearsStoredFindingsAfterSuccessfulReRun(t *testing.T) {
 	}()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -624,7 +624,7 @@ func TestExecutor_FixPersistsFollowUpRoundAsAutoFix(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -693,7 +693,7 @@ func TestExecutor_FixSelectedFindingsRewritesSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -752,7 +752,7 @@ func TestExecutor_UserFixRecordsSelectedFindingIDsAndFixSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -853,7 +853,7 @@ func TestExecutor_AutoFixRecordsSelectedFindingIDs(t *testing.T) {
 		t.Fatalf("expected the undecided ask-user finding to stay outstanding, got %v", dbSteps[0].FindingsJSON)
 	}
 
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatalf("respond: %v", err)
 	}
 	waitExecutorDone(t, done)

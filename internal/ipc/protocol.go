@@ -289,7 +289,7 @@ type SubscribeParams struct {
 // already decided it, and the daemon refuses the response (leaving the gate
 // parked) when one is left out. An omission is never a decline.
 type RespondParams struct {
-	ExpectedGate     *types.GateIdentity  `json:"expected_gate,omitempty"`
+	ExpectedGate     *types.GateIdentity  `json:"expected_gate"`
 	RunID            string               `json:"run_id"`
 	Step             types.StepName       `json:"step"`
 	Action           types.ApprovalAction `json:"action"`

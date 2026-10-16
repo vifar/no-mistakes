@@ -377,8 +377,7 @@ func TestProtectedPathPushApprovalCannotSkipPublicationOrDiscardEdits(t *testing
 	}
 
 	approvalErr := client.Call(ipc.MethodRespond, &ipc.RespondParams{
-		RunID: result.RunID, Step: types.StepPush, Action: types.ActionApprove,
-	}, nil)
+		RunID: result.RunID, Step: types.StepPush, Action: types.ActionApprove, ExpectedGate: ipcGateSnapshot(t, client, result.RunID, types.StepPush)}, nil)
 	if approvalErr == nil {
 		run := waitForRunTerminalState(t, database, result.RunID)
 		deadline := time.Now().Add(15 * time.Second)
@@ -411,8 +410,7 @@ func TestProtectedPathPushApprovalCannotSkipPublicationOrDiscardEdits(t *testing
 	gitCmd(t, workDir, "restore", "--source=HEAD", "--staged", "--worktree", "--", "test.txt")
 	if err := client.Call(ipc.MethodRespond, &ipc.RespondParams{
 		RunID: result.RunID, Step: types.StepPush, Action: types.ActionFix,
-		FindingIDs: parkedGateFindingIDs(t, database, result.RunID),
-	}, nil); err != nil {
+		FindingIDs: parkedGateFindingIDs(t, database, result.RunID), ExpectedGate: ipcGateSnapshot(t, client, result.RunID, types.StepPush)}, nil); err != nil {
 		t.Fatal(err)
 	}
 	run := waitForRunTerminalState(t, database, result.RunID)

@@ -310,7 +310,7 @@ func TestReviewLoop_ParkRespondFixKeepsRoleSessions(t *testing.T) {
 	}()
 
 	waitForReviewStatus(t, database, run.ID, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"f-1"}); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"f-1"}, gateSnapshot(exec)); err != nil {
 		t.Fatalf("respond: %v", err)
 	}
 
