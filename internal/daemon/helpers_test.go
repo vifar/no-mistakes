@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/logstore"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -196,6 +197,33 @@ func runTestDaemon(t *testing.T, p *paths.Paths, d *db.DB, sf StepFactory, stopW
 	})
 
 	waitForDaemonReadyOrExit(t, p, exited)
+}
+
+// recoveryTestOption makes bypassing the production PR guard explicit.
+type recoveryTestOption int
+
+const withoutRecoveryPRContextGuard recoveryTestOption = iota + 1
+
+// runRecoveryTestDaemon uses the real Rebase core step so RunManager installs
+// GuardPRContext before reconciling CI, exactly as production startup does.
+// The Rebase step is already completed in these recovered-run fixtures.
+func runRecoveryTestDaemon(t *testing.T, p *paths.Paths, d *db.DB, options ...recoveryTestOption) {
+	t.Helper()
+	withGuard := true
+	for _, option := range options {
+		switch option {
+		case withoutRecoveryPRContextGuard:
+			withGuard = false
+		default:
+			t.Fatalf("unknown recovery test option: %d", option)
+		}
+	}
+	runTestDaemon(t, p, d, func() []pipeline.Step {
+		if !withGuard {
+			return []pipeline.Step{&steps.CIStep{}}
+		}
+		return []pipeline.Step{&steps.RebaseStep{}, &steps.CIStep{}}
+	}, 35*time.Second)
 }
 
 // --- Mock steps and helpers for RunManager tests ---
@@ -435,12 +463,23 @@ printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"structured
 	return path
 }
 
-func writeMockGHState(t *testing.T, dir, state, prURL string) (string, string) {
+func writeMockGHState(t *testing.T, dir, state, prURL, sourceRepo, headSHA string) (string, string) {
 	t.Helper()
 	logPath := filepath.Join(dir, "gh.log")
+	// GuardPRContext reads complete facts before CI asks for the terminal state.
+	// Always return the real upstream identity so a mismatched recorded URL is
+	// rejected by the production facts reader, rather than by an incomplete fake.
+	merged := "false"
+	if state == "MERGED" {
+		merged = "true"
+	}
+	facts := `{"number":42,"html_url":"https://github.com/test/repo/pull/42","state":"closed","merged":` +
+		merged +
+		`,"merge_commit_sha":"` + headSHA + `","head":{"ref":"feature","sha":"` + headSHA +
+		`","repo":{"full_name":"` + sourceRepo + `"}},"base":{"ref":"main"}}`
 	if runtime.GOOS == "windows" {
 		path := filepath.Join(dir, "gh.bat")
-		script := "@echo off\r\nset TOKENSTATE=\r\nif defined GH_TOKEN set TOKENSTATE=set\r\necho env:%GH_CONFIG_DIR% token:%TOKENSTATE%>>\"" + logPath + "\"\r\necho %*>>\"" + logPath + "\"\r\necho %* | findstr /C:\"auth status\" >nul && exit /b 0\r\necho %* | findstr /C:\"pr view " + prURL + " --repo test/repo --json state --jq .state\" >nul && (echo " + state + "& exit /b 0)\r\nexit /b 1\r\n"
+		script := "@echo off\r\nset TOKENSTATE=\r\nif defined GH_TOKEN set TOKENSTATE=set\r\necho env:%GH_CONFIG_DIR% token:%TOKENSTATE%>>\"" + logPath + "\"\r\necho %*>>\"" + logPath + "\"\r\necho %* | findstr /C:\"auth status\" >nul && exit /b 0\r\necho %* | findstr /C:\"pr view " + prURL + " --repo test/repo --json state --jq .state\" >nul && (echo " + state + "& exit /b 0)\r\necho %* | findstr /C:\"api --hostname github.com --method GET repos/test/repo/pulls/42\" >nul && (echo " + facts + "& exit /b 0)\r\necho %* | findstr /C:\"api --hostname github.com --method GET repos/test/repo/pulls -f state=open\" >nul && (echo [[]]& exit /b 0)\r\nexit /b 1\r\n"
 		if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -453,6 +492,8 @@ printf '%s\n' "$*" >>` + shellQuoteForTest(logPath) + `
 case "$*" in
   "auth status"*|"auth status --hostname "*) exit 0 ;;
   "pr view ` + prURL + ` --repo test/repo --json state --jq .state") printf '%s\n' ` + shellQuoteForTest(state) + `; exit 0 ;;
+  "api --hostname github.com --method GET repos/test/repo/pulls/42") printf '%s\n' ` + shellQuoteForTest(facts) + `; exit 0 ;;
+  "api --hostname github.com --method GET repos/test/repo/pulls -f state=open"*) printf '%s\n' '[[]]'; exit 0 ;;
 esac
 exit 1
 `

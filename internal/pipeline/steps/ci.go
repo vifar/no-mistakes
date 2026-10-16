@@ -134,10 +134,6 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	if err := sctx.Ctx.Err(); err != nil {
 		return false, err
 	}
-	prURL, err := recordedPRURL(sctx)
-	if err != nil {
-		return false, err
-	}
 	provider := resolvedProvider(sctx)
 	host, skipReason := buildHost(sctx, provider)
 	if host == nil {
@@ -147,6 +143,13 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		return false, err
 	}
 
+	prURL := ""
+	if sctx.Run.PRURL != nil {
+		prURL = strings.TrimSpace(*sctx.Run.PRURL)
+	}
+	if prURL == "" {
+		return false, fmt.Errorf("run has no PR URL")
+	}
 	prNumber, err := scm.ExtractPRNumber(prURL)
 	if err != nil {
 		return false, fmt.Errorf("extract PR number: %w", err)

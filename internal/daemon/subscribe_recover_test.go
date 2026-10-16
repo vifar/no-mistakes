@@ -18,7 +18,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/lifecycle"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
-	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -598,11 +597,10 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 		}{
 			{name: "matching"},
 			{name: "fork", fork: "https://github.com/contributor/repo.git", sourceRepo: "contributor/repo"},
-			{name: "receipt_only", missingRunURL: "empty"},
-			{name: "receipt_only_nil", missingRunURL: "nil"},
-			{name: "no_identity", missingRunURL: "all", wantError: "no recorded PR identity"},
-			{name: "wrong_repo", prURL: "https://github.com/other/repo/pull/42", wantError: "does not match"},
-			{name: "wrong_host", prURL: "https://other.example/test/repo/pull/42", wantError: "does not match"},
+			{name: "missing_url_with_receipt", missingRunURL: "empty", wantError: "PR comparison changed after rebase"},
+			{name: "nil_url_with_receipt", missingRunURL: "nil", wantError: "PR comparison changed after rebase"},
+			{name: "wrong_repo", prURL: "https://github.com/other/repo/pull/42", wantError: "do not match recorded PR identity"},
+			{name: "wrong_host", prURL: "https://other.example/test/repo/pull/42", wantError: "do not match recorded PR identity"},
 		} {
 			t.Run(state+"/"+tc.name, func(t *testing.T) {
 				tmpDir, err := os.MkdirTemp("", "dtest")
@@ -628,7 +626,7 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 				if err != nil {
 					t.Fatal(err)
 				}
-				defer d.Close()
+				t.Cleanup(func() { _ = d.Close() })
 				repo, headSHA := setupTestGitRepo(t, p, d, "reconcile-parked-ci-"+strings.ToLower(state))
 				if tc.fork != "" {
 					repo, err = d.UpdateRepoMetadataWithFork(repo.ID, repo.UpstreamURL, tc.fork, "main")
@@ -647,25 +645,19 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 				if prURL == "" {
 					prURL = "https://github.com/test/repo/pull/42"
 				}
-				if tc.missingRunURL != "all" {
-					if err := d.UpdateRunPRURL(run.ID, prURL); err != nil {
-						t.Fatal(err)
-					}
-					run.PRURL = &prURL
+				if err := d.UpdateRunPRURL(run.ID, prURL); err != nil {
+					t.Fatal(err)
 				}
+				run.PRURL = &prURL
 				worktree := p.WorktreeDir(repo.ID, run.ID)
 				if err := gitpkg.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), worktree, headSHA); err != nil {
 					t.Fatal(err)
-				}
-				receiptURL := prURL
-				if tc.missingRunURL == "all" {
-					receiptURL = ""
 				}
 				sourceRepo := tc.sourceRepo
 				if sourceRepo == "" {
 					sourceRepo = "test/repo"
 				}
-				testgit.BindRunComparison(t, d, run, worktree, "main", receiptURL, sourceRepo, "feature")
+				testgit.BindRunComparison(t, d, run, worktree, "main", prURL, sourceRepo, "feature")
 				if tc.missingRunURL == "empty" || tc.missingRunURL == "nil" {
 					if err := d.UpdateRunPRURL(run.ID, ""); err != nil {
 						t.Fatal(err)
@@ -686,6 +678,13 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 						}
 						run.PRURL = nil
 					}
+				}
+				rebase, err := d.InsertStepResult(run.ID, types.StepRebase)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := d.CompleteStepWithStatus(rebase.ID, types.StepStatusCompleted, 0, 1, ""); err != nil {
+					t.Fatal(err)
 				}
 				step, err := d.InsertStepResult(run.ID, types.StepCI)
 				if err != nil {
@@ -708,67 +707,57 @@ func TestRecoverOnStartup_ReconcilesHistoricalCIGateFromCurrentPRState(t *testin
 					t.Fatal(err)
 				}
 
+				if err := d.UpdateRunPRState(run.ID, "open"); err != nil {
+					t.Fatal(err)
+				}
 				before, err := d.GetRun(run.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
-				ghDir, ghLog := writeMockGHState(t, t.TempDir(), state, prURL)
+				ghDir, ghLog := writeMockGHState(t, t.TempDir(), state, prURL, sourceRepo, headSHA)
 				t.Setenv("PATH", ghDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 				t.Setenv("GH_TOKEN", "ambient-must-not-leak")
-				errCh := make(chan error, 1)
-				go func() {
-					errCh <- RunWithOptions(p, d, func() []pipeline.Step { return []pipeline.Step{&steps.CIStep{}} })
-				}()
-				defer func() {
-					client, dialErr := ipc.Dial(p.Socket())
-					if dialErr == nil {
-						_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
-						_ = client.Close()
-					}
-					select {
-					case <-errCh:
-					// Match RunManager.Shutdown's 30-second in-flight drain budget;
-					// recovered worktree cleanup is especially process-spawn-bound on
-					// Windows.
-					case <-time.After(35 * time.Second):
-						t.Error("daemon did not stop")
-					}
-				}()
-
-				waitForDaemonReady(t, p)
+				runRecoveryTestDaemon(t, p, d)
+				recovered := waitForRunTerminalState(t, d, run.ID)
 				if tc.wantError != "" {
-					// Exercise the same read-only reconciler synchronously so this
-					// assertion proves refusal, rather than depending on a sleep.
-					reconciled, err := (&steps.CIStep{}).ReconcileApprovalGate(&pipeline.StepContext{
-						Ctx: context.Background(), DB: d, Run: run, Repo: repo, WorkDir: worktree,
-					})
-					if reconciled || err == nil || !strings.Contains(err.Error(), tc.wantError) {
-						t.Fatalf("identity refusal = %v, %v; want %q", reconciled, err, tc.wantError)
-					}
 					persisted, err := d.GetRun(run.ID)
 					if err != nil {
 						t.Fatal(err)
 					}
-					parked, err := d.GetStepsByRun(run.ID)
+					recoveredSteps, err := d.GetStepsByRun(run.ID)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if persisted.Status != types.RunRunning || persisted.AwaitingAgentSince == nil ||
+					errorText := ""
+					if persisted.Error != nil {
+						errorText = *persisted.Error
+					}
+					if persisted.Status != types.RunFailed || persisted.Error == nil ||
+						!strings.Contains(errorText, "check PR context before ci:") ||
+						!strings.Contains(errorText, tc.wantError) ||
 						!reflect.DeepEqual(persisted.PRStateObservedAt, before.PRStateObservedAt) ||
 						!reflect.DeepEqual(persisted.PRState, before.PRState) ||
 						!reflect.DeepEqual(persisted.PRURL, before.PRURL) ||
-						len(parked) != 1 || parked[0].Status != types.StepStatusAwaitingApproval {
-						t.Fatalf("refused identity changed parked state: run=%+v steps=%+v", persisted, parked)
+						len(recoveredSteps) != 2 || recoveredSteps[0].Status != types.StepStatusCompleted ||
+						recoveredSteps[1].Status != types.StepStatusFailed ||
+						!reflect.DeepEqual(recoveredSteps[1].Error, persisted.Error) {
+						t.Fatalf("guard refusal changed PR observation or did not fail recovery: run=%+v steps=%+v error=%v", persisted, recoveredSteps, errorText)
 					}
-					logData, _ := os.ReadFile(ghLog)
+					logData, err := os.ReadFile(ghLog)
+					if err != nil {
+						t.Fatal(err)
+					}
 					if strings.Contains(string(logData), "pr view") {
-						t.Fatalf("refused identity queried a PR: %s", logData)
+						t.Fatalf("guard refusal reached the live PR state lookup: %s", logData)
 					}
 					return
 				}
-				completed := waitForRunTerminalState(t, d, run.ID)
+				completed := recovered
 				if completed.Status != types.RunCompleted || completed.AwaitingAgentSince != nil || completed.PRState == nil || *completed.PRState != strings.ToLower(state) {
-					t.Fatalf("historical CI gate after %s reconciliation = status %s awaiting %v", state, completed.Status, completed.AwaitingAgentSince)
+					if completed.Error != nil {
+						t.Logf("recovery error: %s", *completed.Error)
+					}
+					t.Fatalf("historical CI gate after %s reconciliation = status %s awaiting %v error %v", state, completed.Status, completed.AwaitingAgentSince, completed.Error)
 				}
 				active, err := lifecycle.ActiveRuns(p)
 				if err != nil {
