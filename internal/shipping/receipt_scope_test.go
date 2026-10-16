@@ -40,6 +40,47 @@ func recordScope(t *testing.T, f *exportFixture, policy scm.CheckScopePolicy) {
 	}
 }
 
+// Receipt export rechecks the live head under the monitor's recorded scope.
+// These are the checks GitHub collection returns after removing the pipeline's
+// own pending no-mistakes StatusContext (covered by the CI-step regression).
+func TestCIReadyReceiptApprovalStatusDeadlock(t *testing.T) {
+	f := newExportFixture(t)
+	if err := f.database.SetRunCIReadyWithReason(f.run.ID, true, false); err != nil {
+		t.Fatal(err)
+	}
+	f.forge.checks = []scm.Check{
+		{Name: "actionlint", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPass},
+		{Name: "conflict-markers", Kind: scm.CheckKindRun, Bucket: scm.CheckBucketPass},
+		{Name: "approve #8521", Kind: scm.CheckKindRun, App: "github-actions", Workflow: "PR Final Approval", State: "IN_PROGRESS", Bucket: scm.CheckBucketPending},
+		{Name: "approval-status", Kind: scm.CheckKindRun, State: "IN_PROGRESS", Bucket: scm.CheckBucketPending},
+	}
+	recordScope(t, f, scm.CheckScopePolicy{RequiredChecks: scm.RequiredChecksAuto, Resolved: &scm.CheckScopeResolution{
+		Derived: true,
+		Required: []scm.RequiredCheck{
+			{Context: "no-mistakes", SelfStatus: true},
+			{Context: "actionlint"},
+			{Context: "conflict-markers"},
+		},
+	}})
+	raw, err := Export(context.Background(), f.database, f.repo, f.run.ID, "ci-ready", f.forge)
+	if err != nil {
+		t.Fatalf("pending approval checks or owned status blocked strict receipt verification: %v", err)
+	}
+	var receipt Payload
+	if err := json.Unmarshal(raw, &receipt); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Phase != "ci-ready" || receipt.LocalHeadSHA != f.run.HeadSHA || receipt.ForgeHeadSHA != f.run.HeadSHA {
+		t.Fatalf("receipt did not certify the exact ready head: %+v", receipt)
+	}
+	// A previously ready record cannot certify a newly failing required check,
+	// even while both out-of-scope approval checks remain pending.
+	f.forge.checks[0].Bucket = scm.CheckBucketFail
+	if _, err := Export(context.Background(), f.database, f.repo, f.run.ID, "ci-ready", f.forge); err == nil || !strings.Contains(err.Error(), "all live checks green") {
+		t.Fatalf("required actionlint failure did not block certification: %v", err)
+	}
+}
+
 func TestCIReadyReceiptUsesTheRecordedCheckScope(t *testing.T) {
 	ctx := context.Background()
 	f := newExportFixture(t)
