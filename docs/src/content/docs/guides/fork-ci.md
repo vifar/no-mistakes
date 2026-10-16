@@ -95,6 +95,12 @@ the runner's virtual machine once (for example with the Determinate installer an
 job fails with an actionable error if it is missing. None of these workflows change
 publication destinations or install the CLI on a developer machine.
 
+### Go cache: disabled on the self-hosted jobs
+
+The `check`, `test` and `e2e` jobs set `cache: false` on `actions/setup-go`. The runner is persistent, so the Go module and build caches already stay on its local disk between jobs. The action's own cache only adds a post-job upload. On this runner that upload has hung in the `Post Run actions/setup-go` step after every real step had passed, until the job hit its `timeout-minutes` and GitHub reported the job as **cancelled**.
+
+If a CI job shows `cancelled` while all of its test and build steps succeeded, check the post-job steps first. Rerun the failed job, rather than treating it as a test failure. Keep `cache: false` unless the runner becomes ephemeral; in that case, add a separately timed cache step instead of the action's built-in cache.
+
 ## Self-update destination
 
 The [update command reference](/no-mistakes/reference/cli/#no-mistakes-update)

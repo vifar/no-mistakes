@@ -36,6 +36,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: '1.27.1'
+          # Persistent self-hosted runner: its Go module and build caches
+          # already live on local disk. The action's post-job cache save can
+          # hang until the job timeout (see guides/fork-ci.md).
+          cache: false
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
       - name: Check generated skill and vet
@@ -53,6 +57,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: '1.27.1'
+          # Persistent self-hosted runner: its Go module and build caches
+          # already live on local disk. The action's post-job cache save can
+          # hang until the job timeout (see guides/fork-ci.md).
+          cache: false
       - name: Full Linux race suite
         run: go test -race ./... -p 2 -timeout 25m
       - name: Build Linux CLI
@@ -76,5 +84,9 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: '1.27.1'
+          # Persistent self-hosted runner: its Go module and build caches
+          # already live on local disk. The action's post-job cache save can
+          # hang until the job timeout (see guides/fork-ci.md).
+          cache: false
       - name: End-to-end journeys with temporary daemon cleanup
         run: make e2e
