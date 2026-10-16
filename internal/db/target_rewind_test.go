@@ -353,3 +353,65 @@ func TestTargetRewindPreservesCoreSkipChoicesWithoutPreservingEvidence(t *testin
 	}
 
 }
+
+func TestTargetRewindPersistsPRObservation(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		for _, attached := range []bool{false, true} {
+			t.Run(map[bool]string{false: "current", true: "upgrade"}[legacy]+"/"+map[bool]string{false: "absent", true: "attached"}[attached], func(t *testing.T) {
+				d, id, c, req := targetRewindDBFixture(t)
+				var want *string
+				if attached {
+					previous, err := d.GetRunPRContext(id)
+					if err != nil {
+						t.Fatal(err)
+					}
+					pinned := previous.PRContextCandidate
+					pinned.PRURL = "https://github.com/test/repo/pull/42"
+					pinned.ForgeHeadSHA = pinned.LocalHeadSHA
+					bound, err := d.BindRunPRContext(id, pinned, types.StepRebase)
+					if err != nil {
+						t.Fatal(err)
+					}
+					c.PRURL, c.ForgeHeadSHA = pinned.PRURL, pinned.ForgeHeadSHA
+					req.ExpectedGeneration, req.HasPR = bound.Generation, true
+					want = &c.ForgeHeadSHA
+				}
+				for i := 0; i < 2; i++ {
+					result, err := d.RewindRunPRContext(id, c, req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					req.ExpectedGeneration = result.Generation
+					c.TargetSHA = strings.Repeat("f", 40)
+				}
+				// Remove only the new column to model the already-supported pending
+				// rewind schema before reopening through the real migration path.
+				if legacy {
+					if _, err := d.sql.Exec(`ALTER TABLE run_target_rewinds DROP COLUMN forge_head_sha`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				var sequence int
+				var name, path string
+				if err := d.sql.QueryRow(`PRAGMA database_list`).Scan(&sequence, &name, &path); err != nil {
+					t.Fatal(err)
+				}
+				if err := d.Close(); err != nil {
+					t.Fatal(err)
+				}
+				reopened, err := Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer reopened.Close()
+				var got *string
+				if err = reopened.sql.QueryRow(`SELECT forge_head_sha FROM run_target_rewinds WHERE id=(SELECT pending_target_rewind_id FROM runs WHERE id=?)`, id).Scan(&got); err != nil {
+					t.Fatalf("pending PR observation was not persisted: %v", err)
+				}
+				if (want == nil) != (got == nil) || want != nil && got != nil && *want != *got {
+					t.Fatalf("recovery PR pin=%v want=%v", got, want)
+				}
+			})
+		}
+	}
+}

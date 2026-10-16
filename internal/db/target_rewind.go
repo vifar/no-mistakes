@@ -15,10 +15,11 @@ var (
 
 // TargetAdvanceRewind is diagnostic history. SourceSHA is the ORIGINAL source
 // observation for the pending integration; nil means confirmed remote absence.
+// ForgeHeadSHA pins the attached PR head; nil pins continued PR absence.
 // Runs point at the latest row only while that integration remains pending.
 type TargetAdvanceRewind struct {
 	ID, RunID, OldTargetSHA, TargetSHA, LocalHeadSHA string
-	SourceSHA                                        *string
+	SourceSHA, ForgeHeadSHA                          *string
 	Step                                             types.StepName
 	Generation, At                                   int64
 }
@@ -54,9 +55,9 @@ type rewindQuery interface{ QueryRow(string, ...any) *sql.Row }
 
 func pendingTargetRewind(q rewindQuery, runID string) (*TargetAdvanceRewind, error) {
 	p := &TargetAdvanceRewind{}
-	err := q.QueryRow(`SELECT w.id,w.run_id,w.old_target_sha,w.target_sha,w.local_head_sha,w.source_sha,w.step,w.generation,w.at
+	err := q.QueryRow(`SELECT w.id,w.run_id,w.old_target_sha,w.target_sha,w.local_head_sha,w.source_sha,w.forge_head_sha,w.step,w.generation,w.at
  FROM run_target_rewinds w JOIN runs r ON r.pending_target_rewind_id=w.id AND r.id=w.run_id WHERE r.id=?`, runID).Scan(
-		&p.ID, &p.RunID, &p.OldTargetSHA, &p.TargetSHA, &p.LocalHeadSHA, &p.SourceSHA, &p.Step, &p.Generation, &p.At)
+		&p.ID, &p.RunID, &p.OldTargetSHA, &p.TargetSHA, &p.LocalHeadSHA, &p.SourceSHA, &p.ForgeHeadSHA, &p.Step, &p.Generation, &p.At)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -68,6 +69,15 @@ func pendingTargetRewind(q rewindQuery, runID string) (*TargetAdvanceRewind, err
 
 func (d *DB) GetPendingTargetRewind(runID string) (*TargetAdvanceRewind, error) {
 	return pendingTargetRewind(d.sql, runID)
+}
+
+// prHeadObservation is nullable so absence cannot be confused with an
+// unattached PR. Rewind admission rejects unattached PRs before this is stored.
+func prHeadObservation(c PRContextCandidate) *string {
+	if c.PRURL == "" {
+		return nil
+	}
+	return &c.ForgeHeadSHA
 }
 
 func sameOptionalSHA(a, b *string) bool {
@@ -114,8 +124,8 @@ func checkTargetRewindEligibility(tx *sql.Tx, runID string, previous *PRContext,
 	if err != nil {
 		return nil, nil, err
 	}
-	if pending != nil && !sameOptionalSHA(pending.SourceSHA, req.SourceSHA) {
-		return nil, nil, fmt.Errorf("%w: remote source changed during pending rewind", ErrTargetAdvanceIneligible)
+	if pending != nil && (!sameOptionalSHA(pending.SourceSHA, req.SourceSHA) || !sameOptionalSHA(pending.ForgeHeadSHA, prHeadObservation(candidate))) {
+		return nil, nil, fmt.Errorf("%w: remote source or PR observation changed during pending rewind", ErrTargetAdvanceIneligible)
 	}
 	identity := previous.PRURL == candidate.PRURL && previous.SourceRepo == candidate.SourceRepo && previous.SourceBranch == candidate.SourceBranch && previous.TargetBranch == candidate.TargetBranch && previous.ForgeHeadSHA == candidate.ForgeHeadSHA
 	pinnedPR := !req.HasPR && previous.PRURL == "" || req.HasPR && previous.PRURL != "" && previous.ForgeHeadSHA != "" && previous.ForgeHeadSHA == candidate.ForgeHeadSHA

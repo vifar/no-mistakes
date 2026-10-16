@@ -208,6 +208,10 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 		candidate.SourceRepo = previous.SourceRepo
 	}
 
+	if pending != nil && !samePendingRewindIdentity(pending, previous, candidate, selection) {
+		return pipeline.PRContextDecision{}, fmt.Errorf("PR comparison changed during pending rewind; start a new run")
+	}
+
 	eligible, eligibilityErr := sctx.DB.CanRewindTarget(sctx.Run.ID, step)
 	eligible = eligible && sctx.Run.Shipping == nil
 	if eligibilityErr != nil {
@@ -240,7 +244,7 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 		return pipeline.PRContextDecision{Target: selection, RestartFrom: types.StepRebase}, nil
 	}
 	if pending != nil && !(step == types.StepRebase && sctx.PRContextAfterStep && sctx.PRContextRebaseCompleted) {
-		if candidate.LocalHeadSHA != previous.LocalHeadSHA || candidate.LocalHeadSHA != sctx.Run.HeadSHA || candidate.LocalHeadSHA != pending.LocalHeadSHA || !sameRewindIdentity(previous, candidate) {
+		if candidate.LocalHeadSHA != previous.LocalHeadSHA || candidate.LocalHeadSHA != sctx.Run.HeadSHA || candidate.LocalHeadSHA != pending.LocalHeadSHA {
 			return pipeline.PRContextDecision{}, fmt.Errorf("PR comparison changed during pending rewind; start a new run")
 		}
 		// A parked result or a recovered gate never completes integration.

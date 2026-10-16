@@ -11,7 +11,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -379,4 +382,92 @@ func TestTargetAdvancePublishedCIRestartJourney(t *testing.T) {
 	if rewinds != 0 || pending || history != 0 {
 		t.Fatalf("published restart was rewound: %d %t %d", rewinds, pending, history)
 	}
+}
+
+// A target rewind replaces the comparison while gate identities keep the
+// accepted response bound to its original park. Recovery must discard it.
+func TestTargetAdvanceGateIdentityRecoveryJourney(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: axiScenario(t), GlobalConfigExtra: "daemon:\n  max_concurrent_runs: 1\n  hold_slot_while_parked: false"})
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.dumpDebugState()
+		}
+	})
+	const branch = "feature/rewind-gate-recovery"
+	a := gateJourneyStart(t, h, branch)
+	gateJourneyAwaitSlots(t, h, func(s ipc.SlotsResult) bool { return s.InUse == 0 && s.ParkedReleased == 1 })
+	if err := config.SetGlobalDaemonSetting(filepath.Join(h.NMHome, "config.yaml"), "hold_slot_while_parked", "true"); err != nil {
+		t.Fatal(err)
+	}
+	client, err := ipc.Dial(paths.WithRoot(h.NMHome).Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var slots ipc.SlotsResult
+	err = client.Call(ipc.MethodReloadSlots, nil, &slots)
+	client.Close()
+	if err != nil || !slots.HoldSlotWhileParked {
+		t.Fatalf("enable holder: %+v %v", slots, err)
+	}
+	h.CommitChange("feature/rewind-slot-holder", "feature.txt", "holder\n", "hold the run slot")
+	if out, err := h.Run("axi", "run", "--intent", axiIntent); err != nil {
+		t.Fatalf("start holder: %v\n%s", err, out)
+	}
+	holder := h.ActiveRun("feature/rewind-slot-holder")
+	if holder == nil {
+		t.Fatal("missing holder")
+	}
+	holderGate := gateJourneyWait(t, h, holder.ID, "")
+	socket := paths.WithRoot(h.NMHome).Socket()
+	if result := gateJourneyRespond(t, socket, a.RunID, types.ActionAnswer, &a); !result.OK {
+		t.Fatalf("queue old response: %+v", result)
+	}
+	raw := gateJourneyPending(t, h, a)
+	if !strings.Contains(raw, a.Nonce) {
+		t.Fatal("queued response lost original park identity")
+	}
+	gateJourneyDaemon(t, h, "stop")
+	target := advanceMain(t, h, "rewind-recovery.md", "new comparison\n", "advance target while response is queued")
+	gateJourneyDaemon(t, h, "start")
+	gateJourneyAwaitSlots(t, h, func(s ipc.SlotsResult) bool { return s.InUse == 1 && s.Queued >= 1 })
+	if got := gateJourneyPending(t, h, a); got != raw {
+		t.Fatal("queued response changed before dispatch")
+	}
+	// The holder also sees the advanced target during recovery. Wait for
+	// its replacement gate before aborting it to release capacity.
+	gateJourneyWait(t, h, holder.ID, holderGate.Nonce)
+	if result := gateJourneyRespond(t, socket, holder.ID, types.ActionAbort, nil); !result.OK {
+		t.Fatalf("release holder: %+v", result)
+	}
+	b := gateJourneyWait(t, h, a.RunID, a.Nonce)
+	if b.StepResultID != a.StepResultID || b.RoundID == a.RoundID {
+		t.Fatalf("rewind did not replace the old round: A=%+v B=%+v", a, b)
+	}
+	if rounds := gateJourneyRounds(t, h, b); len(rounds) != 1 || rounds[0].Round != 1 || rounds[0].Trigger != "initial" {
+		t.Fatalf("queued old answer was dispatched in the new generation: %+v", rounds)
+	}
+	count, pending, history := targetRewindHistory(t, h.NMHome, a.RunID)
+	if count != 1 || pending || history != 1 {
+		t.Fatalf("rewind lifecycle: count=%d pending=%t history=%d", count, pending, history)
+	}
+	// The integrated head is private until publication; inspect its managed
+	// worktree instead of requiring the bare forge to have that object.
+	run := h.RunInfo(a.RunID)
+	worktree := paths.WithRoot(h.NMHome).WorktreeDir(run.RepoID, run.ID)
+	if !isAncestorIn(t, h, worktree, target, run.HeadSHA) {
+		t.Fatal("rewound review omits the new target")
+	}
+	gateJourneyRefusal(t, gateJourneyRespond(t, socket, a.RunID, types.ActionAnswer, &a), b)
+	if current := gateJourneyWait(t, h, a.RunID, ""); current != b {
+		t.Fatal("old response released the replacement gate")
+	}
+	if result := gateJourneyRespond(t, socket, b.RunID, types.ActionAnswer, &b); !result.OK {
+		t.Fatalf("fresh response refused: %+v", result)
+	}
+	c := gateJourneyWait(t, h, b.RunID, b.Nonce)
+	rounds := gateJourneyRounds(t, h, c)
+	if len(rounds) != 2 || rounds[1].Round != 2 || rounds[1].Trigger != "answer" {
+		t.Fatalf("fresh identified response did not dispatch exactly once: %+v", rounds)
+	}
+	t.Log("queued pre-rewind response survived restart, was discarded by the rewind, and was refused at the replacement gate; a fresh identified answer succeeded")
 }

@@ -1759,6 +1759,28 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var reviewComparisonGeneration int64
 	var restartFrom types.StepName
 
+	// Every comparison restart discards its selections. A charged rewind also
+	// starts a fresh repair budget, round history, and execution accounting.
+	resetComparisonState := func(priorGeneration int64, restarting bool) {
+		newGeneration := e.evidenceGeneration.Load() != priorGeneration
+		if !newGeneration && !restarting {
+			return
+		}
+		if newGeneration {
+			roundNum, autoFixAttempts = 0, 0
+			currentRoundID = ""
+			executionMS, durationOverrideMS = 0, 0
+		}
+		sctx.Fixing, sctx.AutoFixRound, sctx.SkipFixExecution, sctx.FinalizingAnswers = false, false, false, false
+		sctx.CarriedFindings, sctx.PreviousFindings, sctx.DeferredFindings = "", "", ""
+		outstandingFindings = ""
+		pendingVerificationIDs, selectedOutstandingIDs = nil, nil
+		nextTrigger = "initial"
+		if restarting {
+			phaseStart = time.Now()
+		}
+	}
+
 	// Execute with possible fix loop
 rounds:
 	for {
@@ -1812,14 +1834,7 @@ rounds:
 				return false, "", contextErr
 			}
 
-			if e.evidenceGeneration.Load() != priorGeneration {
-				roundNum, autoFixAttempts = 0, 0
-				currentRoundID = ""
-				executionMS, durationOverrideMS = 0, 0
-				outstandingFindings = ""
-				pendingVerificationIDs, selectedOutstandingIDs = nil, nil
-				nextTrigger = "initial"
-			}
+			resetComparisonState(priorGeneration, restartIndex >= 0)
 			sctx.PRTarget, sctx.PRContext = e.prTarget, e.prContext
 			sctx.EvidenceDir = e.runEvidenceDir(run.ID)
 			if restartIndex >= 0 {
@@ -1835,11 +1850,6 @@ rounds:
 				e.emitStepEvent(ipc.EventStepStarted, run, repo, stepName, string(types.StepStatusRunning))
 				sctx.PRTarget, sctx.PRContext = e.prTarget, e.prContext
 				sctx.EvidenceDir = e.runEvidenceDir(run.ID)
-				sctx.Fixing, sctx.SkipFixExecution, sctx.FinalizingAnswers = false, false, false
-				sctx.CarriedFindings, sctx.PreviousFindings, sctx.DeferredFindings = "", "", ""
-				outstandingFindings = ""
-				pendingVerificationIDs, selectedOutstandingIDs = nil, nil
-				nextTrigger = "initial"
 				continue rounds
 			}
 		}
@@ -2138,10 +2148,12 @@ rounds:
 				if indexErr != nil {
 					return false, "", indexErr
 				}
+				priorGeneration := e.evidenceGeneration.Load()
 				restartIndex, contextErr := e.checkPRContext(ctx, run, repo, workDir, stepName, currentIndex, true)
 				if contextErr != nil {
 					return false, "", contextErr
 				}
+				resetComparisonState(priorGeneration, restartIndex >= 0)
 				if restartIndex >= 0 {
 					if restartIndex < currentIndex {
 						return false, e.steps[restartIndex].Name(), nil
@@ -2152,12 +2164,6 @@ rounds:
 					e.emitStepEvent(ipc.EventStepStarted, run, repo, stepName, string(types.StepStatusRunning))
 					sctx.PRTarget, sctx.PRContext = e.prTarget, e.prContext
 					sctx.EvidenceDir = e.runEvidenceDir(run.ID)
-					sctx.Fixing, sctx.SkipFixExecution, sctx.FinalizingAnswers = false, false, false
-					sctx.CarriedFindings, sctx.PreviousFindings, sctx.DeferredFindings = "", "", ""
-					outstandingFindings = ""
-					pendingVerificationIDs, selectedOutstandingIDs = nil, nil
-					nextTrigger = "initial"
-					phaseStart = time.Now()
 					continue rounds
 				}
 				sctx.PRTarget, sctx.PRContext = e.prTarget, e.prContext

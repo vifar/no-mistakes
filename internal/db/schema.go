@@ -492,4 +492,13 @@ var migrationStatements = []string{
         AFTER UPDATE OF status ON runs
         WHEN NEW.status NOT IN ('pending','running','queued')
         BEGIN UPDATE runs SET pending_target_rewind_id=NULL WHERE id=NEW.id; END`,
+	// NULL pins continued PR absence; a value pins the attached forge head.
+	`ALTER TABLE run_target_rewinds ADD COLUMN forge_head_sha TEXT`,
+	// Existing attached parks already pinned their head in the receipt. Copy
+	// only the active, matching generation; never replace a recorded PR pin.
+	`UPDATE run_target_rewinds SET forge_head_sha=(
+     SELECT c.forge_head_sha FROM run_pr_contexts c
+     WHERE c.run_id=run_target_rewinds.run_id AND c.generation=run_target_rewinds.generation
+       AND c.pr_url IS NOT NULL AND c.pr_url!=''
+   ) WHERE forge_head_sha IS NULL AND id IN (SELECT pending_target_rewind_id FROM runs)`,
 }

@@ -27,6 +27,18 @@ func sameRewindIdentity(p *db.PRContext, c db.PRContextCandidate) bool {
 	return p.PRURL == c.PRURL && p.SourceRepo == c.SourceRepo && p.SourceBranch == c.SourceBranch && p.TargetBranch == c.TargetBranch && p.ForgeHeadSHA == c.ForgeHeadSHA
 }
 
+// samePendingRewindIdentity validates the full discovery observation, even
+// when a discovered PR cannot attach because its head differs from local HEAD.
+func samePendingRewindIdentity(pending *db.TargetAdvanceRewind, previous *db.PRContext, candidate db.PRContextCandidate, selected pipeline.PRTargetSelection) bool {
+	if previous == nil || !sameRewindIdentity(previous, candidate) {
+		return false
+	}
+	if pending.ForgeHeadSHA == nil {
+		return previous.PRURL == "" && selected.PRURL == "" && selected.ForgeHeadSHA == ""
+	}
+	return previous.PRURL != "" && selected.PRURL == previous.PRURL && selected.ForgeHeadSHA == *pending.ForgeHeadSHA
+}
+
 // observeRewindRemotes never reads tracking refs. Each operation has bounded
 // network calls and owns its refs until its caller has finished integration.
 func observeRewindRemotes(c *pipeline.StepContext, target string, generation int64) (observation rewindObservation, cleanup func() error, err error) {
@@ -177,7 +189,7 @@ func checkedRewindTargets(c *pipeline.StepContext, targets []string) (checked []
 	if previous.SourceBranch == candidate.SourceBranch && scm.SameSourceRepository(resolvedProvider(c), previous.SourceRepo, candidate.SourceRepo) {
 		candidate.SourceRepo = previous.SourceRepo
 	}
-	if head != c.Run.HeadSHA || head != previous.LocalHeadSHA || head != pending.LocalHeadSHA || !sameRewindIdentity(previous, candidate) {
+	if head != c.Run.HeadSHA || head != previous.LocalHeadSHA || head != pending.LocalHeadSHA || !samePendingRewindIdentity(pending, previous, candidate, selected) {
 		return nil, cleanup, fmt.Errorf("local head or PR identity changed during pending rewind")
 	}
 	if !sameRewindSource(pending.SourceSHA, observed.source) {

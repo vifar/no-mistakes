@@ -152,8 +152,9 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 				if err != nil {
 					return PRContextBindResult{}, err
 				}
-				if pending != nil && !sameOptionalSHA(pending.SourceSHA, options.rewind.SourceSHA) {
-					return PRContextBindResult{}, fmt.Errorf("remote source changed during pending rewind")
+				if pending != nil && (!sameOptionalSHA(pending.SourceSHA, options.rewind.SourceSHA) ||
+					!sameOptionalSHA(pending.ForgeHeadSHA, prHeadObservation(candidate)) || options.rewind.HasPR != (candidate.PRURL != "")) {
+					return PRContextBindResult{}, fmt.Errorf("remote source or PR observation changed during pending rewind")
 				}
 			}
 			return PRContextBindResult{Generation: previous.Generation}, nil
@@ -185,6 +186,7 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 		}
 		if initial || previous.Generation != *options.completeGeneration || pending == nil ||
 			pending.TargetSHA != candidate.TargetSHA || head != candidate.LocalHeadSHA ||
+			!sameOptionalSHA(pending.ForgeHeadSHA, prHeadObservation(candidate)) ||
 			previous.TargetBranch != candidate.TargetBranch || previous.PRURL != candidate.PRURL ||
 			previous.SourceRepo != candidate.SourceRepo || previous.SourceBranch != candidate.SourceBranch || previous.ForgeHeadSHA != candidate.ForgeHeadSHA {
 			return PRContextBindResult{}, fmt.Errorf("pending Rebase completion differs from classified comparison")
@@ -214,13 +216,13 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 
 	if rewindRun != nil {
 		req := options.rewind
-		source := req.SourceSHA
+		source, forgeHead := req.SourceSHA, prHeadObservation(candidate)
 		if pending != nil {
-			source = pending.SourceSHA
+			source, forgeHead = pending.SourceSHA, pending.ForgeHeadSHA
 		}
 		id := newID()
-		if _, err = tx.Exec(`INSERT INTO run_target_rewinds (id,run_id,old_target_sha,target_sha,local_head_sha,source_sha,step,generation,at)
-            VALUES (?,?,?,?,?,?,?,?,?)`, id, runID, previous.TargetSHA, candidate.TargetSHA, candidate.LocalHeadSHA, source, req.Step, generation, now()); err != nil {
+		if _, err = tx.Exec(`INSERT INTO run_target_rewinds (id,run_id,old_target_sha,target_sha,local_head_sha,source_sha,forge_head_sha,step,generation,at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)`, id, runID, previous.TargetSHA, candidate.TargetSHA, candidate.LocalHeadSHA, source, forgeHead, req.Step, generation, now()); err != nil {
 			return PRContextBindResult{}, err
 		}
 		if _, err = tx.Exec(`UPDATE runs SET target_advance_rewinds=target_advance_rewinds+1,pending_target_rewind_id=? WHERE id=?`, id, runID); err != nil {
