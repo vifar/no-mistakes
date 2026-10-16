@@ -364,7 +364,7 @@ func TestStrictReviewResolutionRecoveredGateCertification(t *testing.T) {
 			if _, err := sctx.DB.InsertReviewStepRound(sctx.StepResultID, 3, "auto_fix", &gate, nil, sctx.Run.HeadSHA, 1); err != nil {
 				t.Fatal(err)
 			}
-			if err := sctx.DB.UpdateStepStatusWithDuration(sctx.StepResultID, types.StepStatusFixReview, 1); err != nil {
+			if err := parkGateFixture(sctx.DB, sctx.StepResultID, types.StepStatusFixReview, 1); err != nil {
 				t.Fatal(err)
 			}
 			if err := sctx.DB.UpdateRunStatus(sctx.Run.ID, types.RunRunning); err != nil {

@@ -154,11 +154,17 @@ func (m Model) respondCmd(action types.ApprovalAction) tea.Cmd {
 			return nil
 		}
 	}
+	var expectedGate *types.GateIdentity
+	if step.Gate != nil {
+		snapshot := *step.Gate
+		expectedGate = &snapshot
+	}
 	return func() tea.Msg {
 		params := &ipc.RespondParams{
-			RunID:  m.runID,
-			Step:   step.StepName,
-			Action: action,
+			ExpectedGate: expectedGate,
+			RunID:        m.runID,
+			Step:         step.StepName,
+			Action:       action,
 		}
 		if action == types.ActionFix {
 			ids := m.selectedFindingIDs(step.StepName)

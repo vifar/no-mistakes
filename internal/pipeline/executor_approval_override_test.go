@@ -166,7 +166,7 @@ func TestExecutor_ApprovalOverride_RecoveredPathStillFailing(t *testing.T) {
 	if _, err := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 10); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 10); err != nil {
+	if err := parkGateFixture(database, stepResult.ID, types.StepStatusAwaitingApproval, 10); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.SetRunAwaitingAgent(run.ID); err != nil {

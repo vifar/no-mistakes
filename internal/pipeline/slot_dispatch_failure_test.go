@@ -28,10 +28,13 @@ func TestAnsweredGateDispatchFailureClearsTheParkedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	findings := `{"findings":[],"summary":"review"}`
+	if _, err := database.InsertStepRound(row.ID, 1, "initial", &findings, nil, 1); err != nil {
+		t.Fatal(err)
+	}
 	if err := database.ParkStepForApproval(run.ID, row.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.SetStepPendingResponse(row.ID, `{"action":"approve"}`, answeredActivity); err != nil {
+	if err := database.SetStepPendingResponse(row.ID, boundPendingFixture(t, database, row.ID, `{"action":"approve"}`), answeredActivity); err != nil {
 		t.Fatal(err)
 	}
 	control, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
@@ -53,6 +56,8 @@ func TestAnsweredGateDispatchFailureClearsTheParkedState(t *testing.T) {
 	}
 	exec := NewExecutor(database, p, nil, nil, nil, nil)
 	exec.SetRunSlot(&publicationRunSlot{})
+	saved, _ := database.GetStepResult(row.ID)
+	exec.gate = saved.GateIdentity()
 	if err := exec.acquireAnsweredGateSlot(context.Background(), run.ID, row.ID); err == nil {
 		t.Fatal("dispatch succeeded despite the failed write")
 	}
@@ -86,6 +91,7 @@ func TestRecoveredGateFailuresClearPendingState(t *testing.T) {
 					continue
 				}
 				t.Run(string(status)+"/"+marker+"/"+failure, func(t *testing.T) {
+					marker := marker
 					preserveShutdown := strings.HasPrefix(failure, "shutdown-") && failure != "shutdown-dispatched"
 					database, p, run, repo := setupTest(t)
 					workDir := completionFixture(t, database, run)
@@ -107,6 +113,7 @@ func TestRecoveredGateFailuresClearPendingState(t *testing.T) {
 						t.Fatal(err)
 					}
 					if marker != "" {
+						marker = boundPendingFixture(t, database, row.ID, marker)
 						if err := database.SetStepPendingResponse(row.ID, marker, answeredActivity); err != nil {
 							t.Fatal(err)
 						}

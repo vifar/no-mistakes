@@ -92,6 +92,7 @@ type fixRow struct {
 // stepView is a render-ready view of a single pipeline step, decoupled from
 // whether it came from the daemon (ipc) or the local database.
 type stepView struct {
+	Gate             *types.GateIdentity
 	ID               string
 	Name             string
 	Status           string
@@ -193,6 +194,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 	}
 	for _, s := range r.Steps {
 		sv := stepView{
+			Gate:                s.Gate,
 			ID:                  s.ID,
 			Name:                string(s.StepName),
 			Status:              string(s.Status),
@@ -272,6 +274,10 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 			RoundStartedAt: s.RoundStartedAt,
 			LastActivityAt: s.LastActivityAt,
 			AgentPID:       s.AgentPID,
+		}
+		if s.GateNonce != nil {
+			identity := s.GateIdentity()
+			sv.Gate = &identity
 		}
 		if s.AutoFixLimit != nil {
 			sv.AutoFixLimit = *s.AutoFixLimit
@@ -743,6 +749,9 @@ func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
 		{Key: "step", Value: gate.Name},
 		{Key: "status", Value: gate.Status},
 	}
+	if gate.Gate != nil {
+		gfields = append(gfields, gateIdentityFields(*gate.Gate)...)
+	}
 	if parsed.Summary != "" {
 		gfields = append(gfields, toon.Field{Key: "summary", Value: truncate(parsed.Summary, maxGateSummary)})
 	}
@@ -972,4 +981,8 @@ func emitError(cmd *cobra.Command, code int, msg string, help ...string) error {
 	}
 	emitDoc(cmd, fields...)
 	return &exitError{code: code}
+}
+
+func gateIdentityFields(g types.GateIdentity) []toon.Field {
+	return []toon.Field{{Key: "run_id", Value: g.RunID}, {Key: "step_result_id", Value: g.StepResultID}, {Key: "round_id", Value: g.RoundID}, {Key: "nonce", Value: g.Nonce}}
 }

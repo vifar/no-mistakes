@@ -113,10 +113,10 @@ func TestShippingNoSurfaceManagerAdmission(t *testing.T) {
 						if err := database.StartStep(sr.ID); err != nil {
 							t.Fatal(err)
 						}
-						if err := database.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, exit, 10, &raw); err != nil {
+						if _, err := database.InsertStepRound(sr.ID, 1, "initial", &raw, nil, 10); err != nil {
 							t.Fatal(err)
 						}
-						if _, err := database.InsertStepRound(sr.ID, 1, "initial", &raw, nil, 10); err != nil {
+						if err := database.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, exit, 10, &raw); err != nil {
 							t.Fatal(err)
 						}
 						run, err = database.GetRun(run.ID)

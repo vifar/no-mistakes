@@ -113,7 +113,7 @@ func TestExecutorRecoveredTerminalCIGateCollectsCurrentSupport(t *testing.T) {
 	if _, err := database.InsertStepRound(ci.ID, 1, "initial", &findings, nil, 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(ci.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+	if err := parkGateFixture(database, ci.ID, types.StepStatusAwaitingApproval, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.SetRunAwaitingAgent(run.ID); err != nil {

@@ -49,7 +49,7 @@ func TestExecutor_RecoveredAnswerRoundIsTriggeredAsAnAnswer(t *testing.T) {
 	if _, err := database.InsertReviewStepRound(stepResult.ID, 1, "initial", &findings, nil, "", 25); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 25); err != nil {
+	if err := parkGateFixture(database, stepResult.ID, types.StepStatusAwaitingApproval, 25); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
@@ -218,7 +218,7 @@ func TestExecutor_RecoveredAnswerRoundInheritsAFixReviewGatesContext(t *testing.
 	if _, err := database.InsertReviewStepRound(stepResult.ID, 2, "auto_fix", &findings, nil, "", 30); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusFixReview, 30); err != nil {
+	if err := parkGateFixture(database, stepResult.ID, types.StepStatusFixReview, 30); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
@@ -336,7 +336,7 @@ func TestExecutor_RecoveredAnswerRoundKeepsTheOutstandingFindings(t *testing.T) 
 	if _, err := database.InsertReviewStepRound(stepResult.ID, 2, "auto_fix", &findings, &selected, "", 30); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusFixReview, 30); err != nil {
+	if err := parkGateFixture(database, stepResult.ID, types.StepStatusFixReview, 30); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.SetRunAwaitingAgent(run.ID); err != nil {

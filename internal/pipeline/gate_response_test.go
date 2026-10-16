@@ -622,7 +622,7 @@ func TestExecutor_RecoveredGateValidatesAndRecordsTheDecision(t *testing.T) {
 	if _, err := database.InsertReviewStepRound(stepResult.ID, 1, "initial", &findings, nil, "1111111111111111111111111111111111111111", 25); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 25); err != nil {
+	if err := parkGateFixture(database, stepResult.ID, types.StepStatusAwaitingApproval, 25); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
@@ -773,6 +773,11 @@ func TestExecutor_DispositionEchoIncludesNormalizedAdditions(t *testing.T) {
 				t.Fatal(err)
 			}
 			exec.waitingRoundID = round.ID
+			if err := database.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, 0, 1, &gate); err != nil {
+				t.Fatal(err)
+			}
+			parked, _ := database.GetStepResult(sr.ID)
+			exec.gate = parked.GateIdentity()
 			var ignored []string
 			if strings.Contains(gate, "existing") {
 				ignored = []string{"user-1"}

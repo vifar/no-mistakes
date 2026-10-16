@@ -105,6 +105,13 @@ func (m *Model) applyEvent(event ipc.Event) bool {
 		if event.StepName != nil && event.Status != nil {
 			m.updateStepStatus(*event.StepName, types.StepStatus(*event.Status))
 		}
+		if event.StepName != nil && event.Gate != nil {
+			for i := range m.steps {
+				if m.steps[i].StepName == *event.StepName {
+					m.steps[i].Gate = event.Gate
+				}
+			}
+		}
 		if event.StepName != nil && event.Error != nil {
 			m.setStepError(*event.StepName, event.Error)
 		}
@@ -267,7 +274,7 @@ func sameGateState(oldGate, newGate *ipc.StepResultInfo, oldFindings, newFinding
 	if oldGate == nil || newGate == nil {
 		return oldGate == nil && newGate == nil
 	}
-	return oldGate.ID == newGate.ID &&
+	return sameGateIdentity(oldGate.Gate, newGate.Gate) && oldGate.ID == newGate.ID &&
 		oldGate.StepName == newGate.StepName &&
 		oldGate.Status == newGate.Status &&
 		oldGate.RoundCount == newGate.RoundCount &&
@@ -483,4 +490,11 @@ func (m Model) stepsWithRunningElapsed() []ipc.StepResultInfo {
 		}
 	}
 	return steps
+}
+
+func sameGateIdentity(a, b *types.GateIdentity) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.SameGate(*b)
 }

@@ -66,10 +66,10 @@ func TestAcceptedGapApprovalManagerAndExecutor(t *testing.T) {
 					if err := database.StartStep(sr.ID); err != nil {
 						t.Fatal(err)
 					}
-					if err := database.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, 0, 10, &raw); err != nil {
+					if _, err := database.InsertStepRound(sr.ID, 1, "initial", &raw, nil, 10); err != nil {
 						t.Fatal(err)
 					}
-					if _, err := database.InsertStepRound(sr.ID, 1, "initial", &raw, nil, 10); err != nil {
+					if err := database.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, 0, 10, &raw); err != nil {
 						t.Fatal(err)
 					}
 					run, err = database.GetRun(run.ID)
@@ -210,10 +210,10 @@ func TestAcceptedGapSurvivesACrashBetweenRecordAndCompletion(t *testing.T) {
 			if err := database.StartStep(sr.ID); err != nil {
 				t.Fatal(err)
 			}
-			if err := database.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, 0, 10, &raw); err != nil {
+			if _, err := database.InsertStepRound(sr.ID, 1, "initial", &raw, nil, 10); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := database.InsertStepRound(sr.ID, 1, "initial", &raw, nil, 10); err != nil {
+			if err := database.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, 0, 10, &raw); err != nil {
 				t.Fatal(err)
 			}
 			// The previous daemon wrote the acceptance, then stopped.

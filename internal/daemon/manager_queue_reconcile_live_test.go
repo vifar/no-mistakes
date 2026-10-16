@@ -112,7 +112,8 @@ esac
 	}
 	// This serialized record is the durable acceptance contract, not a mock
 	// of recovery: the pending reconciliation froze ten seconds at acceptance.
-	if err := database.SetStepPendingResponse(row.ID, `{"kind":"reconcile","parked_ms":10000}`, "already answered; waiting for a run slot"); err != nil {
+	pendingMarker := boundPendingFixture(t, database, row.ID, `{"kind":"reconcile","parked_ms":10000}`)
+	if err := database.SetStepPendingResponse(row.ID, pendingMarker, "already answered; waiting for a run slot"); err != nil {
 		t.Fatal(err)
 	}
 	// Restore a crash snapshot taken 120 seconds after parking, despite the
@@ -154,7 +155,7 @@ esac
 		t.Fatalf("transient read lost recoverability: %v", err)
 	}
 	persisted, err := database.GetStepResult(row.ID)
-	if err != nil || !persisted.AnsweredWaitingForSlot() || persisted.PendingResponse == nil || *persisted.PendingResponse != `{"kind":"reconcile","parked_ms":10000}` {
+	if err != nil || !persisted.AnsweredWaitingForSlot() || persisted.PendingResponse == nil || *persisted.PendingResponse != pendingMarker {
 		t.Fatalf("transient read consumed the acceptance marker: %+v, %v", persisted, err)
 	}
 	var snapshot ipc.GetRunResult
@@ -181,7 +182,7 @@ esac
 		t.Fatalf("shutdown lost the retrying parked run: %+v, %v", current, err)
 	}
 	persisted, err = database.GetStepResult(row.ID)
-	if err != nil || persisted.PendingResponse == nil || *persisted.PendingResponse != `{"kind":"reconcile","parked_ms":10000}` {
+	if err != nil || persisted.PendingResponse == nil || *persisted.PendingResponse != pendingMarker {
 		t.Fatalf("shutdown lost the retrying acceptance: %+v, %v", persisted, err)
 	}
 	if _, err := os.Stat(workDir); err != nil {

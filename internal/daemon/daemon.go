@@ -1574,12 +1574,16 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if len(p.AcceptGaps) > 0 || p.CoveredBy != "" {
 			gaps = &db.AcceptedGaps{FindingIDs: p.AcceptGaps, Reason: p.ApprovalReason, CoveredBy: p.CoveredBy}
 		}
-		dispositions, err := mgr.HandleRespondWithAcceptedGaps(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason, gaps)
+		dispositions, err := mgr.HandleRespondWithAcceptedGaps(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason, gaps, p.ExpectedGate)
 		if err != nil {
 			// A refused fix response is the caller's input to fix, not a
 			// transport failure: the gate is still parked. Report it as a
 			// structured result so the CLI can name the unaccounted findings
 			// and help, and the caller can send a corrected response.
+			var stale *pipeline.GateSupersededError
+			if errors.As(err, &stale) {
+				return &ipc.RespondResult{OK: false, Code: "gate_superseded", Refusal: stale.Error(), CurrentGate: &stale.Current, Help: "Read `no-mistakes axi status` and respond to the current gate"}, nil
+			}
 			var refusal *pipeline.RespondRefusal
 			if errors.As(err, &refusal) {
 				return &ipc.RespondResult{OK: false, Refusal: refusal.Message, Missing: refusal.Missing, DeclinedEarlierFix: refusal.DeclinedEarlierFix, Help: refusal.Help}, nil
@@ -1770,6 +1774,10 @@ func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 		LastActivityAt: s.LastActivityAt,
 		LastActivity:   s.LastActivity,
 		AgentPID:       s.AgentPID,
+	}
+	if s.GateNonce != nil {
+		identity := s.GateIdentity()
+		info.Gate = &identity
 	}
 	if s.AnsweredWaitingForSlot() {
 		// Parked in the database so a restart recovers the gate, but answered:

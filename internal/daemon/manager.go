@@ -48,6 +48,9 @@ var fetchRecoveredDefaultBranchSHA = fetchTrustedDefaultBranchSHA
 
 // RunManager tracks active pipeline executors and manages run lifecycle.
 type RunManager struct {
+	// beforeAnswerRespond is a test scheduling barrier, nil in production.
+	beforeAnswerRespond func()
+
 	mu           sync.Mutex
 	runs         map[string]*managedRun
 	wg           sync.WaitGroup // tracks background run goroutines
@@ -2803,7 +2806,7 @@ func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepNam
 // HandleRespondWithAcceptedGaps is HandleRespondWithOverrides for an approval
 // that may carry an owner-accepted Test gap. The pre-check here and the
 // executor's live gate share db.StepResult.AcceptedGapRefusal.
-func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps) (pipeline.RespondDispositions, error) {
+func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps, expected ...*types.GateIdentity) (pipeline.RespondDispositions, error) {
 	if action == types.ActionAbort {
 		m.mu.Lock()
 		owned := m.runs[runID]
@@ -2827,6 +2830,38 @@ func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.Step
 	run, err := m.db.GetRun(runID)
 	if err != nil {
 		return pipeline.RespondDispositions{}, err
+	}
+	// A completed run may no longer have an executor. A bound late response
+	// still gets the typed current identity rather than a transport error.
+	if action != types.ActionAbort && len(expected) > 0 && expected[0] != nil {
+		m.mu.Lock()
+		owned := m.runs[runID]
+		var executor *pipeline.Executor
+		if owned != nil {
+			executor = owned.executor
+		}
+		m.mu.Unlock()
+		current := types.GateIdentity{RunID: runID}
+		if executor != nil {
+			current = executor.CurrentGate()
+		} else {
+			rows, readErr := m.db.GetStepsByRun(runID)
+			if readErr != nil {
+				return pipeline.RespondDispositions{}, readErr
+			}
+			for _, row := range rows {
+				if row.StepName == step {
+					current = row.GateIdentity()
+				}
+				if row.Status == types.StepStatusAwaitingApproval || row.Status == types.StepStatusFixReview {
+					current = row.GateIdentity()
+					break
+				}
+			}
+		}
+		if executor == nil || !expected[0].SameGate(current) {
+			return pipeline.RespondDispositions{}, &pipeline.GateSupersededError{Current: current}
+		}
 	}
 	if gaps != nil && action != types.ActionApprove {
 		return pipeline.RespondDispositions{}, fmt.Errorf("--accept-gap requires --action approve")
@@ -2881,7 +2916,7 @@ func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.Step
 		return pipeline.RespondDispositions{}, fmt.Errorf("no active executor for run %s", runID)
 	}
 
-	return exec.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, gaps)
+	return exec.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, gaps, expected...)
 }
 
 // HandleAnswerReviewQuestion records one operator answer to a question the
@@ -2931,6 +2966,10 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 	if !ok {
 		return nil, fmt.Errorf("no active executor for run %s", runID)
 	}
+	// Capture before reading the conversation or publishing the answer. Another
+	// answer may settle that snapshot while this handler is delayed. Even a zero
+	// identity is explicit: a later park must not inherit this response.
+	expectedGate := exec.CurrentGate()
 	// A repository that has not turned the conversation on has no channel to
 	// answer into, and the reviewer was never told to ask, so say which setting
 	// would accept an answer rather than report a missing directory.
@@ -3033,9 +3072,17 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 		return result, nil
 	}
 	result.ClosedLast = true
-	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil); err != nil {
-		// Not an error for the caller: the answer is recorded either way, and
-		// "no step awaiting approval" is the ordinary mid-turn case.
+	if expectedGate.Nonce == "" || expectedGate.Step != types.StepReview {
+		result.Note = "recorded; the review gate was not released because none was parked when this answer began; the reviewer will read it at its next checkpoint"
+		return result, nil
+	}
+	if m.beforeAnswerRespond != nil {
+		m.beforeAnswerRespond()
+	}
+	if err := exec.Respond(types.StepReview, types.ActionAnswer, nil, &expectedGate); err != nil {
+		// The answer stays recorded if this gate was consumed or superseded.
+		// Automatic resumption already delivered it, or a later park will read it.
+		// Report success without dispatching it against a replacement gate.
 		result.Note = fmt.Sprintf("recorded; the review gate was not released (%v)", err)
 		return result, nil
 	}

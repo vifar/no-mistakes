@@ -402,7 +402,7 @@ func seedRecoveredQueueGates(f *faultFixture) []recoveredRunPlan {
 		if _, err := f.d.InsertReviewStepRound(step.ID, 1, "initial", &findings, nil, f.head, 1); err != nil {
 			f.t.Fatal(err)
 		}
-		if err := f.d.UpdateStepStatusWithDuration(step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+		if err := parkGateFixture(f.d, step.ID, types.StepStatusAwaitingApproval, 1); err != nil {
 			f.t.Fatal(err)
 		}
 		if err := f.d.SetRunAwaitingAgent(run.ID); err != nil {

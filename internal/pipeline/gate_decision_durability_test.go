@@ -107,6 +107,11 @@ func TestExecutor_ReansweredRoundPreservesAcknowledgedFindingContent(t *testing.
 				exec.waitingRoundID = round.ID
 				exec.waitingFindings = gate
 				exec.approvalCh = make(chan approvalResponse, 1)
+				if err := database.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, 0, 1, &gate); err != nil {
+					t.Fatal(err)
+				}
+				parked, _ := database.GetStepResult(sr.ID)
+				exec.gate = parked.GateIdentity()
 				got, err := exec.RespondWithOverrides(step, types.ActionFix, ids, ignored, notes, added, "")
 				if err != nil {
 					t.Fatal(err)
@@ -219,6 +224,9 @@ func TestExecutor_RecoveredAcceptedResponseIsReapplied(t *testing.T) {
 	crashed.waitingStepResultID = stepResult.ID
 	crashed.waitingRoundID = rounds[0].ID
 	crashed.waitingFindings = gate
+	parked, _ := database.GetStepResult(stepResult.ID)
+	crashed.gate = parked.GateIdentity()
+	acceptedGate := crashed.gate
 	accepted := []types.Finding{{Description: "repair logger", UserInstructions: "keep compatibility"}}
 	if _, err := crashed.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1"}, []string{"R2"}, map[string]string{"R1": "preserve logger format"}, accepted, ""); err != nil {
 		t.Fatal(err)
@@ -247,7 +255,7 @@ func TestExecutor_RecoveredAcceptedResponseIsReapplied(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("recovered step never dispatched the recorded fix")
 	}
-	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err == nil {
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil, &acceptedGate); err == nil {
 		t.Fatal("a recovered, already-answered gate accepted another response")
 	}
 	findings, err := types.ParseFindingsJSON(merged)

@@ -1372,6 +1372,9 @@ func driveRunScoped(ctx context.Context, progress io.Writer, client *ipc.Client,
 				return run, false, nil
 			}
 			gateKey := gate.Name + "\x00" + gate.Status
+			if gate.Gate != nil {
+				gateKey += "\x00" + gate.Gate.Nonce
+			}
 			if pendingGate == gateKey {
 				// Duplicate or delayed events can race persistence after a response.
 				// Keep waiting for an authoritative transition rather than answering
@@ -1391,7 +1394,7 @@ func driveRunScoped(ctx context.Context, progress io.Writer, client *ipc.Client,
 			if action == types.ActionFix {
 				fixedSteps[gate.Name] = true
 			}
-			if _, err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil, nil, "", nil, ""); err != nil {
+			if _, err := sendRespond(client, runID, types.StepName(gate.Name), action, findingIDs, nil, nil, nil, "", nil, "", gate.Gate); err != nil {
 				return nil, false, fmt.Errorf("auto-resolve %s: %w", gate.Name, err)
 			}
 			pendingGate = gateKey
@@ -1446,20 +1449,20 @@ func gateResolution(gate stepView, alreadyFixed bool) (types.ApprovalAction, []s
 	return types.ActionFix, ids
 }
 
-// gateIdentity identifies the exact park a wait is leaving: the parked step's
-// status and the round it parked at. The status alone cannot tell a re-park
-// apart from the park just answered, since the next round can park at the same
-// status before any wait observes the intervening running state. Every
-// execution round is persisted before the step parks again (InsertStepRound),
-// so a re-park always carries a higher round count. A daemon that reports no
-// round count leaves both sides zero and degrades to the status-only check.
+// gateIdentity identifies the exact park a wait is leaving. Nonce distinguishes
+// repeated parks within one round. Round count also supports older daemons.
 type gateIdentity struct {
+	nonce  string
 	status string
 	round  int
 }
 
 func (s stepView) identity() gateIdentity {
-	return gateIdentity{status: s.Status, round: s.RoundCount}
+	g := gateIdentity{status: s.Status, round: s.RoundCount}
+	if s.Gate != nil {
+		g.nonce = s.Gate.Nonce
+	}
+	return g
 }
 
 // waitStepLeavesGate blocks until the named step leaves the gate we just
@@ -1479,7 +1482,7 @@ func waitStepLeavesGate(ctx context.Context, socketPath, runID, step string, gat
 		}
 		for _, s := range run.Steps {
 			if string(s.StepName) == step {
-				if string(s.Status) != gate.status || s.RoundCount != gate.round {
+				if string(s.Status) != gate.status || s.RoundCount != gate.round || (s.Gate != nil && s.Gate.Nonce != gate.nonce) {
 					return nil
 				}
 				break
@@ -1496,7 +1499,7 @@ func getRunInfo(ctx context.Context, socketPath, runID string) (*ipc.RunInfo, er
 // what it recorded. A response the daemon refused is returned as a
 // *respondRefusalError - the gate is still parked and the response can be
 // corrected.
-func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, added []types.Finding, approvalReason string, acceptGaps []string, coveredBy string) (ipc.RespondResult, error) {
+func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, added []types.Finding, approvalReason string, acceptGaps []string, coveredBy string, expected ...*types.GateIdentity) (ipc.RespondResult, error) {
 	params := &ipc.RespondParams{
 		RunID:            runID,
 		Step:             step,
@@ -1509,13 +1512,16 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 		AcceptGaps:       acceptGaps,
 		CoveredBy:        coveredBy,
 	}
+	if len(expected) > 0 {
+		params.ExpectedGate = expected[0]
+	}
 	var result ipc.RespondResult
 	if err := client.Call(ipc.MethodRespond, params, &result); err != nil {
 		return ipc.RespondResult{}, err
 	}
 	if !result.OK {
 		if result.Refusal != "" {
-			return result, &respondRefusalError{refusal: result.Refusal, missing: result.Missing, help: result.Help}
+			return result, &respondRefusalError{refusal: result.Refusal, missing: result.Missing, help: result.Help, current: result.CurrentGate}
 		}
 		return result, fmt.Errorf("daemon rejected the response")
 	}
@@ -1525,12 +1531,24 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 // respondRefusalError carries a refusal the daemon reported for a response that
 // left the gate parked.
 type respondRefusalError struct {
+	current *types.GateIdentity
 	refusal string
 	missing []string
 	help    string
 }
 
 func (e *respondRefusalError) Error() string { return e.refusal }
+
+func (e *respondRefusalError) emit(cmd *cobra.Command, runID string) error {
+	if e.current == nil {
+		return emitError(cmd, 2, e.refusal, e.helpLines(runID)...)
+	}
+	current := gateIdentityFields(*e.current)
+	current = append(current, toon.Field{Key: "step", Value: string(e.current.Step)}, toon.Field{Key: "status", Value: string(e.current.Status)})
+	fields := []toon.Field{{Key: "code", Value: "gate_superseded"}, {Key: "message", Value: e.refusal}, {Key: "help", Value: e.helpLines(runID)}, {Key: "current_gate", Value: toon.NewObject(current...)}}
+	emitDoc(cmd, toon.Field{Key: "error", Value: toon.NewObject(fields...)})
+	return &exitError{code: 2}
+}
 
 // helpLines renders the refusal as the structured error's help entries: the
 // daemon's own next action plus the missing pending IDs the response has to
@@ -1992,11 +2010,11 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		}
 	}
 
-	result, err := sendRespond(env.client, runID, stepName, act, findingIDs, ignoreIDs, instructions, added, ra.reason, acceptGapIDs, ra.coveredBy)
+	result, err := sendRespond(env.client, runID, stepName, act, findingIDs, ignoreIDs, instructions, added, ra.reason, acceptGapIDs, ra.coveredBy, gateSnapshotFor(rv, string(stepName)))
 	if err != nil {
 		var refusal *respondRefusalError
 		if errors.As(err, &refusal) {
-			return emitError(cmd, 2, refusal.refusal, refusal.helpLines(ra.runID)...)
+			return refusal.emit(cmd, ra.runID)
 		}
 		return emitError(cmd, 1, fmt.Sprintf("respond to %s: %v", stepName, err))
 	}
@@ -2019,6 +2037,10 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	if err != nil {
 		if isAxiWaitElapsed(ctx, driveCtx, err) {
 			return emitAxiWaitElapsedForRun(cmd, ra.wait, ra.runID, "no-mistakes axi run", lead...)
+		}
+		var refusal *respondRefusalError
+		if errors.As(err, &refusal) {
+			return refusal.emit(cmd, ra.runID)
 		}
 		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
 	}
@@ -2400,4 +2422,13 @@ func splitCSV(s string) []string {
 		}
 	}
 	return out
+}
+
+func gateSnapshotFor(rv runView, step string) *types.GateIdentity {
+	for _, s := range rv.Steps {
+		if s.Name == step {
+			return s.Gate
+		}
+	}
+	return nil
 }

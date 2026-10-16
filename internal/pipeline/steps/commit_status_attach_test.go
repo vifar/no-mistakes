@@ -231,7 +231,7 @@ func TestPipelineAttachCommitStatus(t *testing.T) {
 				if _, err = sc.DB.InsertStepRound(gate.ID, 1, "initial", &findings, nil, 0); err != nil {
 					t.Fatal(err)
 				}
-				if err = sc.DB.UpdateStepStatusWithDuration(gate.ID, types.StepStatusAwaitingApproval, 0); err != nil {
+				if err = sc.DB.ParkStepForApproval(run.ID, gate.ID, types.StepStatusAwaitingApproval, 0, 0, &findings); err != nil {
 					t.Fatal(err)
 				}
 				if err = sc.DB.UpdateRunStatus(run.ID, types.RunRunning); err != nil {

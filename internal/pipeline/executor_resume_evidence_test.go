@@ -80,7 +80,7 @@ func TestExecutor_RecoveredGateResumerReceivesTheRunsEvidenceDir(t *testing.T) {
 	if _, err := database.InsertReviewStepRound(stepResult.ID, 1, "initial", &findings, nil, "", 25); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 25); err != nil {
+	if err := parkGateFixture(database, stepResult.ID, types.StepStatusAwaitingApproval, 25); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.SetRunAwaitingAgent(run.ID); err != nil {

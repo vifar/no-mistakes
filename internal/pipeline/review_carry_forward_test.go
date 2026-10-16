@@ -49,7 +49,7 @@ func seedRecoveredReviewGate(t *testing.T, database *db.DB, run *db.Run, finding
 			t.Fatal(err)
 		}
 	}
-	if err := database.UpdateStepStatusWithDuration(stepResult.ID, status, 25); err != nil {
+	if err := database.ParkStepForApproval(run.ID, stepResult.ID, status, 0, 25, &findings); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.SetRunAwaitingAgent(run.ID); err != nil {

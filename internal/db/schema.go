@@ -458,4 +458,10 @@ var migrationStatements = []string{
 	// response is dispatched, so a crash during the wait leaves a recoverable
 	// gate; NULL means no response is pending. Cleared when dispatch begins.
 	`ALTER TABLE step_results ADD COLUMN pending_response TEXT`,
+	// One nonce per park, including repeated parks of the same round.
+	`ALTER TABLE step_results ADD COLUMN gate_nonce TEXT`,
+	`ALTER TABLE step_results ADD COLUMN gate_round_id TEXT`,
+	// Give pre-nonce unanswered parks an identity once on upgrade. Legacy pending
+	// responses lack a binding and recovery refuses them rather than replaying.
+	`UPDATE step_results SET gate_nonce = lower(hex(randomblob(16))), gate_round_id = (SELECT id FROM step_rounds WHERE step_result_id = step_results.id ORDER BY round DESC LIMIT 1) WHERE status IN ('awaiting_approval', 'fix_review') AND gate_nonce IS NULL`,
 }

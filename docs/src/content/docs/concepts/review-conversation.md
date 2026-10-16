@@ -39,6 +39,8 @@ The approve and skip paths described below apply to ordinary runs. The
 [strict shipping contract](/no-mistakes/reference/cli/#strict-shipping-and-review-receipts)
 refuses those shortcuts at Review and requires independent certification.
 
+Answer delivery binds its gate release to the identity captured before the answer is appended. If automatic resumption has already consumed that gate, the answer stays recorded and reports `reviewer_resumed: false` with the reason. A later code-only gate remains parked for its own decision; the delayed answer cannot dispatch another finalization turn.
+
 ## The file protocol
 
 Every run owns a review-conversation directory under the run's evidence

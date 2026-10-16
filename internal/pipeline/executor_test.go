@@ -204,7 +204,7 @@ func TestExecutor_RecoveredCIGateApprovalRestartsAPendingCarryAtTest(t *testing.
 		if _, err := database.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 10); err != nil {
 			t.Fatal(err)
 		}
-		if err := database.UpdateStepStatusWithDuration(sr.ID, types.StepStatusAwaitingApproval, 10); err != nil {
+		if err := parkGateFixture(database, sr.ID, types.StepStatusAwaitingApproval, 10); err != nil {
 			t.Fatal(err)
 		}
 	}

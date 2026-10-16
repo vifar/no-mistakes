@@ -848,7 +848,7 @@ func TestExecutorRecoveredApprovalRevalidatesMovedPRTargetBeforeUsingParkedVerdi
 	if _, err := database.InsertReviewStepRound(review.ID, 1, "initial", &findings, nil, oldHead, 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(review.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+	if err := parkGateFixture(database, review.ID, types.StepStatusAwaitingApproval, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.SetRunAwaitingAgent(run.ID); err != nil {

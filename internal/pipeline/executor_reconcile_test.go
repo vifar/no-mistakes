@@ -232,7 +232,7 @@ func TestExecutor_ResumeFatalReconcileErrorFailsRun(t *testing.T) {
 	if _, err := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 10); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 10); err != nil {
+	if err := parkGateFixture(database, stepResult.ID, types.StepStatusAwaitingApproval, 10); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
@@ -518,7 +518,8 @@ func TestExecutor_RecoveredReconciliationPreservesPendingOnTransientError(t *tes
 			if err := database.ParkStepForApproval(run.ID, row.ID, status, 0, 1, &findings); err != nil {
 				t.Fatal(err)
 			}
-			if err := database.SetStepPendingResponse(row.ID, `{"kind":"reconcile"}`, answeredActivity); err != nil {
+			pendingMarker := boundPendingFixture(t, database, row.ID, `{"kind":"reconcile"}`)
+			if err := database.SetStepPendingResponse(row.ID, pendingMarker, answeredActivity); err != nil {
 				t.Fatal(err)
 			}
 			run, err = database.GetRun(run.ID)
@@ -555,7 +556,7 @@ func TestExecutor_RecoveredReconciliationPreservesPendingOnTransientError(t *tes
 					t.Fatalf("attempt %d lost crash recoverability: %v", attempt, err)
 				}
 				persisted, err := database.GetStepResult(row.ID)
-				if err != nil || persisted.Status != status || !persisted.AnsweredWaitingForSlot() || persisted.PendingResponse == nil || *persisted.PendingResponse != `{"kind":"reconcile"}` {
+				if err != nil || persisted.Status != status || !persisted.AnsweredWaitingForSlot() || persisted.PendingResponse == nil || *persisted.PendingResponse != pendingMarker {
 					t.Fatalf("attempt %d lost pending reconciliation: %+v, %v", attempt, persisted, err)
 				}
 				if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err == nil {
@@ -618,7 +619,7 @@ func TestExecutor_RecoveredReconciliationFatalErrorFailsInsteadOfRetrying(t *tes
 	if err := database.ParkStepForApproval(run.ID, row.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.SetStepPendingResponse(row.ID, `{"kind":"reconcile"}`, answeredActivity); err != nil {
+	if err := database.SetStepPendingResponse(row.ID, boundPendingFixture(t, database, row.ID, `{"kind":"reconcile"}`), answeredActivity); err != nil {
 		t.Fatal(err)
 	}
 	run, err = database.GetRun(run.ID)

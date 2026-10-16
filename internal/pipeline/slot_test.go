@@ -192,7 +192,7 @@ func TestExecutorAbortDoesNotWaitForOccupiedSlot(t *testing.T) {
 				if _, err := database.InsertReviewStepRound(sr.ID, 1, "initial", &findings, nil, run.HeadSHA, 1); err != nil {
 					t.Fatal(err)
 				}
-				if err := database.UpdateStepStatusWithDuration(sr.ID, types.StepStatusAwaitingApproval, 1); err != nil {
+				if err := parkGateFixture(database, sr.ID, types.StepStatusAwaitingApproval, 1); err != nil {
 					t.Fatal(err)
 				}
 				if err := database.SetRunAwaitingAgent(run.ID); err != nil {
@@ -754,7 +754,7 @@ func TestExecutorReconciliationWaitsDurablyForCapacity(t *testing.T) {
 				if err := database.ParkStepForApproval(run.ID, row.ID, status, 0, 1, &findings); err != nil {
 					t.Fatal(err)
 				}
-				if err := database.SetStepPendingResponse(row.ID, `{"kind":"reconcile"}`, answeredActivity); err != nil {
+				if err := database.SetStepPendingResponse(row.ID, boundPendingFixture(t, database, row.ID, `{"kind":"reconcile"}`), answeredActivity); err != nil {
 					t.Fatal(err)
 				}
 				run, err = database.GetRun(run.ID)
@@ -862,10 +862,12 @@ func TestRecoveredGateKeepsAcceptanceParkedDuration(t *testing.T) {
 				original.SetRunSlot(&recordingSlot{})
 				original.waitingStep = types.StepCI
 				original.waitingStepResultID = row.ID
+				parked, _ := database.GetStepResult(row.ID)
+				original.gate = parked.GateIdentity()
 				original.waitingSince = time.Now().Add(-10 * time.Second)
 				var response *approvalResponse
 				if !reconcile {
-					response = &approvalResponse{action: types.ActionApprove}
+					response = &approvalResponse{action: types.ActionApprove, gate: original.gate}
 				}
 				original.mu.Lock()
 				err = original.acceptApprovalGate(response)

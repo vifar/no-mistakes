@@ -40,6 +40,7 @@ const (
 )
 
 type approvalResponse struct {
+	gate           types.GateIdentity
 	action         types.ApprovalAction
 	findingIDs     []string
 	instructions   map[string]string
@@ -85,6 +86,7 @@ type Executor struct {
 	mu             sync.Mutex
 	activeAgentPID atomic.Int64          // live lifecycle ownership, independent of SQLite
 	approvalCh     chan approvalResponse // buffered channel for approval responses
+	gate           types.GateIdentity    // last published park, protected by mu
 	waiting        bool                  // true when blocked on approval
 	slotWaitStep   types.StepName
 	// answeredParkedMS is the parked time at acceptance of a response waiting
@@ -257,8 +259,8 @@ func (e *Executor) SetGateReconcileTimings(interval, timeout time.Duration) {
 // Respond sends a user approval action to the currently waiting step.
 // The step parameter must match the step currently awaiting approval.
 // Returns an error if no step is awaiting approval or if the step name doesn't match.
-func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, findingIDs []string) error {
-	_, err := e.RespondWithOverrides(step, action, findingIDs, nil, nil, nil, "")
+func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, findingIDs []string, expected ...*types.GateIdentity) error {
+	_, err := e.RespondWithOverrides(step, action, findingIDs, nil, nil, nil, "", expected...)
 	return err
 }
 
@@ -273,8 +275,8 @@ func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, fin
 //
 // It returns the dispositions the response recorded, which the daemon echoes
 // to the caller.
-func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string) (RespondDispositions, error) {
-	return e.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, nil)
+func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, expected ...*types.GateIdentity) (RespondDispositions, error) {
+	return e.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, nil, expected...)
 }
 
 // RespondWithAcceptedGaps is RespondWithOverrides for an approval that may
@@ -282,7 +284,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 // by db.StepResult.AcceptedGapRefusal and recorded durably before the step
 // completes; its reason comes from gaps and is not stored as a Test exception
 // reason.
-func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps) (RespondDispositions, error) {
+func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps, expected ...*types.GateIdentity) (RespondDispositions, error) {
 	if gaps != nil && (step != types.StepTest || action != types.ActionApprove) {
 		return RespondDispositions{}, fmt.Errorf("an accepted gap applies only to Test approval")
 	}
@@ -313,6 +315,14 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 		return RespondDispositions{}, fmt.Errorf("unrecognized approval action %q (valid: approve, fix, skip, abort, answer)", action)
 	}
 	e.mu.Lock()
+	// Omitted identity means an explicit operation on the current gate. Bind it
+	// under this lock. Asynchronous callers must pass their earlier snapshot.
+	if action != types.ActionAbort && len(expected) > 0 && expected[0] != nil {
+		if err := e.validateGateLocked(*expected[0]); err != nil {
+			e.mu.Unlock()
+			return RespondDispositions{}, err
+		}
+	}
 	if !e.waiting {
 		if e.slotWaitStep == step {
 			e.mu.Unlock()
@@ -355,6 +365,7 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 		return RespondDispositions{}, errors.New(refusal)
 	}
 	response := approvalResponse{
+		gate:           e.currentGateLocked(),
 		action:         action,
 		findingIDs:     findingIDs,
 		instructions:   instructions,
@@ -739,15 +750,20 @@ func (e *Executor) RegisterRecoveredGate(run *db.Run) error {
 	if err != nil {
 		return err
 	}
-	e.recoveryGate = gate
+	identity := gate.stepResult.GateIdentity()
+	if identity.Nonce == "" || identity.RoundID != gate.lastRoundID {
+		return fmt.Errorf("recovered approval gate has no complete identity")
+	}
 	if gate.stepResult.PendingResponse != nil {
 		// The operator already answered this gate; only the slot wait was
 		// interrupted. Recover it as an answered gate: no new response is
 		// accepted, and the recorded one is re-applied once a slot is granted.
-		recorded, parkedMS, err := decodePendingResponse(*gate.stepResult.PendingResponse)
+		recorded, parkedMS, err := decodePendingResponse(*gate.stepResult.PendingResponse, identity)
 		if err != nil {
 			return err
 		}
+		e.recoveryGate = gate
+		e.gate = identity
 		e.recoveredResponse = recorded
 		e.slotWaitStep = gate.step.Name()
 		e.waitingSince = time.Unix(*run.AwaitingAgentSince, 0)
@@ -759,6 +775,8 @@ func (e *Executor) RegisterRecoveredGate(run *db.Run) error {
 		}
 		return nil
 	}
+	e.recoveryGate = gate
+	e.gate = identity
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingShipping = run.Shipping
@@ -1976,7 +1994,7 @@ rounds:
 			// to drive this gate (versus actively running/fixing/ci). Observability
 			// only: it does not change the wait below. Pending response acceptance
 			// hides it from status; dispatch or cancellation clears the saved marker.
-			if dbErr := e.db.ParkStepForApproval(run.ID, sr.ID, approvalStatus, finalExitCode, executionMS, findingsPtr); dbErr != nil {
+			if dbErr := e.db.ParkStepForApproval(run.ID, sr.ID, approvalStatus, finalExitCode, executionMS, findingsPtr, currentRoundID); dbErr != nil {
 				e.waiting = false
 				e.waitingStep = ""
 				e.waitingFindings = ""
@@ -1984,6 +2002,13 @@ rounds:
 				e.mu.Unlock()
 				return false, "", fmt.Errorf("persist %s approval gate: %w", stepName, dbErr)
 			}
+			parkedRow, dbErr := e.db.GetStepResult(sr.ID)
+			if dbErr != nil || parkedRow == nil {
+				e.waiting = false
+				e.mu.Unlock()
+				return false, "", fmt.Errorf("read parked %s identity: %v", stepName, dbErr)
+			}
+			e.gate = parkedRow.GateIdentity()
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), effectiveFindings, "", &executionMS)
 			e.mu.Unlock()
 
@@ -2629,10 +2654,11 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 			// first wins.
 			if !pendingReconciliation {
 				if action, resume, err := e.resumeApprovalGate(ctx, step, sctx, findings); resume {
-					if claimed, err := e.claimGateReconciliation(&approvalResponse{action: action}); err != nil {
+					response := approvalResponse{action: action}
+					if claimed, err := e.claimGateReconciliation(&response); err != nil {
 						return approvalResponse{}, false, err
 					} else if claimed {
-						return approvalResponse{action: action}, false, nil
+						return response, false, nil
 					}
 					return <-e.approvalCh, false, nil
 				} else if err != nil && ctx.Err() == nil {
@@ -2693,6 +2719,9 @@ func (e *Executor) claimGateReconciliation(response *approvalResponse) (bool, er
 	defer e.mu.Unlock()
 	if !e.waiting {
 		return false, nil
+	}
+	if response != nil {
+		response.gate = e.currentGateLocked()
 	}
 	if err := e.acceptApprovalGate(response); err != nil {
 		return false, err
@@ -2993,6 +3022,20 @@ func (e *Executor) emitStepEventWithFindingsAndError(eventType ipc.EventType, ru
 		StepName:   &stepName,
 		Status:     &status,
 		DurationMS: durationMS,
+	}
+	// Events that publish a gate carry the same persisted identity as status.
+	// The caller holds e.mu through gate publication; read from the DB here so
+	// non-gate events need no second lock or unsynchronized executor reads.
+	if status == string(types.StepStatusAwaitingApproval) || status == string(types.StepStatusFixReview) {
+		if rows, err := e.db.GetStepsByRun(run.ID); err == nil {
+			for _, row := range rows {
+				if row.StepName == stepName {
+					g := row.GateIdentity()
+					event.Gate = &g
+					break
+				}
+			}
+		}
 	}
 	// The combined housekeeping invocation is recorded under Document because
 	// that is where it executes. Carry its broader scope on completion so an

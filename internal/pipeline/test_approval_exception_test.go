@@ -54,10 +54,10 @@ func testApprovalOfParkedVerdict(t *testing.T, verdict string, exception, recove
 		if err := database.StartStep(sr.ID); err != nil {
 			t.Fatal(err)
 		}
-		if err := database.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, 7, 10, &findings); err != nil {
+		if _, err := database.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 10); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := database.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 10); err != nil {
+		if err := database.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, 7, 10, &findings); err != nil {
 			t.Fatal(err)
 		}
 		run, err = database.GetRun(run.ID)
