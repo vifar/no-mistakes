@@ -60,7 +60,7 @@ no-mistakes axi respond
 no-mistakes update
 ```
 
-`no-mistakes update` stops and starts the daemon when it is running, or when stale daemon artifacts exist, so the new executable is used.
+`no-mistakes update` stops and starts the daemon when it is running, or when stale daemon artifacts exist, so the new executable is used. On macOS and Linux the start runs the newly installed binary's `daemon start`, so the LaunchAgent or systemd unit is rewritten from the new version's service definition.
 It prefers the managed service path and falls back to a detached daemon if service startup is unavailable or fails.
 If pending or running pipeline runs exist, `update` refuses to restart the daemon by default and prints each active run's ID, status, branch, and short head SHA. Pass `--force` to restart the daemon anyway and accept that those runs may fail; `-y`/`--yes` does not bypass this guard.
 If the daemon is already running from a different executable path, update still prompts before replacing it; `-y`/`--yes` answers that prompt non-interactively.
@@ -121,7 +121,7 @@ On Linux, a step that exhausts memory fails only its own run.
 Configured commands, agent subprocesses, and managed agent servers raise their `oom_score_adj` so the kernel OOM killer picks them before the daemon.
 The generated systemd unit sets `OOMPolicy=continue`, so one killed step no longer stops the whole service and interrupts other in-flight runs. [Crash recovery](#crash-recovery) owns how interrupted runs are handled.
 When a step process is killed and the daemon's cgroup records a new `oom_kill`, the step fails with "ran out of memory" appended to its original error text, and the step log keeps the command output printed before the kill.
-An existing unit picks up the policy when `no-mistakes daemon start` or `restart` refreshes the service definition.
+An existing unit picks up the policy when `no-mistakes daemon start`, `restart`, or `update` refreshes the service definition.
 
 ## Concurrent push handling
 

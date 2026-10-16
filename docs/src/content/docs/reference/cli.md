@@ -836,7 +836,7 @@ no-mistakes update -y
 no-mistakes update --force
 ```
 
-Downloads the latest release, verifies the SHA-256 checksum, atomically replaces the running binary, and resets the daemon when it is running or stale daemon artifacts exist so the new executable is picked up, preferring the managed service path and falling back to a detached daemon if service startup is unavailable or fails.
+Downloads the latest release, verifies the SHA-256 checksum, atomically replaces the running binary, and resets the daemon when it is running or stale daemon artifacts exist so the new executable is picked up, preferring the managed service path (on macOS and Linux the newly installed binary's `daemon start` rewrites the service definition) and falling back to a detached daemon if service startup is unavailable or fails.
 By default this installs the latest stable release.
 Pass `--beta` to include prereleases and install the latest beta when one is newer than the current stable release.
 Version discovery reads the configured fork's `channels.json` release asset to avoid the unauthenticated REST API rate limit. Stable, beta, and background checks use the same manifest. If the manifest is unavailable or invalid, update fails without falling back to upstream or the REST API. [Fork release prerequisites](/no-mistakes/guides/fork-updates/) explains publication and version ordering. Channel-manifest publication is a prerequisite; channel fallback is not implemented.
