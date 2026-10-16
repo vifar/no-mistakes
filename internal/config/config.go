@@ -83,7 +83,9 @@ const (
 	// DefaultDaemonConnectTimeout bounds client IPC connection attempts to a
 	// daemon socket that exists but is not accepting connections.
 	DefaultDaemonConnectTimeout = 3 * time.Second
-	// DefaultBranchSyncRemoteTimeout bounds each remote Git operation (ls-remote, fetch) in internal/branchsync. Global-config-only; a pushed branch cannot change it. Timeout still fails closed.
+	// DefaultBranchSyncRemoteTimeout is the fallback per-operation network
+	// budget in internal/branchsync. Setting semantics are documented in
+	// docs/src/content/docs/reference/global-config.md#branch_sync_remote_timeout.
 	DefaultBranchSyncRemoteTimeout = 60 * time.Second
 	// DefaultGateReconcileInterval is how often a parked approval gate is
 	// rechecked. Global-config-only; a pushed branch cannot change it.
@@ -1559,8 +1561,8 @@ test_agent_timeout: "30m"
 # connection before failing instead of hanging.
 daemon_connect_timeout: "3s"
 
-# Maximum time guarded branch synchronization waits for one remote Git operation
-# (ls-remote or fetch) before treating the target as offline. Global-only.
+# Per-operation network timeout for guarded branch synchronization. Global-only.
+# See https://kunchenguid.github.io/no-mistakes/reference/global-config/#branch_sync_remote_timeout
 branch_sync_remote_timeout: "60s"
 
 # How often a parked approval gate is rechecked, and the deadline for each
