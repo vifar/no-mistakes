@@ -38,13 +38,21 @@ func (s *reconcilingApprovalStep) Execute(*StepContext) (*StepOutcome, error) {
 func (s *reconcilingApprovalStep) ReconcileApprovalGate(sctx *StepContext) (bool, error) {
 	call := s.calls.Add(1)
 	if s.callStart != nil {
-		s.callStart <- call
+		select {
+		case s.callStart <- call:
+		case <-sctx.Ctx.Done():
+			return false, sctx.Ctx.Err()
+		}
 	}
 	if s.startOnce.CompareAndSwap(false, true) && s.started != nil {
 		close(s.started)
 	}
 	if s.release != nil {
-		<-s.release
+		select {
+		case <-s.release:
+		case <-sctx.Ctx.Done():
+			return false, sctx.Ctx.Err()
+		}
 	}
 	if s.block {
 		<-sctx.Ctx.Done()
@@ -140,7 +148,7 @@ func TestExecutor_ReconcileErrorPreservesGateFailClosed(t *testing.T) {
 	step := &reconcilingApprovalStep{
 		name:      types.StepCI,
 		callStart: make(chan int64, 4),
-		release:   make(chan struct{}),
+		release:   make(chan struct{}, 1),
 	}
 	reconcileErr := error(errors.New("provider unavailable"))
 	step.err.Store(&reconcileErr)
@@ -178,7 +186,7 @@ func TestExecutor_ReconcileErrorPreservesGateFailClosed(t *testing.T) {
 	if err := exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
 		t.Fatal(err)
 	}
-	step.release <- struct{}{}
+	close(step.release)
 	select {
 	case err := <-done:
 		if err != nil {
@@ -269,29 +277,48 @@ func TestExecutor_ResumeFatalReconcileErrorFailsRun(t *testing.T) {
 }
 
 func TestExecutor_GateRecheckIsBoundedAndApprovalWinsAfterTimeout(t *testing.T) {
-	database, p, run, repo := setupTest(t)
-	step := &reconcilingApprovalStep{name: types.StepCI, block: true, started: make(chan struct{})}
-	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
-	exec.SetGateReconcileTimings(time.Hour, 25*time.Millisecond)
+	for _, barrier := range []string{"provider", "release"} {
+		t.Run(barrier, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			step := &reconcilingApprovalStep{name: types.StepCI, block: true, started: make(chan struct{})}
+			if barrier == "release" {
+				step.release = make(chan struct{})
+			}
+			exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+			exec.SetGateReconcileTimings(time.Hour, 25*time.Millisecond)
 
-	workDir := completionFixture(t, database, run)
-	done := make(chan error, 1)
-	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
-	select {
-	case <-step.started:
-	case <-time.After(3 * time.Second):
-		t.Fatal("gate reconciliation did not start")
-	}
-	if err := exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("Execute() error = %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("blocking provider check was not bounded")
+			workDir := completionFixture(t, database, run)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan struct{})
+			var executeErr error
+			go func() {
+				executeErr = exec.Execute(ctx, run, repo, workDir)
+				close(done)
+			}()
+			t.Cleanup(func() {
+				cancel()
+				if step.release != nil {
+					close(step.release)
+				}
+				<-done
+			})
+			select {
+			case <-step.started:
+			case <-time.After(3 * time.Second):
+				t.Fatal("gate reconciliation did not start")
+			}
+			if err := exec.Respond(types.StepCI, types.ActionApprove, nil, gateSnapshot(exec)); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-done:
+				if executeErr != nil {
+					t.Fatalf("Execute() error = %v", executeErr)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("blocking reconciliation check was not bounded")
+			}
+		})
 	}
 }
 
