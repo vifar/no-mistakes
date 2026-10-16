@@ -287,11 +287,15 @@ func TestExecutor_FixResponseRefusedWhenEarlierDecisionsAreUnavailable(t *testin
 // with a fix response at all.
 func TestExecutor_FixResponseRefusedWhenTheRoundReadFails(t *testing.T) {
 	exec, database, _, _, _ := respondFixStepFindings(t)
+	// The parked row is visible before the executor finishes publishing its
+	// identity. Snapshot under its lock before closing the DB so the injected
+	// failure hits round validation, not the park's identity read.
+	expected := gateSnapshot(exec)
 	if err := database.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1", "R2", "R3"}, nil, nil, nil, "", gateSnapshot(exec))
+	_, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1", "R2", "R3"}, nil, nil, nil, "", expected)
 	var refusal *RespondRefusal
 	if !errors.As(err, &refusal) {
 		t.Fatalf("err = %v, want a refusal", err)
