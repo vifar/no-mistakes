@@ -56,14 +56,10 @@ func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
 				sctx.Fixing = true
 				sctx.PreviousFindings = `{"findings":[{"id":"required-check","severity":"error","description":"Required check failed","action":"auto-fix"}]}`
 			}
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(context.Canceled)
 			sctx.Ctx = ctx
 			sctx.Config.TestAgentTimeout = 5 * time.Second
-			if mode == "deadline" {
-				sctx.Config.TestAgentTimeout = 300 * time.Millisecond
-				sctx.Config.TestAgentWorkingTimeout = 300 * time.Millisecond
-			}
 			// Logging goes through the result channel, so no test method races a late worker.
 			sctx.Log = func(string) {}
 			type response struct {
@@ -74,17 +70,22 @@ func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
 			go func() { o, e := (&TestStep{}).Execute(sctx); result <- response{o, e} }()
 			limit := time.NewTimer(5 * time.Second)
 			defer limit.Stop()
+			// Early-exit modes may finish between readiness polls. Leave their
+			// result buffered for the outcome assertions below.
 			for {
 				if data, err := os.ReadFile(ready); err == nil && len(data) > 0 {
 					break
 				}
 				select {
-				case r := <-result:
-					t.Fatalf("ended before the child started: %#v %v", r.outcome, r.err)
 				case <-limit.C:
 					t.Fatal("child readiness deadline")
 				case <-time.After(10 * time.Millisecond):
 				}
+			}
+			if mode == "deadline" {
+				// Deliver the budget cut only after the native child is running;
+				// a short startup deadline can expire before cancellation is testable.
+				cancel(errTestAgentTimeout)
 			}
 			if mode == "zombie-success" {
 				pid, err := os.ReadFile(ready)
@@ -132,7 +133,7 @@ func TestTestNativeEarlyResultChildCompletion(t *testing.T) {
 			select {
 			case got = <-result:
 			case <-time.After(10 * time.Second):
-				cancel()
+				cancel(context.Canceled)
 				t.Fatal("native step did not settle within the independent 10s outer guard")
 			}
 			t.Logf("mode=%s error=%v approval=%v", mode, got.err, got.outcome != nil && got.outcome.NeedsApproval)
