@@ -833,10 +833,20 @@ func TestExecutorReconciliationWaitsDurablyForCapacity(t *testing.T) {
 	}
 }
 
+type acquisitionHookSlot struct {
+	recordingSlot
+	onAcquire func()
+}
+
+func (s *acquisitionHookSlot) Acquire(ctx context.Context) error {
+	s.onAcquire()
+	return s.recordingSlot.Acquire(ctx)
+}
+
 func TestRecoveredGateKeepsAcceptanceParkedDuration(t *testing.T) {
 	for _, reconcile := range []bool{false, true} {
-		for _, cancelled := range []bool{false, true} {
-			t.Run(fmt.Sprintf("reconcile=%t/cancelled=%t", reconcile, cancelled), func(t *testing.T) {
+		for _, cancellation := range []string{"none", "before-resume", "on-acquire"} {
+			t.Run(fmt.Sprintf("reconcile=%t/cancellation=%s", reconcile, cancellation), func(t *testing.T) {
 				database, p, run, repo := setupTest(t)
 				workDir := completionFixture(t, database, run)
 				if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
@@ -893,12 +903,18 @@ func TestRecoveredGateKeepsAcceptanceParkedDuration(t *testing.T) {
 				run.AwaitingAgentSince = &parkedAt
 				recovered := NewExecutor(database, p, nil, nil, []Step{step}, nil)
 				recovered.SetRunSlot(&recordingSlot{})
-				ctx, cancel := context.WithCancel(context.Background())
-				defer cancel()
-				if cancelled {
-					cancel()
+				ctx, cancel := context.WithCancelCause(context.Background())
+				defer cancel(context.Canceled)
+				if cancellation == "before-resume" {
+					cancel(errors.New(types.RunCancelReasonAbortedByUser))
+				}
+				if cancellation == "on-acquire" {
+					recovered.SetRunSlot(&acquisitionHookSlot{onAcquire: func() {
+						cancel(errors.New(types.RunCancelReasonAbortedByUser))
+					}})
 				}
 				err = recovered.Resume(ctx, run, repo, workDir)
+				cancelled := cancellation != "none"
 				if (err != nil) != cancelled {
 					t.Fatalf("Resume error = %v, cancelled = %t", err, cancelled)
 				}
