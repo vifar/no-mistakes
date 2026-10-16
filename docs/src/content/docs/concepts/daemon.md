@@ -167,7 +167,7 @@ On startup, the daemon checks for interrupted `pending` or `running` runs and re
 - Records a content-versioned gate configuration stamp only after the whole migration succeeds. Normal restarts check current stamped gates from the filesystem without rerunning the mutating Git commands
 - Clears any parked-awaiting-agent marker so a recovered failed run is not shown as still waiting for `axi respond`
 
-Local recovery completes before IPC opens. Reconciliation of [GitHub commit statuses](/no-mistakes/reference/pipeline-steps/#push) starts in the background only after IPC health succeeds, so slow status endpoints do not delay readiness. Recovery also scans completed, failed, and cancelled runs with unfinished push attempts or final status updates. This closes a crash gap between saving a terminal run and posting its final status. All recovery status reporting shares one 60-second deadline; each post is limited to 15 seconds or the remaining overall budget, whichever is shorter. Shutdown cancels and waits for that background reporter.
+Local recovery completes before IPC opens. Reconciliation of [GitHub commit statuses](/no-mistakes/reference/pipeline-steps/#push) starts in the background only after IPC health succeeds, so slow status endpoints do not delay readiness. Recovery also scans completed, failed, and cancelled runs with unfinished publication attempts or final status updates. This closes a crash gap between saving a terminal run and posting its final status. All recovery status reporting shares one 60-second deadline; each post is limited to 15 seconds or the remaining overall budget, whichever is shorter. Shutdown cancels and waits for that background reporter.
 
 ## Logging
 
