@@ -3,6 +3,7 @@ package steps
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -145,6 +146,10 @@ func resolveAndApplyPRTarget(sctx *pipeline.StepContext, reader scm.PRFactsReade
 		if retargeter == nil {
 			return pipeline.PRTargetSelection{}, false, fmt.Errorf("provider cannot retarget recorded pull request to %s", requested)
 		}
+		if err := sctx.DB.MarkRunRetargetAttempted(sctx.Run.ID); err != nil {
+			return pipeline.PRTargetSelection{}, false, err
+		}
+		sctx.Run.RetargetAttempted = true
 		if err := retargeter.SetPRBaseBranch(sctx.Ctx, prFromOwnedURL(selection.PRURL), requested); err != nil {
 			return pipeline.PRTargetSelection{}, false, fmt.Errorf("retarget recorded pull request to %s: %w", requested, err)
 		}
@@ -164,9 +169,18 @@ func resolveAndApplyPRTarget(sctx *pipeline.StepContext, reader scm.PRFactsReade
 	return selection, freshRetarget, nil
 }
 
-func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName, selection pipeline.PRTargetSelection, freshRetarget bool) (pipeline.PRContextDecision, error) {
+func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName, selection pipeline.PRTargetSelection, freshRetarget bool) (decision pipeline.PRContextDecision, err error) {
 	if sctx == nil || sctx.DB == nil || sctx.Run == nil || sctx.Repo == nil {
 		return pipeline.PRContextDecision{}, fmt.Errorf("PR context requires a run, repository, and database")
+	}
+
+	previous, err := sctx.DB.GetRunPRContext(sctx.Run.ID)
+	if err != nil {
+		return pipeline.PRContextDecision{}, err
+	}
+	pending, err := sctx.DB.GetPendingTargetRewind(sctx.Run.ID)
+	if err != nil {
+		return pipeline.PRContextDecision{}, err
 	}
 	candidate, err := readPRComparison(sctx, selection)
 	if err != nil {
@@ -189,13 +203,52 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 		candidate.PRURL = selection.PRURL
 		candidate.ForgeHeadSHA = selection.ForgeHeadSHA
 	}
-	previous, err := sctx.DB.GetRunPRContext(sctx.Run.ID)
-	if err != nil {
-		return pipeline.PRContextDecision{}, err
-	}
 	if previous != nil && previous.SourceBranch == candidate.SourceBranch &&
 		scm.SameSourceRepository(resolvedProvider(sctx), previous.SourceRepo, candidate.SourceRepo) {
 		candidate.SourceRepo = previous.SourceRepo
+	}
+
+	eligible, eligibilityErr := sctx.DB.CanRewindTarget(sctx.Run.ID, step)
+	eligible = eligible && sctx.Run.Shipping == nil
+	if eligibilityErr != nil {
+		return pipeline.PRContextDecision{}, eligibilityErr
+	}
+	var observedSource *string
+	targetChanged := previous != nil && (previous.TargetBranch != candidate.TargetBranch || previous.TargetSHA != candidate.TargetSHA)
+	if pending != nil || targetChanged && !(freshRetarget && previous.TargetBranch != candidate.TargetBranch) && eligible {
+		observed, cleanup, observeErr := observeRewindRemotes(sctx, selection.TargetBranch, previous.Generation)
+		if observeErr != nil {
+			return pipeline.PRContextDecision{}, observeErr
+		}
+		defer func() { err = errors.Join(err, cleanup()) }()
+		observedSource = observed.source
+		if pending != nil && !sameRewindSource(pending.SourceSHA, observedSource) {
+			return pipeline.PRContextDecision{}, fmt.Errorf("PR comparison changed: remote source changed during pending rewind; start a new run")
+		}
+		exact, compareErr := prComparisonAtTarget(sctx, candidate.TargetBranch, observed.target, candidate.LocalHeadSHA)
+		if compareErr != nil {
+			return pipeline.PRContextDecision{}, compareErr
+		}
+		candidate.TargetSHA, candidate.MergeBaseSHA, candidate.DiffDigest = exact.TargetSHA, exact.MergeBaseSHA, exact.DiffDigest
+		targetChanged = previous.TargetBranch != candidate.TargetBranch || previous.TargetSHA != candidate.TargetSHA
+	}
+	if targetChanged && !(freshRetarget && previous.TargetBranch != candidate.TargetBranch) && eligible {
+		_, bindErr := classifyTargetAdvance(sctx, step, selection, previous, candidate, observedSource)
+		if bindErr != nil {
+			return pipeline.PRContextDecision{}, bindErr
+		}
+		return pipeline.PRContextDecision{Target: selection, RestartFrom: types.StepRebase}, nil
+	}
+	if pending != nil && !(step == types.StepRebase && sctx.PRContextAfterStep && sctx.PRContextRebaseCompleted) {
+		if candidate.LocalHeadSHA != previous.LocalHeadSHA || candidate.LocalHeadSHA != sctx.Run.HeadSHA || candidate.LocalHeadSHA != pending.LocalHeadSHA || !sameRewindIdentity(previous, candidate) {
+			return pipeline.PRContextDecision{}, fmt.Errorf("PR comparison changed during pending rewind; start a new run")
+		}
+		// A parked result or a recovered gate never completes integration.
+		decision = pipeline.PRContextDecision{Target: selection}
+		if step != types.StepRebase {
+			decision.RestartFrom = types.StepRebase
+		}
+		return decision, nil
 	}
 	resetFrom := types.StepReview
 	if previous == nil || previous.TargetBranch != candidate.TargetBranch ||
@@ -246,7 +299,9 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 		return pipeline.PRContextDecision{}, fmt.Errorf("PR comparison changed after %s; start a new run for the current target and head", resetFrom)
 	}
 	var bound db.PRContextBindResult
-	if forward {
+	if pending != nil && step == types.StepRebase && sctx.PRContextRebaseCompleted {
+		bound, err = sctx.DB.CompleteRebasePRContext(sctx.Run.ID, candidate, previous.Generation)
+	} else if forward {
 		bound, err = sctx.DB.AdvanceRunPRContext(sctx.Run.ID, candidate)
 	} else {
 		bound, err = sctx.DB.BindRunPRContext(sctx.Run.ID, candidate, resetFrom)
@@ -258,7 +313,7 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 		url := candidate.PRURL
 		sctx.Run.PRURL = &url
 	}
-	decision := pipeline.PRContextDecision{Target: selection}
+	decision = pipeline.PRContextDecision{Target: selection}
 	if previous != nil && bound.Changed {
 		if !forward && !sameComparisonExceptNewPRIdentity(previous, candidate) && step.Order() >= resetFrom.Order() {
 			decision.RestartFrom = resetFrom

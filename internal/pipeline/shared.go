@@ -1,7 +1,14 @@
 package pipeline
 
 import (
+	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+
+	"github.com/kunchenguid/no-mistakes/internal/git"
 )
 
 // HousekeepingLintResult is the lint assessment produced by the combined
@@ -84,4 +91,39 @@ func (s *RunShared) TakeHousekeepingLint() (HousekeepingLintResult, bool) {
 	result := *s.housekeepingLint
 	s.housekeepingLint = nil
 	return result, true
+}
+
+// PreparationMarkerPath is shared by preparation and rewind invalidation.
+func PreparationMarkerPath(ctx context.Context, workDir string) (string, error) {
+	path, err := git.Run(ctx, workDir, "rev-parse", "--git-path", "no-mistakes-prepared")
+	if err != nil {
+		return "", fmt.Errorf("resolve preparation marker: %w", err)
+	}
+	path = strings.TrimSpace(path)
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(workDir, path)
+	}
+	return filepath.Clean(path), nil
+}
+
+// InvalidatePreparation holds the SAME lock as EnsurePrepared until marker
+// removal and memory invalidation finish. An old callback cannot recreate a
+// stale marker after invalidation, and removal failures stop the run.
+func (s *RunShared) InvalidatePreparation(ctx context.Context, workDir string) error {
+	if s != nil {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+	}
+	marker, err := PreparationMarkerPath(ctx, workDir)
+	if err != nil {
+		return err
+	}
+	if err = os.Remove(marker); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove preparation marker for target rewind: %w", err)
+	}
+	if s != nil {
+		s.prepared = false
+		s.housekeepingLint = nil
+	}
+	return nil
 }

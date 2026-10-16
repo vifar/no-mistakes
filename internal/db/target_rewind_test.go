@@ -240,3 +240,96 @@ func TestTargetRewindOrdinaryBindsNeverCharge(t *testing.T) {
 	}
 	assertRewindCharge(t, d, id, 0, false)
 }
+
+func TestTargetRewindConcurrentIdenticalClassificationChargesOnce(t *testing.T) {
+	d, id, c, req := targetRewindDBFixture(t)
+	type result struct {
+		bind PRContextBindResult
+		err  error
+	}
+	results := make(chan result, 2)
+	for i := 0; i < 2; i++ {
+		go func() { b, err := d.RewindRunPRContext(id, c, req); results <- result{b, err} }()
+	}
+	changes := 0
+	for i := 0; i < 2; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		if r.bind.Changed {
+			changes++
+		}
+	}
+	if changes != 1 {
+		t.Fatalf("identical concurrent classifications changed %d times", changes)
+	}
+	assertRewindCharge(t, d, id, 1, true)
+}
+
+func TestTargetRewindOriginalPinSurvivesDatabaseReopen(t *testing.T) {
+	d, id, c, req := targetRewindDBFixture(t)
+	source := strings.Repeat("9", 40)
+	req.SourceSHA = &source
+	if _, err := d.RewindRunPRContext(id, c, req); err != nil {
+		t.Fatal(err)
+	}
+	var sequence int
+	var name, path string
+	if err := d.sql.QueryRow(`PRAGMA database_list`).Scan(&sequence, &name, &path); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	pending, err := reopened.GetPendingTargetRewind(id)
+	if err != nil || pending == nil || pending.SourceSHA == nil || *pending.SourceSHA != source || pending.LocalHeadSHA != c.LocalHeadSHA || pending.TargetSHA != c.TargetSHA {
+		t.Fatalf("pending pin did not survive reopen: %+v %v", pending, err)
+	}
+	assertRewindCharge(t, reopened, id, 1, true)
+}
+
+func TestTargetRewindPreservesCoreSkipChoicesWithoutPreservingEvidence(t *testing.T) {
+	d, id, c, req := targetRewindDBFixture(t)
+	testStep, err := d.InsertStepResult(id, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	custom, err := d.InsertStepResult(id, types.CustomGateStepName(types.StepTest, "audit"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []*StepResult{testStep, custom} {
+		if _, err := d.sql.Exec(`UPDATE step_results SET status='skipped',findings_json='obsolete',pending_response='obsolete' WHERE id=?`, row.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.RewindRunPRContext(id, c, req); err != nil {
+		t.Fatal(err)
+	}
+	preserved, err := d.GetStepResult(testStep.ID)
+	if err != nil || preserved.Status != types.StepStatusSkipped || preserved.FindingsJSON != nil || preserved.PendingResponse != nil {
+		t.Fatalf("requested core skip was lost or kept evidence: %+v %v", preserved, err)
+	}
+	reset, err := d.GetStepResult(custom.ID)
+	if err != nil || reset.Status != types.StepStatusPending || reset.FindingsJSON != nil || reset.PendingResponse != nil {
+		t.Fatalf("custom gate was not reset: %+v %v", reset, err)
+	}
+	c.LocalHeadSHA = strings.Repeat("f", 40)
+	if err := d.UpdateRunHeadSHA(id, c.LocalHeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.CompleteRebasePRContext(id, c, 2); err != nil {
+		t.Fatal(err)
+	}
+	preserved, err = d.GetStepResult(testStep.ID)
+	if err != nil || preserved.Status != types.StepStatusSkipped || preserved.FindingsJSON != nil {
+		t.Fatalf("Rebase completion lost the core skip choice: %+v %v", preserved, err)
+	}
+
+}

@@ -96,15 +96,7 @@ func ensurePrepared(sctx *pipeline.StepContext, logStep types.StepName) error {
 }
 
 func preparationMarkerPath(ctx context.Context, workDir string) (string, error) {
-	path, err := git.Run(ctx, workDir, "rev-parse", "--git-path", "no-mistakes-prepared")
-	if err != nil {
-		return "", fmt.Errorf("resolve preparation marker: %w", err)
-	}
-	path = strings.TrimSpace(path)
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(workDir, path)
-	}
-	return filepath.Clean(path), nil
+	return pipeline.PreparationMarkerPath(ctx, workDir)
 }
 
 func cleanupPreparationChanges(ctx context.Context, workDir, originalHead string, submodules []preparationSubmodule) error {

@@ -46,7 +46,7 @@ func reviewConversationDir(sctx *pipeline.StepContext) string {
 	if !reviewConversationEnabled(sctx) {
 		return ""
 	}
-	return reviewqa.Dir(sctx.EvidenceDir)
+	return runReviewConversationDir(sctx)
 }
 
 // reviewConversationReadDir is where an EXISTING conversation may be read from,
@@ -79,7 +79,7 @@ func reviewConversationReadDir(sctx *pipeline.StepContext) string {
 	if sctx == nil || strings.TrimSpace(sctx.EvidenceDir) == "" {
 		return ""
 	}
-	dir := reviewqa.Dir(sctx.EvidenceDir)
+	dir := runReviewConversationDir(sctx)
 	if _, err := os.Stat(filepath.Join(dir, reviewqa.QuestionsFile)); err != nil {
 		return ""
 	}
@@ -624,4 +624,11 @@ func (s *ReviewStep) ResumeApprovalGate(sctx *pipeline.StepContext, findingsJSON
 		sctx.Log("every review question is answered; resuming the reviewer to finish its pass")
 	}
 	return types.ActionAnswer, true, nil
+}
+
+func runReviewConversationDir(sctx *pipeline.StepContext) string {
+	if sctx.ReviewConversationDir != "" {
+		return sctx.ReviewConversationDir
+	}
+	return reviewqa.Dir(sctx.EvidenceDir)
 }

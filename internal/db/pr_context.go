@@ -146,9 +146,19 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 			return PRContextBindResult{}, fmt.Errorf("bind run PR context: PR identity conflict")
 		}
 		if previous.PRContextCandidate == candidate && (options == nil || options.completeGeneration == nil) {
+
+			if options != nil && options.rewind != nil {
+				pending, err := pendingTargetRewind(tx, runID)
+				if err != nil {
+					return PRContextBindResult{}, err
+				}
+				if pending != nil && !sameOptionalSHA(pending.SourceSHA, options.rewind.SourceSHA) {
+					return PRContextBindResult{}, fmt.Errorf("remote source changed during pending rewind")
+				}
+			}
 			return PRContextBindResult{Generation: previous.Generation}, nil
 		}
-		if previous.Generation == math.MaxInt64 {
+		if previous.Generation == math.MaxInt64 && previous.PRContextCandidate != candidate {
 			return PRContextBindResult{}, fmt.Errorf("bind run PR context: generation exhausted")
 		}
 	}
@@ -247,6 +257,11 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 		}
 	}
 	if !initial && !identityOnlyAttach && !forward {
+		if rewindRun != nil {
+			if _, err := tx.Exec(`UPDATE review_comparisons SET approved=0 WHERE run_id=?`, runID); err != nil {
+				return PRContextBindResult{}, err
+			}
+		}
 		if _, err := tx.Exec(`DELETE FROM step_rounds WHERE step_result_id IN (
 			SELECT id FROM step_results WHERE run_id=? AND step_order>=?)`, runID, resetFrom.Order()); err != nil {
 			return PRContextBindResult{}, fmt.Errorf("bind run PR context: discard superseded rounds: %w", err)
@@ -256,13 +271,18 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 			awaiting_agent_since=NULL, updated_at=? WHERE id=?`, ts, runID); err != nil {
 			return PRContextBindResult{}, fmt.Errorf("bind run PR context: revoke run authority: %w", err)
 		}
-		if _, err := tx.Exec(`UPDATE step_results SET status=?, exit_code=NULL,
+		// A skipped core step is a pinned execution choice, not validation
+		// credit. Keep that choice durable if this rewind later parks, while
+		// discarding all its evidence and rerunning every custom gate.
+		preserveSkips := options != nil && (options.rewind != nil || options.completeGeneration != nil)
+		if _, err := tx.Exec(`UPDATE step_results SET status=CASE WHEN ? AND status='skipped'
+            AND step_name IN ('review','test','document','lint','push','pr','ci') THEN 'skipped' ELSE ? END, exit_code=NULL,
 			duration_ms=NULL, log_path=NULL, findings_json=NULL, error=NULL,
 			started_at=NULL, round_started_at=NULL, completed_at=NULL,
 			last_activity_at=NULL, last_activity=NULL, agent_pid=NULL,
 			auto_fix_limit=NULL, ci_fix_attempts=0, override_reason=NULL,
-			approval_reason=NULL, accepted_gaps_json=NULL, skip_reason=NULL, pending_response=NULL
-			WHERE run_id=? AND step_order>=?`, types.StepStatusPending, runID, resetFrom.Order()); err != nil {
+			approval_reason=NULL, accepted_gaps_json=NULL, skip_reason=NULL, pending_response=CASE WHEN ? THEN NULL ELSE pending_response END
+			WHERE run_id=? AND step_order>=?`, preserveSkips, types.StepStatusPending, rewindRun != nil, runID, resetFrom.Order()); err != nil {
 			return PRContextBindResult{}, fmt.Errorf("bind run PR context: reset dependent steps: %w", err)
 		}
 	}

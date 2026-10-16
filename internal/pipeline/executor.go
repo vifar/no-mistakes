@@ -59,16 +59,17 @@ type approvalResponse struct {
 
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
 type Executor struct {
-	db             *db.DB
-	paths          *paths.Paths
-	config         *config.Config
-	forge          *forgecontext.Context
-	agent          agent.Agent
-	steps          []Step
-	skips          map[types.StepName]bool
-	prContextGuard func(*StepContext, types.StepName) (PRContextDecision, error)
-	prTarget       *PRTargetSelection
-	prContext      *db.PRContext
+	db                 *db.DB
+	paths              *paths.Paths
+	config             *config.Config
+	forge              *forgecontext.Context
+	agent              agent.Agent
+	steps              []Step
+	skips              map[types.StepName]bool
+	prContextGuard     func(*StepContext, types.StepName) (PRContextDecision, error)
+	prTarget           *PRTargetSelection
+	prContext          *db.PRContext
+	evidenceGeneration atomic.Int64
 
 	onEvent EventFunc
 
@@ -141,7 +142,11 @@ func (e *Executor) SetPRContextGuard(guard func(*StepContext, types.StepName) (P
 	e.prContextGuard = guard
 }
 
-func (e *Executor) checkPRContext(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, stepName types.StepName, currentIndex int, afterStep bool) (int, error) {
+func (e *Executor) checkPRContext(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, stepName types.StepName, currentIndex int, afterStep bool, rebaseCompleted ...bool) (int, error) {
+	when := "before"
+	if afterStep {
+		when = "after"
+	}
 	if run.Shipping != nil || e.prContextGuard == nil || stepName.Order() < types.StepRebase.Order() || e.skips[stepName] && !afterStep {
 		return -1, nil
 	}
@@ -152,15 +157,16 @@ func (e *Executor) checkPRContext(ctx context.Context, run *db.Run, repo *db.Rep
 		Ctx: ctx, Run: run, Repo: repo, WorkDir: workDir,
 		Config: e.config, ForgeContext: e.forge, DB: e.db,
 		PRTarget: e.prTarget, PRContext: e.prContext,
-		PRContextAfterStep: afterStep,
-		Log:                func(message string) { slog.Info("PR context", "run_id", run.ID, "message", message) },
-		LogFile:            func(message string) { slog.Info("PR context", "run_id", run.ID, "message", message) },
+		PRContextAfterStep:       afterStep,
+		PRContextRebaseCompleted: len(rebaseCompleted) > 0 && rebaseCompleted[0],
+		Log:                      func(message string) { slog.Info("PR context", "run_id", run.ID, "message", message) },
+		LogFile:                  func(message string) { slog.Info("PR context", "run_id", run.ID, "message", message) },
 	}, stepName)
 	if err != nil {
-		return -1, fmt.Errorf("check PR context before %s: %w", stepName, err)
+		return -1, fmt.Errorf("check PR context %s %s: %w", when, stepName, err)
 	}
 	if strings.TrimSpace(decision.Target.TargetBranch) == "" {
-		return -1, fmt.Errorf("check PR context before %s: target is empty", stepName)
+		return -1, fmt.Errorf("check PR context %s %s: target is empty", when, stepName)
 	}
 	selected := decision.Target
 	e.prTarget = &selected
@@ -169,6 +175,20 @@ func (e *Executor) checkPRContext(ctx context.Context, run *db.Run, repo *db.Rep
 		return -1, fmt.Errorf("load PR context after %s: %w", stepName, err)
 	}
 	e.prContext = receipt
+
+	current, err := e.db.GetRun(run.ID)
+	if err != nil {
+		return -1, err
+	}
+	if current != nil {
+		if current.TargetAdvanceRewinds > e.evidenceGeneration.Load() {
+			if err = e.applyTargetRewind(ctx, run, workDir, current.TargetAdvanceRewinds); err != nil {
+				return -1, err
+			}
+		}
+		run.TargetAdvanceRewinds = current.TargetAdvanceRewinds
+		run.PendingTargetRewindID = current.PendingTargetRewindID
+	}
 	if decision.RestartFrom == "" || (decision.RestartFrom == stepName && !afterStep) {
 		return -1, nil
 	}
@@ -235,7 +255,7 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 // from StepContext rather than recomputing a path, which is what let the
 // steering preamble and the test step drift apart while both hardcoded the
 // system temp directory.
-func (e *Executor) runEvidenceDir(runID string) string {
+func (e *Executor) runEvidenceRoot(runID string) string {
 	if e.paths == nil {
 		return ""
 	}
@@ -244,6 +264,52 @@ func (e *Executor) runEvidenceDir(runID string) string {
 		configured = e.config.Test.Evidence.LocalRoot
 	}
 	return e.paths.RunEvidenceDir(configured, runID)
+}
+
+func (e *Executor) runEvidenceDir(runID string) string {
+	root := e.runEvidenceRoot(runID)
+	if root == "" {
+		return ""
+	}
+	return filepath.Join(root, fmt.Sprintf("g%d", e.evidenceGeneration.Load()))
+}
+
+// applyTargetRewind runs between completed step calls, including guard-driven
+// jumps that do not pass prepareRestart. A failed invalidation is terminal.
+func (e *Executor) applyTargetRewind(ctx context.Context, run *db.Run, workDir string, generation int64) error {
+	if err := e.shared.InvalidatePreparation(ctx, workDir); err != nil {
+		return err
+	}
+	root := e.runEvidenceRoot(run.ID)
+	if root != "" {
+		for old := e.evidenceGeneration.Load(); old < generation; old++ {
+			source := filepath.Join(root, fmt.Sprintf("g%d", old))
+			destination := filepath.Join(root, "superseded", fmt.Sprintf("g%d", old))
+			if _, err := os.Stat(source); os.IsNotExist(err) {
+				continue
+			} else if err != nil {
+				return err
+			}
+			if err := os.MkdirAll(filepath.Dir(destination), 0700); err != nil {
+				return err
+			}
+			if err := os.Rename(source, destination); err != nil {
+				return fmt.Errorf("supersede evidence generation: %w", err)
+			}
+		}
+	}
+	e.evidenceGeneration.Store(generation)
+	e.mu.Lock()
+	e.recoveredResponse = nil
+	e.answeredParkedMS = 0
+	e.slotWaitStep = ""
+	e.mu.Unlock()
+	run.TerminalHeadVerifiedAt = nil
+	run.AwaitingAgentSince = nil
+	run.ReviewApprovedHeadSHA = nil
+	run.CIReadyAt = nil
+	run.CIReadyNoCI = false
+	return nil
 }
 
 // SetGateReconcileTimings overrides the interval between approval-gate
@@ -336,6 +402,23 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 	if step != e.waitingStep {
 		e.mu.Unlock()
 		return RespondDispositions{}, fmt.Errorf("step mismatch: responding to %q but %q is awaiting approval", step, e.waitingStep)
+	}
+
+	if step == types.StepRebase && (action == types.ActionApprove || action == types.ActionSkip) {
+		row, err := e.db.GetStepResult(e.waitingStepResultID)
+		if err != nil || row == nil {
+			e.mu.Unlock()
+			return RespondDispositions{}, fmt.Errorf("cannot read parked Rebase")
+		}
+		pending, err := e.db.GetPendingTargetRewind(row.RunID)
+		if err != nil {
+			e.mu.Unlock()
+			return RespondDispositions{}, err
+		}
+		if pending != nil {
+			e.mu.Unlock()
+			return RespondDispositions{}, fmt.Errorf("pending target rewind requires successful Rebase integration; approve and skip are refused")
+		}
 	}
 	if e.waitingShipping != nil {
 		if action == types.ActionSkip {
@@ -757,6 +840,9 @@ func (e *Executor) RegisterRecoveredGate(run *db.Run) error {
 	if identity.Nonce == "" || identity.RoundID != gate.lastRoundID {
 		return fmt.Errorf("recovered approval gate has no complete identity")
 	}
+	// A durable park proves the earlier generation's invalidation completed.
+	// Loading it is not a new rewind and must preserve an accepted pending fix.
+	e.evidenceGeneration.Store(run.TargetAdvanceRewinds)
 	if gate.stepResult.PendingResponse != nil {
 		// The operator already answered this gate; only the slot wait was
 		// interrupted. Recover it as an answered gate: no new response is
@@ -924,9 +1010,10 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		// reads the run's evidence - ReviewStep.ResumeApprovalGate resolves the
 		// conversation directory from it - would otherwise decline on every tick
 		// of a RECOVERED park, which is the daemon-restart window it exists for.
-		EvidenceDir: e.runEvidenceDir(run.ID),
-		PRTarget:    e.prTarget,
-		PRContext:   e.prContext,
+		EvidenceDir:           e.runEvidenceDir(run.ID),
+		ReviewConversationDir: reviewqa.Dir(e.runEvidenceRoot(run.ID)),
+		PRTarget:              e.prTarget,
+		PRContext:             e.prContext,
 		Log: func(message string) {
 			slog.Info("recovered approval gate reconciliation", "run_id", run.ID, "step", gate.step.Name(), "message", message)
 		},
@@ -1598,32 +1685,33 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		return nil
 	}
 	sctx := &StepContext{
-		Ctx:               ctx,
-		Run:               run,
-		Repo:              repo,
-		WorkDir:           workDir,
-		GateDir:           e.paths.RepoDir(repo.ID),
-		Agent:             limitAgent(stepAgent, e.slot),
-		Config:            e.config,
-		ForgeContext:      e.forge,
-		PRTarget:          e.prTarget,
-		PRContext:         e.prContext,
-		DB:                e.db,
-		StepResultID:      sr.ID,
-		Slot:              e.slot,
-		UserIntent:        userIntent,
-		IntentSource:      userIntentSource,
-		Sessions:          e.sessions,
-		Shared:            e.shared,
-		EvidenceDir:       e.runEvidenceDir(run.ID),
-		Fixing:            state.fixing,
-		SkipFixExecution:  state.skipFixExecution,
-		FinalizingAnswers: state.answering,
-		CarriedFindings:   answerRoundCarriedFindings(state.answering, outstandingFindings),
-		PreviousFindings:  state.previousFindings,
-		DeferredFindings:  state.deferredFindings,
-		Log:               writeLog,
-		LogChunk:          writeLogChunk,
+		Ctx:                   ctx,
+		Run:                   run,
+		Repo:                  repo,
+		WorkDir:               workDir,
+		GateDir:               e.paths.RepoDir(repo.ID),
+		Agent:                 limitAgent(stepAgent, e.slot),
+		Config:                e.config,
+		ForgeContext:          e.forge,
+		PRTarget:              e.prTarget,
+		PRContext:             e.prContext,
+		DB:                    e.db,
+		StepResultID:          sr.ID,
+		Slot:                  e.slot,
+		UserIntent:            userIntent,
+		IntentSource:          userIntentSource,
+		Sessions:              e.sessions,
+		Shared:                e.shared,
+		EvidenceDir:           e.runEvidenceDir(run.ID),
+		ReviewConversationDir: reviewqa.Dir(e.runEvidenceRoot(run.ID)),
+		Fixing:                state.fixing,
+		SkipFixExecution:      state.skipFixExecution,
+		FinalizingAnswers:     state.answering,
+		CarriedFindings:       answerRoundCarriedFindings(state.answering, outstandingFindings),
+		PreviousFindings:      state.previousFindings,
+		DeferredFindings:      state.deferredFindings,
+		Log:                   writeLog,
+		LogChunk:              writeLogChunk,
 		LogFile: func(text string) {
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
@@ -1718,11 +1806,22 @@ rounds:
 			if indexErr != nil {
 				return false, "", indexErr
 			}
-			restartIndex, contextErr := e.checkPRContext(ctx, run, repo, workDir, stepName, currentIndex, true)
+			priorGeneration := e.evidenceGeneration.Load()
+			restartIndex, contextErr := e.checkPRContext(ctx, run, repo, workDir, stepName, currentIndex, true, stepName == types.StepRebase && outcome != nil && !outcome.NeedsApproval && outcome.RestartFrom == "")
 			if contextErr != nil {
 				return false, "", contextErr
 			}
+
+			if e.evidenceGeneration.Load() != priorGeneration {
+				roundNum, autoFixAttempts = 0, 0
+				currentRoundID = ""
+				executionMS, durationOverrideMS = 0, 0
+				outstandingFindings = ""
+				pendingVerificationIDs, selectedOutstandingIDs = nil, nil
+				nextTrigger = "initial"
+			}
 			sctx.PRTarget, sctx.PRContext = e.prTarget, e.prContext
+			sctx.EvidenceDir = e.runEvidenceDir(run.ID)
 			if restartIndex >= 0 {
 				if restartIndex < currentIndex {
 					return false, e.steps[restartIndex].Name(), nil
@@ -1735,6 +1834,7 @@ rounds:
 				}
 				e.emitStepEvent(ipc.EventStepStarted, run, repo, stepName, string(types.StepStatusRunning))
 				sctx.PRTarget, sctx.PRContext = e.prTarget, e.prContext
+				sctx.EvidenceDir = e.runEvidenceDir(run.ID)
 				sctx.Fixing, sctx.SkipFixExecution, sctx.FinalizingAnswers = false, false, false
 				sctx.CarriedFindings, sctx.PreviousFindings, sctx.DeferredFindings = "", "", ""
 				outstandingFindings = ""
@@ -2051,6 +2151,7 @@ rounds:
 					}
 					e.emitStepEvent(ipc.EventStepStarted, run, repo, stepName, string(types.StepStatusRunning))
 					sctx.PRTarget, sctx.PRContext = e.prTarget, e.prContext
+					sctx.EvidenceDir = e.runEvidenceDir(run.ID)
 					sctx.Fixing, sctx.SkipFixExecution, sctx.FinalizingAnswers = false, false, false
 					sctx.CarriedFindings, sctx.PreviousFindings, sctx.DeferredFindings = "", "", ""
 					outstandingFindings = ""
@@ -2060,6 +2161,7 @@ rounds:
 					continue rounds
 				}
 				sctx.PRTarget, sctx.PRContext = e.prTarget, e.prContext
+				sctx.EvidenceDir = e.runEvidenceDir(run.ID)
 			}
 			if reconciled {
 				phaseStart = time.Now()
@@ -3172,7 +3274,7 @@ func (e *Executor) ReviewConversationDir(runID string) string {
 	if !e.ReviewConversationEnabled() {
 		return ""
 	}
-	return reviewqa.Dir(e.runEvidenceDir(runID))
+	return reviewqa.Dir(e.runEvidenceRoot(runID))
 }
 
 // ReviewConversationEnabled reports whether this run's effective config turns
@@ -3223,7 +3325,7 @@ func (e *Executor) ReviewConversationAnswerDir(runID string) string {
 	if e.ReviewConversationEnabled() {
 		return e.ReviewConversationDir(runID)
 	}
-	dir := reviewqa.Dir(e.runEvidenceDir(runID))
+	dir := reviewqa.Dir(e.runEvidenceRoot(runID))
 	if dir == "" {
 		return ""
 	}

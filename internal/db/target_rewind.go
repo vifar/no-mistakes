@@ -74,9 +74,40 @@ func sameOptionalSHA(a, b *string) bool {
 	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
 
-func checkTargetRewindEligibility(tx *sql.Tx, runID string, previous *PRContext, candidate PRContextCandidate, req *TargetAdvanceRewindRequest) (*Run, *TargetAdvanceRewind, error) {
+// CanRewindTarget avoids adding source observations to excluded boundaries.
+// The transaction repeats the same checks before it binds anything.
+func (d *DB) CanRewindTarget(runID string, step types.StepName) (bool, error) {
+	_, err := targetRewindRun(d.sql, runID, step)
+	if errors.Is(err, ErrTargetAdvanceIneligible) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+func targetRewindRun(q rewindQuery, runID string, step types.StepName) (*Run, error) {
 	r := &Run{}
-	if err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id=?`, runID), r); err != nil {
+	if err := scanRun(q.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id=?`, runID), r); err != nil {
+		return nil, err
+	}
+	var prohibited bool
+	if err := q.QueryRow(`SELECT EXISTS (SELECT 1 FROM commit_status_attempts WHERE run_id=?) OR
+ EXISTS (SELECT 1 FROM commit_status_publications WHERE run_id=?) OR
+ EXISTS (SELECT 1 FROM step_results WHERE run_id=? AND step_name='pr' AND status='completed') OR
+ EXISTS (SELECT 1 FROM step_results WHERE run_id=? AND step_name='rebase' AND status='skipped')`, runID, runID, runID, runID).Scan(&prohibited); err != nil {
+		return nil, err
+	}
+	published := r.LastPushedSHA != nil || r.PushGeneration != nil && *r.PushGeneration != 0 || r.RetargetAttempted || prohibited
+
+	if r.Shipping != nil || published || step.Order() < types.StepRebase.Order() || step.Order() > types.StepLint.Order() ||
+		(r.Status != types.RunRunning && r.Status != types.RunPending) {
+		return nil, ErrTargetAdvanceIneligible
+	}
+	return r, nil
+}
+
+func checkTargetRewindEligibility(tx *sql.Tx, runID string, previous *PRContext, candidate PRContextCandidate, req *TargetAdvanceRewindRequest) (*Run, *TargetAdvanceRewind, error) {
+	r, err := targetRewindRun(tx, runID, req.Step)
+	if err != nil {
 		return nil, nil, err
 	}
 	pending, err := pendingTargetRewind(tx, runID)
@@ -86,18 +117,9 @@ func checkTargetRewindEligibility(tx *sql.Tx, runID string, previous *PRContext,
 	if pending != nil && !sameOptionalSHA(pending.SourceSHA, req.SourceSHA) {
 		return nil, nil, fmt.Errorf("%w: remote source changed during pending rewind", ErrTargetAdvanceIneligible)
 	}
-	var prohibited bool
-	if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM commit_status_attempts WHERE run_id=?) OR
- EXISTS (SELECT 1 FROM commit_status_publications WHERE run_id=?) OR
- EXISTS (SELECT 1 FROM step_results WHERE run_id=? AND step_name='pr' AND status='completed') OR
- EXISTS (SELECT 1 FROM step_results WHERE run_id=? AND step_name='rebase' AND status='skipped')`, runID, runID, runID, runID).Scan(&prohibited); err != nil {
-		return nil, nil, err
-	}
-	published := r.LastPushedSHA != nil || r.PushGeneration != nil && *r.PushGeneration != 0 || r.RetargetAttempted || prohibited
 	identity := previous.PRURL == candidate.PRURL && previous.SourceRepo == candidate.SourceRepo && previous.SourceBranch == candidate.SourceBranch && previous.TargetBranch == candidate.TargetBranch && previous.ForgeHeadSHA == candidate.ForgeHeadSHA
 	pinnedPR := !req.HasPR && previous.PRURL == "" || req.HasPR && previous.PRURL != "" && previous.ForgeHeadSHA != "" && previous.ForgeHeadSHA == candidate.ForgeHeadSHA
-	if r.Shipping != nil || published || !identity || !pinnedPR || req.Step.Order() < types.StepRebase.Order() || req.Step.Order() > types.StepLint.Order() ||
-		(r.Status != types.RunRunning && r.Status != types.RunPending) ||
+	if !identity || !pinnedPR ||
 		previous.LocalHeadSHA != candidate.LocalHeadSHA || r.HeadSHA != candidate.LocalHeadSHA || previous.TargetSHA == candidate.TargetSHA || previous.Generation != req.ExpectedGeneration {
 		return nil, nil, ErrTargetAdvanceIneligible
 	}
@@ -105,7 +127,7 @@ func checkTargetRewindEligibility(tx *sql.Tx, runID string, previous *PRContext,
 		return nil, nil, fmt.Errorf("invalid remote source SHA")
 	}
 	if r.TargetAdvanceRewinds >= int64(req.MaxRewinds) {
-		return nil, nil, fmt.Errorf("%w (%d)", ErrTargetAdvanceCap, req.MaxRewinds)
+		return nil, nil, fmt.Errorf("%w (rebase.max_target_advance_rewinds=%d)", ErrTargetAdvanceCap, req.MaxRewinds)
 	}
 	return r, pending, nil
 }
