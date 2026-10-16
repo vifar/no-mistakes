@@ -136,6 +136,9 @@ type managedRun struct {
 // past the cap is an ordinary error, never unbounded growth.
 const maxSubscribersPerRun = 32
 
+// An e2e build can install the same scheduling barrier used by daemon tests.
+var defaultBeforeAnswerRespond func()
+
 // NewRunManager creates a RunManager. Pass nil for stepFactory to use default steps.
 func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *RunManager {
 	if stepFactory == nil {
@@ -150,6 +153,7 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		stateRevs:     make(map[string]int64),
 		completedRuns: make(map[string]bool),
 	}
+	m.beforeAnswerRespond = defaultBeforeAnswerRespond
 	m.limitsCache = runLimits{max: config.DefaultMaxConcurrentRuns}
 	m.claimQueued = database.ClaimQueuedRun
 	m.markQueued = database.MarkRunQueued

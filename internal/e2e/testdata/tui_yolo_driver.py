@@ -35,16 +35,24 @@ def drain(seconds):
                 return
             buf.extend(chunk)
 
-drain(pre)
-for key in keys:
-    os.write(fd, key.encode())
-    drain(0.4)
-drain(post)
-os.write(fd, b"q")
-drain(1.0)
+def interrupted(signum, frame):
+    raise SystemExit(128 + signum)
+
+signal.signal(signal.SIGTERM, interrupted)
+signal.signal(signal.SIGINT, interrupted)
 try:
-    os.kill(pid, signal.SIGTERM)
-except ProcessLookupError:
-    pass
-os.waitpid(pid, 0)
-sys.stdout.write(buf.decode("utf-8", "replace"))
+    drain(pre)
+    for key in keys:
+        os.write(fd, key.encode())
+        drain(0.4)
+    drain(post)
+    os.write(fd, b"q")
+    drain(1.0)
+finally:
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    os.waitpid(pid, 0)
+    os.close(fd)
+    sys.stdout.write(buf.decode("utf-8", "replace"))

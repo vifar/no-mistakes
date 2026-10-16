@@ -880,7 +880,7 @@ func buildBinaries(t *testing.T) (nmBin, fakeBin string) {
 			{nm, "./cmd/no-mistakes"},
 			{fake, "./cmd/fakeagent"},
 		} {
-			cmd := exec.Command("go", "build", "-o", target.out, target.pkg)
+			cmd := exec.Command("go", "build", "-tags=e2e", "-o", target.out, target.pkg)
 			cmd.Dir = repoRoot
 			out, err := cmd.CombinedOutput()
 			if err != nil {
