@@ -362,3 +362,92 @@ func TestAttachCommitStatusJourney(t *testing.T) {
 		})
 	}
 }
+
+// The approval check remains pending independently of the status endpoint. The
+// public contract requires a validated immutable Push to publish success before
+// CI can be ready, avoiding an approval/status circular wait.
+func TestImmutableAttachCommitStatusJourney(t *testing.T) {
+	h, forge := newStatusJourney(t, "github")
+	clean, err := os.ReadFile(h.Scenario)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(clean), "\n  - text: \"no issues found\"")
+	if start < 0 {
+		t.Fatal("clean scenario action is missing")
+	}
+	if err := os.WriteFile(h.Scenario, []byte("actions:"+string(clean[start:])), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	branch, head, wt := statusBranch(t, h, true)
+	gh := filepath.Join(h.BinDir, "gh")
+	delegate := filepath.Join(h.BinDir, "status-delegate")
+	if err := os.Rename(gh, delegate); err != nil {
+		t.Fatal(err)
+	}
+	checks := `{"data":{"repository":{"object":{"statusCheckRollup":{"contexts":{"nodes":[{"__typename":"CheckRun","databaseId":1,"name":"external-approval","status":"IN_PROGRESS","conclusion":null,"checkSuite":{"app":{"slug":"fixture-approval"}}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}}`
+	script := "#!/bin/sh\ncase \"$*\" in\n*'statusCheckRollup'*) printf '%s\\n' " + shellQuote(checks) + " ; exit 0 ;;\n*'mergeable,mergeStateStatus'*) printf 'MERGEABLE CLEAN\\n'; exit 0 ;;\nesac\nexec " + shellQuote(delegate) + " \"$@\"\n"
+	if err := os.WriteFile(gh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out, err := h.RunInDir(wt, "axi", "run", "--shipping-mode", "immutable-source", "--intent", "validate immutable promotion status before external approval", "--wait", "2s")
+	t.Logf("immutable launch: %v\n%s", err, out)
+	if err != nil && !strings.Contains(out, "wait of 2s elapsed") {
+		t.Fatalf("launch failed: %v\n%s", err, out)
+	}
+	run := waitForStepStatus(t, h, branch, types.StepCI, types.StepStatusRunning, 60*time.Second)
+	if run.Status != types.RunRunning || run.CIReady {
+		t.Fatalf("expected CI still pending before completion: %+v", run)
+	}
+	push, _ := findStep(run.Steps, types.StepPush)
+	if push.Status != types.StepStatusCompleted {
+		t.Fatalf("immutable Push did not complete: %+v", push)
+	}
+	forge.assert(t, head, "pending", "success")
+	t.Log(statusCommand(t, h, wt, "axi", "status"))
+	if h.UpstreamBranchSHA(branch) != head {
+		t.Fatal("immutable promotion changed the upstream head")
+	}
+	statusCommand(t, h, wt, "axi", "abort")
+	forge.assert(t, head, "pending", "success", "failure")
+}
+
+// A failed immutable validation must leave the attachment pending while parked,
+// and cancellation must settle it as failure without ever publishing success.
+func TestImmutableAttachFailedValidationJourney(t *testing.T) {
+	h, forge := newStatusJourney(t, "github")
+	clean, err := os.ReadFile(h.Scenario)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(clean), "\n  - text: \"no issues found\"")
+	if start < 0 {
+		t.Fatal("clean scenario action is missing")
+	}
+	scenario := `actions:
+  - match: "You are validating a code change"
+    text: "validation failed"
+    structured:
+      findings: []
+      summary: "validation failed"
+      tested: ["fixture: failing acceptance check"]
+      testing_summary: "fixture acceptance check failed"
+      artifacts: []
+      scenarios:
+        - {name: "fixture acceptance check", result: fail, live: true, evidence: "fixture rejection", reason: ""}
+      verdict: no-go
+` + string(clean[start:])
+	if err := os.WriteFile(h.Scenario, []byte(scenario), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	branch, head, wt := statusBranch(t, h, true)
+	t.Log(statusCommand(t, h, wt, "axi", "run", "--shipping-mode", "immutable-source", "--intent", "refuse success for failed immutable validation"))
+	run := waitForStepStatus(t, h, branch, types.StepTest, types.StepStatusAwaitingApproval, 60*time.Second)
+	push, _ := findStep(run.Steps, types.StepPush)
+	if push.Status != types.StepStatusPending {
+		t.Fatalf("unvalidated immutable source reached Push: %+v", push)
+	}
+	forge.assert(t, head, "pending")
+	statusCommand(t, h, wt, "axi", "abort")
+	forge.assert(t, head, "pending", "failure")
+}
