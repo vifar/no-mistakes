@@ -573,10 +573,10 @@ func marshalSanitizedAnswerLine(a db.ReviewAnswer) string {
 // the conversation, builds a finding for each still-open question and returns;
 // only afterwards does the executor write the step rows and register the gate as
 // waiting. An answer to the last open question landing inside that window is
-// appended to disk, so the daemon's answer handler sees nothing open, calls
-// Respond, gets "no step awaiting approval", and reports the answer recorded -
-// truthfully, but there is no reviewer left to read it. The gate then parks on
-// the pre-answer snapshot and nothing releases it.
+// appended to disk, but the daemon's answer handler captured no parked gate to
+// release. It reports the answer recorded without dispatching a response. The
+// gate then parks on the pre-answer snapshot with no reviewer left to read the
+// answer; this resumer releases that gate for finalization.
 //
 // It returns an ACTION rather than resolving the gate, which is the whole reason
 // ApprovalGateResumer exists: completing the review step here would approve the

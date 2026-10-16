@@ -1526,8 +1526,8 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 	return result, nil
 }
 
-// respondRefusalError carries a refusal the daemon reported for a response that
-// left the gate parked.
+// respondRefusalError carries a refusal the daemon reported without admitting
+// the response. A superseded refusal also carries the current gate identity.
 type respondRefusalError struct {
 	current *types.GateIdentity
 	refusal string
