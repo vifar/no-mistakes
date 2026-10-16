@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -10,12 +9,7 @@ import (
 	toON "github.com/toon-format/toon-go"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
-	"github.com/kunchenguid/no-mistakes/internal/config"
-	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
-	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
-	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/spf13/cobra"
 )
@@ -136,35 +130,7 @@ func newAxiSyncCmd() *cobra.Command {
 }
 
 func openSyncService() (*branchsync.Service, func(), error) {
-	p, d, err := openResources()
-	if err != nil {
-		return nil, nil, err
-	}
-	repo, err := findRepo(d)
-	if err != nil {
-		d.Close()
-		return nil, nil, err
-	}
-	globalCfg, cfgErr := config.LoadGlobal(p.ConfigFile())
-	if cfgErr != nil {
-		d.Close()
-		return nil, nil, cfgErr
-	}
-	service := &branchsync.Service{DB: d, Repo: repo, WorkDir: ".", GateDir: p.RepoDir(repo.ID), Paths: p, RemoteTimeout: globalCfg.BranchSyncRemoteTimeout}
-	service.LookupPRState = func(ctx context.Context, repo *db.Repo, run *db.Run) (scm.PRState, error) {
-		forge, err := forgecontext.Resolve(ctx, globalCfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
-		if err == nil {
-			err = forgecontext.RefuseProviderPluginOverlap(ctx, forge, globalCfg.ProviderPlugins, repo.UpstreamURL)
-		}
-		if err != nil {
-			return "", err
-		}
-		return steps.ReadPRState(&pipeline.StepContext{
-			Ctx: ctx, Run: run, Repo: repo, WorkDir: service.WorkDir,
-			Config: config.Merge(globalCfg, &config.RepoConfig{}), ForgeContext: forge,
-		})
-	}
-	return service, func() { _ = d.Close() }, nil
+	return branchsync.OpenCurrent(steps.NewPRStateLookup)
 }
 
 func runHumanSync(cmd *cobra.Command, check, yes bool) error {

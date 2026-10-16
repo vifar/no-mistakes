@@ -171,7 +171,7 @@ type Service struct {
 	// LookupPRState reads the recorded PR through the caller's configured SCM
 	// host and credential context. Nil means no host is available. Refresh and
 	// Apply bound the lookup with RemoteTimeout, like the remote Git reads.
-	LookupPRState func(context.Context, *db.Repo, *db.Run) (scm.PRState, error)
+	LookupPRState PRStateLookup
 
 	// Remote operation seams are service-local so tests can substitute
 	// controlled fakes without changing process-wide state observed by
@@ -251,9 +251,11 @@ func (s *Service) confirmPRState(ctx context.Context, repo *db.Repo, run *db.Run
 	return state, nil
 }
 
+type PRStateLookup func(context.Context, *db.Repo, *db.Run) (scm.PRState, error)
+
 // OpenCurrent opens a service for the invoking registered worktree. The caller
 // owns the returned close function.
-func OpenCurrent() (*Service, func(), error) {
+func OpenCurrent(lookupFactory func(*config.GlobalConfig, string) PRStateLookup) (*Service, func(), error) {
 	p, err := paths.New()
 	if err != nil {
 		return nil, nil, err
@@ -287,7 +289,7 @@ func OpenCurrent() (*Service, func(), error) {
 		database.Close()
 		return nil, nil, cfgErr
 	}
-	return &Service{DB: database, Repo: repo, WorkDir: root, GateDir: p.RepoDir(repo.ID), Paths: p, RemoteTimeout: globalCfg.BranchSyncRemoteTimeout}, func() { _ = database.Close() }, nil
+	return &Service{DB: database, Repo: repo, WorkDir: root, GateDir: p.RepoDir(repo.ID), Paths: p, RemoteTimeout: globalCfg.BranchSyncRemoteTimeout, LookupPRState: lookupFactory(globalCfg, root)}, func() { _ = database.Close() }, nil
 }
 
 // TargetFingerprint returns a stable one-way identity for a credential-free,

@@ -9,6 +9,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -492,7 +493,7 @@ func (m *Model) refreshCachedSync() {
 func Run(socketPath string, client *ipc.Client, run *ipc.RunInfo, latestVersion string) error {
 	model := NewModel(socketPath, client, run)
 	model.latestVersion = latestVersion
-	if service, closeFn, err := branchsync.OpenCurrent(); err == nil {
+	if service, closeFn, err := branchsync.OpenCurrent(steps.NewPRStateLookup); err == nil {
 		defer closeFn()
 		model.syncService = service
 		model.syncRefresh = func() branchsync.State { return service.Refresh(context.Background()) }
