@@ -1,12 +1,19 @@
 package tui
 
 import (
+	"context"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -327,5 +334,121 @@ func TestActivePipelineOwnedStateOffersNoRecoveryAction(t *testing.T) {
 	m = nextModel.(Model)
 	if cmd != nil || m.recoverConfirm || m.syncConfirm {
 		t.Fatalf("u acted on an active pipeline_owned state: %#v", m)
+	}
+}
+
+func TestBranchSyncActionPersistsRetirementAcrossCachedRefresh(t *testing.T) {
+	for _, live := range []scm.PRState{scm.PRStateMerged, scm.PRStateClosed} {
+		t.Run(string(live), func(t *testing.T) {
+			root := t.TempDir()
+			t.Setenv("NM_HOME", t.TempDir())
+			t.Setenv("NO_MISTAKES_TELEMETRY", "off")
+			realGit, err := testgit.RealGit()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+			t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(root, "unused-gitconfig"))
+			t.Setenv("GIT_CONFIG_COUNT", "0")
+			git := func(args ...string) string {
+				t.Helper()
+				cmd := exec.Command(realGit, args...)
+				cmd.Dir = root
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v: %v: %s", args, err, out)
+				}
+				return strings.TrimSpace(string(out))
+			}
+			git("init", "-b", "feature")
+			git("config", "user.name", "Test")
+			git("config", "user.email", "test@example.com")
+			git("commit", "--allow-empty", "-m", "local")
+			old := git("rev-parse", "HEAD")
+			git("commit", "--allow-empty", "-m", "pipeline")
+			pushed := git("rev-parse", "HEAD")
+			git("reset", "--hard", old)
+			remote := filepath.Join(t.TempDir(), "remote.git")
+			git("init", "--bare", remote)
+			database, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			registeredRoot, err := gitpkg.FindGitRoot(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo, err := database.InsertRepo(registeredRoot, remote, "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.InsertRun(repo.ID, "feature", old, old)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, err := range []error{
+				database.UpdateRunHeadSHA(run.ID, pushed),
+				database.UpdateRunPushBinding(run.ID, db.PushBinding{HeadSHA: pushed, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(remote), Ref: "refs/heads/feature"}),
+				database.UpdateRunPRURL(run.ID, "https://github.com/test/repo/pull/42"),
+				database.UpdateRunPRState(run.ID, "open"),
+				database.UpdateRunErrorStatus(run.ID, types.RunCIMonitorInterruptedReason, types.RunCIMonitorInterrupted),
+			} {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			lookupCalls := 0
+			service := &branchsync.Service{DB: database, Repo: repo, WorkDir: root, LookupPRState: func(context.Context, *db.Repo, *db.Run) (scm.PRState, error) {
+				lookupCalls++
+				return live, nil
+			}}
+			info := &ipc.RunInfo{ID: run.ID, Branch: "feature", Status: types.RunCIMonitorInterrupted}
+			m := NewModel("socket", nil, info)
+			m.setSyncService(service)
+			if m.branchSync == nil || m.branchSync.State != branchsync.StateBehind || lookupCalls != 0 {
+				t.Fatalf("passive attach = %+v, lookups=%d", m.branchSync, lookupCalls)
+			}
+			refsBefore := git("show-ref")
+			next, cmd := m.handleKey(keyMsg("u"))
+			m = next.(Model)
+			if cmd == nil {
+				t.Fatal("u did not schedule refresh")
+			}
+			next, _ = m.Update(cmd())
+			m = next.(Model)
+			wantState := branchsync.StateMergedRemoteRemoved
+			if live == scm.PRStateClosed {
+				wantState = branchsync.StateClosed
+			}
+			if m.branchSync == nil || m.branchSync.State != wantState || m.syncConfirm || m.branchSync.NextAction != nil || lookupCalls != 1 {
+				t.Fatalf("explicit sync = %+v, confirm=%v, lookups=%d", m.branchSync, m.syncConfirm, lookupCalls)
+			}
+			stored, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.PRState == nil || *stored.PRState != strings.ToLower(string(live)) {
+				t.Fatalf("retirement was not persisted: %+v", stored)
+			}
+			m.refreshCachedSync()
+			reattached := NewModel("socket", nil, info)
+			reattached.setSyncService(service)
+			for _, model := range []Model{m, reattached} {
+				if model.branchSync == nil || model.branchSync.PRState != strings.ToLower(string(live)) || model.branchSync.NextAction != nil {
+					t.Fatalf("cached retirement = %+v", model.branchSync)
+				}
+				if strings.Contains(renderLocalBranchStatus(model.branchSync, false, 80), "u sync branch") {
+					t.Fatal("retired branch offers sync")
+				}
+				_, cmd := model.handleKey(keyMsg("u"))
+				if cmd != nil {
+					t.Fatal("retired branch schedules synchronization")
+				}
+			}
+			if lookupCalls != 1 || git("show-ref") != refsBefore || git("rev-parse", "HEAD") != old {
+				t.Fatal("passive refresh contacted forge or sync changed Git refs")
+			}
+		})
 	}
 }

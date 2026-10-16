@@ -495,15 +495,19 @@ func Run(socketPath string, client *ipc.Client, run *ipc.RunInfo, latestVersion 
 	model.latestVersion = latestVersion
 	if service, closeFn, err := branchsync.OpenCurrent(steps.NewPRStateLookup); err == nil {
 		defer closeFn()
-		model.syncService = service
-		model.syncRefresh = func() branchsync.State { return service.Refresh(context.Background()) }
-		model.syncApply = func() branchsync.State { return service.Apply(context.Background()) }
-		model.syncRecover = func(keepLocal bool) branchsync.State { return service.Recover(context.Background(), keepLocal) }
-		model.refreshCachedSync()
+		model.setSyncService(service)
 	}
 	p := tea.NewProgram(model, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
+}
+
+func (m *Model) setSyncService(service *branchsync.Service) {
+	m.syncService = service
+	m.syncRefresh = func() branchsync.State { return service.RefreshForApply(context.Background()) }
+	m.syncApply = func() branchsync.State { return service.Apply(context.Background()) }
+	m.syncRecover = func(keepLocal bool) branchsync.State { return service.Recover(context.Background(), keepLocal) }
+	m.refreshCachedSync()
 }
 
 func tuiRelevantSyncState(state branchsync.State) bool {
