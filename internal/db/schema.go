@@ -473,4 +473,23 @@ var migrationStatements = []string{
 	// ci-ready receipt re-reads live checks outside the daemon and must apply
 	// exactly the scope the CI step used; NULL means none was recorded.
 	`ALTER TABLE runs ADD COLUMN check_scope_json TEXT`,
+	// Each new run starts with no publication-retarget history, no pending
+	// integration, and its own zero rewind budget. Never copy these on rerun.
+	`ALTER TABLE runs ADD COLUMN target_advance_rewinds INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE runs ADD COLUMN pending_target_rewind_id TEXT`,
+	`ALTER TABLE runs ADD COLUMN retarget_attempted INTEGER NOT NULL DEFAULT 0`,
+	`CREATE TABLE IF NOT EXISTS run_target_rewinds (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+        old_target_sha TEXT NOT NULL, target_sha TEXT NOT NULL,
+        local_head_sha TEXT NOT NULL, source_sha TEXT,
+        step TEXT NOT NULL, generation INTEGER NOT NULL, at INTEGER NOT NULL,
+        UNIQUE(run_id,generation)
+    )`,
+	// Every terminal path, including crash recovery and supersession, abandons
+	// active integration but retains its diagnostic rows and charged budget.
+	`CREATE TRIGGER IF NOT EXISTS clear_terminal_target_rewind
+        AFTER UPDATE OF status ON runs
+        WHEN NEW.status NOT IN ('pending','running','queued')
+        BEGIN UPDATE runs SET pending_target_rewind_id=NULL WHERE id=NEW.id; END`,
 }
