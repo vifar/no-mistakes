@@ -18,8 +18,8 @@ import "strings"
 // substring) when deriving the "checks passed" state, so the producer and the
 // consumers must reference these constants rather than spelling out literals.
 const (
-	// ChecksPassedMsg is logged when an observed rollup satisfies the pipeline's
-	// readiness rules but the PR is not yet merged or closed. Excluded checks
+	// ChecksPassedMsg is logged when the check scope establishes readiness
+	// but the PR is not yet merged or closed. Excluded checks
 	// may still be pending or failing; the monitor keeps watching.
 	ChecksPassedMsg = "all CI checks passed - still monitoring until merged or closed"
 	// NoChecksPassedMsg is logged only when the trusted default-branch config
