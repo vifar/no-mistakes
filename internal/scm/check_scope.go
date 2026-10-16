@@ -20,9 +20,9 @@ const (
 	RequiredChecksAll = "all"
 )
 
-// ErrRequiredChecksUnavailable reports that a provider has no readable
-// required-check configuration for a branch: no protection or rules, or no
-// permission to read them. Callers fall back to evaluating every check.
+// ErrRequiredChecksUnavailable reports that a provider cannot supply a complete
+// required-check set, for example because access is denied or a merge rule
+// cannot be mapped to check contexts. Callers fall back to evaluating every check.
 var ErrRequiredChecksUnavailable = errors.New("required status checks are not available for this branch")
 
 // RequiredCheck is one status check a target branch requires before merging.
@@ -55,9 +55,11 @@ func (r RequiredCheck) satisfiedBy(c Check) bool {
 // RequiredChecksReader is implemented by providers that can name the status
 // checks a target branch requires before merging.
 //
-// An implementation returns ErrRequiredChecksUnavailable (possibly wrapped)
-// when the branch has no readable required-check configuration, and any other
-// error when the read itself failed.
+// A readable configuration with no required status checks returns an empty set
+// without error. An explicitly absent protection source can contribute an empty
+// set while other sources still apply. An implementation returns
+// ErrRequiredChecksUnavailable (possibly wrapped) when it cannot supply a complete
+// set, and any other error when the read itself failed.
 type RequiredChecksReader interface {
 	GetRequiredChecks(ctx context.Context, pr *PR, branch string) ([]RequiredCheck, error)
 }
