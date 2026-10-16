@@ -2923,32 +2923,18 @@ func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.Step
 	return exec.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, gaps, expected)
 }
 
-// HandleAnswerReviewQuestion records one operator answer to a question the
-// run's reviewer asked, and releases the review gate once nothing is left
-// open.
+// HandleAnswerReviewQuestion records an operator answer in the run's review
+// conversation.
 //
-// The three outcomes are all correct and all expected:
-//
-//   - the reviewer is still working (no gate parked yet). The answer is
-//     durably appended and the reviewer reads it at its next checkpoint, which
-//     is the whole point of emitting questions mid-turn: an early answer can
-//     redirect the pass instead of arriving after the effort is spent.
-//   - the reviewer has parked in waiting-on-answers. Once this answer closes
-//     the last open question, types.ActionAnswer resumes the reviewer's own
-//     session with the answers. That is the push the captain required: nothing
-//     polls, and the reviewer receives a message it did not ask for.
-//   - this answer closed no question that was open before the append - an id
-//     nobody asked, or a correction sent after the last question was already
-//     answered. It is recorded and NO gate is released; see the wasOpen
-//     snapshot below, which exists because the open count alone would let such
-//     an answer steal the verdict on a gate parked on ordinary findings.
+// Answer delivery, including superseded gate releases, is owned by
+// docs/src/content/docs/concepts/review-conversation.md.
 //
 // Every answer is stamped with the ask it settles, so a correction binds to the
 // already-settled ask instead of pre-answering a later re-ask of the same id.
 // The two ways that stamp cannot be trusted are refused before anything is
-// written, and they stay distinguishable from each other and from the third
-// outcome above: a conversation that cannot be READ AT ALL, and one whose
-// question history could not be read TO THE END.
+// written, and they stay distinguishable from each other and from a recorded
+// answer that closed no open question: a conversation that cannot be READ AT
+// ALL, and one whose question history could not be read TO THE END.
 //
 // The write happens before the release decision, so a failure to resume never
 // loses the answer - the next answer, or a recovered gate, finds it on disk.
