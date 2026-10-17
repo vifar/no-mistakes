@@ -927,6 +927,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 				return ErrParkedAtShutdown
 			}
 		}
+		if e.ciMonitorInterruptedByShutdown(run.ID, err, ctx) {
+			return ErrCIMonitorInterruptedAtShutdown
+		}
 		if cause := context.Cause(ctx); cause != nil && cause.Error() == types.RunCancelReasonAbortedByUser {
 			e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		}
@@ -1879,6 +1882,10 @@ rounds:
 		}
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
+		if err != nil && stepName == types.StepCI && e.ciMonitorInterruptedByShutdown(run.ID, err, ctx) {
+			fmt.Fprintf(logFile, "\n%s; leaving the CI monitor for restart recovery\n", ErrDaemonShutdown)
+			return false, "", ErrCIMonitorInterruptedAtShutdown
+		}
 		if err != nil {
 			durationMS := executionMS + roundDuration
 			// Persist the failure reason to the step's own log file. The error
@@ -2348,6 +2355,9 @@ done:
 	}
 	if stepName == types.StepCI && !stepSkipped {
 		if err := e.validateCICompletion(ctx, run, repo, workDir); err != nil {
+			if e.ciMonitorInterruptedByShutdown(run.ID, err, ctx) {
+				return false, "", ErrCIMonitorInterruptedAtShutdown
+			}
 			if dbErr := e.db.FailStep(sr.ID, err.Error(), durationMS); dbErr != nil {
 				slog.Warn("failed to mark unproven CI step as failed", "step", stepName, "error", dbErr)
 			}
@@ -2920,12 +2930,42 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	return reconciler.ReconcileApprovalGate(&copyCtx)
 }
 
+// ciMonitorInterruptedByShutdown reports whether a daemon shutdown stopped
+// this run while it was monitoring CI for an already-created PR. Such a run has
+// no verdict, so a clean stop leaves it active exactly as a crash would: it
+// records no failure and posts no failure status, and the next start's
+// recovery marks it ci_monitor_interrupted. The run's shape is read from the
+// same durable condition that recovery uses.
+func (e *Executor) ciMonitorInterruptedByShutdown(runID string, err error, ctxs ...context.Context) bool {
+	shutdown := errors.Is(err, ErrDaemonShutdown)
+	for _, ctx := range ctxs {
+		if ctx != nil && errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+			shutdown = true
+		}
+	}
+	if !shutdown {
+		return false
+	}
+	monitoring, dbErr := e.db.IsActiveCIMonitorRun(runID)
+	if dbErr != nil {
+		slog.Warn("failed to check for an interrupted CI monitor at shutdown", "run", runID, "error", dbErr)
+		return false
+	}
+	if monitoring {
+		slog.Info("run left monitoring CI for restart recovery", "run", runID)
+	}
+	return monitoring
+}
+
 // failRun marks a run as failed and returns the error.
 // It accepts an optional context; if the context was cancelled with a cause,
 // the cause message is used as the run's error (more informative than "context canceled").
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
-	if errors.Is(err, ErrParkedAtShutdown) {
+	if LeftForRecoveryAtShutdown(err) {
 		return err
+	}
+	if e.ciMonitorInterruptedByShutdown(run.ID, err, ctxs...) {
+		return ErrCIMonitorInterruptedAtShutdown
 	}
 	errMsg := err.Error()
 	for _, ctx := range ctxs {

@@ -35,6 +35,19 @@ var ErrDaemonShutdown = errors.New("daemon shutting down")
 // the next start resumes it, as it would after a crash.
 var ErrParkedAtShutdown = errors.New("run left parked at an approval gate by daemon shutdown")
 
+// ErrCIMonitorInterruptedAtShutdown is returned when a daemon shutdown reached
+// a run that was monitoring CI for an already-created PR. The run is left
+// active, exactly as a crash leaves it, so the next start records it as
+// ci_monitor_interrupted instead of failing it.
+var ErrCIMonitorInterruptedAtShutdown = errors.New("run left monitoring CI by daemon shutdown")
+
+// LeftForRecoveryAtShutdown reports whether err means a daemon shutdown left
+// the run's durable record for the next start's recovery, so callers must not
+// terminalize the run, report a failure for it, or remove its worktree.
+func LeftForRecoveryAtShutdown(err error) bool {
+	return errors.Is(err, ErrParkedAtShutdown) || errors.Is(err, ErrCIMonitorInterruptedAtShutdown)
+}
+
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
 	Ctx                      context.Context

@@ -969,9 +969,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		// this already-decided run as a claimed one to cancel and wait on.
 		m.markFinishing(plan.run.ID)
 		slot.Release()
-		if errors.Is(resumeErr, pipeline.ErrParkedAtShutdown) {
+		if pipeline.LeftForRecoveryAtShutdown(resumeErr) {
 			parkedAtShutdown = true
-			slog.Info("recovered run left parked for resume after daemon restart", "run_id", plan.run.ID)
+			slog.Info("recovered run left for recovery after daemon restart", "run_id", plan.run.ID, "reason", resumeErr)
 			return
 		} else if err := resumeErr; err != nil {
 			if plan.run.Status == types.RunRunning {
@@ -2558,9 +2558,9 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		// not pipeline load.
 		m.markFinishing(run.ID)
 		slot.Release()
-		if errors.Is(err, pipeline.ErrParkedAtShutdown) {
+		if pipeline.LeftForRecoveryAtShutdown(err) {
 			parkedAtShutdown = true
-			slog.Info("run left parked for resume after daemon restart", "run_id", run.ID)
+			slog.Info("run left for recovery after daemon restart", "run_id", run.ID, "reason", err)
 			return
 		}
 		if err != nil {

@@ -61,6 +61,7 @@ If the daemon is already running from a different executable path, update still 
 If the daemon executable path cannot be determined, the update aborts before replacing anything.
 
 `no-mistakes daemon stop`, `no-mistakes daemon uninstall`, and `no-mistakes daemon restart` apply the same guard: if pending or running pipeline runs exist, each refuses by default and lists the active runs, and each takes its own `--force` to proceed anyway.
+A daemon draining many runs can take longer to exit than a stop waits for, and may exit just as the stop inspects its process. A stop that finds the process gone and the socket no longer answering counts the daemon as stopped instead of reporting an error. If `daemon restart` still gets an error from its stop step, it starts the new daemon once the old one no longer answers, and prints the stop error as a warning. While the old daemon still answers, it fails with that error, says the old daemon may still be running, and starts nothing.
 `no-mistakes daemon start` applies it when it would restart a running daemon to refresh a changed service definition or replace an older daemon that does not support the gate-context RPC; it then refuses before stopping the daemon or rewriting the definition, and takes `--force` the same way.
 When a running daemon does not support that RPC, `daemon start`, `daemon stop`, `daemon restart`, `daemon uninstall`, and `update` check gate execution context locally, including process ancestry, and still refuse callers inside validation steps. `daemon start` then stops the older daemon and installs the current binary in the managed service definition before starting it, as `daemon restart` does.
 That `--force` override is available only to an ordinary top-level caller. A
@@ -143,7 +144,7 @@ reason about in one long-lived process than inside independent hook invocations.
 
 ## Crash recovery
 
-A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) leaves a run that is fully recorded as waiting at an approval gate exactly as a crash would, so the next start resumes it at that gate. This also preserves a recovered gate interrupted before dispatch, including during slot admission, comparison checks, or pending reconciliation retries: its parked state, any accepted response, and worktree remain available for the next restart. A clean stop still fails a run that is in the middle of executing a step.
+A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) leaves a run that is fully recorded as waiting at an approval gate exactly as a crash would, so the next start resumes it at that gate. This also preserves a recovered gate interrupted before dispatch, including during slot admission, comparison checks, or pending reconciliation retries: its parked state, any accepted response, and worktree remain available for the next restart. A clean stop also leaves a run that is monitoring CI for an already-created PR as a crash would, so the next start records it as `ci_monitor_interrupted` (see below). The stop posts no failure status for it. A clean stop still fails any other run that is in the middle of executing a step.
 
 On startup, the daemon checks for interrupted `pending` or `running` runs and restores the durable queue:
 

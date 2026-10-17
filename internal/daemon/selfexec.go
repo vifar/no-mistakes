@@ -732,6 +732,10 @@ func stopDetachedDaemonByPID(p *paths.Paths) error {
 		return err
 	}
 	if err := validateDaemonPIDFallback(p, pid); err != nil {
+		if errors.Is(err, errDaemonPIDExited) {
+			finishStopOfExitedDaemon(p, err)
+			return nil
+		}
 		return err
 	}
 	if err := daemonKillPID(pid); err != nil {
@@ -752,6 +756,21 @@ func stopDetachedDaemonByPID(p *paths.Paths) error {
 	}
 
 	return fmt.Errorf("daemon pid %d still running after kill", pid)
+}
+
+// errDaemonPIDExited means the PID fallback found the daemon process already
+// gone while it was being inspected, so the stop has nothing left to kill.
+var errDaemonPIDExited = errors.New("daemon process exited")
+
+// finishStopOfExitedDaemon completes a stop whose daemon exited while the PID
+// fallback inspected it. clearDeadDaemonArtifacts only removes the socket and
+// PID file when no process holds the NM_HOME lock, so a daemon that started
+// meanwhile keeps its own.
+func finishStopOfExitedDaemon(p *paths.Paths, err error) {
+	if _, clearErr := clearDeadDaemonArtifacts(p); clearErr != nil {
+		slog.Warn("clear exited daemon artifacts", "error", clearErr)
+	}
+	slog.Info("daemon exited during stop", "detail", err)
 }
 
 func validateDaemonPIDFallback(p *paths.Paths, pid int) error {
@@ -775,6 +794,15 @@ func validateDaemonPIDFallback(p *paths.Paths, pid int) error {
 	}
 	startTime, err := daemonProcessStartTime(pid)
 	if err != nil {
+		// `ps` also fails for a PID that has just exited: a daemon draining its
+		// runs can outlast the stop timeout and exit while it is inspected. It
+		// is gone only when the process is absent and the socket no longer
+		// answers either.
+		if running, runErr := daemonProcessRunning(pid); runErr == nil && !running {
+			if alive, healthErr := daemonHealthCheck(p); healthErr == nil && !alive {
+				return fmt.Errorf("%w: inspect daemon pid %d: %v", errDaemonPIDExited, pid, err)
+			}
+		}
 		return fmt.Errorf("inspect daemon pid %d: %w", pid, err)
 	}
 	matches, err := daemonPIDRecordMatchesProcess(p, record, startTime)
@@ -876,6 +904,10 @@ func waitForDaemonStop(p *paths.Paths, instance daemonInstance) error {
 	switch {
 	case err == nil:
 		if err := validateDaemonPIDFallback(p, pid); err != nil {
+			if errors.Is(err, errDaemonPIDExited) {
+				finishStopOfExitedDaemon(p, err)
+				return nil
+			}
 			return err
 		}
 	default:

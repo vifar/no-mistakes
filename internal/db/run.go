@@ -1240,33 +1240,13 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 	// crashes unchanged. Preserved runs are excluded: those are parked CI runs
 	// the caller resumes and reconciles against live PR state, so that
 	// more-specific recovery path owns them instead of this coarse marking.
-	ciArgs := []any{
-		types.RunCIMonitorInterrupted, types.RunCIMonitorInterruptedReason, ts,
-		types.RunPending, types.RunRunning,
-		types.StepCI,
-		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview,
-		types.StepCI,
-		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview,
-	}
+	ciArgs := []any{types.RunCIMonitorInterrupted, types.RunCIMonitorInterruptedReason, ts}
+	ciArgs = append(ciArgs, ciMonitorRunArgs()...)
 	ciArgs = append(ciArgs, args...)
 	ciResult, err := tx.Exec(
 		`UPDATE runs
 		 SET status = ?, error = ?, awaiting_agent_since = NULL, updated_at = ?
-		 WHERE status IN (?, ?)
-		   AND pr_url IS NOT NULL
-		   AND pr_url <> ''
-		   AND EXISTS (
-		       SELECT 1 FROM step_results ci
-		       WHERE ci.run_id = runs.id
-		         AND ci.step_name = ?
-		         AND ci.status IN (?, ?, ?, ?)
-		   )
-		   AND NOT EXISTS (
-		       SELECT 1 FROM step_results active
-		       WHERE active.run_id = runs.id
-		         AND active.step_name <> ?
-		         AND active.status IN (?, ?, ?, ?)
-		   )`+placeholders,
+		 WHERE `+ciMonitorRunCondition+placeholders,
 		ciArgs...,
 	)
 	if err != nil {
@@ -1346,6 +1326,52 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 		return 0, fmt.Errorf("commit transaction: %w", err)
 	}
 	return int(ciCount + count), nil
+}
+
+// ciMonitorRunCondition matches an active run whose only active step is the CI
+// monitor for an already-created PR. Startup recovery records such a run as
+// ci_monitor_interrupted, and a clean stop leaves it for that recovery, so
+// both read this one definition. Bind it with ciMonitorRunArgs.
+const ciMonitorRunCondition = `status IN (?, ?)
+		   AND pr_url IS NOT NULL
+		   AND pr_url <> ''
+		   AND EXISTS (
+		       SELECT 1 FROM step_results ci
+		       WHERE ci.run_id = runs.id
+		         AND ci.step_name = ?
+		         AND ci.status IN (?, ?, ?, ?)
+		   )
+		   AND NOT EXISTS (
+		       SELECT 1 FROM step_results active
+		       WHERE active.run_id = runs.id
+		         AND active.step_name <> ?
+		         AND active.status IN (?, ?, ?, ?)
+		   )`
+
+func ciMonitorRunArgs() []any {
+	return []any{
+		types.RunPending, types.RunRunning,
+		types.StepCI,
+		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview,
+		types.StepCI,
+		types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview,
+	}
+}
+
+// IsActiveCIMonitorRun reports whether the run is active and monitoring CI for
+// an already-created PR, the shape startup recovery preserves as
+// ci_monitor_interrupted instead of failing.
+func (d *DB) IsActiveCIMonitorRun(id string) (bool, error) {
+	args := append([]any{id}, ciMonitorRunArgs()...)
+	var one int
+	err := d.sql.QueryRow(`SELECT 1 FROM runs WHERE id = ? AND `+ciMonitorRunCondition, args...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("check ci monitor run: %w", err)
+	}
+	return true, nil
 }
 
 func recoveryExclusionClause(preserved map[string]struct{}) (string, []any) {

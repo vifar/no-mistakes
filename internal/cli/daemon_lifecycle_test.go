@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -233,5 +234,61 @@ func createLifecycleGuardRuns(t *testing.T, p *paths.Paths) {
 	}
 	if err := database.UpdateRunStatus(running.ID, types.RunRunning); err != nil {
 		t.Fatalf("mark running: %v", err)
+	}
+}
+
+// A forced restart whose stop step reports an error must not silently leave no
+// daemon: once the old daemon no longer answers, it starts the new one, and
+// while the old one still answers it fails loudly and starts nothing.
+func TestDaemonRestartForceAfterStopError(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		oldAlive  bool
+		wantStart bool
+	}{
+		{name: "old daemon gone", oldAlive: false, wantStart: true},
+		{name: "old daemon still answering", oldAlive: true, wantStart: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nmHome := makeSocketSafeTempDir(t)
+			t.Setenv("NM_HOME", nmHome)
+			createLifecycleGuardRuns(t, paths.WithRoot(nmHome))
+
+			startCalled := false
+			prevStop, prevStart, prevRunning := daemonStopFn, daemonStartFn, daemonIsRunningFn
+			daemonStopFn = func(*paths.Paths) error {
+				return errors.New("inspect daemon pid 3973: exit status 1")
+			}
+			daemonStartFn = func(*paths.Paths) error {
+				startCalled = true
+				return nil
+			}
+			daemonIsRunningFn = func(*paths.Paths) (bool, error) { return tc.oldAlive, nil }
+			t.Cleanup(func() {
+				daemonStopFn, daemonStartFn, daemonIsRunningFn = prevStop, prevStart, prevRunning
+			})
+
+			out, err := executeCmd("daemon", "restart", "--force")
+			if startCalled != tc.wantStart {
+				t.Fatalf("start called = %t, want %t (output %q, error %v)", startCalled, tc.wantStart, out, err)
+			}
+			if tc.wantStart {
+				if err != nil {
+					t.Fatalf("daemon restart --force = %v, want the new daemon started\n%s", err, out)
+				}
+				if !strings.Contains(out, "inspect daemon pid 3973") {
+					t.Fatalf("restart should still report the stop error, got %q", out)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("daemon restart --force should fail while the old daemon still answers, got output %q", out)
+			}
+			for _, want := range []string{"stop daemon", "inspect daemon pid 3973", "may still be running", "no new daemon was started"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("restart error should contain %q, got %v", want, err)
+				}
+			}
+		})
 	}
 }

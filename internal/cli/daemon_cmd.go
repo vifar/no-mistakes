@@ -702,7 +702,14 @@ func newDaemonRestartCmd() *cobra.Command {
 					return err
 				}
 				if err := daemonStopFn(p); err != nil {
-					return fmt.Errorf("stop daemon: %w", err)
+					// A failed stop must not leave the operator with no daemon
+					// and no clear signal. Start anyway once the old daemon no
+					// longer answers; the NM_HOME lock still refuses a second
+					// daemon if the old process is somehow holding it.
+					if alive, aliveErr := daemonIsRunningFn(p); aliveErr != nil || alive {
+						return fmt.Errorf("stop daemon: %w; the old daemon may still be running and no new daemon was started", err)
+					}
+					fmt.Fprintf(cmd.ErrOrStderr(), "  warning: stop daemon: %v; the old daemon no longer answers, starting a new one\n", err)
 				}
 				if err := daemonStartFn(p); err != nil {
 					return fmt.Errorf("start daemon: %w", err)
