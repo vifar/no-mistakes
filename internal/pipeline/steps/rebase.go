@@ -867,6 +867,12 @@ func dedupeRebaseFindings(findings []Finding) []Finding {
 // updateHeadSHA syncs the run's head SHA after rebase and checks for an empty
 // diff against the same PR target selected before integration.
 func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext, targetBranch string, checkedTarget ...string) (*pipeline.StepOutcome, error) {
+	pinned := len(checkedTarget) > 0 && checkedTarget[0] != ""
+	if pinned {
+		if err := verifyRewindIntegration(sctx, checkedTarget[0]); err != nil {
+			return nil, err
+		}
+	}
 	headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve head after rebase: %w", err)
@@ -887,7 +893,6 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext, targetBranch
 	// so reuse that ref instead of fetching again after HEAD was rewritten and
 	// persisted: a failure here could not undo either.
 
-	pinned := len(checkedTarget) > 0 && checkedTarget[0] != ""
 	baseSHA := ""
 	if pinned {
 		baseSHA, err = git.Run(ctx, sctx.WorkDir, "merge-base", checkedTarget[0], headSHA)

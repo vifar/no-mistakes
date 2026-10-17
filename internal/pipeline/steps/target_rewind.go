@@ -142,7 +142,6 @@ func classifyTargetAdvance(c *pipeline.StepContext, step types.StepName, selecti
 
 // checkedRewindTargets runs before BOTH integration loops. Its returned values
 // are immutable commit IDs, including for conflict resolution and merge mode.
-// The existing integration policy selects which targets survive this mapping.
 func checkedRewindTargets(c *pipeline.StepContext, targets []string) (checked []string, cleanup func() error, err error) {
 	pending, err := c.DB.GetPendingTargetRewind(c.Run.ID)
 	if err != nil {
@@ -210,12 +209,11 @@ func checkedRewindTargets(c *pipeline.StepContext, targets []string) (checked []
 
 	}
 	for _, target := range targets {
-		if target == "origin/"+previous.TargetBranch {
-			checked = append(checked, observed.target)
-		} else if observed.source != nil {
+		if target != "origin/"+previous.TargetBranch && observed.source != nil {
 			checked = append(checked, *observed.source)
 		}
 	}
+	checked = append(checked, observed.target)
 	return checked, cleanup, nil
 }
 

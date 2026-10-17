@@ -289,6 +289,76 @@ func TestTargetRewindForcePushObservesButNeverIntegratesSource(t *testing.T) {
 	}
 }
 
+func TestTargetRewindDirectMainIntegratesCheckedTarget(t *testing.T) {
+	for _, strategy := range []string{config.RebaseStrategyRebase, config.RebaseStrategyMerge} {
+		for _, fixing := range []bool{false, true} {
+			t.Run(strategy+"/"+map[bool]string{false: "normal", true: "fix"}[fixing], func(t *testing.T) {
+				c, selected := rewindFixture(t)
+				gitCmd(t, c.WorkDir, "checkout", "-B", "main", c.Run.HeadSHA)
+				run, err := c.DB.InsertRun(c.Repo.ID, "refs/heads/main", c.Run.HeadSHA, c.Run.BaseSHA)
+				if err != nil {
+					t.Fatal(err)
+				}
+				c.Run = run
+				c.Config.Rebase.Strategy = strategy
+				if _, err := guardPRContextWithSelection(c, types.StepRebase, selected, false); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, c.WorkDir, "checkout", "-b", "advanced-main", c.Run.BaseSHA)
+				if err := os.WriteFile(filepath.Join(c.WorkDir, "landed.txt"), []byte("newly landed main content\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, c.WorkDir, "add", "landed.txt")
+				gitCmd(t, c.WorkDir, "commit", "-m", "advance main independently")
+				target := gitCmd(t, c.WorkDir, "rev-parse", "HEAD")
+				gitCmd(t, c.WorkDir, "push", "origin", "HEAD:main")
+				gitCmd(t, c.WorkDir, "checkout", "main")
+				decision, err := guardPRContextWithSelection(c, types.StepTest, selected, false)
+				if err != nil || decision.RestartFrom != types.StepRebase {
+					t.Fatalf("direct main advance did not rewind: %+v, %v", decision, err)
+				}
+				c.Fixing = fixing
+				outcome, err := (&RebaseStep{}).Execute(c)
+				if err != nil || outcome == nil || outcome.NeedsApproval {
+					t.Fatalf("direct main integration failed: %+v, %v", outcome, err)
+				}
+				gitCmd(t, c.WorkDir, "merge-base", "--is-ancestor", target, "HEAD")
+				for file, want := range map[string]string{"landed.txt": "newly landed main content\n", "feature.txt": "feature code\n"} {
+					if content, err := os.ReadFile(filepath.Join(c.WorkDir, file)); err != nil || string(content) != want {
+						t.Fatalf("integration lost %s: %q, %v", file, content, err)
+					}
+				}
+				c.PRContextAfterStep, c.PRContextRebaseCompleted = true, true
+				if _, err := guardPRContextWithSelection(c, types.StepRebase, selected, false); err != nil {
+					t.Fatal(err)
+				}
+				if pending, err := c.DB.GetPendingTargetRewind(c.Run.ID); err != nil || pending != nil {
+					t.Fatalf("successful integration left pending rewind: %+v, %v", pending, err)
+				}
+			})
+		}
+	}
+}
+
+func TestTargetRewindCompletionRefusesUnintegratedTarget(t *testing.T) {
+	c, selected := rewindFixture(t)
+	target := advanceRewindTarget(t, c)
+	if _, err := guardPRContextWithSelection(c, types.StepTest, selected, false); err != nil {
+		t.Fatal(err)
+	}
+	before := c.Run.HeadSHA
+	if outcome, err := updateHeadSHA(c.Ctx, c, "main", target); err == nil || outcome != nil {
+		t.Fatalf("unintegrated rewind reported success: %+v, %v", outcome, err)
+	}
+	run, err := c.DB.GetRun(c.Run.ID)
+	if err != nil || run.HeadSHA != before || c.Run.HeadSHA != before {
+		t.Fatalf("rejected integration changed recorded head: %+v, %v", run, err)
+	}
+	if pending, err := c.DB.GetPendingTargetRewind(c.Run.ID); err != nil || pending == nil {
+		t.Fatalf("rejected integration lost pending rewind: %+v, %v", pending, err)
+	}
+}
+
 func TestTargetRewindNoopAndFastForwardConsumePending(t *testing.T) {
 	for _, mode := range []string{"no-op", "fast-forward"} {
 		t.Run(mode, func(t *testing.T) {
