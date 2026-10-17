@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -49,8 +48,9 @@ func TestTargetAdvanceNewPRWhilePendingJourney(t *testing.T) {
 	if terminal.Status != types.RunFailed || terminal.Error == nil || !strings.Contains(*terminal.Error, "PR") || !strings.Contains(*terminal.Error, "changed") {
 		t.Fatalf("new PR did not fail closed: %s %s", terminal.Status, deref(terminal.Error))
 	}
-	worktree := paths.WithRoot(h.NMHome).WorktreeDir(terminal.RepoID, terminal.ID)
-	if actual := gitIn(t, h, worktree, "rev-parse", "HEAD"); actual != head || h.UpstreamBranchSHA(branch) != source {
+	// Terminalization reconciles the managed head before persisting failure;
+	// the worktree itself may already have been removed by daemon cleanup.
+	if actual := terminal.HeadSHA; actual != head || h.UpstreamBranchSHA(branch) != source {
 		t.Fatalf("PR identity refusal mutated a head: managed=%s expected=%s", actual, head)
 	}
 	charge, pending, history := targetRewindHistory(t, h.NMHome, terminal.ID)
