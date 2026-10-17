@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -69,11 +70,13 @@ type findingRow struct {
 }
 
 type runRow struct {
-	ID     string `toon:"id"`
-	Branch string `toon:"branch"`
-	Status string `toon:"status"`
-	Head   string `toon:"head"`
-	PR     string `toon:"pr"`
+	Owner     string `toon:"owner"`
+	Ownerless bool   `toon:"ownerless"`
+	ID        string `toon:"id"`
+	Branch    string `toon:"branch"`
+	Status    string `toon:"status"`
+	Head      string `toon:"head"`
+	PR        string `toon:"pr"`
 }
 
 // logRow is a single log line; a []logRow renders as a block array so multiline
@@ -117,6 +120,7 @@ type stepView struct {
 
 // runView is a render-ready view of a pipeline run.
 type runView struct {
+	Owner                string
 	TargetAdvanceRewinds int64
 	Shipping             *types.ShippingOptions
 	ShippingComparison   *shipping.StatusIdentity
@@ -166,6 +170,7 @@ func ordinaryReviewGeneration(r *ipc.RunInfo) *int64 {
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
 	rv := runView{
+		Owner:                 r.Owner,
 		TargetAdvanceRewinds:  r.TargetAdvanceRewinds,
 		Shipping:              r.Shipping,
 		SubmittedHeadSHA:      r.SubmittedHeadSHA,
@@ -232,6 +237,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 
 func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 	rv := runView{
+		Owner:                r.Owner(),
 		TargetAdvanceRewinds: r.TargetAdvanceRewinds,
 		Shipping:             r.Shipping,
 		SubmittedHeadSHA:     r.SubmittedHeadSHA,
@@ -333,6 +339,54 @@ func (rv runView) awaitingStep() (stepView, bool) {
 		}
 	}
 	return stepView{}, false
+}
+
+// awaitingPersonStep requires a parked step AND its live durable gate. Old
+// findings and run timestamps alone cannot establish an unanswered decision.
+func (rv runView) awaitingPersonStep() (stepView, bool) {
+	if terminalStatus(rv.Status) || rv.AnsweredStep != "" {
+		return stepView{}, false
+	}
+	for _, s := range rv.Steps {
+		if s.Status != string(types.StepStatusAwaitingApproval) && s.Status != string(types.StepStatusFixReview) {
+			continue
+		}
+		g := s.Gate
+		if g != nil && g.RunID == rv.ID && g.StepResultID == s.ID && string(g.Step) == s.Name && string(g.Status) == s.Status && g.Nonce != "" && g.RoundID != "" {
+			return s, true
+		}
+	}
+	return stepView{}, false
+}
+
+func awaitingPersonFields(rv runView) []toon.Field {
+	gate, awaiting := rv.awaitingPersonStep()
+	fields := []toon.Field{{Key: "awaiting_person", Value: awaiting}}
+	if !awaiting {
+		return fields
+	}
+	var age any
+	if rv.AwaitingAgentSince != nil {
+		seconds := nowUnix() - *rv.AwaitingAgentSince
+		if seconds < 0 {
+			seconds = 0
+		}
+		age = seconds
+		fields = append(fields, toon.Field{Key: "awaiting_for", Value: formatCompactDuration(time.Duration(seconds) * time.Second)})
+	}
+	fields = append(fields, toon.Field{Key: "awaiting_since", Value: rv.AwaitingAgentSince}, toon.Field{Key: "awaiting_seconds", Value: age}, toon.Field{Key: "awaiting_step", Value: gate.Name})
+	findings, _ := types.ParseFindingsJSON(gate.FindingsJSON)
+	question := truncate(findings.Summary, maxGateSummary)
+	questions := make([]string, 0, len(findings.Items))
+	for _, f := range findings.Items {
+		if f.Description != "" {
+			questions = append(questions, f.Description)
+		}
+	}
+	if question == "" {
+		question = strings.Join(questions, "\n")
+	}
+	return append(fields, toon.Field{Key: "gate_question", Value: question}, toon.Field{Key: "gate_questions", Value: questions})
 }
 
 // formatParkedFor renders how long a run has been parked awaiting the agent,
@@ -583,6 +637,8 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 			fields = append(fields, toon.Field{Key: "waiting_for_slot", Value: true})
 		}
 	}
+	fields = append(fields, toon.Field{Key: "owner", Value: rv.Owner}, toon.Field{Key: "ownerless", Value: rv.Owner == ""})
+	fields = append(fields, awaitingPersonFields(rv)...)
 	fields = append(fields, toon.Field{Key: "head", Value: shortSHA(rv.HeadSHA)})
 	fields = append(fields, toon.Field{Key: "head_sha", Value: rv.HeadSHA}, toon.Field{Key: "target_advance_rewinds", Value: rv.TargetAdvanceRewinds})
 	if rv.Shipping != nil {
@@ -972,6 +1028,14 @@ func axiEncodingError(err error) string {
 
 // emitDoc writes a finished TOON document to stdout.
 func emitDoc(cmd *cobra.Command, fields ...toon.Field) {
+	if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
+		var doc map[string]any
+		if err := toon.UnmarshalString(axiDoc(fields...), &doc); err != nil {
+			doc = map[string]any{"error": "encode status JSON: " + err.Error()}
+		}
+		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(doc)
+		return
+	}
 	fmt.Fprint(cmd.OutOrStdout(), axiDoc(fields...))
 }
 

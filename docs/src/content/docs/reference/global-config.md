@@ -1401,7 +1401,10 @@ When enabled and no intent was supplied directly for the run, no-mistakes can re
 | `intent.threshold`        | `float`    | `0.2`   | Minimum raw match score for selecting a transcript session |
 | `intent.slack_days`       | `int`      | `3`     | Extra days to look back before the change window           |
 | `intent.disabled_readers` | `string[]` | Empty   | Transcript readers to disable                              |
+| `intent.require_owner` | `bool` | `false` | Refuse new runs without explicit launch ownership |
 | `intent.publish_intent`   | `bool`     | `true`  | Publish the generated Intent section on PR bodies by default |
+
+`intent.require_owner: true` is global-only. The daemon rejects ownerless new runs and reruns before cancelling an existing run or creating a replacement row. Its default is false, which accepts ownerless launches with a warning. It does not change existing runs or gate approval policy. See [launch owner](/no-mistakes/reference/cli/#launch-owner) for caller input and status fields.
 
 Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `pi`, and `copilot`.
 

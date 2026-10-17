@@ -74,7 +74,9 @@ type Run struct {
 	Intent          *string
 	IntentSource    *string
 	IntentSessionID *string
-	IntentScore     *float64
+	// LaunchOwner is explicit responsibility, independent of transcript provenance.
+	LaunchOwner *string
+	IntentScore *float64
 	// LaunchNonce, LaunchValidationGeneration, and LaunchIntentDigest are
 	// nullable for ordinary and historical rows. Together they bind one opaque
 	// proof request to this run; only receipt-specific IPC exposes them.
@@ -116,7 +118,16 @@ type Run struct {
 	UpdatedAt                int64
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, COALESCE(pr_base_branch_requested, 0), COALESCE(retarget_attempted, 0), target_advance_rewinds, pending_target_rewind_id, COALESCE(omit_intent, 0), COALESCE(external_ci_owner, ''), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, shipping_options, created_at, updated_at`
+// Owner returns explicit launch responsibility. Legacy transcript session IDs
+// describe intent provenance, not a person responsible for answering gates.
+func (r *Run) Owner() string {
+	if r.LaunchOwner == nil {
+		return ""
+	}
+	return strings.TrimSpace(*r.LaunchOwner)
+}
+
+const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_owner, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, COALESCE(pr_base_branch_requested, 0), COALESCE(retarget_attempted, 0), target_advance_rewinds, pending_target_rewind_id, COALESCE(omit_intent, 0), COALESCE(external_ci_owner, ''), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, shipping_options, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
@@ -128,7 +139,7 @@ func scanRun(row interface {
 		&r.LastPushedSHA, &r.PushTargetKind, &r.PushTargetFingerprint, &r.PushRef,
 		&r.LastPushedAt, &r.PushGeneration, &r.PushActive, &r.TerminalHeadVerifiedAt,
 		&r.CustodyReturnedAt, &r.Error, &r.AwaitingAgentSince, &r.ParkedMS,
-		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore,
+		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore, &r.LaunchOwner,
 		&r.LaunchNonce, &r.LaunchValidationGeneration, &r.LaunchIntentDigest, &r.LaunchReceiptClaimedAt,
 		&r.PRBaseBranch, &r.PRBaseBranchRequested, &r.RetargetAttempted, &r.TargetAdvanceRewinds, &r.PendingTargetRewindID, &r.OmitIntent, &r.ExternalCIOwner, &r.PiProfile, &r.VerificationPlan,
 		&storedClosingIssues, &r.ClosingIssueRefsLockedAt, &r.Shipping,
@@ -240,6 +251,7 @@ func (d *DB) InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA string, in
 		r.IntentSource = &intent.Source
 		r.IntentSessionID = &intent.SessionID
 		r.IntentScore = &intent.Score
+		r.LaunchOwner = &intent.Owner
 	}
 	prBaseBranch = strings.TrimSpace(prBaseBranch)
 	if prBaseBranch != "" {
@@ -252,8 +264,8 @@ func (d *DB) InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA string, in
 	r.OmitIntent = omitIntent
 	r.ExternalCIOwner = externalCIOwner
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, pr_base_branch_requested, omit_intent, external_ci_owner, pi_profile, verification_plan, shipping_options, created_at, updated_at, retarget_attempted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
-		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.PRBaseBranch, r.PRBaseBranchRequested, r.OmitIntent, r.ExternalCIOwner, r.PiProfile, r.VerificationPlan, r.Shipping, r.CreatedAt, r.UpdatedAt,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_owner, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, pr_base_branch_requested, omit_intent, external_ci_owner, pi_profile, verification_plan, shipping_options, created_at, updated_at, retarget_attempted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchOwner, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.PRBaseBranch, r.PRBaseBranchRequested, r.OmitIntent, r.ExternalCIOwner, r.PiProfile, r.VerificationPlan, r.Shipping, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
@@ -1039,8 +1051,10 @@ func IsAuthoritativeRunIntentSource(source string) bool {
 	return source == RunIntentSourceAgent || source == RunIntentSourceRerun
 }
 
-// RunIntent carries the four intent-related columns persisted on a run.
+// RunIntent carries intent provenance and explicit launch ownership.
+// UpdateRunIntent changes provenance only; launch ownership remains immutable.
 type RunIntent struct {
+	Owner     string
 	Summary   string
 	Source    string
 	SessionID string

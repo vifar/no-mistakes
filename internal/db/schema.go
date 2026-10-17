@@ -511,4 +511,6 @@ var migrationStatements = []string{
      WHERE c.run_id=run_target_rewinds.run_id AND c.generation=run_target_rewinds.generation
        AND c.pr_url IS NOT NULL AND c.pr_url!=''
    ) WHERE forge_head_sha IS NULL AND id IN (SELECT pending_target_rewind_id FROM runs)`,
+	// Explicit launch responsibility; never inferred from historical transcript IDs.
+	`ALTER TABLE runs ADD COLUMN launch_owner TEXT`,
 }

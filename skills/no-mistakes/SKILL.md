@@ -105,6 +105,8 @@ the same way once the work is committed on a feature branch.
 
 ## Before you start
 
+Record who will drive the gates on each new run with `axi run --owner <actual-session-or-thread-id>` (or the documented `NO_MISTAKES_OWNER` environment variable). Do not invent an ID. Ownerless launches warn by default; an operator may require ownership. Ownership grants no approval authority and sends no notification. Use `axi status --awaiting` to list this repository's unanswered live gates with their owners, wait ages and questions; `--json` selects JSON. `awaiting_person` requires a parked step and matching gate identity; historical findings counts do not prove a wait.
+
 - The work you want validated must be **committed** on a branch. The gate
   validates committed history, not your uncommitted working tree.
 - You must be on a **feature branch**, not the repository's default branch.

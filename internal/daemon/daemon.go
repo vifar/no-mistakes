@@ -1454,7 +1454,25 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return &ipc.ClaimLaunchReceiptResult{Receipt: &receipt}, nil
 	})
 
-	// Capability probe for --no-publish-intent: see ipc.ProbeOmitIntentResult.
+	// Check caller ownership support before the CLI takes branch custody.
+	srv.Handle(ipc.MethodProbeRunOwner, func(_ context.Context, params json.RawMessage) (interface{}, error) {
+		var p ipc.ProbeRunOwnerParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		if err := types.ValidateRunOwner(p.Owner); err != nil {
+			return nil, err
+		}
+		cfg, err := config.LoadGlobal(mgr.paths.ConfigFile())
+		if err != nil {
+			return nil, err
+		}
+		if cfg.Intent.RequireOwner && strings.TrimSpace(p.Owner) == "" {
+			return nil, fmt.Errorf("launch requires an owner: pass --owner or NO_MISTAKES_OWNER")
+		}
+		return &ipc.ProbeRunOwnerResult{OK: true}, nil
+	})
+
 	srv.Handle(ipc.MethodProbeShipping, func(context.Context, json.RawMessage) (interface{}, error) {
 		return &ipc.ProbeOmitIntentResult{OK: true}, nil
 	})
@@ -1544,7 +1562,10 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		runID, err := mgr.HandleRerun(ctx, p.RepoID, p.Branch, p.PreviousRunID, p.SkipSteps, p.Intent, p.PRBaseBranch, p.OmitIntent, p.ExternalCIOwner, p.CallerHeadSHA, p.VerificationPlanID, p.ClosingIssueRefs, p.PiProfile)
+		if err := types.ValidateRunOwner(p.Owner); err != nil {
+			return nil, err
+		}
+		runID, err := mgr.HandleRerun(types.WithRunOwner(ctx, p.Owner), p.RepoID, p.Branch, p.PreviousRunID, p.SkipSteps, p.Intent, p.PRBaseBranch, p.OmitIntent, p.ExternalCIOwner, p.CallerHeadSHA, p.VerificationPlanID, p.ClosingIssueRefs, p.PiProfile)
 		if err != nil {
 			return nil, err
 		}
@@ -1703,6 +1724,7 @@ func gateContextResult(result gatecontext.Result) ipc.GateContextResult {
 
 func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 	info := &ipc.RunInfo{
+		Owner:                r.Owner(),
 		TargetAdvanceRewinds: r.TargetAdvanceRewinds,
 		Shipping:             r.Shipping,
 		ID:                   r.ID,
