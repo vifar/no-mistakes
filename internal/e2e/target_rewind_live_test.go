@@ -101,10 +101,19 @@ func TestTargetAdvanceAdditionalPreservationJourney(t *testing.T) {
 	}
 }
 
-// Skipping a gate is a decision about the old comparison. After recovery and
-// a target advance during Document, the gate must execute again, while old
-// evidence remains available only in the superseded generation.
+// Skipping a gate is a decision about the old comparison. After a target
+// advance during Document, the gate must execute again in live and recovered
+// execution, while old evidence remains only in the superseded generation.
 func TestTargetAdvanceRecoveredCustomGateJourney(t *testing.T) {
+	for _, recover := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recover=%t", recover), func(t *testing.T) {
+			targetAdvanceCustomGateJourney(t, recover)
+		})
+	}
+}
+
+func targetAdvanceCustomGateJourney(t *testing.T, recover bool) {
+	t.Helper()
 	scenario := cleanReviewScenario(t)
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: scenario})
 	count := filepath.Join(t.TempDir(), "gate-invocations")
@@ -140,8 +149,10 @@ func TestTargetAdvanceRecoveredCustomGateJourney(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(evidenceRoot, "legacy.log"), []byte("old comparison evidence\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	gateJourneyDaemon(t, h, "stop")
-	gateJourneyDaemon(t, h, "start")
+	if recover {
+		gateJourneyDaemon(t, h, "stop")
+		gateJourneyDaemon(t, h, "start")
+	}
 	waitForStepStatus(t, h, branch, types.StepTest, types.StepStatusAwaitingApproval, 90*time.Second)
 	deadline := time.Now().Add(15 * time.Second)
 	for {
@@ -170,11 +181,14 @@ func TestTargetAdvanceRecoveredCustomGateJourney(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(evidenceRoot, "g1", "legacy.log")); !os.IsNotExist(err) {
 		t.Fatalf("old evidence leaked into current generation: %v", err)
 	}
-	t.Logf("run=%s recovered at Test, advanced target during Document, reran skipped audit gate; legacy evidence archived under superseded/g0 and absent from g1", second.ID)
+	t.Logf("run=%s recover=%t, advanced target during Document, reran skipped audit gate; legacy evidence archived under superseded/g0 and absent from g1", second.ID, recover)
 	logTargetRewindStatus(t, h, second.ID)
-	h.Respond(second.ID, gate, types.ActionAbort)
-	if terminal := h.WaitForRun(branch, 30*time.Second); terminal.Status != types.RunFailed {
-		t.Fatalf("abort failed: %s", terminal.Status)
+	h.Respond(second.ID, gate, types.ActionSkip)
+	// Test's configured command always fails. Completion therefore proves
+	// execution honored the operator's durable skip after the rewind, rather
+	// than merely preserving a skipped database row until the next gate.
+	if terminal := h.WaitForRun(branch, 120*time.Second); terminal.Status != types.RunCompleted {
+		t.Fatalf("rewound run did not preserve the Test skip: %s %s", terminal.Status, deref(terminal.Error))
 	}
 }
 
