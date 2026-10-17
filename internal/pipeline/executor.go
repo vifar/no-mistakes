@@ -661,8 +661,11 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 			continue
 		}
 
-		sr := stepRecords[step.Name()]
-		if e.skips[step.Name()] {
+		sr, err := e.db.GetStepResult(stepRecords[step.Name()].ID)
+		if err != nil {
+			return e.failRun(run, repo, fmt.Errorf("get step %s: %w", step.Name(), err), ctx)
+		}
+		if e.skips[step.Name()] || sr.Status == types.StepStatusSkipped {
 			if err := e.refuseSkippedPRWithClosingIssues(run, repo, step.Name(), sr.ID); err != nil {
 				return e.failRun(run, repo, err, ctx)
 			}

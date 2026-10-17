@@ -297,6 +297,107 @@ func TestTargetRewindRecoveredRemainderRerunsResetCustomGate(t *testing.T) {
 	}
 }
 
+func TestTargetRewindLiveExecutionPreservesOperatorSkips(t *testing.T) {
+	for _, skipped := range []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint} {
+		for _, afterStep := range []bool{false, true} {
+			t.Run(string(skipped)+"/"+map[bool]string{false: "entry guard", true: "post-step guard"}[afterStep], func(t *testing.T) {
+				d, p, r, repo := setupTest(t)
+				dir := completionFixture(t, d, r)
+				calls := 0
+				operatorSkipped := &adaptiveCallStep{name: skipped, fn: func(*StepContext) (*StepOutcome, error) {
+					calls++
+					return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"manual","severity":"warning","description":"needs a decision","action":"ask-user"}]}`}, nil
+				}}
+				gateCalls := 0
+				gate := &adaptiveCallStep{name: types.CustomGateStepName(types.StepReview, "audit"), fn: func(*StepContext) (*StepOutcome, error) {
+					gateCalls++
+					return &StepOutcome{Skipped: gateCalls == 1}, nil
+				}}
+				rebase := newPassStep(types.StepRebase)
+				steps := []Step{rebase}
+				for _, name := range []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint} {
+					if name == skipped {
+						steps = append(steps, operatorSkipped)
+					} else {
+						steps = append(steps, newPassStep(name))
+					}
+					if name == types.StepReview {
+						steps = append(steps, gate)
+					}
+				}
+				trigger := types.CustomGateStepName(types.StepLint, "audit")
+				steps = append(steps, newPassStep(trigger))
+				e := NewExecutor(d, p, nil, nil, steps, nil)
+				rewound, completed := false, false
+				e.SetPRContextGuard(func(c *StepContext, name types.StepName) (PRContextDecision, error) {
+					decision := PRContextDecision{Target: PRTargetSelection{TargetBranch: "main"}}
+					if !rewound && name == trigger && c.PRContextAfterStep == afterStep {
+						previous, err := d.GetRunPRContext(r.ID)
+						if err != nil {
+							return decision, err
+						}
+						candidate := previous.PRContextCandidate
+						candidate.TargetSHA = strings.Repeat("c", 40)
+						if _, err := d.RewindRunPRContext(r.ID, candidate, db.TargetAdvanceRewindRequest{ExpectedGeneration: previous.Generation, Step: types.StepLint, MaxRewinds: 3}); err != nil {
+							return decision, err
+						}
+						rewound = true
+						decision.RestartFrom = types.StepRebase
+					}
+					if rewound && name == types.StepRebase && c.PRContextRebaseCompleted {
+						previous, err := d.GetRunPRContext(r.ID)
+						if err != nil {
+							return decision, err
+						}
+						candidate := previous.PRContextCandidate
+						candidate.DiffDigest = strings.Repeat("d", 64)
+						if _, err := d.CompleteRebasePRContext(r.ID, candidate, previous.Generation); err != nil {
+							return decision, err
+						}
+						completed = true
+					}
+					return decision, nil
+				})
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				done := make(chan error, 1)
+				finished := make(chan struct{})
+				go func() {
+					defer close(finished)
+					done <- e.Execute(ctx, r, repo, dir)
+				}()
+				t.Cleanup(func() {
+					cancel()
+					<-finished
+				})
+				waitForStepStatus(t, d, r.ID, skipped, types.StepStatusAwaitingApproval)
+				if err := e.Respond(skipped, types.ActionSkip, nil, gateSnapshot(e)); err != nil {
+					t.Fatal(err)
+				}
+				if err := <-done; err != nil {
+					t.Fatal(err)
+				}
+				if !rewound || !completed || calls != 1 || rebase.callCount() != 2 || gateCalls != 2 {
+					t.Fatalf("rewound=%t completed=%t skipped calls=%d rebase calls=%d custom gate calls=%d", rewound, completed, calls, rebase.callCount(), gateCalls)
+				}
+				rows, err := d.GetStepsByRun(r.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, row := range rows {
+					want := types.StepStatusCompleted
+					if row.StepName == skipped {
+						want = types.StepStatusSkipped
+					}
+					if row.Status != want {
+						t.Errorf("%s status=%s, want %s", row.StepName, row.Status, want)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestTargetRewindDropsObsoleteRecoveredResponseAndCachedAuthority(t *testing.T) {
 	e, r, dir := pendingRewindExecutor(t)
 	e.recoveredResponse = &approvalResponse{action: types.ActionApprove}
