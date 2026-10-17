@@ -477,7 +477,7 @@ var migrationStatements = []string{
 	// integration, and its own zero rewind budget. Never copy these on rerun.
 	`ALTER TABLE runs ADD COLUMN target_advance_rewinds INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE runs ADD COLUMN pending_target_rewind_id TEXT`,
-	`ALTER TABLE runs ADD COLUMN retarget_attempted INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE runs ADD COLUMN retarget_attempted INTEGER`,
 	`CREATE TABLE IF NOT EXISTS run_target_rewinds (
         id TEXT PRIMARY KEY,
         run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

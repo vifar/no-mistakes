@@ -100,13 +100,15 @@ func targetRewindRun(q rewindQuery, runID string, step types.StepName) (*Run, er
 		return nil, err
 	}
 	var prohibited bool
-	if err := q.QueryRow(`SELECT EXISTS (SELECT 1 FROM commit_status_attempts WHERE run_id=?) OR
+	if err := q.QueryRow(`SELECT retarget_attempted IS NOT 0 OR
+ EXISTS (SELECT 1 FROM commit_status_attempts WHERE run_id=?) OR
  EXISTS (SELECT 1 FROM commit_status_publications WHERE run_id=?) OR
  EXISTS (SELECT 1 FROM step_results WHERE run_id=? AND step_name='pr' AND status='completed') OR
- EXISTS (SELECT 1 FROM step_results WHERE run_id=? AND step_name='rebase' AND status='skipped')`, runID, runID, runID, runID).Scan(&prohibited); err != nil {
+ EXISTS (SELECT 1 FROM step_results WHERE run_id=? AND step_name='rebase' AND status='skipped')
+ FROM runs WHERE id=?`, runID, runID, runID, runID, runID).Scan(&prohibited); err != nil {
 		return nil, err
 	}
-	published := r.LastPushedSHA != nil || r.PushGeneration != nil && *r.PushGeneration != 0 || r.RetargetAttempted || prohibited
+	published := r.LastPushedSHA != nil || r.PushGeneration != nil && *r.PushGeneration != 0 || prohibited
 
 	if r.Shipping != nil || published || step.Order() < types.StepRebase.Order() || step.Order() > types.StepLint.Order() ||
 		(r.Status != types.RunRunning && r.Status != types.RunPending) {
