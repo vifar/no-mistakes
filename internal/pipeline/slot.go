@@ -71,6 +71,7 @@ func (e *Executor) acquireSlot(ctx context.Context) error {
 // run is waiting for a run slot. It carries everything dispatch needs, so a
 // daemon that stops during the wait can re-apply the response after a restart.
 type pendingGateResponse struct {
+	Origin           types.ResponseOrigin `json:"origin,omitempty"`
 	CoverageRound    *db.StepRound        `json:"coverage_round,omitempty"`
 	Gate             types.GateIdentity   `json:"gate"`
 	ParkedMS         *int64               `json:"parked_ms,omitempty"`
@@ -89,6 +90,7 @@ func encodePendingResponse(r *approvalResponse, parkedMS int64, gate types.GateI
 	if r != nil {
 		p.Kind = ""
 		p.Action = r.action
+		p.Origin = r.origin
 		p.FindingIDs = r.findingIDs
 		p.IgnoreFindingIDs = r.ignoreFindingIDs
 		p.Instructions = r.instructions
@@ -120,6 +122,7 @@ func decodePendingResponse(raw string, current types.GateIdentity) (*approvalRes
 	return &approvalResponse{
 		gate:             p.Gate,
 		action:           p.Action,
+		origin:           p.Origin.OrUnknown(),
 		findingIDs:       p.FindingIDs,
 		ignoreFindingIDs: p.IgnoreFindingIDs,
 		instructions:     p.Instructions,

@@ -127,7 +127,8 @@ CREATE TABLE IF NOT EXISTS step_results (
     agent_pid        INTEGER,
     auto_fix_limit              INTEGER,
     ci_fix_attempts             INTEGER NOT NULL DEFAULT 0,
-    override_reason             TEXT
+    override_reason             TEXT,
+    response_origin             TEXT NOT NULL DEFAULT 'unknown'
 );
 
 -- A run's observed PR identity and exact comparison are one atomic receipt.
@@ -162,6 +163,7 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     user_findings_json   TEXT,
     selected_finding_ids TEXT,
     selection_source     TEXT,
+    response_origin      TEXT NOT NULL DEFAULT 'unknown',
     fix_summary          TEXT,
     repair_published     INTEGER NOT NULL DEFAULT 0,
     duration_ms          INTEGER NOT NULL,
@@ -557,6 +559,8 @@ var migrationStatements = append([]string{
         AND r.review_approved_head_sha=local_head_sha)`,
 	// Separate observation: never replace the original qualification comparison.
 	`ALTER TABLE run_pr_contexts ADD COLUMN retained_target_sha TEXT`,
+	`ALTER TABLE step_results ADD COLUMN response_origin TEXT NOT NULL DEFAULT 'unknown'`,
+	`ALTER TABLE step_rounds ADD COLUMN response_origin TEXT NOT NULL DEFAULT 'unknown'`,
 }, statusValidationMigrationStatements...)
 
 // additiveMigrationStatements hold the additive schema changes that a

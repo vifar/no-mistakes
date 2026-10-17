@@ -44,7 +44,8 @@ type StepResult struct {
 	AcceptedGapsJSON *string
 	// SkipReason records an automatic PR/CI skip, distinct from an explicit
 	// per-run skip. Legacy rows have no recorded reason.
-	SkipReason *string
+	SkipReason     *string
+	ResponseOrigin types.ResponseOrigin
 	// PendingResponse is the accepted gate response (JSON) of a parked step
 	// whose run is waiting for a run-concurrency slot. NULL means none.
 	PendingResponse *string
@@ -88,17 +89,23 @@ func (d *DB) readableStepResultColumns() string {
 	} else {
 		columns += ", NULL AS pending_response"
 	}
+	if d.hasColumn("step_results", "response_origin") {
+		columns += ", response_origin"
+	} else {
+		columns += ", 'unknown' AS response_origin"
+	}
 	return columns
 }
 
 // InsertStepResult creates a new step result record.
 func (d *DB) InsertStepResult(runID string, stepName types.StepName) (*StepResult, error) {
 	s := &StepResult{
-		ID:        newID(),
-		RunID:     runID,
-		StepName:  stepName,
-		StepOrder: stepName.Order(),
-		Status:    types.StepStatusPending,
+		ID:             newID(),
+		RunID:          runID,
+		StepName:       stepName,
+		StepOrder:      stepName.Order(),
+		Status:         types.StepStatusPending,
+		ResponseOrigin: types.ResponseOriginUnknown,
 	}
 	_, err := sqlitewrite.Exec(context.Background(), d.sql, "InsertStepResult",
 		`INSERT INTO step_results (id, run_id, step_name, step_order, status) VALUES (?, ?, ?, ?, ?)`,
@@ -115,7 +122,7 @@ func (d *DB) GetStepResult(id string) (*StepResult, error) {
 	s := &StepResult{}
 	err := d.sql.QueryRow(
 		`SELECT `+d.readableStepResultColumns()+` FROM step_results WHERE id = ?`, id,
-	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.RoundStartedAt, &s.OverrideReason, &s.SkipReason, &s.ApprovalReason, &s.GateNonce, &s.GateRoundID, &s.AcceptedGapsJSON, &s.PendingResponse)
+	).Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.RoundStartedAt, &s.OverrideReason, &s.SkipReason, &s.ApprovalReason, &s.GateNonce, &s.GateRoundID, &s.AcceptedGapsJSON, &s.PendingResponse, &s.ResponseOrigin)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -147,7 +154,7 @@ func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
 	var steps []*StepResult
 	for rows.Next() {
 		s := &StepResult{}
-		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.RoundStartedAt, &s.OverrideReason, &s.SkipReason, &s.ApprovalReason, &s.GateNonce, &s.GateRoundID, &s.AcceptedGapsJSON, &s.PendingResponse); err != nil {
+		if err := rows.Scan(&s.ID, &s.RunID, &s.StepName, &s.StepOrder, &s.Status, &s.ExitCode, &s.DurationMS, &s.LogPath, &s.FindingsJSON, &s.Error, &s.StartedAt, &s.CompletedAt, &s.LastActivityAt, &s.LastActivity, &s.AgentPID, &s.AutoFixLimit, &s.RoundStartedAt, &s.OverrideReason, &s.SkipReason, &s.ApprovalReason, &s.GateNonce, &s.GateRoundID, &s.AcceptedGapsJSON, &s.PendingResponse, &s.ResponseOrigin); err != nil {
 			return nil, fmt.Errorf("scan step result: %w", err)
 		}
 		steps = append(steps, s)
@@ -175,7 +182,7 @@ func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 		SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL,
 			findings_json = NULL, error = NULL, started_at = NULL,
 			round_started_at = NULL, completed_at = NULL, last_activity_at = NULL, last_activity = NULL,
-			agent_pid = NULL, auto_fix_limit = NULL, override_reason = NULL, approval_reason = NULL, accepted_gaps_json = NULL
+			agent_pid = NULL, auto_fix_limit = NULL, override_reason = NULL, approval_reason = NULL, accepted_gaps_json = NULL, response_origin = 'unknown'
 		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped)
 		if err != nil {
 			return fmt.Errorf("reset steps for revalidation: %w", err)

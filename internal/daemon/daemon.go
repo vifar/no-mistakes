@@ -1630,7 +1630,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if len(p.AcceptGaps) > 0 || p.CoveredBy != "" {
 			gaps = &db.AcceptedGaps{FindingIDs: p.AcceptGaps, Reason: p.ApprovalReason, CoveredBy: p.CoveredBy}
 		}
-		dispositions, err := mgr.HandleRespondWithAcceptedGaps(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason, gaps, p.ExpectedGate, p.Coverage)
+		dispositions, err := mgr.HandleRespondWithAcceptedGaps(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason, gaps, p.ExpectedGate, pipeline.ResponseOptions{Origin: p.Origin, Coverage: p.Coverage})
 		if err != nil {
 			// Admission refusals are structured results, not transport failures.
 			// A superseded gate requires a fresh decision; finding-selection

@@ -124,7 +124,7 @@ func TestExecutor_IncompleteCoverageCanContinueWithoutFixOrApproval(t *testing.T
 		}
 	})
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if _, err := exec.RespondWithOverrides(types.StepReview, types.ApprovalAction("complete-coverage"), nil, nil, nil, nil, "", gateSnapshot(exec), coverageBinding(t, database, run.ID)); err != nil {
+	if _, err := exec.RespondWithOverrides(types.StepReview, types.ApprovalAction("complete-coverage"), nil, nil, nil, nil, "", gateSnapshot(exec), ResponseOptions{Coverage: coverageBinding(t, database, run.ID)}); err != nil {
 		t.Fatalf("cannot complete an empty-findings review without a fix or waiver: %v", err)
 	}
 	select {
@@ -251,7 +251,7 @@ func TestExecutor_PersistedFixReviewContinuesCoverageWithoutReplacingItsRun(t *t
 	binding := coverageBinding(t, database, run.ID)
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		_, err := exec.RespondWithOverrides(types.StepReview, types.ActionCompleteCoverage, nil, nil, nil, nil, "", gateSnapshot(exec), binding)
+		_, err := exec.RespondWithOverrides(types.StepReview, types.ActionCompleteCoverage, nil, nil, nil, nil, "", gateSnapshot(exec), ResponseOptions{Coverage: binding})
 		if err == nil {
 			break
 		}
@@ -309,7 +309,7 @@ func TestExecutor_CoverageContinuationDoesNotCertifyAnotherPartialReview(t *test
 		}
 	})
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if _, err := exec.RespondWithOverrides(types.StepReview, types.ApprovalAction("complete-coverage"), nil, nil, nil, nil, "", gateSnapshot(exec), coverageBinding(t, database, run.ID)); err != nil {
+	if _, err := exec.RespondWithOverrides(types.StepReview, types.ApprovalAction("complete-coverage"), nil, nil, nil, nil, "", gateSnapshot(exec), ResponseOptions{Coverage: coverageBinding(t, database, run.ID)}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -373,7 +373,7 @@ func TestExecutor_CoverageContinuationRejectsStaleBindingsAndChangedSource(t *te
 					}
 				}
 			}
-			if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionCompleteCoverage, nil, nil, nil, nil, "", gateSnapshot(exec), binding); err == nil {
+			if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionCompleteCoverage, nil, nil, nil, nil, "", gateSnapshot(exec), ResponseOptions{Coverage: binding}); err == nil {
 				t.Fatal("coverage continuation accepted stale or changed source")
 			}
 			if err := exec.Respond(types.StepReview, types.ActionAbort, nil, gateSnapshot(exec)); err != nil {
@@ -418,7 +418,7 @@ func TestExecutor_ConcurrentCoverageResponsesStartOnlyOneReview(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, err := exec.RespondWithOverrides(types.StepReview, types.ActionCompleteCoverage, nil, nil, nil, nil, "", gateSnapshot(exec), binding)
+			_, err := exec.RespondWithOverrides(types.StepReview, types.ActionCompleteCoverage, nil, nil, nil, nil, "", gateSnapshot(exec), ResponseOptions{Coverage: binding})
 			results <- err
 		}()
 	}
@@ -438,7 +438,7 @@ func TestExecutor_ConcurrentCoverageResponsesStartOnlyOneReview(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("static review did not start")
 	}
-	if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionCompleteCoverage, nil, nil, nil, nil, "", gateSnapshot(exec), binding); err == nil {
+	if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionCompleteCoverage, nil, nil, nil, nil, "", gateSnapshot(exec), ResponseOptions{Coverage: binding}); err == nil {
 		t.Fatal("repeated request started another active reviewer")
 	}
 	close(release)
