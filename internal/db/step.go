@@ -123,6 +123,10 @@ func (d *DB) GetStepResult(id string) (*StepResult, error) {
 	return s, nil
 }
 
+func (d *DB) stepsByRunQuery() string {
+	return `SELECT ` + d.readableStepResultColumns() + ` FROM step_results WHERE run_id = ? ORDER BY step_order, id`
+}
+
 // GetStepsByRun returns all step results for a run, in execution order.
 //
 // The `id` tie-break is load-bearing: a custom gate shares its anchor's
@@ -133,9 +137,7 @@ func (d *DB) GetStepResult(id string) (*StepResult, error) {
 // ids are monotonic ULIDs, so ordering by id reproduces insertion - that is,
 // execution - order deterministically.
 func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
-	rows, err := d.sql.Query(
-		`SELECT `+d.readableStepResultColumns()+` FROM step_results WHERE run_id = ? ORDER BY step_order, id`, runID,
-	)
+	rows, err := d.sql.Query(d.stepsByRunQuery(), runID)
 	if err != nil {
 		return nil, fmt.Errorf("get steps by run: %w", err)
 	}

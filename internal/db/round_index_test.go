@@ -6,11 +6,9 @@ import (
 	"testing"
 )
 
-const roundsByStepPlanQuery = `EXPLAIN QUERY PLAN SELECT id, step_result_id, round, trigger_type, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, repair_published, duration_ms, created_at FROM step_rounds WHERE step_result_id = ? ORDER BY round`
-
 func roundsByStepQueryPlan(t *testing.T, d *DB) string {
 	t.Helper()
-	return roundsQueryPlan(t, d, roundsByStepPlanQuery)
+	return roundsQueryPlan(t, d, "EXPLAIN QUERY PLAN "+roundsByStepQuery)
 }
 
 func roundsQueryPlan(t *testing.T, d *DB, query string) string {
@@ -98,7 +96,7 @@ func TestStepRoundsIndexExistingDatabase(t *testing.T) {
 // must seek a run's steps instead of scanning every step result.
 func TestStepResultsByRunQueryPlan(t *testing.T) {
 	d := openTestDB(t)
-	plan := roundsQueryPlan(t, d, `EXPLAIN QUERY PLAN SELECT `+d.readableStepResultColumns()+` FROM step_results WHERE run_id = ? ORDER BY step_order, id`)
+	plan := roundsQueryPlan(t, d, "EXPLAIN QUERY PLAN "+d.stepsByRunQuery())
 	t.Logf("GetStepsByRun query plan: %s", plan)
 	if !strings.Contains(plan, "USING INDEX idx_step_results_run_order") {
 		t.Errorf("query plan does not use the step results index: %s", plan)
