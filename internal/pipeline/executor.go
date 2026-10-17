@@ -250,11 +250,9 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 	return exec
 }
 
-// runEvidenceDir resolves where this run's test evidence is written. The
-// executor is the single owner of that answer for the pipeline: steps read it
-// from StepContext rather than recomputing a path, which is what let the
-// steering preamble and the test step drift apart while both hardcoded the
-// system temp directory.
+// runEvidenceRoot resolves the stable run root shared by evidence generations
+// and the review conversation. Steps receive executor-resolved paths through
+// StepContext rather than rebuilding them independently.
 func (e *Executor) runEvidenceRoot(runID string) string {
 	if e.paths == nil {
 		return ""
@@ -266,6 +264,8 @@ func (e *Executor) runEvidenceRoot(runID string) string {
 	return e.paths.RunEvidenceDir(configured, runID)
 }
 
+// runEvidenceDir selects the active generation; generation zero preserves
+// legacy artifact paths at the run root during recovery.
 func (e *Executor) runEvidenceDir(runID string) string {
 	root := e.runEvidenceRoot(runID)
 	if root == "" || e.evidenceGeneration.Load() == 0 {

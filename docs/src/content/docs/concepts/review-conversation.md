@@ -42,8 +42,9 @@ refuses those shortcuts at Review and requires independent certification.
 ## The file protocol
 
 Every run owns a review-conversation directory under the run's evidence
-directory (`pipeline.StepContext.EvidenceDir`, resolved once by the executor and
-always outside the worktree):
+root (`pipeline.StepContext.ReviewConversationDir`, resolved by the executor and
+always outside the worktree). It stays at this path across target-advance
+rewinds, independently of the active test-evidence generation:
 
 ```
 <evidence-root>/<run-id>/review/

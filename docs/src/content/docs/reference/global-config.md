@@ -1118,6 +1118,15 @@ rebase:
 
 A value in the trusted repository config overrides this global value in both directions. When the trusted repository config omits the key, this global value applies. An unrecognized value fails the config closed rather than falling back to the default, so a typo cannot quietly keep rewriting history a maintainer asked to stop rewriting.
 
+### rebase.max_target_advance_rewinds
+
+Operator-level default for the [per-run target-advance rewind limit](/no-mistakes/reference/repo-config/#rebasemax_target_advance_rewinds). The default is `3`; `0` disables rewinds, and negative values are rejected. A value in the trusted repository configuration overrides this global value.
+
+```yaml
+rebase:
+  max_target_advance_rewinds: 3
+```
+
 ### review.path_instructions
 
 Machine-local review guidance that applies to every repository this machine gates.
@@ -1409,7 +1418,7 @@ Otherwise, accepted candidates are ranked by confidence, which combines the raw 
 ### test.evidence
 
 Test-step evidence storage settings.
-By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>`. On GitHub.com/GHEC, supported image and video artifacts are also uploaded when the PR is rendered; see `attach_media` below.
+By default, evidence artifacts are written to `<NM_HOME>/evidence/<run-id>`. After a [target-advance rewind](/no-mistakes/reference/pipeline-steps/#target-advances-before-publication), the active evidence directory is `<NM_HOME>/evidence/<run-id>/g<N>`, where `N` is the run's rewind count. Generation zero keeps the original run-root layout, including for recovered runs. On GitHub.com/GHEC, supported image and video artifacts are also uploaded when the PR is rendered; see `attach_media` below.
 
 |      |          |
 | ---- | -------- |

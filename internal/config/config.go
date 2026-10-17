@@ -853,6 +853,9 @@ type RebaseRaw struct {
 
 // Rebase holds the resolved rebase-step settings.
 type Rebase struct {
+	// MaxTargetAdvanceRewinds caps committed unpublished target fast-forwards per run.
+	MaxTargetAdvanceRewinds int
+
 	// Strategy selects how the rebase step integrates a base branch that moved
 	// under the gated branch.
 	//
@@ -875,8 +878,7 @@ type Rebase struct {
 	//
 	// The cost is a merge commit per integration. On a squash-merged default
 	// branch they never reach it; on a merge-committed one they do.
-	MaxTargetAdvanceRewinds int
-	Strategy                string
+	Strategy string
 }
 
 // AutoFix holds resolved per-step auto-fix attempt limits.
@@ -3764,10 +3766,9 @@ func rebaseDefaults() Rebase {
 	return Rebase{Strategy: DefaultRebaseStrategy, MaxTargetAdvanceRewinds: DefaultMaxTargetAdvanceRewinds}
 }
 
-// applyRebaseOverrides applies a raw strategy onto resolved defaults.
-// The value was already validated at parse time, so an unrecognized one cannot
-// reach here; an empty string is treated as "not set" so a repository can
-// comment the key out without inventing a third meaning.
+// applyRebaseOverrides applies raw rebase settings onto resolved defaults.
+// Values were already validated at parse time. An empty strategy or nil
+// rewind limit is treated as "not set", preserving the resolved default.
 func applyRebaseOverrides(dst *Rebase, src *RebaseRaw) {
 	if src.MaxTargetAdvanceRewinds != nil {
 		dst.MaxTargetAdvanceRewinds = *src.MaxTargetAdvanceRewinds

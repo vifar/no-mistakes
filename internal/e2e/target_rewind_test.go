@@ -3,9 +3,11 @@
 package e2e
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -186,8 +188,16 @@ func TestTargetAdvanceExistingPRJourney(t *testing.T) {
 			}
 			launch := make(chan launchResult, 1)
 			go func() {
-				out, err := h.RunInDir(wt, "axi", "run", "--intent", "validate the existing PR", "--skip", "ci")
-				launch <- launchResult{out, err}
+				// This follower spans two validation passes plus the explicit
+				// release below. Match the journey's completion budget rather
+				// than the harness's 60-second budget for individual commands.
+				ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+				defer cancel()
+				cmd := exec.CommandContext(ctx, h.NMBin, "axi", "run", "--intent", "validate the existing PR", "--skip", "ci")
+				cmd.Dir = wt
+				cmd.Env = os.Environ()
+				out, err := cmd.CombinedOutput()
+				launch <- launchResult{string(out), err}
 			}()
 			active := waitForStepStatus(t, h, branch, types.StepTest, types.StepStatusRunning, 90*time.Second)
 
@@ -345,7 +355,14 @@ func TestTargetAdvancePublishedCIRestartJourney(t *testing.T) {
 		t.Fatal(err)
 	}
 	checks := `{"data":{"repository":{"object":{"statusCheckRollup":{"contexts":{"nodes":[{"__typename":"CheckRun","databaseId":1,"name":"fixture-build","status":"COMPLETED","conclusion":"FAILURE","checkSuite":{"app":{"slug":"fixture-ci"}}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}}`
-	wrapper := "#!/bin/sh\ncase \"$*\" in\n*'statusCheckRollup'*) printf '%s\\n' " + shellQuote(checks) + "; exit 0 ;;\n*'mergeable,mergeStateStatus'*) printf 'MERGEABLE CLEAN\\n'; exit 0 ;;\nesac\nexec " + shellQuote(delegate) + " \"$@\"\n"
+	// The repaired head gets a new successful CI result. Repeating the old
+	// failure forever correctly keeps the monitor waiting and never reaches
+	// the support-owner refresh that requests a new Review.
+	greenChecks := strings.Replace(checks, `"conclusion":"FAILURE"`, `"conclusion":"SUCCESS"`, 1)
+	wrapper := "#!/bin/sh\ncase \"$*\" in\n*'statusCheckRollup'*)\n" +
+		"current=$(git --git-dir=" + shellQuote(h.UpstreamDir) + " rev-parse refs/heads/" + branch + ") || exit 1\n" +
+		"if [ \"$current\" = " + shellQuote(head) + " ]; then printf '%s\\n' " + shellQuote(checks) + "; else printf '%s\\n' " + shellQuote(greenChecks) + "; fi\nexit 0 ;;\n" +
+		"*'mergeable,mergeStateStatus'*) printf 'MERGEABLE CLEAN\\n'; exit 0 ;;\nesac\nexec " + shellQuote(delegate) + " \"$@\"\n"
 	if err := os.WriteFile(gh, []byte(wrapper), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -382,6 +399,7 @@ func TestTargetAdvancePublishedCIRestartJourney(t *testing.T) {
 	if rewinds != 0 || pending || history != 0 {
 		t.Fatalf("published restart was rewound: %d %t %d", rewinds, pending, history)
 	}
+	t.Logf("published head=%s, repaired head=%s, advanced target=%s: comparison refused after CI restart with zero rewinds", head, stored.HeadSHA, target)
 }
 
 // A target rewind replaces the comparison while gate identities keep the
