@@ -15,7 +15,7 @@ import (
 // and logs out of the default branch's history while still linking them from
 // the PR.
 //
-// The path itself is resolved once by the executor (see
+// The active generation's path is resolved by the executor (see
 // pipeline.StepContext.EvidenceDir) and read from the step context here. Steps
 // must never rebuild it from os.TempDir(): on Linux the daemon's TMPDIR is
 // unset, so that resolved to the shared /tmp - a fixed name nobody reaped, on

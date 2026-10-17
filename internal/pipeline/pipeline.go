@@ -99,8 +99,8 @@ type StepContext struct {
 	// Steps use it to query their own round history for multi-round prompts.
 	StepResultID string
 	// EvidenceDir is where this run's test-evidence artifacts belong, always
-	// outside the worktree. The executor resolves it once from the app root
-	// (honoring test.evidence.local_root) so every consumer - the test step's
+	// outside the worktree. The executor resolves the active generation from
+	// the app root (honoring test.evidence.local_root) so every consumer - the test step's
 	// prompt and the PR step's publisher - names the same directory. Empty only
 	// in embeddings that never gather evidence.
 	EvidenceDir           string

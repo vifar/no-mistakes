@@ -1090,7 +1090,7 @@ rebase:
   max_target_advance_rewinds: 3
 ```
 
-This setting is read from the trusted default-branch configuration, regardless of `allow_repo_commands`. A repository value overrides the operator's global default. Initial binding, local fix commits, first PR attachment, failed transactions, and identical retries do not spend this budget. Reaching it stops the run with a message naming the cap. See [Target advances before publication](/no-mistakes/reference/pipeline-steps/#target-advances-before-publication) for eligibility and pending-conflict rules.
+This setting is read from the trusted default-branch configuration, regardless of `allow_repo_commands`. A repository value overrides the operator's global default. Initial binding, local fix commits, first PR attachment, failed transactions, and identical retries do not spend this budget. A further target advance after the budget is exhausted stops the run with a message naming the cap. See [Target advances before publication](/no-mistakes/reference/pipeline-steps/#target-advances-before-publication) for eligibility and pending-conflict rules.
 
 ### commit.fix_message
 
