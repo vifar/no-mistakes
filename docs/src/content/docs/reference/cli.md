@@ -623,6 +623,59 @@ Pipeline-created commits remain preserved in the gate and a recoverable cancella
 While a run is active, do not use `axi abort` or `no-mistakes rerun` to go fix a finding yourself.
 That cancels the pipeline's in-flight work and forces a full re-validation; use `axi respond --action fix` at the gate so the pipeline applies and re-checks the fix.
 
+## no-mistakes axi retry
+
+Continue a run that failed because an agent invocation itself failed, instead of starting the whole pipeline again.
+
+```sh
+no-mistakes axi retry --run <id>
+```
+
+An agent invocation failure is an error the agent call returned while its context was still live: a provider processing error, a usage or quota limit, a transport failure, or the agent process exiting.
+The executor records that cause on the failed step when the step fails with that error.
+A timeout, a cancellation, and every failure about the change itself - a review finding, a failing test or lint, a refused policy, a human decision at a gate - record no cause and are never retried; use [`no-mistakes rerun`](#no-mistakes-rerun) or address them first.
+
+The retry starts a new run at the failed run's preserved head, so every correction the pipeline already committed is kept:
+
+- The steps before the failed step are carried from the failed run, with their outcome and, for a carried Review, the head that Review approved. Their findings and fixes appear in the new run's output and PR body as recorded in the failed run.
+- The failed step restarts from the beginning, with round trigger `retry`. A failed agent turn is never replayed, so a Review that failed during a fix round reviews the resulting head again in full before Test runs. Fixer commits the failed run never re-reviewed are flagged to that review together with the failed run's rounds, exactly as for a rerun.
+- Every later step runs normally. Per-run skips of steps that never ran are kept.
+
+The failed step must be Test or an earlier step, because Test's evidence and every later step's work are not kept after a run ends.
+The new run inherits the failed run's intent byte for byte with its provenance, PR base branch, intent omission, closing references, open PR URL, and Pi profile; retry takes none of the flags that would change them.
+
+`--run` names the failed run, as `axi status` shows it.
+It does not select a run: the retried run is always the current branch's latest run, and a `--run` that names any other run is refused.
+The retry refuses, changing nothing, unless every proof holds:
+
+| Proof | Holds when |
+| ----- | ---------- |
+| `run identity` | `--run` names a run of the current repository and branch |
+| `latest run` | no newer run exists on the branch |
+| `no active run` | no run is active on the branch |
+| `failed run` | the run's status is `failed`, not `cancelled` or `completed` |
+| `unpublished run` | the run never pushed |
+| `durable checkpoint` | the run's record holds one row per step of its pinned pipeline: completed or skipped steps, exactly one failed step, then steps that never ran |
+| `eligible failure` | the failed step's recorded cause is an agent invocation failure |
+| `reusable evidence` | the failed step is Test or an earlier step |
+| `preserved head` | the run verified its final head when it failed, and the gate still keeps exactly that commit: its recovery ref when the pipeline moved the head, the submitted commit otherwise |
+| `clean branch` | the working tree has no uncommitted changes |
+| `matching head` | the local `HEAD` is exactly the preserved head; adopt it first with `no-mistakes axi sync --recover` |
+| `compatible configuration` | the run has no verification plan, its Pi profile still resolves to the same model and effort, and the repository's gates, read from the freshly fetched trusted default branch, are the gates the run pinned. A carried Review also needs the same effective repository configuration as the trusted commit its rounds recorded, the same global configuration when its rounds recorded one, and the same agent and model that served each carried step (an `auto` agent is resolved first). The configuration is checked twice: once before the launch, and again against the configuration the new run actually loads, so a change between the two refuses the retry. The refusal names the changed setting |
+| `review conversation` | a carried Review that recorded a question still has its question records on disk. They are copied into the new run, so open and withdrawn questions reach the PR body; if they are gone, the retry is refused |
+
+Each refusal names the failed proof and points to `no-mistakes rerun`.
+The new run records which run, step, and round it continues, the failed step's error, and the preserved head it started from.
+Its run object shows that link as `retry_of`, and the failed run's run object names its continuation as `retried_by`; the new run's own outcome completes the trail.
+A failed run is continued at most once.
+Retry is never offered as an automatic next action: it runs only when you ask for it.
+Like `axi run`, it then blocks until the next gate, CI-ready decision point, or final outcome, bounded by `--wait` (default `8m`).
+
+| Flag | Type | Default | Description |
+| ---- | ---- | ------- | ----------- |
+| `--run` | `string` | (none) | ID of the failed run, which must be the current branch's latest run (required) |
+| `--wait` | `duration` | `8m` | Maximum time to block before returning a structured reattach hint |
+
 ## no-mistakes eject
 
 Remove the gate from the current repository.
@@ -698,7 +751,9 @@ inherited from the selected prior run; `--no-publish-intent` and the global
 default can only add omission, never remove it. If another run is active on that branch, rerun
 cancels it before starting over. Treat rerun as a between-runs action after a
 failed or cancelled outcome; use `axi run` for separate local fixes, and do not
-use rerun to bypass a gate.
+use rerun to bypass a gate. When the run failed only because an agent invocation
+failed, [`no-mistakes axi retry`](#no-mistakes-axi-retry) continues it from the
+failed step instead of repeating every completed step.
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |

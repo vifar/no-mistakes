@@ -160,6 +160,7 @@ When CI returns, including with findings, the boundary guard rejects the changed
 The monitor does not automatically repair or revalidate that changed comparison.
 After termination, restart from the current target and head; never hand-rebase.
 See [`no-mistakes rerun`](/no-mistakes/reference/cli/#no-mistakes-rerun) for restart and custody conditions.
+A run that failed before Push only because an agent invocation failed - a provider error, a usage limit, or the agent process exiting - can instead continue from its failed step with [`no-mistakes axi retry --run <id>`](/no-mistakes/reference/cli/#no-mistakes-axi-retry); it refuses with the failed proof whenever continuing is not provably safe.
 The agent must not use `no-mistakes axi run` to refresh a still-active PR: after `checks-passed` it reattaches to the running monitor with HEAD unchanged and returns the monitor output without rebasing.
 
 In task-first mode, if the repo is on the default branch, the skill tells the agent to create a feature branch before committing because the gate validates committed history on a non-default branch.
@@ -179,6 +180,7 @@ no-mistakes axi respond --run <id> --action approve
 no-mistakes axi logs --step review --full
 no-mistakes axi abort
 no-mistakes axi abort --run <id>
+no-mistakes axi retry --run <id>
 ```
 
 Before any post-pipeline local commit or fresh run, read `branch_sync` and follow its exact `next_action.command`.

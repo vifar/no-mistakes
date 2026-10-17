@@ -34,6 +34,7 @@ const (
 	MethodGetRunsForHead            = "get_runs_for_head"
 	MethodGetActiveRun              = "get_active_run"
 	MethodRerun                     = "rerun"
+	MethodRetryRun                  = "retry_run"
 	MethodSubscribe                 = "subscribe"
 	MethodRespond                   = "respond"
 	MethodAnswerReview              = "answer_review_question"
@@ -287,6 +288,26 @@ type RerunParams struct {
 	// ClosingIssueRefs are added to the references the selected run carried;
 	// a rerun never drops an inherited closing reference.
 	ClosingIssueRefs []string `json:"closing_issue_refs,omitempty"`
+}
+
+// RetryRunParams asks the daemon to continue a failed run from its failed
+// step. RunID must name the branch's latest run: it confirms the run the
+// caller inspected and never selects any other. CallerHeadSHA is the clean
+// caller worktree's HEAD; empty means the worktree was not clean.
+type RetryRunParams struct {
+	RepoID        string `json:"repo_id"`
+	Branch        string `json:"branch"`
+	RunID         string `json:"run_id"`
+	CallerHeadSHA string `json:"caller_head_sha,omitempty"`
+}
+
+// RetryRunResult names the run that continues the failed one and the step it
+// restarted, with the round of that step the failed run was in.
+type RetryRunResult struct {
+	RunID       string         `json:"run_id"`
+	SourceRunID string         `json:"source_run_id"`
+	Step        types.StepName `json:"step"`
+	SourceRound int            `json:"source_round"`
 }
 
 // SubscribeParams starts an event stream for a run.
@@ -612,6 +633,10 @@ type RunInfo struct {
 	// axi's outcome wording does not need to inspect every step itself.
 	CIOverrideReason   string `json:"ci_override_reason,omitempty"`
 	TestOverrideReason string `json:"test_override_reason,omitempty"`
+	// RetryOf links a run started by axi retry to the failed run it continues;
+	// RetriedBy names the run that continued this failed run.
+	RetryOf   *RunRetryInfo `json:"retry_of,omitempty"`
+	RetriedBy string        `json:"retried_by,omitempty"`
 	// StateRev is the monotonic run-state revision this snapshot is at least
 	// as new as. It is sampled before the database read, so every event at or
 	// below it is already reflected here and every event above it still
@@ -619,6 +644,17 @@ type RunInfo struct {
 	StateRev  int64 `json:"state_rev,omitempty"`
 	CreatedAt int64 `json:"created_at"`
 	UpdatedAt int64 `json:"updated_at"`
+}
+
+// RunRetryInfo is the audit link from a continuation run to the failure it
+// continues: the failed run, its failed step and round, that step's error,
+// and the preserved head the continuation started from.
+type RunRetryInfo struct {
+	RunID             string         `json:"run_id"`
+	Step              types.StepName `json:"step"`
+	Round             int            `json:"round"`
+	Error             string         `json:"error"`
+	CheckpointHeadSHA string         `json:"checkpoint_head_sha"`
 }
 
 // WorkScopeDocumentLintHousekeeping identifies the one agent invocation that

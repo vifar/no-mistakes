@@ -1,9 +1,9 @@
 package db
 
 import (
+	"context"
 	"fmt"
-"context"
-"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )

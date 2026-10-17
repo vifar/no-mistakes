@@ -1600,6 +1600,21 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		}
 		return &ipc.PushReceivedResult{RunID: id}, nil
 	})
+	srv.Handle(ipc.MethodRetryRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var p ipc.RetryRunParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		link, err := mgr.HandleRetry(ctx, p.RepoID, p.Branch, p.RunID, p.CallerHeadSHA)
+		if err != nil {
+			return nil, err
+		}
+		return &ipc.RetryRunResult{RunID: link.RunID, SourceRunID: link.SourceRunID, Step: link.StepName, SourceRound: link.SourceRound}, nil
+	})
+
 	srv.Handle(ipc.MethodPushReceived, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		// Hooks execute in a managed bare gate by definition, so only the
 		// authenticated peer ancestry is meaningful at this ingress.
@@ -1801,6 +1816,12 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		info.PendingCISupport = pending
 	} else {
 		info.PendingCISupportError = err.Error()
+	}
+	if link, err := d.GetRunRetry(r.ID); err == nil && link != nil {
+		info.RetryOf = &ipc.RunRetryInfo{RunID: link.SourceRunID, Step: link.StepName, Round: link.SourceRound, Error: link.SourceError, CheckpointHeadSHA: link.CheckpointHeadSHA}
+	}
+	if link, err := d.GetRunRetryBySource(r.ID); err == nil && link != nil {
+		info.RetriedBy = link.RunID
 	}
 	if len(steps) > 0 {
 		rounds, roundsErr := d.GetRoundsByRun(r.ID)

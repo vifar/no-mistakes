@@ -165,6 +165,19 @@ Symptom: a run stops with a failed step.
 
 See [daemon logging](/no-mistakes/concepts/daemon/#logging) for per-step logs and where to find database infrastructure-failure diagnostics.
 
+### A run failed on a provider error, usage limit, or agent exit
+
+When the failed step is Test or an earlier step and its error came from the agent invocation itself, continue the run instead of starting over:
+
+```sh
+no-mistakes axi sync --recover   # when the run left unpublished pipeline commits
+no-mistakes axi retry --run <id>
+```
+
+The retry keeps every committed correction, carries the steps before the failed one, and restarts the failed step from the beginning.
+It refuses, naming the proof that failed, when the failure is about the change itself, the branch or head moved, or the configuration changed; use `no-mistakes rerun` then.
+See [`no-mistakes axi retry`](/no-mistakes/reference/cli/#no-mistakes-axi-retry) for every proof.
+
 ### Push fails with `refusing to force-push`
 
 This means the live remote branch changed after the pipeline's last observed head and contains commit(s) the validated worktree did not incorporate.

@@ -157,6 +157,8 @@ type runView struct {
 	// live check (see pipeline.ApprovalOverrideVerifier). outcomeForRun uses
 	// it to keep a deliberate override from reading identically to a
 	// genuinely green run in agent-facing output.
+	RetryOf               *ipc.RunRetryInfo
+	RetriedBy             string
 	CIOverrideReason      string
 	TestOverrideReason    string
 	ExternalCIOwner       string
@@ -174,7 +176,8 @@ func ordinaryReviewGeneration(r *ipc.RunInfo) *int64 {
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
 	rv := runView{
-		EndingEvent:    r.EndingEvent,
+		EndingEvent: r.EndingEvent,
+		RetryOf:     r.RetryOf, RetriedBy: r.RetriedBy,
 		OwnerAdmission: r.OwnerAdmission, OwnerAdmissionError: r.OwnerAdmissionError,
 		Owner:                 r.Owner,
 		TargetAdvanceRewinds:  r.TargetAdvanceRewinds,
@@ -687,6 +690,17 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	}
 	if rv.TestOverrideReason != "" {
 		fields = append(fields, toon.Field{Key: "test_override_reason", Value: rv.TestOverrideReason})
+	}
+	if r := rv.RetryOf; r != nil {
+		fields = append(fields, toon.Field{Key: "retry_of", Value: toon.NewObject(
+			toon.Field{Key: "run", Value: r.RunID},
+			toon.Field{Key: "step", Value: string(r.Step)},
+			toon.Field{Key: "failed_round", Value: r.Round},
+			toon.Field{Key: "checkpoint_head", Value: shortSHA(r.CheckpointHeadSHA)},
+		)})
+	}
+	if rv.RetriedBy != "" {
+		fields = append(fields, toon.Field{Key: "retried_by", Value: rv.RetriedBy})
 	}
 	if p := rv.VerificationPlan; p != nil {
 		fields = append(fields, toon.Field{Key: "verification_plan", Value: toon.NewObject(
