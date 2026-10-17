@@ -93,3 +93,20 @@ func TestStepRoundsIndexExistingDatabase(t *testing.T) {
 		})
 	}
 }
+
+// GetStepsByRun runs once per run on every status and run-list request, so it
+// must seek a run's steps instead of scanning every step result.
+func TestStepResultsByRunQueryPlan(t *testing.T) {
+	d := openTestDB(t)
+	plan := roundsQueryPlan(t, d, `EXPLAIN QUERY PLAN SELECT `+d.readableStepResultColumns()+` FROM step_results WHERE run_id = ? ORDER BY step_order, id`)
+	t.Logf("GetStepsByRun query plan: %s", plan)
+	if !strings.Contains(plan, "USING INDEX idx_step_results_run_order") {
+		t.Errorf("query plan does not use the step results index: %s", plan)
+	}
+	if strings.Contains(strings.ToUpper(plan), "SCAN STEP_RESULTS") {
+		t.Errorf("query plan scans all step results: %s", plan)
+	}
+	if strings.Contains(strings.ToUpper(plan), "TEMP B-TREE") {
+		t.Errorf("query plan sorts step results in a temp b-tree: %s", plan)
+	}
+}

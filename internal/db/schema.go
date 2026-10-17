@@ -143,6 +143,8 @@ CREATE TABLE IF NOT EXISTS step_rounds (
 
 CREATE INDEX IF NOT EXISTS idx_step_rounds_step_result_round ON step_rounds (step_result_id, round);
 
+CREATE INDEX IF NOT EXISTS idx_step_results_run_order ON step_results (run_id, step_order, id);
+
 CREATE TABLE IF NOT EXISTS agent_invocations (
     id                    TEXT PRIMARY KEY,
     run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
