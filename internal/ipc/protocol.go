@@ -23,6 +23,7 @@ const (
 	MethodCaptureVerificationPlan   = "capture_verification_plan"
 	MethodStartFreshRun             = "start_fresh_run"
 	MethodProbeShipping             = "probe_shipping"
+	MethodProbeRunOwner             = "probe_run_owner"
 	MethodClaimLaunchReceipt        = "claim_launch_receipt"
 	MethodGetRun                    = "get_run"
 	MethodGetStepDiff               = "get_step_diff"
@@ -78,6 +79,14 @@ func (e *RPCError) Error() string { return e.Message }
 
 // --- Method parameters ---
 
+// ProbeRunOwnerParams checks caller ownership support before branch custody changes.
+type ProbeRunOwnerParams struct {
+	Owner string `json:"owner"`
+}
+type ProbeRunOwnerResult struct {
+	OK bool `json:"ok"`
+}
+
 // PushReceivedParams are sent by the post-receive hook when a push arrives.
 //
 // Intent, when set, is an agent-supplied description of the change. It is
@@ -85,6 +94,7 @@ func (e *RPCError) Error() string { return e.Message }
 // intent from local transcripts. LaunchNonce and ValidationGeneration together
 // opt into a nonce-bound launch proof.
 type PushReceivedParams struct {
+	Owner              string                 `json:"owner"`
 	VerificationPlanID string                 `json:"verification_plan_id,omitempty"`
 	Shipping           *types.ShippingOptions `json:"shipping,omitempty"`
 	PiProfile          *agentcfg.PiProfile    `json:"pi_profile,omitempty"`
@@ -117,6 +127,7 @@ type PushReceivedParams struct {
 // branch head. The daemon checks the gate while holding the branch lock, so a
 // caller never receives a proof for a drifting creation context.
 type StartFreshRunParams struct {
+	Owner              string                 `json:"owner"`
 	VerificationPlanID string                 `json:"verification_plan_id,omitempty"`
 	Shipping           *types.ShippingOptions `json:"shipping,omitempty"`
 	PiProfile          *agentcfg.PiProfile    `json:"pi_profile,omitempty"`
@@ -248,6 +259,7 @@ type GetActiveRunParams struct {
 // leaves the new run to perform fresh inference.
 // ClosingIssueRefs are merged with the selected run's persisted references.
 type RerunParams struct {
+	Owner              string              `json:"owner"`
 	VerificationPlanID string              `json:"verification_plan_id,omitempty"`
 	PiProfile          *agentcfg.PiProfile `json:"pi_profile,omitempty"`
 
@@ -379,6 +391,7 @@ type PushReceivedResult struct {
 // selected one durable run before the caller drives it. The validation
 // generation and intent digest are persisted; raw intent is never included.
 type LaunchReceipt struct {
+	Owner     string              `json:"owner"`
 	PiProfile *agentcfg.PiProfile `json:"pi_profile,omitempty"`
 
 	RunID                string `json:"run_id"`
@@ -514,6 +527,7 @@ type ShutdownResult struct {
 
 // RunInfo is the IPC representation of a pipeline run.
 type RunInfo struct {
+	Owner                string                     `json:"owner"`
 	TargetAdvanceRewinds int64                      `json:"target_advance_rewinds"`
 	VerificationPlan     *verificationplan.Snapshot `json:"verification_plan"`
 	Shipping             *types.ShippingOptions     `json:"shipping,omitempty"`

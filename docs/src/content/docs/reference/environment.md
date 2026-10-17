@@ -38,6 +38,18 @@ Override how long a CLI client waits for an existing daemon socket to accept a c
 
 Takes precedence over `daemon_connect_timeout` in `config.yaml`. An empty, unparsable, or non-positive value is ignored and the config value (or its default) is used instead. The config value is read from the root whose socket is being dialed, not from the root `NM_HOME` names, so a push handled by the root that owns the gate also waits for the timeout that root configured.
 
+## `NO_MISTAKES_OWNER`
+
+Optional session/thread ID or person responsible for driving a new run's approval gates. `axi run` and `rerun` read it in the launching CLI and send it to the daemon; the daemon does not read its own environment to guess a caller. `--owner` takes precedence, including an explicitly empty value. Absence records an ownerless run and warns by default; the operator can enable global `intent.require_owner` to refuse it. See [launch owner](/no-mistakes/reference/cli/#launch-owner).
+
+A launching agent should set this to its actual known identity. For example, in a Codex environment that exposes `CODEX_THREAD_ID`:
+
+```sh
+NO_MISTAKES_OWNER="$CODEX_THREAD_ID" no-mistakes axi run --intent-file ./intent.md
+```
+
+There is no automatic T3 thread-ID fallback. Do not manufacture an ID when the launching environment lacks one.
+
 ## `FORGEJO_BASE_URL`
 
 Canonical Forgejo web base URL used for provider discovery and forgejo-axi commands.

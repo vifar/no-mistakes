@@ -27,6 +27,10 @@ func newRerunCmd() *cobra.Command {
 			if cmd.Flags().Changed("intent") && strings.TrimSpace(intent) == "" {
 				return fmt.Errorf("--intent must not be empty")
 			}
+			owner, err := launchOwner(cmd)
+			if err != nil {
+				return err
+			}
 			profile, err := piProfileFromFlags(cmd, model, effort)
 			if err != nil {
 				return err
@@ -84,12 +88,15 @@ func newRerunCmd() *cobra.Command {
 					profile = &resolved
 				}
 
+				if err := probeLaunchOwner(client, owner); err != nil {
+					return err
+				}
 				callerHead, err := rerunCallerHead(cmd.Context())
 				if err != nil {
 					return err
 				}
 				var result ipc.RerunResult
-				if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: branch, Intent: intent, PRBaseBranch: baseBranch, OmitIntent: noPublishIntent, CallerHeadSHA: callerHead, PiProfile: profile, ClosingIssueRefs: closes}, &result); err != nil {
+				if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{Owner: owner, RepoID: repo.ID, Branch: branch, Intent: intent, PRBaseBranch: baseBranch, OmitIntent: noPublishIntent, CallerHeadSHA: callerHead, PiProfile: profile, ClosingIssueRefs: closes}, &result); err != nil {
 					return fmt.Errorf("rerun pipeline: %w", err)
 				}
 
@@ -98,6 +105,7 @@ func newRerunCmd() *cobra.Command {
 			})
 		},
 	}
+	bindOwnerFlag(cmd)
 	cmd.Flags().StringVar(&intent, "intent", "", "explicit intent for this rerun (overrides inherited intent or fresh inference)")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch for the PR for this rerun only (overrides inherited per-run base branch)")
 	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this rerun (adds to the inherited decision; tighten-only)")

@@ -135,6 +135,10 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			owner, err := parseOwnerPushOptions(pushOptions)
+			if err != nil {
+				return err
+			}
 			externalCIOwner, err := parseExternalCIOwnerPushOptions(pushOptions)
 			if err != nil {
 				return err
@@ -179,6 +183,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 
 			var result ipc.PushReceivedResult
 			return client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+				Owner:                  owner,
 				Shipping:               shipping,
 				Gate:                   gatePath,
 				Ref:                    ref,
