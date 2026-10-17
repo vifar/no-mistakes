@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,6 +20,17 @@ func TestTargetAdvanceRewindSafetyOrderingJourney(t *testing.T) {
 			for _, eligible := range []bool{true, false} {
 				t.Run(fmt.Sprintf("%s/%s/eligible=%t", strategy, kind, eligible), func(t *testing.T) {
 					h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t)})
+					t.Cleanup(func() {
+						if !t.Failed() {
+							return
+						}
+						h.dumpDebugState()
+						for _, run := range h.Runs() {
+							if state, err := json.MarshalIndent(h.RunInfo(run.ID), "", "  "); err == nil {
+								t.Logf("run and gate diagnostics:\n%s", state)
+							}
+						}
+					})
 					script := filepath.Join(t.TempDir(), "advance.sh")
 					limit := 3
 					if !eligible {
