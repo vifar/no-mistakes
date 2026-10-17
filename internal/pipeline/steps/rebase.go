@@ -84,29 +84,6 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.Step
 		}
 	}
 
-	// Stop before rebasing when the gated branch carries commits that live on
-	// the contributor's local default branch but were never pushed to
-	// origin/<default>. Rebasing onto the fresh remote default keeps those
-	// commits in the branch's history, so the PR may bundle another
-	// workstream's unpushed work. Surface the ambiguity for a human decision.
-	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch); outcome != nil {
-		return outcome, nil
-	}
-	if forcePush && branch == defaultBranch && remoteDefaultBranchAdvanced(ctx, sctx.WorkDir, defaultBranch, sctx.Run.BaseSHA) {
-		findingsJSON, _ := json.Marshal(Findings{
-			Items: []Finding{{
-				Severity:    "warning",
-				File:        filepath.Join("internal", "pipeline", "steps", "rebase.go"),
-				Description: fmt.Sprintf("origin/%s advanced after the force push; manual review required before updating the default branch", defaultBranch),
-			}},
-			Summary: fmt.Sprintf("remote %s advanced during force push", defaultBranch),
-		})
-		return &pipeline.StepOutcome{
-			NeedsApproval: true,
-			Findings:      string(findingsJSON),
-		}, nil
-	}
-
 	targets := rebaseTargetsForBranch(branch, defaultBranch, branchTarget)
 	if forcePush {
 		sctx.Log("force push detected, skipping " + branchTarget + " sync")
@@ -128,6 +105,29 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.Step
 	}
 	if pending != nil {
 		checkedTarget = pending.TargetSHA
+	} else {
+		// Stop before rebasing when the gated branch carries commits that live on
+		// the contributor's local default branch but were never pushed to
+		// origin/<default>. Rebasing onto the fresh remote default keeps those
+		// commits in the branch's history, so the PR may bundle another
+		// workstream's unpushed work. Surface the ambiguity for a human decision.
+		if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch); outcome != nil {
+			return outcome, nil
+		}
+		if forcePush && branch == defaultBranch && remoteDefaultBranchAdvanced(ctx, sctx.WorkDir, defaultBranch, sctx.Run.BaseSHA) {
+			findingsJSON, _ := json.Marshal(Findings{
+				Items: []Finding{{
+					Severity:    "warning",
+					File:        filepath.Join("internal", "pipeline", "steps", "rebase.go"),
+					Description: fmt.Sprintf("origin/%s advanced after the force push; manual review required before updating the default branch", defaultBranch),
+				}},
+				Summary: fmt.Sprintf("remote %s advanced during force push", defaultBranch),
+			})
+			return &pipeline.StepOutcome{
+				NeedsApproval: true,
+				Findings:      string(findingsJSON),
+			}, nil
+		}
 	}
 
 	merging := mergesMovedBase(sctx)
