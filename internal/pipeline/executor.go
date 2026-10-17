@@ -268,8 +268,8 @@ func (e *Executor) runEvidenceRoot(runID string) string {
 
 func (e *Executor) runEvidenceDir(runID string) string {
 	root := e.runEvidenceRoot(runID)
-	if root == "" {
-		return ""
+	if root == "" || e.evidenceGeneration.Load() == 0 {
+		return root
 	}
 	return filepath.Join(root, fmt.Sprintf("g%d", e.evidenceGeneration.Load()))
 }
@@ -285,6 +285,27 @@ func (e *Executor) applyTargetRewind(ctx context.Context, run *db.Run, workDir s
 		for old := e.evidenceGeneration.Load(); old < generation; old++ {
 			source := filepath.Join(root, fmt.Sprintf("g%d", old))
 			destination := filepath.Join(root, "superseded", fmt.Sprintf("g%d", old))
+			if old == 0 {
+				entries, err := os.ReadDir(root)
+				if os.IsNotExist(err) {
+					continue
+				}
+				if err != nil {
+					return err
+				}
+				for _, entry := range entries {
+					if entry.Name() == "superseded" || entry.Name() == reviewqa.DirName {
+						continue
+					}
+					if err := os.MkdirAll(destination, 0700); err != nil {
+						return err
+					}
+					if err := os.Rename(filepath.Join(root, entry.Name()), filepath.Join(destination, entry.Name())); err != nil {
+						return fmt.Errorf("supersede evidence generation: %w", err)
+					}
+				}
+				continue
+			}
 			if _, err := os.Stat(source); os.IsNotExist(err) {
 				continue
 			} else if err != nil {
@@ -1295,10 +1316,6 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 // review pass's carried set; any later step's restart starts a fresh one.
 func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, repo *db.Repo, workDir, logDir string, start int, restartedBy types.StepName) error {
 	revalidating := restartedBy != ""
-	results, err := e.db.GetStepsByRun(run.ID)
-	if err != nil {
-		return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err), ctx)
-	}
 	for index := start; index < len(e.steps); index++ {
 		if ctx.Err() != nil {
 			return e.failRun(run, repo, context.Cause(ctx), ctx)
@@ -1316,6 +1333,10 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 			revalidating = true
 			index = restartIndex - 1
 			continue
+		}
+		results, err := e.db.GetStepsByRun(run.ID)
+		if err != nil {
+			return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err), ctx)
 		}
 		if index >= len(results) || results[index].StepName != e.steps[index].Name() || (!revalidating && results[index].Status != types.StepStatusPending && results[index].Status != types.StepStatusSkipped) {
 			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index), ctx)

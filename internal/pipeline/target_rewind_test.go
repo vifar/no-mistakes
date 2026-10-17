@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -194,6 +195,13 @@ func TestTargetRewindEvidenceGenerationArchivesAndIsolatesArtifacts(t *testing.T
 	if err := os.WriteFile(filepath.Join(old, "obsolete.log"), []byte("must not be reused"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	conversation := filepath.Join(e.runEvidenceRoot(r.ID), reviewqa.DirName, reviewqa.QuestionsFile)
+	if err := os.MkdirAll(filepath.Dir(conversation), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(conversation, []byte("conversation history"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := e.applyTargetRewind(context.Background(), r, dir, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -206,6 +214,86 @@ func TestTargetRewindEvidenceGenerationArchivesAndIsolatesArtifacts(t *testing.T
 	}
 	if b, err := os.ReadFile(filepath.Join(e.runEvidenceRoot(r.ID), "superseded", "g0", "obsolete.log")); err != nil || string(b) != "must not be reused" {
 		t.Fatalf("diagnostic evidence lost: %q %v", b, err)
+	}
+	if b, err := os.ReadFile(conversation); err != nil || string(b) != "conversation history" {
+		t.Fatalf("conversation moved with obsolete evidence: %q %v", b, err)
+	}
+	if err := os.MkdirAll(current, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(current, "second.log"), []byte("second generation"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.applyTargetRewind(context.Background(), r, dir, 2); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(e.runEvidenceRoot(r.ID), "superseded", "g1", "second.log")); err != nil || string(b) != "second generation" {
+		t.Fatalf("later diagnostic evidence lost: %q %v", b, err)
+	}
+	if _, err := os.Stat(filepath.Join(e.runEvidenceDir(r.ID), "second.log")); !os.IsNotExist(err) {
+		t.Fatal("later generation reused obsolete evidence")
+	}
+}
+
+func TestTargetRewindRecoveredRemainderRerunsResetCustomGate(t *testing.T) {
+	for _, afterStep := range []bool{false, true} {
+		t.Run(map[bool]string{false: "entry guard", true: "post-step guard"}[afterStep], func(t *testing.T) {
+			d, p, r, repo := setupTest(t)
+			dir := completionFixture(t, d, r)
+			gate := newPassStep(types.CustomGateStepName(types.StepReview, "audit"))
+			lint := newPassStep(types.StepLint)
+			steps := []Step{newPassStep(types.StepRebase), newPassStep(types.StepReview), gate, newPassStep(types.StepTest), newPassStep(types.StepDocument), lint}
+			for index, step := range steps {
+				row, err := d.InsertStepResult(r.ID, step.Name())
+				if err != nil {
+					t.Fatal(err)
+				}
+				status := types.StepStatusCompleted
+				if index == 4 {
+					continue
+				}
+				if step == gate || step == lint {
+					status = types.StepStatusSkipped
+				}
+				if err := d.CompleteStepWithStatus(row.ID, status, 0, 0, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			e := NewExecutor(d, p, nil, nil, steps, nil)
+			e.initializeRunScopes(r.ID)
+			e.workDir = dir
+			rewound := false
+			e.SetPRContextGuard(func(c *StepContext, name types.StepName) (PRContextDecision, error) {
+				decision := PRContextDecision{Target: PRTargetSelection{TargetBranch: "main"}}
+				if !rewound && name == types.StepDocument && c.PRContextAfterStep == afterStep {
+					previous, err := d.GetRunPRContext(r.ID)
+					if err != nil {
+						return decision, err
+					}
+					candidate := previous.PRContextCandidate
+					candidate.TargetSHA = strings.Repeat("c", 40)
+					if _, err := d.RewindRunPRContext(r.ID, candidate, db.TargetAdvanceRewindRequest{ExpectedGeneration: previous.Generation, Step: name, MaxRewinds: 3}); err != nil {
+						return decision, err
+					}
+					rewound = true
+					decision.RestartFrom = types.StepRebase
+				}
+				return decision, nil
+			})
+			if err := e.executeRecoveredRemainder(context.Background(), r, repo, dir, t.TempDir(), 4, ""); err != nil {
+				t.Fatal(err)
+			}
+			if !rewound || gate.callCount() != 1 {
+				t.Fatalf("reset gate bypassed: rewound=%t calls=%d", rewound, gate.callCount())
+			}
+			if lint.callCount() != 0 {
+				t.Fatal("rewind discarded a core step's pinned skip")
+			}
+			rows, err := d.GetStepsByRun(r.ID)
+			if err != nil || rows[2].Status != types.StepStatusCompleted || rows[5].Status != types.StepStatusSkipped {
+				t.Fatalf("wrong durable gate outcomes: %+v, %v", rows, err)
+			}
+		})
 	}
 }
 

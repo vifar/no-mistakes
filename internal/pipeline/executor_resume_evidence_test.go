@@ -3,6 +3,8 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -73,7 +75,15 @@ func TestExecutor_RecoveredGateResumerReceivesTheRunsEvidenceDir(t *testing.T) {
 	if err := database.StartStep(stepResult.ID); err != nil {
 		t.Fatal(err)
 	}
-	findings := `{"findings":[{"id":"question-q1","severity":"warning","description":"Review question awaiting an answer: keep the legacy route?","action":"ask-user","category":"review-question"}],"summary":"one open question"}`
+	legacyRoot := p.RunEvidenceDir("", run.ID)
+	artifact := filepath.Join(legacyRoot, "legacy.log")
+	if err := os.MkdirAll(legacyRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(artifact, []byte("pre-upgrade evidence"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	findings := fmt.Sprintf(`{"findings":[{"id":"question-q1","severity":"warning","description":"Review question awaiting an answer: keep the legacy route?","action":"ask-user","category":"review-question"}],"summary":"one open question","artifacts":[{"kind":"log","path":%q}]}`, artifact)
 	if err := database.SetStepFindings(stepResult.ID, findings); err != nil {
 		t.Fatal(err)
 	}
@@ -92,16 +102,45 @@ func TestExecutor_RecoveredGateResumerReceivesTheRunsEvidenceDir(t *testing.T) {
 	}
 
 	resumed := make(chan struct{})
+	readLegacyEvidence := func(sctx *StepContext) error {
+		if sctx.EvidenceDir != legacyRoot {
+			return fmt.Errorf("generation-zero evidence root moved from %s to %s", legacyRoot, sctx.EvidenceDir)
+		}
+		content, err := os.ReadFile(filepath.Join(sctx.EvidenceDir, "legacy.log"))
+		if err != nil || string(content) != "pre-upgrade evidence" {
+			return fmt.Errorf("legacy evidence unavailable: %q, %v", content, err)
+		}
+		return nil
+	}
 	step := &evidenceReadingResumer{name: types.StepReview}
 	step.fn = func(sctx *StepContext) (*StepOutcome, error) {
 		if !sctx.FinalizingAnswers {
 			return nil, fmt.Errorf("the resumed gate did not re-enter the step as a finalize turn")
 		}
+		if err := readLegacyEvidence(sctx); err != nil {
+			return nil, err
+		}
 		close(resumed)
 		return &StepOutcome{}, nil
 	}
 
-	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 2}}, newFakeSessionAgent(), []Step{step}, nil)
+	publication := &adaptiveCallStep{name: types.StepPR, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if err := readLegacyEvidence(sctx); err != nil {
+			return nil, err
+		}
+		rounds, err := database.GetRoundsByStep(stepResult.ID)
+		if err != nil {
+			return nil, err
+		}
+		if len(rounds) == 0 || rounds[0].FindingsJSON == nil || *rounds[0].FindingsJSON != findings {
+			return nil, fmt.Errorf("recovery changed the persisted artifact path binding")
+		}
+		return &StepOutcome{}, nil
+	}}
+	if _, err := database.InsertStepResult(run.ID, types.StepPR); err != nil {
+		t.Fatal(err)
+	}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 2}}, newFakeSessionAgent(), []Step{step, publication}, nil)
 	exec.SetGateReconcileTimings(10*time.Millisecond, time.Second)
 
 	done := make(chan error, 1)
