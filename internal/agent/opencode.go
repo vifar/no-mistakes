@@ -202,13 +202,8 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 	if err != nil {
 		return nil, err
 	}
-
-	// The 2.x API is a different protocol, not a different route list: the
-	// session body, the prompt endpoint, the event frames and the
-	// completion signal all changed. It runs its own path so the 1.x path
-	// stays exactly as it was.
 	if a.version() == opencodeAPIVersion2 {
-		return a.runOnceV2(ctx, opts, baseURL)
+		return a.runV2(ctx, opts, baseURL)
 	}
 
 	// Create session with blanket permissions
