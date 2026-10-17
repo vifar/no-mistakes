@@ -1745,7 +1745,14 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		}
 		info.Steps = make([]ipc.StepResultInfo, 0, len(steps))
 		for _, s := range steps {
-			stepInfo := stepToInfoWithRounds(d, s, roundsByStep[s.ID], roundsErr)
+			var stepInfo ipc.StepResultInfo
+			if roundsErr != nil {
+				// An unreadable round fails the whole batch; per-step reads keep
+				// the damage to the step that owns it.
+				stepInfo = stepToInfo(d, s)
+			} else {
+				stepInfo = stepToInfoWithRounds(d, s, roundsByStep[s.ID], nil)
+			}
 			info.Steps = append(info.Steps, stepInfo)
 			if stepInfo.ResponsePending {
 				info.AwaitingAgent, info.AwaitingAgentSince = false, nil

@@ -69,4 +69,7 @@ func TestGetRoundsByRun(t *testing.T) {
 	if !strings.Contains(plan, "USING INDEX idx_step_rounds_step_result_round") || strings.Contains(strings.ToUpper(plan), "SCAN STEP_ROUNDS") || strings.Contains(strings.ToUpper(plan), "TEMP B-TREE") {
 		t.Fatalf("batched query must use the rounds index without a full scan or sort: %s", plan)
 	}
+	if !strings.Contains(plan, "INDEX idx_step_results_run_order") || strings.Contains(strings.ToUpper(plan), "SCAN STEP_RESULTS") {
+		t.Fatalf("batched query must find the run's steps through the step results index: %s", plan)
+	}
 }

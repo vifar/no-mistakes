@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"database/sql"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -251,5 +252,68 @@ func TestStepToInfoNoFixSummariesWithoutFixRounds(t *testing.T) {
 	info := stepToInfo(d, step)
 	if len(info.FixSummaries) != 0 {
 		t.Errorf("fix summaries = %v, want none", info.FixSummaries)
+	}
+}
+
+// One unreadable round must only cost its own step's round statistics, as it
+// did before rounds were loaded once per run.
+func TestRunToInfoIsolatesUnreadableRounds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	d, err := db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	repo, err := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"one","severity":"warning","description":"first issue"}]}`
+	healthy, err := d.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertStepRound(healthy.ID, 1, "initial", &findings, nil, 10); err != nil {
+		t.Fatal(err)
+	}
+	broken, err := d.InsertStepResult(run.ID, types.StepLint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad, err := d.InsertStepRound(broken.ID, 1, "initial", &findings, nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if _, err := raw.Exec(`UPDATE step_rounds SET duration_ms = 'unreadable' WHERE id = ?`, bad.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.GetRoundsByStep(broken.ID); err == nil {
+		t.Fatal("corrupted round still scans; the fixture does not exercise the error path")
+	}
+	steps, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := runToInfo(d, run, steps)
+	for _, step := range got.Steps {
+		switch step.StepName {
+		case types.StepReview:
+			if step.RoundCount != 1 || step.ReportedFindings != 1 {
+				t.Fatalf("healthy step lost round stats because another step's round is unreadable: %+v", step)
+			}
+		case types.StepLint:
+			if step.RoundCount != 0 {
+				t.Fatalf("unreadable step reported round stats: %+v", step)
+			}
+		}
 	}
 }
