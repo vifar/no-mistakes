@@ -318,7 +318,7 @@ This strict path needs Pi 0.82.0 or later (read from `pi --version`; a prereleas
 Pi applies `--no-tools` (`-nt`) and a `--tools` (`-t`) allowlist to extension tools too, so with either flag in `agent_args_override.pi` the model cannot see `no_mistakes_output`.
 Otherwise the invocation uses the prompt-inlined schema: the schema goes into the prompt and the final text response is validated with the common text fallback described above. A provider/model that refuses strict tools is retried once on that path and then stays on it for the agent's lifetime.
 The step log names which path each structured invocation ran.
-On the strict path, a run that ends without calling `no_mistakes_output` as its only final tool call is a structured-output rejection, so Review's bounded schema rerun applies.
+On the strict path, a run that ends without calling `no_mistakes_output` as its only final tool call is retried by the bounded invocation retry loop; if retries exhaust, it remains a structured-output rejection, so Review's bounded schema rerun applies. A `pi exited: ...: fetch failed` error is retried only when its stderr does not indicate authentication, access denial, or quota exhaustion; those failures remain terminal.
 Either way the adapter validates the result against the same schema, keeping required fields and the existing nullable-optional-field contract unchanged.
 The extension is invocation-scoped and works with `--no-extensions`.
 Invocations without a schema retain the ordinary final-text path.

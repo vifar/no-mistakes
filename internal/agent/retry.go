@@ -260,6 +260,27 @@ func classifyTransient(err error) (string, bool) {
 	if isTerminalRetryError(msg) {
 		return "", false
 	}
+	const piMissingOutputPrefix = "pi did not finish by calling no_mistakes_output alone"
+	if strings.HasPrefix(msg, piMissingOutputPrefix) {
+		stderr := strings.TrimSpace(strings.TrimPrefix(msg[len(piMissingOutputPrefix):], ":"))
+		if isPiPermanentStderr(stderr) {
+			return "", false
+		}
+		return "pi missing output tool", true
+	}
+	const piExitPrefix = "pi exited: "
+	if strings.HasPrefix(msg, piExitPrefix) {
+		if separator := strings.Index(msg[len(piExitPrefix):], ": "); separator >= 0 {
+			separator += len(piExitPrefix)
+			stderr := strings.TrimSpace(msg[separator+2:])
+			if strings.Contains(stderr, "fetch failed") {
+				if isPiPermanentStderr(stderr) {
+					return "", false
+				}
+				return "pi fetch failed", true
+			}
+		}
+	}
 	for _, sig := range transientNeedles {
 		if strings.Contains(msg, sig.needle) {
 			return sig.label, true
@@ -269,6 +290,27 @@ func classifyTransient(err error) (string, bool) {
 		return "http " + m, true
 	}
 	return "", false
+}
+
+func isPiPermanentStderr(stderr string) bool {
+	for _, sig := range terminalNeedles {
+		if strings.Contains(stderr, sig.needle) {
+			return true
+		}
+	}
+	for _, needle := range []string{
+		"permission denied",
+		"authentication",
+		"unauthorized",
+		"forbidden",
+		"401",
+		"403",
+	} {
+		if strings.Contains(stderr, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func isTerminalRetryError(msg string) bool {
