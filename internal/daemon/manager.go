@@ -1364,7 +1364,11 @@ func assertTrustedConfigReadable(ctx context.Context, wtDir, defaultBranch, trus
 // A proof-mode push creates an unclaimed row: the first matching observer
 // receives the sole `created` disposition by atomically claiming it.
 func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushReceivedParams) (string, error) {
+	if err := types.ValidateRunOwner(params.Owner); err != nil {
+		return "", err
+	}
 	ctx = types.WithShippingOptions(ctx, params.Shipping)
+	ctx = types.WithRunOwner(ctx, params.Owner)
 	// Ref deletion (git push remote :branch) sends new SHA as all-zeros.
 	// Nothing to validate - skip pipeline.
 	if git.IsZeroSHA(params.New) {
@@ -1406,7 +1410,11 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 // HandleStartFreshRun creates or replays a proof-mode launch only after
 // checking the creation context under the repository/branch lock.
 func (m *RunManager) HandleStartFreshRun(ctx context.Context, params *ipc.StartFreshRunParams) (ipc.LaunchReceipt, error) {
+	if err := types.ValidateRunOwner(params.Owner); err != nil {
+		return ipc.LaunchReceipt{}, err
+	}
 	ctx = types.WithShippingOptions(ctx, params.Shipping)
+	ctx = types.WithRunOwner(ctx, params.Owner)
 	repo, err := m.db.GetRepo(params.RepoID)
 	if err != nil {
 		return ipc.LaunchReceipt{}, fmt.Errorf("get repo: %w", err)
@@ -1456,6 +1464,9 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 			return "", err
 		}
 		if existing != nil {
+			if existing.Owner() != types.RunOwnerFromContext(ctx) {
+				return "", fmt.Errorf("conflicting launch_nonce: owner differs from run")
+			}
 			if planID != "" && (existing.VerificationPlan == nil || existing.VerificationPlan.ID != planID) {
 				return "", fmt.Errorf("verification plan cannot replace an existing run attachment")
 			}
@@ -1648,6 +1659,7 @@ func receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
 		disposition = "created"
 	}
 	return ipc.LaunchReceipt{
+		Owner:                run.Owner(),
 		PiProfile:            run.PiProfile,
 		RunID:                run.ID,
 		Disposition:          disposition,
@@ -2022,6 +2034,16 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// their failed-row diagnostics on a bad global config: the load error is
 	// held until the row exists.
 	globalCfg, globalCfgErr := config.LoadGlobal(m.paths.ConfigFile())
+	owner := types.RunOwnerFromContext(ctx)
+	if err := types.ValidateRunOwner(owner); err != nil {
+		return "", err
+	}
+	if owner == "" {
+		if globalCfg != nil && globalCfg.Intent.RequireOwner {
+			return "", fmt.Errorf("launch requires an owner: pass --owner or NO_MISTAKES_OWNER")
+		}
+		slog.Warn("launch has no owner; nobody is recorded to drive approval gates", "repo_id", repo.ID, "branch", branch)
+	}
 	var pin *agentcfg.PiProfile
 	if request := agentcfg.OptionalPiProfile(profiles); request != nil {
 		if globalCfgErr != nil {
@@ -2119,11 +2141,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		storedIntent = strings.TrimSpace(storedIntent)
 	}
 	var runIntent *db.RunIntent
-	if strings.TrimSpace(storedIntent) != "" {
+	if strings.TrimSpace(storedIntent) != "" || owner != "" {
 		if source == "" {
 			source = db.RunIntentSourceAgent
 		}
-		runIntent = &db.RunIntent{Summary: storedIntent, Source: source, Score: 1}
+		runIntent = &db.RunIntent{Summary: storedIntent, Source: source, Owner: owner, SessionID: owner, Score: 1}
 	}
 
 	storedPRBaseBranch, err := normalizeRunPRBaseBranch(prBaseBranch)

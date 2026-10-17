@@ -281,7 +281,7 @@ func runsFields(runs []*db.Run, limit int) []toon.Field {
 		if r.PRURL != nil {
 			pr = *r.PRURL
 		}
-		rows = append(rows, runRow{ID: r.ID, Branch: r.Branch, Status: string(r.Status), Head: shortSHA(r.HeadSHA), PR: pr})
+		rows = append(rows, runRow{Owner: r.Owner(), Ownerless: r.Owner() == "", ID: r.ID, Branch: r.Branch, Status: string(r.Status), Head: shortSHA(r.HeadSHA), PR: pr})
 	}
 	return []toon.Field{
 		{Key: "count", Value: fmt.Sprintf("%d of %d total", len(shown), len(runs))},

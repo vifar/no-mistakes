@@ -31,11 +31,52 @@ func newAxiStatusCmd() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			awaiting, _ := cmd.Flags().GetBool("awaiting")
+			if awaiting {
+				return runAxiAwaitingStatus(cmd)
+			}
 			return runAxiStatus(cmd, runID)
 		},
 	}
+	cmd.Flags().Bool("awaiting", false, "list only runs in this repository with an unanswered live approval gate")
+	cmd.Flags().Bool("json", false, "output status as JSON")
 	cmd.Flags().StringVar(&runID, "run", "", "inspect a specific run ID (default: current branch's active or most recent)")
+	cmd.MarkFlagsMutuallyExclusive("run", "awaiting")
 	return cmd
+}
+
+// runAxiAwaitingStatus explicitly lists parked runs across this repository's
+// branches. It never attaches branch-scoped mutation commands to those rows.
+func runAxiAwaitingStatus(cmd *cobra.Command) error {
+	env, err := openAxiQueryEnv("")
+	if err != nil {
+		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
+	}
+	defer env.close()
+	runs, err := env.d.GetRunsByRepo(env.repo.ID)
+	if err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("list runs: %v", err))
+	}
+	rows := make([]any, 0)
+	for _, r := range runs {
+		if r.Status.Terminal() {
+			continue
+		}
+		steps, err := env.d.GetStepsByRun(r.ID)
+		if err != nil {
+			return emitError(cmd, 1, fmt.Sprintf("load steps: %v", err))
+		}
+		rv := runViewFromDB(r, steps, env.d)
+		if _, ok := rv.awaitingPersonStep(); !ok {
+			continue
+		}
+		fields := []toon.Field{{Key: "id", Value: rv.ID}, {Key: "branch", Value: rv.Branch}, {Key: "owner", Value: rv.Owner}, {Key: "ownerless", Value: rv.Owner == ""}}
+		fields = append(fields, awaitingPersonFields(rv)...)
+		fields = append(fields, toon.Field{Key: "inspect", Value: "no-mistakes axi status --run " + rv.ID})
+		rows = append(rows, toon.NewObject(fields...))
+	}
+	emitDoc(cmd, toon.Field{Key: "awaiting_runs", Value: rows})
+	return nil
 }
 
 // runAxiStatus renders the run status for the current branch or an explicit
