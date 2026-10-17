@@ -7,6 +7,10 @@ import (
 	"math"
 	"net/url"
 	"strings"
+	"time"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -78,6 +82,28 @@ func (d *DB) AdvanceRunPRContext(runID string, candidate PRContextCandidate) (PR
 }
 
 func (d *DB) bindRunPRContext(runID string, candidate PRContextCandidate, resetFrom types.StepName, forward bool) (PRContextBindResult, error) {
+	const attempts = 4
+	const initialBackoff = 25 * time.Millisecond
+	for attempt := 0; ; attempt++ {
+		result, err := d.bindRunPRContextOnce(runID, candidate, resetFrom, forward)
+		var sqliteErr *sqlite.Error
+		// Include extended codes such as SQLITE_BUSY_SNAPSHOT (517). Its
+		// snapshot cannot be upgraded even after busy_timeout: release the
+		// transaction and re-read the receipt, generation and authority checks.
+		// SQLITE_LOCKED and non-driver errors are not this recovery contract.
+		if !errors.As(err, &sqliteErr) || sqliteErr.Code()&0xff != sqlite3.SQLITE_BUSY {
+			return result, err
+		}
+		if attempt+1 == attempts {
+			return PRContextBindResult{}, fmt.Errorf("bind run PR context after %d attempts: %w", attempts, err)
+		}
+		// Once has already rolled back before waiting, so the backoff holds
+		// neither the stale snapshot nor this DB's sole connection.
+		time.Sleep(initialBackoff << attempt)
+	}
+}
+
+func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, resetFrom types.StepName, forward bool) (PRContextBindResult, error) {
 	if err := validatePRContextCandidate(candidate); err != nil {
 		return PRContextBindResult{}, err
 	}
