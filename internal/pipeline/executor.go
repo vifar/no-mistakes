@@ -1031,8 +1031,8 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		Sessions:     e.sessions,
 		Shared:       e.shared,
 		// The same value executeStep supplies. A reconciler or resumer that
-		// reads the run's evidence - ReviewStep.ResumeApprovalGate resolves the
-		// conversation directory from it - would otherwise decline on every tick
+		// reads the review conversation needs its stable directory as well as
+		// the active evidence directory, or it would decline on every tick
 		// of a RECOVERED park, which is the daemon-restart window it exists for.
 		EvidenceDir:           e.runEvidenceDir(run.ID),
 		ReviewConversationDir: reviewqa.Dir(e.runEvidenceRoot(run.ID)),
