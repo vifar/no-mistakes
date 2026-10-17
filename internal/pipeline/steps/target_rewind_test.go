@@ -323,6 +323,67 @@ func TestTargetRewindNoopAndFastForwardConsumePending(t *testing.T) {
 	}
 }
 
+func TestTargetRewindConflictsRestoreBoundHeadAfterPartialIntegration(t *testing.T) {
+	for _, strategy := range []string{config.RebaseStrategyRebase, config.RebaseStrategyMerge} {
+		for _, scenario := range []string{"source fast-forward then target conflict", "source integration then target conflict", "source conflict then target integration"} {
+			t.Run(strategy+"/"+scenario, func(t *testing.T) {
+				c, selected := rewindFixture(t)
+				c.Config.Rebase.Strategy = strategy
+				entry := c.Run.HeadSHA
+				sourceBase := entry
+				if scenario != "source fast-forward then target conflict" {
+					sourceBase = c.Run.BaseSHA
+				}
+				gitCmd(t, c.WorkDir, "checkout", "-b", "remote-source", sourceBase)
+				sourceFile := "source.txt"
+				if scenario == "source conflict then target integration" {
+					sourceFile = "feature.txt"
+				}
+				if err := os.WriteFile(filepath.Join(c.WorkDir, sourceFile), []byte("source update\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, c.WorkDir, "add", sourceFile)
+				gitCmd(t, c.WorkDir, "commit", "-m", "advance source")
+				source := gitCmd(t, c.WorkDir, "rev-parse", "HEAD")
+				gitCmd(t, c.WorkDir, "push", "--force", "origin", "HEAD:feature")
+				gitCmd(t, c.WorkDir, "checkout", "main")
+				targetFile := "feature.txt"
+				if scenario == "source conflict then target integration" {
+					targetFile = "target.txt"
+				}
+				if err := os.WriteFile(filepath.Join(c.WorkDir, targetFile), []byte("target update\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, c.WorkDir, "add", targetFile)
+				gitCmd(t, c.WorkDir, "commit", "-m", "advance target")
+				gitCmd(t, c.WorkDir, "push", "origin", "main")
+				gitCmd(t, c.WorkDir, "checkout", "feature")
+				if _, err := guardPRContextWithSelection(c, types.StepTest, selected, false); err != nil {
+					t.Fatal(err)
+				}
+				outcome, err := (&RebaseStep{}).Execute(c)
+				if err != nil || outcome == nil || !outcome.NeedsApproval || !outcome.AutoFixable {
+					t.Fatalf("conflicts must reach repair or approval: %+v, %v", outcome, err)
+				}
+				if head := gitCmd(t, c.WorkDir, "rev-parse", "HEAD"); head != entry || c.Run.HeadSHA != entry {
+					t.Fatalf("conflict changed bound head: live=%s recorded=%s want=%s", head, c.Run.HeadSHA, entry)
+				}
+				if status := gitStatusPorcelain(t, c.WorkDir); status != "" {
+					t.Fatalf("conflict left dirty worktree: %s", status)
+				}
+				c.PRContextAfterStep = true
+				if _, err := guardPRContextWithSelection(c, types.StepRebase, selected, false); err != nil {
+					t.Fatalf("conflict must survive the executor's post-step guard: %v", err)
+				}
+				pending, err := c.DB.GetPendingTargetRewind(c.Run.ID)
+				if err != nil || pending == nil || pending.LocalHeadSHA != entry || pending.SourceSHA == nil || *pending.SourceSHA != source {
+					t.Fatalf("conflict lost pending bindings: %+v, %v", pending, err)
+				}
+			})
+		}
+	}
+}
+
 func TestTargetRewindConflictAbortIsNotSuccessfulIntegration(t *testing.T) {
 	c, selected := rewindFixture(t)
 	gitCmd(t, c.WorkDir, "checkout", "main")

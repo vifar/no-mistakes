@@ -203,6 +203,11 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.Step
 	}
 
 	if len(conflictTargets) > 0 {
+		if pending != nil {
+			if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", pending.LocalHeadSHA); err != nil {
+				return nil, fmt.Errorf("restore pending rewind entry head: %w", err)
+			}
+		}
 		summary := fmt.Sprintf("conflict %s %s", integrationVerb(merging), strings.Join(conflictTargets, ", "))
 		findingsJSON, _ := json.Marshal(Findings{Items: dedupeRebaseFindings(conflictFindings), Summary: summary})
 		return &pipeline.StepOutcome{
