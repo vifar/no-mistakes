@@ -16,15 +16,17 @@ var docOnlyExtensions = map[string]bool{".md": true, ".mdx": true, ".markdown": 
 // them can change pipeline behavior; they are never documentation here.
 var agentInstructionNames = map[string]bool{"agents.md": true, "agent.md": true, "claude.md": true, "gemini.md": true, "skill.md": true}
 
-// isDocOnlyPath reports whether a repository path is plain documentation for
-// the doc-only carry. The rule fails closed: prose at the repository root or
-// under docs/, never a hidden path, an agent instruction file, or anything
-// under skills or prompts directories.
-func isDocOnlyPath(p string) bool {
+// isDocOnlyPath applies the built-in documentation rule.
+func isDocOnlyPath(p string) bool { return isDocOnlyPathFor(p, nil) }
+
+// isDocOnlyPathFor reports whether a repository path is plain documentation
+// for the doc-only carry. Hidden paths, agent instruction files, and anything
+// under skills or prompts directories never count, whatever the repository
+// configures. Configured globs (document.doc_only_paths) then name the
+// documentation; without them only prose at the repository root or under
+// docs/ counts. Everything else fails closed.
+func isDocOnlyPathFor(p string, configured []string) bool {
 	p = strings.TrimPrefix(path.Clean(p), "./")
-	if !docOnlyExtensions[strings.ToLower(path.Ext(p))] {
-		return false
-	}
 	if agentInstructionNames[strings.ToLower(path.Base(p))] {
 		return false
 	}
@@ -34,6 +36,17 @@ func isDocOnlyPath(p string) bool {
 		if strings.HasPrefix(segment, ".") || lower == "skills" || lower == "prompts" {
 			return false
 		}
+	}
+	if len(configured) > 0 {
+		for _, pattern := range configured {
+			if matchIgnorePattern(p, pattern) {
+				return true
+			}
+		}
+		return false
+	}
+	if !docOnlyExtensions[strings.ToLower(path.Ext(p))] {
+		return false
 	}
 	return len(segments) == 1 || segments[0] == "docs"
 }
@@ -53,8 +66,12 @@ func docOnlyRange(sctx *pipeline.StepContext, from, to string) (bool, error) {
 	if len(paths) == 0 || paths[0] == "" {
 		return false, nil
 	}
+	var configured []string
+	if sctx.Config != nil {
+		configured = sctx.Config.Document.DocOnlyPaths
+	}
 	for _, p := range paths {
-		if !isDocOnlyPath(p) {
+		if !isDocOnlyPathFor(p, configured) {
 			return false, nil
 		}
 	}

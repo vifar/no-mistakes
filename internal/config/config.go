@@ -497,6 +497,13 @@ type DocumentRaw struct {
 	// placement policy with the repository's ownership map or extra
 	// placement rules.
 	Instructions string `yaml:"instructions"`
+	// DocOnlyPaths names the repository's documentation paths (ignore-pattern
+	// globs such as "documentation/**"). Commits that touch only these paths
+	// carry Review and Test credit instead of restarting validation, so it is
+	// trusted-only with the rest of this block. Unset keeps the built-in rule:
+	// prose at the repository root or under docs/. Agent instruction files,
+	// hidden paths, and skills/ or prompts/ directories never count either way.
+	DocOnlyPaths []string `yaml:"doc_only_paths"`
 }
 
 // ReviewRaw is the YAML representation of review-step settings.
@@ -1066,6 +1073,9 @@ type Document struct {
 	// the repository's remote and are rendered before, never instead of,
 	// Instructions.
 	RepositoryInstructions string
+	// DocOnlyPaths are the trusted repository's documentation globs for the
+	// doc-only validation carry (see DocumentRaw.DocOnlyPaths).
+	DocOnlyPaths []string
 }
 
 // Review is the resolved review-step config. Conversation and PathInstructions
@@ -1497,6 +1507,17 @@ func copyAgents(names []types.AgentName) []types.AgentName {
 // path or without instruction text that survives prompt rendering, so the
 // resolved config never carries an entry the review step would have to skip.
 // Parsing already rejects those, but Merge also runs on configs built in code.
+// trimmedPatterns drops blank globs and surrounding whitespace.
+func trimmedPatterns(patterns []string) []string {
+	var out []string
+	for _, pattern := range patterns {
+		if trimmed := strings.TrimSpace(pattern); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
 func resolvePathInstructions(entries []PathInstruction) []PathInstruction {
 	if len(entries) == 0 {
 		return nil
@@ -4081,7 +4102,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		Commit:           commit,
 		Intent:           intent,
 		Test:             test,
-		Document:         Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
+		Document:         Document{Instructions: strings.TrimSpace(repo.Document.Instructions), DocOnlyPaths: trimmedPatterns(repo.Document.DocOnlyPaths)},
 		// repo is the EffectiveRepoConfig result, so both repository values are
 		// already trusted-only. The operator's path instructions are added as
 		// separate sources rather than overlaid: they can only add rules, never

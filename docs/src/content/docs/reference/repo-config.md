@@ -8,7 +8,7 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `staging_exclude`, `max_file_size_bytes`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `ci.required_checks`, `ci.must_pass`, `ci.external_checks`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `rebase.strategy`, `rebase.max_target_advance_rewinds`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
+The daemon also reads `document.instructions`, `document.doc_only_paths`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `staging_exclude`, `max_file_size_bytes`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `ci.required_checks`, `ci.must_pass`, `ci.external_checks`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `rebase.strategy`, `rebase.max_target_advance_rewinds`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
@@ -38,6 +38,9 @@ ignore_patterns:
 document:
   instructions: |
     docs/ owns detailed product guidance; README.md owns the introduction.
+  # Paths whose commits carry Review and Test credit instead of restarting them.
+  doc_only_paths:
+    - "documentation/**"
 
 # Optional review settings, read only from the trusted default branch:
 # whether the reviewer may ask you questions while it works (off by default),
@@ -431,6 +434,16 @@ It augments or clarifies the built-in policy; it cannot disable documentation in
 Like `commands.*` and `agent`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`: a contributor's pushed branch cannot weaken the documentation rules that gate its own review.
 
 An operator can add their own policy for this repository through a machine-local [`repository_overrides`](/no-mistakes/reference/global-config/#machine-local-review-and-documentation-guidance) entry; it is rendered as a separate, labeled section and never replaces this field.
+
+### document.doc_only_paths
+
+Globs naming this repository's documentation, in the same syntax as `ignore_patterns` (`documentation/**`, `docs/**/*.html`, `*.md`).
+
+When every path changed between the review-approved head and the head being pushed is documentation, Push carries the Review approval and the Test result onto the pushed head instead of restarting Review. A Document step commit therefore no longer sends the run back through Review and Test.
+
+Unset, only prose files (`.md`, `.mdx`, `.markdown`, `.rst`, `.adoc`) at the repository root or under `docs/` count. Whichever rule applies, hidden paths, agent instruction files (`AGENTS.md`, `AGENT.md`, `CLAUDE.md`, `GEMINI.md`, `SKILL.md`), and anything under a `skills/` or `prompts/` directory never count, and any other path keeps the restart. Strict shipping never carries.
+
+This field decides which commits skip revalidation, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`: a pushed branch cannot widen it for its own run.
 
 ### review.conversation
 

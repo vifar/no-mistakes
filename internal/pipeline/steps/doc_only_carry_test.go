@@ -189,3 +189,62 @@ func testedHead(t *testing.T, sctx *pipeline.StepContext) string {
 	t.Fatal("no test step findings")
 	return ""
 }
+
+// vifar/controller keeps its docs under documentation/ (including .html), so
+// the default root-and-docs/ rule never carried its churn. Repositories can
+// name their doc paths, but the fail-closed exclusions still win.
+func TestIsDocOnlyPathFor_ConfiguredPaths(t *testing.T) {
+	t.Parallel()
+	configured := []string{"documentation/**", "docs/**/*.html"}
+	for path, want := range map[string]bool{
+		"documentation/infrastructure-cicd.md": true,
+		"documentation/site/index.html":        true,
+		"docs/guide/page.html":                 true,
+		"documentation/AGENTS.md":              false,
+		"documentation/skills/ship/notes.md":   false,
+		"documentation/prompts/review.md":      false,
+		"documentation/.private/notes.md":      false,
+		"README.md":                            false,
+		"src/widget.go":                        false,
+	} {
+		if got := isDocOnlyPathFor(path, configured); got != want {
+			t.Errorf("configured isDocOnlyPathFor(%q) = %v, want %v", path, got, want)
+		}
+	}
+	for path, want := range map[string]bool{
+		"documentation/infrastructure-cicd.md": false,
+		"documentation/site/index.html":        false,
+		"README.md":                            true,
+	} {
+		if got := isDocOnlyPathFor(path, nil); got != want {
+			t.Errorf("default isDocOnlyPathFor(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+func TestReviewRestartNeededForPush_ConfiguredDocOnlyPaths(t *testing.T) {
+	for _, configured := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unset restarts", true: "configured carries"}[configured], func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+			if configured {
+				sctx.Config.Document.DocOnlyPaths = []string{"documentation/**"}
+			}
+			recordReviewApproval(t, sctx, headSHA)
+			recordTestedHead(t, sctx, headSHA)
+			writeAndCommit("documentation/infrastructure-cicd.md", "| row | 18 |\n")(t, dir)
+			pushed := gitCmd(t, dir, "rev-parse", "HEAD")
+			if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, pushed); err != nil {
+				t.Fatal(err)
+			}
+			sctx.Run.HeadSHA = pushed
+			restart, err := reviewRestartNeededForPush(sctx, "", pushed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if restart == configured {
+				t.Fatalf("restart = %v with doc_only_paths configured=%v", restart, configured)
+			}
+		})
+	}
+}
