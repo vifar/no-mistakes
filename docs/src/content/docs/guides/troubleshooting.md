@@ -221,8 +221,7 @@ A branch that touches no `.github/workflows/*.yml` or `*.yaml` pushes normally w
 
 ### Rebase pauses because the branch carries unpushed default-branch commits
 
-This means a local default branch ahead of `origin/<default_branch>` is a strict ancestor of your branch, so the branch may contain unrelated local-default work.
-`no-mistakes` pauses with an `ask-user` finding instead of silently bundling that ambiguous work into the PR. If the local default tip and your branch `HEAD` are equal, it treats the commits as the intended delivery work and continues.
+This finding warns that the branch may contain unrelated local-default work. See [Rebase](/no-mistakes/reference/pipeline-steps/#rebase) for the exact conditions and the pending target-advance rewind exception.
 
 Push the default branch to `origin` if those commits belong in the shared base, or rebuild the feature branch from `origin/<default_branch>` to remove the unrelated work before running the gate again.
 Approve the finding only when you have confirmed the local default-branch work belongs in the delivery branch.
