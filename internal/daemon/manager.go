@@ -3152,14 +3152,14 @@ func (m *RunManager) HandleRespond(runID string, step types.StepName, action typ
 // HandleRespondWithOverrides is like HandleRespond but also forwards explicit
 // declines, user instructions, and user-authored findings to the executor, and
 // returns the dispositions the response recorded.
-func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, expected *types.GateIdentity) (pipeline.RespondDispositions, error) {
-	return m.HandleRespondWithAcceptedGaps(runID, step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, nil, expected)
+func (m *RunManager) HandleRespondWithOverrides(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, expected *types.GateIdentity, coverage ...*ipc.CoverageBinding) (pipeline.RespondDispositions, error) {
+	return m.HandleRespondWithAcceptedGaps(runID, step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, nil, expected, coverage...)
 }
 
 // HandleRespondWithAcceptedGaps is HandleRespondWithOverrides for an approval
 // that may carry an owner-accepted Test gap. The pre-check here and the
 // executor's live gate share db.StepResult.AcceptedGapRefusal.
-func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps, expected *types.GateIdentity) (pipeline.RespondDispositions, error) {
+func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps, expected *types.GateIdentity, coverage ...*ipc.CoverageBinding) (pipeline.RespondDispositions, error) {
 	if action == types.ActionAbort {
 		m.mu.Lock()
 		owned := m.runs[runID]
@@ -3178,7 +3178,7 @@ func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.Step
 			// A waiting gate keeps its original failed outcome and reporting.
 			// Admission checks under the executor lock distinguish an accepted
 			// response, which cannot consume another response while slot-bound.
-			result, err := executor.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, gaps, expected)
+			result, err := executor.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, gaps, expected, coverage...)
 			var pending *pipeline.ResponsePendingError
 			if errors.As(err, &pending) {
 				return pipeline.RespondDispositions{}, m.HandleCancel(runID)
@@ -3275,7 +3275,7 @@ func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.Step
 		return pipeline.RespondDispositions{}, fmt.Errorf("no active executor for run %s", runID)
 	}
 
-	return exec.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, gaps, expected)
+	return exec.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, gaps, expected, coverage...)
 }
 
 // HandleAnswerReviewQuestion records an operator answer in the run's review

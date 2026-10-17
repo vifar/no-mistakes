@@ -71,6 +71,7 @@ func (e *Executor) acquireSlot(ctx context.Context) error {
 // run is waiting for a run slot. It carries everything dispatch needs, so a
 // daemon that stops during the wait can re-apply the response after a restart.
 type pendingGateResponse struct {
+	CoverageRound    *db.StepRound        `json:"coverage_round,omitempty"`
 	Gate             types.GateIdentity   `json:"gate"`
 	ParkedMS         *int64               `json:"parked_ms,omitempty"`
 	Kind             string               `json:"kind,omitempty"`
@@ -94,6 +95,7 @@ func encodePendingResponse(r *approvalResponse, parkedMS int64, gate types.GateI
 		p.AddedFindings = r.addedFindings
 		p.ApprovalReason = r.approvalReason
 		p.AcceptedGaps = r.acceptedGaps
+		p.CoverageRound = r.coverageRound
 	}
 	raw, err := json.Marshal(p)
 	return string(raw), err
@@ -111,7 +113,7 @@ func decodePendingResponse(raw string, current types.GateIdentity) (*approvalRes
 		return nil, p.ParkedMS, nil
 	}
 	switch p.Action {
-	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAnswer:
+	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAnswer, types.ActionCompleteCoverage:
 	default:
 		return nil, nil, fmt.Errorf("recorded gate response has unusable action %q", p.Action)
 	}
@@ -124,6 +126,7 @@ func decodePendingResponse(raw string, current types.GateIdentity) (*approvalRes
 		addedFindings:    p.AddedFindings,
 		approvalReason:   p.ApprovalReason,
 		acceptedGaps:     p.AcceptedGaps,
+		coverageRound:    p.CoverageRound,
 	}, p.ParkedMS, nil
 }
 

@@ -1557,7 +1557,7 @@ func getRunInfo(ctx context.Context, socketPath, runID string) (*ipc.RunInfo, er
 // what it recorded. A response the daemon refused is returned as a
 // *respondRefusalError. A superseded gate requires a fresh status read and
 // decision; the response must not be retried against a replacement gate.
-func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, added []types.Finding, approvalReason string, acceptGaps []string, coveredBy string, expected *types.GateIdentity) (ipc.RespondResult, error) {
+func sendRespond(client *ipc.Client, runID string, step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, added []types.Finding, approvalReason string, acceptGaps []string, coveredBy string, expected *types.GateIdentity, coverage ...*ipc.CoverageBinding) (ipc.RespondResult, error) {
 	params := &ipc.RespondParams{
 		RunID:            runID,
 		Step:             step,
@@ -1571,6 +1571,9 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 		CoveredBy:        coveredBy,
 	}
 	params.ExpectedGate = expected
+	if len(coverage) == 1 {
+		params.Coverage = coverage[0]
+	}
 	var result ipc.RespondResult
 	if err := client.Call(ipc.MethodRespond, params, &result); err != nil {
 		return ipc.RespondResult{}, err
@@ -1808,7 +1811,7 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "respond",
 		Short: "Answer the current approval gate and continue the run",
-		Long: "Sends approve/fix/skip for the step currently awaiting approval, then\n" +
+		Long: "Sends approve/fix/skip/complete-coverage for the step currently awaiting approval, then\n" +
 			"blocks until the next gate, CI-ready decision point, or final outcome.\n" +
 			"With no flags it answers the active run on the current branch. Pass\n" +
 			"--run <id> to answer a specific run by its id from anywhere - including\n" +
@@ -1859,7 +1862,7 @@ func newAxiRespondCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip (required)")
+	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip | complete-coverage (required)")
 	cmd.Flags().StringVar(&runID, "run", "", "answer this run id directly, without resolving the current branch or worktree")
 	cmd.Flags().StringVar(&step, "step", "", "step to respond to (default: the step awaiting approval)")
 	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated finding IDs to fix (with --action fix)")
@@ -1940,13 +1943,16 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	respondCmd := "no-mistakes axi respond" + runFlag(ra.runID)
 	act := types.ApprovalAction(strings.TrimSpace(ra.action))
 	switch act {
-	case types.ActionApprove, types.ActionFix, types.ActionSkip:
+	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionCompleteCoverage:
 	case "":
 		return emitError(cmd, 2, "--action is required",
 			"Run `"+respondCmd+" --action approve|fix|skip`")
 	default:
 		return emitError(cmd, 2, fmt.Sprintf("unknown action %q", ra.action),
-			"Valid actions: approve, fix, skip")
+			"Valid actions: approve, fix, skip, complete-coverage")
+	}
+	if act == types.ActionCompleteCoverage && (ra.autoYes || ra.findings != "" || ra.ignore != "" || ra.instructions != "" || ra.addFinding != "" || ra.reason != "") {
+		return emitError(cmd, 2, "complete-coverage cannot approve subsequent gates or change findings")
 	}
 	acceptGapIDs, err := validateAcceptGapFlags(act, ra)
 	if err != nil {
@@ -2029,6 +2035,9 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	if ra.reason != "" && (act != types.ActionApprove || stepName != types.StepTest) {
 		return emitError(cmd, 2, "--reason applies only to --action approve on the Test step")
 	}
+	if act == types.ActionCompleteCoverage && stepName != types.StepReview {
+		return emitError(cmd, 2, "complete-coverage applies only to a parked Review")
+	}
 
 	findingIDs := splitCSV(ra.findings)
 	ignoreIDs := splitCSV(ra.ignore)
@@ -2066,7 +2075,18 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		}
 	}
 
-	result, err := sendRespond(env.client, runID, stepName, act, findingIDs, ignoreIDs, instructions, added, ra.reason, acceptGapIDs, ra.coveredBy, gateSnapshotFor(rv, string(stepName)))
+	var coverage *ipc.CoverageBinding
+	if act == types.ActionCompleteCoverage {
+		for _, s := range run.Steps {
+			if s.StepName == stepName {
+				coverage = &ipc.CoverageBinding{HeadSHA: run.HeadSHA, StepResultID: s.ID, RoundID: s.LatestRoundID}
+			}
+		}
+		if coverage == nil || coverage.RoundID == "" {
+			return emitError(cmd, 1, "daemon did not provide a bound review round for coverage continuation")
+		}
+	}
+	result, err := sendRespond(env.client, runID, stepName, act, findingIDs, ignoreIDs, instructions, added, ra.reason, acceptGapIDs, ra.coveredBy, gateSnapshotFor(rv, string(stepName)), coverage)
 	if err != nil {
 		var refusal *respondRefusalError
 		if errors.As(err, &refusal) {

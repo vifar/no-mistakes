@@ -211,6 +211,26 @@ Follow-up review passes use the history to avoid re-reporting user-ignored findi
 
 **Default auto-fix limit:** `0`.
 
+### Coverage continuation
+
+A Review gate with `findings: []` and valid, incomplete stored coverage accepts [`axi respond --action complete-coverage`](/no-mistakes/reference/cli/#no-mistakes-axi-respond).
+The action starts a fresh static review turn over only the missing paths and merges its coverage with the retained record.
+It records a `coverage` round without a finding selection, code fix, approval, or question answer.
+The remaining pipeline gates still apply.
+
+The request binds to the observed run head, step result, and latest round.
+The stored record must also match the run ID, recorded run base, resolved review base, trusted configuration SHA, and complete reviewable path set.
+The worktree must be clean at the bound head.
+The pipeline checks the stored source before and after the reviewer turn.
+Stale or concurrent requests cannot dispatch another turn against the same gate.
+Legacy records without pipeline-written provenance remain ineligible and receive no new coverage credit.
+
+Invalid coverage, source changes, or an incomplete union keep Review gated.
+New findings and questions follow the ordinary Review gate rules.
+A still-valid partial result can support another explicit coverage continuation when its findings remain empty.
+Fully recorded parked gates can use the same action after daemon recovery only when their source bindings still match.
+Existing evidence remains in place.
+
 ### Pipeline HEAD continuity
 
 At entry to every repository gate and every core step from Test through CI, no-mistakes compares the live worktree `HEAD` with the pipeline-recorded head. An equal head or a pipeline-descendant commit continues. A backward reset, divergent sibling, or unverifiable relationship fails the run before that step performs work, including for steps that would not create a commit.

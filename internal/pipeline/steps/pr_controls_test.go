@@ -214,7 +214,7 @@ func TestRebindRecoversAnAppendixGHRewroteTheEarlierWay(t *testing.T) {
 		{StepName: types.StepTest, Status: types.StepStatusCompleted},
 		{StepName: types.StepDocument, Status: types.StepStatusCompleted},
 	}
-	rebound, ok, err := rebindOwnedPRAttestation(read, strings.Repeat("b", 40), steps, pipelineAttestationPolicy{})
+	rebound, ok, err := rebindOwnedPRAttestation(read, strings.Repeat("b", 40), steps, pipelineAttestationPolicy{}, scm.ProviderGitHub)
 	if err != nil || !ok {
 		t.Fatalf("rebind refused a PR nobody edited: ok=%v err=%v", ok, err)
 	}

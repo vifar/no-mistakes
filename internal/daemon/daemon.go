@@ -1630,7 +1630,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if len(p.AcceptGaps) > 0 || p.CoveredBy != "" {
 			gaps = &db.AcceptedGaps{FindingIDs: p.AcceptGaps, Reason: p.ApprovalReason, CoveredBy: p.CoveredBy}
 		}
-		dispositions, err := mgr.HandleRespondWithAcceptedGaps(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason, gaps, p.ExpectedGate)
+		dispositions, err := mgr.HandleRespondWithAcceptedGaps(p.RunID, p.Step, p.Action, p.FindingIDs, p.IgnoreFindingIDs, p.Instructions, p.AddedFindings, p.ApprovalReason, gaps, p.ExpectedGate, p.Coverage)
 		if err != nil {
 			// Admission refusals are structured results, not transport failures.
 			// A superseded gate requires a fresh decision; finding-selection
@@ -1890,6 +1890,11 @@ func stepToInfoWithRounds(d *db.DB, s *db.StepResult, rounds []*db.StepRound, ro
 		info.RoundCount = roundStats.TotalRounds
 		info.FixRoundCount = roundStats.FixRounds
 		info.PendingFixSource = roundStats.PendingFixSource
+	}
+	if s.StepName == types.StepReview && (s.Status == types.StepStatusAwaitingApproval || s.Status == types.StepStatusFixReview) {
+		if rounds, err := d.GetRoundsByStep(s.ID); err == nil && len(rounds) != 0 {
+			info.LatestRoundID = rounds[len(rounds)-1].ID
+		}
 	}
 	return info
 }

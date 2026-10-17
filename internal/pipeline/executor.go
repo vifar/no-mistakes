@@ -50,7 +50,8 @@ type approvalResponse struct {
 	approvalReason string
 	// acceptedGaps is the validated strict-shipping Test gap this approval
 	// records; nil for every other approval.
-	acceptedGaps *db.AcceptedGaps
+	acceptedGaps  *db.AcceptedGaps
+	coverageRound *db.StepRound
 	// ignoreFindingIDs is the validated decline list of a fix response. It is
 	// not dispatch input (the decline set is derived from the selection on
 	// read), but an accepted response that selects nothing still has to be
@@ -369,8 +370,8 @@ func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, fin
 //
 // It returns the dispositions the response recorded, which the daemon echoes
 // to the caller.
-func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, expected *types.GateIdentity) (RespondDispositions, error) {
-	return e.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, nil, expected)
+func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, expected *types.GateIdentity, coverage ...*ipc.CoverageBinding) (RespondDispositions, error) {
+	return e.RespondWithAcceptedGaps(step, action, findingIDs, ignoreFindingIDs, instructions, addedFindings, approvalReason, nil, expected, coverage...)
 }
 
 // RespondWithAcceptedGaps is RespondWithOverrides for an approval that may
@@ -378,7 +379,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 // by db.StepResult.AcceptedGapRefusal and recorded durably before the step
 // completes; its reason comes from gaps and is not stored as a Test exception
 // reason.
-func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps, expected *types.GateIdentity) (RespondDispositions, error) {
+func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps, expected *types.GateIdentity, coverage ...*ipc.CoverageBinding) (RespondDispositions, error) {
 	if gaps != nil && (step != types.StepTest || action != types.ActionApprove) {
 		return RespondDispositions{}, fmt.Errorf("an accepted gap applies only to Test approval")
 	}
@@ -404,7 +405,7 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 	// refuses the handler's own release, and the gate parks forever with every
 	// question answered.
 	switch action {
-	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort, types.ActionAnswer:
+	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort, types.ActionAnswer, types.ActionCompleteCoverage:
 	default:
 		return RespondDispositions{}, fmt.Errorf("unrecognized approval action %q (valid: approve, fix, skip, abort, answer)", action)
 	}
@@ -468,6 +469,23 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 		e.mu.Unlock()
 		return RespondDispositions{}, errors.New((&db.StepResult{StepName: step}).AcceptedGapRefusal(false, *gaps))
 	}
+	var coverageRound *db.StepRound
+	if action == types.ActionCompleteCoverage {
+		if err := validateCoverageResponse(step, e.waitingFindings, findingIDs, ignoreFindingIDs, instructions, addedFindings); err != nil {
+			e.mu.Unlock()
+			return RespondDispositions{}, err
+		}
+		var err error
+		coverageRound, err = e.validateCoverageBinding(coverage)
+		if err != nil {
+			e.mu.Unlock()
+			return RespondDispositions{}, err
+		}
+	} else if len(coverage) != 0 && coverage[0] != nil {
+		e.mu.Unlock()
+		return RespondDispositions{}, fmt.Errorf("coverage binding applies only to complete-coverage")
+
+	}
 	if action == types.ActionApprove && e.waitingApprovalRefusal != "" {
 		refusal := e.waitingApprovalRefusal
 		e.mu.Unlock()
@@ -481,6 +499,7 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 		addedFindings:  addedFindings,
 		approvalReason: approvalReason,
 		acceptedGaps:   gaps,
+		coverageRound:  coverageRound,
 	}
 	dispositions := RespondDispositions{}
 	if action == types.ActionFix {
@@ -823,6 +842,8 @@ type stepExecutionState struct {
 	// the two answer paths disagree about the step's durable status. That is
 	// what skipFixExecution above is for.
 	answering              bool
+	completingCoverage     bool
+	coverageRound          *db.StepRound
 	previousFindings       string
 	deferredFindings       string
 	roundNum               int
@@ -1231,14 +1252,19 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	// same way; only the bookkeeping before it and the state handed in differ.
 	// An answer is not a verdict, so it records no selection on the round -
 	// leaving one would read as the human declining the round's findings.
-	case types.ActionFix, types.ActionAnswer:
+	case types.ActionFix, types.ActionAnswer, types.ActionCompleteCoverage:
 		state := stepExecutionState{
 			roundNum:        gate.round,
 			autoFixAttempts: gate.autoFixes,
 			executionMS:     duration,
 			currentRoundID:  gate.lastRoundID,
 		}
-		if response.action == types.ActionAnswer {
+		if response.action == types.ActionCompleteCoverage {
+			state.completingCoverage = true
+			state.coverageRound = response.coverageRound
+			state.outstandingFindings = gate.findings
+			state.selectedOutstandingIDs = gate.selectedOutstandingIDs
+		} else if response.action == types.ActionAnswer {
 			state.answering = true
 			// Carry the parked gate's outstanding set into the finalize round.
 			// The live path keeps it in locals across `continue rounds`, so an
@@ -1823,6 +1849,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		DeferredFindings:      state.deferredFindings,
 		Log:                   writeLog,
 		LogChunk:              writeLogChunk,
+		CoverageContinuation:  state.coverageRound,
 		LogFile: func(text string) {
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
@@ -1853,6 +1880,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// "answer" when it re-enters the step itself.
 	nextTrigger := "initial"
 	switch {
+	case state.completingCoverage:
+		nextTrigger = "coverage"
 	// answering is tested FIRST because the two are not exclusive: an answer
 	// round that inherits a fix_review gate's context carries fixing too, and
 	// labelling it "auto_fix" would persist a human's answer as a pipeline fix
@@ -1944,6 +1973,7 @@ rounds:
 				err = immutableErr
 			}
 		}
+		sctx.CoverageContinuation = nil
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -2392,6 +2422,24 @@ rounds:
 				nextTrigger = "auto_fix"
 				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
 				slog.Info("step fix requested, re-executing", "step", stepName)
+				continue rounds
+
+			case types.ActionCompleteCoverage:
+				phaseStart = time.Now()
+				writeLog("continuing static review to complete coverage without a fix or approval")
+				if err := markRunning(); err != nil {
+					return false, "", err
+				}
+				sctx.Fixing = false
+				sctx.AutoFixRound = false
+				sctx.FinalizingAnswers = false
+				sctx.SkipFixExecution = false
+				sctx.CoverageContinuation = response.coverageRound
+				sctx.PreviousFindings = ""
+				sctx.DeferredFindings = ""
+				sctx.CarriedFindings = ""
+				BindUncertifiedPipelineRange(sctx)
+				nextTrigger = "coverage"
 				continue rounds
 
 			case types.ActionAnswer:

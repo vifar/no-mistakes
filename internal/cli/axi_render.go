@@ -770,9 +770,13 @@ func gateFieldsFor(gate stepView, runID string, strict bool) []toon.Field {
 			approve = "Plain approve is refused in strict shipping for this inconclusive Test verdict. Only if the owner has explicitly approved this specific gap (the unreachable scenarios are covered by mocked tests), run `" + respond + " --action approve --accept-gap " + strings.Join(ids, ",") + " --reason \"<who approved, where, when>\" --covered-by \"<tests>\"`; do not use it without that approval. The reason must name who approved and where (at least 10 characters), and every actionable finding must be named"
 		}
 	}
+	coverageHelp := "Run `" + respond + " --action complete-coverage` to review only the remaining paths using stored coverage for this source"
 	help := []string{
 		approve,
 		"Run `" + respond + " --action fix --findings <ids> [--ignore <ids>]` to have the pipeline fix the selected findings (do not edit files yourself); list every finding below in `--findings` or `--ignore`, unless an earlier round of this step already decided it, and a finding that round chose to fix cannot be declined by a later response",
+	}
+	if pipeline.CanContinueReviewCoverage(types.StepName(gate.Name), gate.FindingsJSON) {
+		help = append([]string{coverageHelp}, help...)
 	}
 	// A review parked in waiting-on-answers is not asking for a verdict: its
 	// reviewer asked questions and cannot finish without them. Approving or

@@ -96,6 +96,9 @@ type StepContext struct {
 	// combination is reachable - not to forbid it.
 	FinalizingAnswers     bool
 	ReviewStartingHeadSHA string
+	// CoverageContinuation names the exact stored round accepted at the gate.
+	// The real review consumer re-reads and validates its scope before reuse.
+	CoverageContinuation *db.StepRound
 	// CarriedFindings is the outstanding set an ANSWER round carries in, minus
 	// the reviewer's own open-question rows (see answerRoundCarriedFindings),
 	// so the finalize turn re-adjudicates by id only findings it made itself.

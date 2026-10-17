@@ -311,6 +311,7 @@ type RespondParams struct {
 	// ExpectedGate is required for every action except abort. Missing or stale
 	// bindings return gate_superseded with CurrentGate, without admission.
 	ExpectedGate     *types.GateIdentity  `json:"expected_gate"`
+	Coverage         *CoverageBinding     `json:"coverage,omitempty"`
 	RunID            string               `json:"run_id"`
 	Step             types.StepName       `json:"step"`
 	Action           types.ApprovalAction `json:"action"`
@@ -339,6 +340,12 @@ type SlotsResult struct {
 	InUse          int `json:"in_use"`
 	Queued         int `json:"queued"`
 	ParkedReleased int `json:"parked_released"`
+}
+
+type CoverageBinding struct {
+	HeadSHA      string `json:"head_sha"`
+	StepResultID string `json:"step_result_id"`
+	RoundID      string `json:"round_id"`
 }
 
 // CancelRunParams cancels an active pipeline run.
@@ -619,14 +626,15 @@ const WorkScopeDocumentLintHousekeeping = "document+lint housekeeping"
 
 // StepResultInfo is the IPC representation of a step result.
 type StepResultInfo struct {
-	Gate       *types.GateIdentity `json:"gate,omitempty"`
-	ID         string              `json:"id"`
-	RunID      string              `json:"run_id"`
-	StepName   types.StepName      `json:"step_name"`
-	StepOrder  int                 `json:"step_order"`
-	Status     types.StepStatus    `json:"status"`
-	ExitCode   *int                `json:"exit_code,omitempty"`
-	DurationMS *int64              `json:"duration_ms,omitempty"`
+	Gate          *types.GateIdentity `json:"gate,omitempty"`
+	ID            string              `json:"id"`
+	RunID         string              `json:"run_id"`
+	StepName      types.StepName      `json:"step_name"`
+	StepOrder     int                 `json:"step_order"`
+	Status        types.StepStatus    `json:"status"`
+	ExitCode      *int                `json:"exit_code,omitempty"`
+	DurationMS    *int64              `json:"duration_ms,omitempty"`
+	LatestRoundID string              `json:"latest_round_id,omitempty"`
 	// WorkScope names shared work whose wall time is recorded on this logical
 	// step. For example, the document step can own one combined document+lint
 	// housekeeping invocation while lint only records the cached handoff.
