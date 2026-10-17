@@ -10,7 +10,12 @@ const roundsByStepPlanQuery = `EXPLAIN QUERY PLAN SELECT id, step_result_id, rou
 
 func roundsByStepQueryPlan(t *testing.T, d *DB) string {
 	t.Helper()
-	rows, err := d.sql.Query(roundsByStepPlanQuery, "step-1")
+	return roundsQueryPlan(t, d, roundsByStepPlanQuery)
+}
+
+func roundsQueryPlan(t *testing.T, d *DB, query string) string {
+	t.Helper()
+	rows, err := d.sql.Query(query, "step-1")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 )
@@ -92,6 +93,11 @@ func (d *DB) StepFixSummaries(stepResultID string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return StepFixSummariesFromRounds(rounds), nil
+}
+
+// StepFixSummariesFromRounds returns fix summaries from rounds in round order.
+func StepFixSummariesFromRounds(rounds []*StepRound) []string {
 	var summaries []string
 	for _, r := range rounds {
 		if !r.IsFixRound() {
@@ -103,7 +109,7 @@ func (d *DB) StepFixSummaries(stepResultID string) ([]string, error) {
 		}
 		summaries = append(summaries, summary)
 	}
-	return summaries, nil
+	return summaries
 }
 
 // StepRoundStats returns aggregate round information for a step result.
@@ -112,6 +118,11 @@ func (d *DB) StepRoundStats(stepResultID string) (StepRoundStats, error) {
 	if err != nil {
 		return StepRoundStats{}, err
 	}
+	return StepRoundStatsFromRounds(rounds), nil
+}
+
+// StepRoundStatsFromRounds summarizes rounds supplied in round order.
+func StepRoundStatsFromRounds(rounds []*StepRound) StepRoundStats {
 	var stats StepRoundStats
 	latestSelectedRound := 0
 	latestSelectedSource := ""
@@ -138,7 +149,7 @@ func (d *DB) StepRoundStats(stepResultID string) (StepRoundStats, error) {
 	if latestSelectedRound == stats.LatestRound {
 		stats.PendingFixSource = latestSelectedSource
 	}
-	return stats, nil
+	return stats
 }
 
 func hasSelectedFinding(raw *string) bool {
@@ -287,6 +298,22 @@ func (d *DB) GetRoundsByStep(stepResultID string) ([]*StepRound, error) {
 		return nil, fmt.Errorf("get rounds by step: %w", err)
 	}
 	defer rows.Close()
+	return scanStepRounds(rows)
+}
+
+const roundsByRunQuery = `SELECT id, step_result_id, round, trigger_type, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, repair_published, duration_ms, created_at FROM step_rounds WHERE step_result_id IN (SELECT id FROM step_results WHERE run_id = ?) ORDER BY step_result_id, round`
+
+// GetRoundsByRun returns a run's rounds ordered by step result and round number.
+func (d *DB) GetRoundsByRun(runID string) ([]*StepRound, error) {
+	rows, err := d.sql.Query(roundsByRunQuery, runID)
+	if err != nil {
+		return nil, fmt.Errorf("get rounds by run: %w", err)
+	}
+	defer rows.Close()
+	return scanStepRounds(rows)
+}
+
+func scanStepRounds(rows *sql.Rows) ([]*StepRound, error) {
 	var rounds []*StepRound
 	for rows.Next() {
 		r := &StepRound{}

@@ -2,12 +2,91 @@ package daemon
 
 import (
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestRunToInfoRoundStatsMatchPerStep(t *testing.T) {
+	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	repo, err := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"one","severity":"warning","description":"first issue"},{"id":"two","severity":"warning","description":"second issue"}]}`
+	remaining := `{"findings":[{"id":"two","severity":"warning","description":"second issue"}]}`
+	summary := "fix first issue"
+	for _, name := range []types.StepName{types.StepReview, types.StepLint, types.StepTest, types.StepDocument} {
+		step, err := d.InsertStepResult(run.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name == types.StepTest {
+			if err := d.SetStepFindings(step.ID, findings); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		if name == types.StepDocument {
+			continue
+		}
+		// Insert out of order to prove each step is aggregated in round order.
+		last, err := d.InsertStepRound(step.ID, 3, "initial", &remaining, nil, 30)
+		if err != nil {
+			t.Fatal(err)
+		}
+		selected := `["two"]`
+		if err := d.SetStepRoundSelection(last.ID, &selected, db.RoundSelectionSourceAutoFix); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 10); err != nil {
+			t.Fatal(err)
+		}
+		trigger := "auto_fix"
+		var fixSummary *string = &summary
+		if name == types.StepLint {
+			trigger, fixSummary = "user_fix", nil
+		}
+		if _, err := d.InsertStepRound(step.ID, 2, trigger, nil, fixSummary, 20); err != nil {
+			t.Fatal(err)
+		}
+	}
+	steps, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := runToInfo(d, run, nil)
+	for _, step := range steps {
+		want.Steps = append(want.Steps, stepToInfo(d, step))
+	}
+	got := runToInfo(d, run, steps)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("run info differs from per-step reads:\ngot: %+v\nwant: %+v", got.Steps, want.Steps)
+	}
+	for _, step := range got.Steps {
+		switch step.StepName {
+		case types.StepReview, types.StepLint:
+			if step.ReportedFindings != 2 || step.FixedFindings != 1 || step.RoundCount != 3 || step.FixRoundCount != 1 || step.PendingFixSource != db.RoundSelectionSourceAutoFix || len(step.FixSummaries) != 1 {
+				t.Fatalf("unexpected round stats: %+v", step)
+			}
+		case types.StepTest:
+			if step.ReportedFindings != 2 || step.FixedFindings != 0 || step.RoundCount != 0 {
+				t.Fatalf("lost findings without rounds: %+v", step)
+			}
+		}
+	}
+}
 
 func TestRunToInfoIncludesImmutableSubmittedHead(t *testing.T) {
 	d, err := db.Open(filepath.Join(t.TempDir(), "test.db"))

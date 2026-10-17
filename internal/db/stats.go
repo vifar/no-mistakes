@@ -112,7 +112,7 @@ func (d *DB) aggregateRunStats(runID string, stepStats map[types.StepName]*StepS
 		if err != nil {
 			return 0, 0, err
 		}
-		findingStats := stepFindingStats(step, rounds)
+		findingStats := StepFindingStatsFromRounds(step, rounds)
 		reported, fixed := findingStats.ReportedFindings, findingStats.FixedFindings
 
 		runReported += reported
@@ -130,11 +130,12 @@ func (d *DB) aggregateRunStats(runID string, stepStats map[types.StepName]*StepS
 }
 
 func stepFindingCounts(step *StepResult, rounds []*StepRound) (reported int, final int) {
-	stats := stepFindingStats(step, rounds)
+	stats := StepFindingStatsFromRounds(step, rounds)
 	return stats.ReportedFindings, stats.ReportedFindings - stats.FixedFindings
 }
 
-func stepFindingStats(step *StepResult, rounds []*StepRound) StepStats {
+// StepFindingStatsFromRounds counts findings from rounds supplied in round order.
+func StepFindingStatsFromRounds(step *StepResult, rounds []*StepRound) StepStats {
 	stats := StepStats{StepName: step.StepName}
 	if len(rounds) == 0 {
 		stats.ReportedFindings = len(findingItems(step.FindingsJSON))
@@ -196,7 +197,7 @@ func (d *DB) StepFindingStats(step *StepResult) (StepStats, error) {
 	if err != nil {
 		return StepStats{}, err
 	}
-	return stepFindingStats(step, rounds), nil
+	return StepFindingStatsFromRounds(step, rounds), nil
 }
 
 // findingItems returns the findings that count as mistakes. A Test budget cut

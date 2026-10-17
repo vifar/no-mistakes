@@ -1738,9 +1738,14 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		info.PendingCISupportError = err.Error()
 	}
 	if len(steps) > 0 {
+		rounds, roundsErr := d.GetRoundsByRun(r.ID)
+		roundsByStep := make(map[string][]*db.StepRound)
+		for _, round := range rounds {
+			roundsByStep[round.StepResultID] = append(roundsByStep[round.StepResultID], round)
+		}
 		info.Steps = make([]ipc.StepResultInfo, 0, len(steps))
 		for _, s := range steps {
-			stepInfo := stepToInfo(d, s)
+			stepInfo := stepToInfoWithRounds(d, s, roundsByStep[s.ID], roundsErr)
 			info.Steps = append(info.Steps, stepInfo)
 			if stepInfo.ResponsePending {
 				info.AwaitingAgent, info.AwaitingAgentSince = false, nil
@@ -1757,6 +1762,11 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 }
 
 func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
+	rounds, err := d.GetRoundsByStep(s.ID)
+	return stepToInfoWithRounds(d, s, rounds, err)
+}
+
+func stepToInfoWithRounds(d *db.DB, s *db.StepResult, rounds []*db.StepRound, roundsErr error) ipc.StepResultInfo {
 	info := ipc.StepResultInfo{
 		ID:             s.ID,
 		RunID:          s.RunID,
@@ -1799,17 +1809,15 @@ func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
 	if s.AutoFixLimit != nil {
 		info.AutoFixLimit = *s.AutoFixLimit
 	}
-	if stats, err := d.StepFindingStats(s); err == nil {
+	if roundsErr == nil {
+		stats := db.StepFindingStatsFromRounds(s, rounds)
 		info.ReportedFindings = stats.ReportedFindings
 		info.FixedFindings = stats.FixedFindings
-	}
-	if summaries, err := d.StepFixSummaries(s.ID); err == nil {
-		info.FixSummaries = summaries
-	}
-	if rounds, err := d.StepRoundStats(s.ID); err == nil {
-		info.RoundCount = rounds.TotalRounds
-		info.FixRoundCount = rounds.FixRounds
-		info.PendingFixSource = rounds.PendingFixSource
+		info.FixSummaries = db.StepFixSummariesFromRounds(rounds)
+		roundStats := db.StepRoundStatsFromRounds(rounds)
+		info.RoundCount = roundStats.TotalRounds
+		info.FixRoundCount = roundStats.FixRounds
+		info.PendingFixSource = roundStats.PendingFixSource
 	}
 	return info
 }
