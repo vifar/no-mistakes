@@ -893,6 +893,60 @@ func (d *DB) UpdateRunHeadSHAWithCarriedReview(id, approvedHeadSHA, headSHA stri
 	return rows == 1, nil
 }
 
+// CarryValidationOverDocOnlyCommits moves the review approval, and the
+// completed Test step's tested head, from fromHeadSHA to toHeadSHA in one
+// write. The caller has proven that fromHeadSHA..toHeadSHA changes only
+// documentation. Each half applies only while it still names fromHeadSHA, so
+// an approval or test result revoked or replaced in the meantime is never
+// resurrected onto the new head; a skipped Test step has no tested head to
+// carry. It reports whether the carry was recorded.
+func (d *DB) CarryValidationOverDocOnlyCommits(runID, fromHeadSHA, toHeadSHA string) (bool, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return false, fmt.Errorf("carry validation over doc-only commits: %w", err)
+	}
+	defer tx.Rollback()
+	var stepID, status string
+	var findingsJSON sql.NullString
+	err = tx.QueryRow(`SELECT id, status, findings_json FROM step_results WHERE run_id = ? AND step_name = ? ORDER BY step_order, id LIMIT 1`, runID, string(types.StepTest)).Scan(&stepID, &status, &findingsJSON)
+	switch {
+	case err == sql.ErrNoRows:
+	case err != nil:
+		return false, fmt.Errorf("carry validation over doc-only commits: read test step: %w", err)
+	case status == string(types.StepStatusSkipped):
+	case status != string(types.StepStatusCompleted) || !findingsJSON.Valid:
+		return false, nil
+	default:
+		findings, err := types.ParseFindingsJSON(findingsJSON.String)
+		if err != nil || findings.TestedHeadSHA != fromHeadSHA {
+			return false, nil
+		}
+		findings.TestedHeadSHA = toHeadSHA
+		carried, err := types.MarshalFindingsJSON(findings)
+		if err != nil {
+			return false, fmt.Errorf("carry validation over doc-only commits: %w", err)
+		}
+		result, err := tx.Exec(`UPDATE step_results SET findings_json = ? WHERE id = ? AND findings_json = ?`, carried, stepID, findingsJSON.String)
+		if err != nil {
+			return false, fmt.Errorf("carry validation over doc-only commits: update tested head: %w", err)
+		}
+		if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+			return false, err
+		}
+	}
+	result, err := tx.Exec(`UPDATE runs SET review_approved_head_sha = ?, updated_at = ? WHERE id = ? AND review_approved_head_sha = ? AND head_sha = ?`, toHeadSHA, now(), runID, fromHeadSHA, toHeadSHA)
+	if err != nil {
+		return false, fmt.Errorf("carry validation over doc-only commits: update review approval: %w", err)
+	}
+	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("carry validation over doc-only commits: %w", err)
+	}
+	return true, nil
+}
+
 // RunTestRestartPending reports whether a carried review approval still
 // awaits its restart at Test (see UpdateRunHeadSHAWithCarriedReview).
 func (d *DB) RunTestRestartPending(id string) (bool, error) {

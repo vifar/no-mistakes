@@ -125,11 +125,11 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, fmt.Errorf("resolve head before push: %w", err)
 	}
 	if resolvedProvider(sctx) == scm.ProviderGitHub && scm.ExtractHost(resolvePushURL(sctx)) != "" {
-		approved, err := sctx.DB.GetRun(sctx.Run.ID)
+		restart, err := reviewRestartNeededForPush(sctx, newHeadSHA, headBeingPushed)
 		if err != nil {
 			return nil, err
 		}
-		if newHeadSHA != "" || (approved.ReviewApprovedHeadSHA != nil && *approved.ReviewApprovedHeadSHA != headBeingPushed) {
+		if restart {
 			if err := recordAgentFixHead(sctx, s.Name(), headBeingPushed); err != nil {
 				return nil, err
 			}
