@@ -28,11 +28,13 @@ type TargetAdvanceRewind struct {
 // facts. Git ancestry is checked by the guard; all durable eligibility and the
 // receipt generation are checked again by the binding transaction.
 type TargetAdvanceRewindRequest struct {
-	ExpectedGeneration int64
-	Step               types.StepName
-	MaxRewinds         int
-	SourceSHA          *string
-	HasPR              bool
+	ObservedPRURL        string
+	ObservedForgeHeadSHA string
+	ExpectedGeneration   int64
+	Step                 types.StepName
+	MaxRewinds           int
+	SourceSHA            *string
+	HasPR                bool
 }
 
 type prContextBindOptions struct {
@@ -72,7 +74,7 @@ func (d *DB) GetPendingTargetRewind(runID string) (*TargetAdvanceRewind, error) 
 }
 
 // prHeadObservation is nullable so absence cannot be confused with an
-// unattached PR. Rewind admission rejects unattached PRs before this is stored.
+// unattached PR. Initial unattached discovery is pinned separately for the run.
 func prHeadObservation(c PRContextCandidate) *string {
 	if c.PRURL == "" {
 		return nil
@@ -102,17 +104,29 @@ func targetRewindRun(q rewindQuery, runID string, step types.StepName) (*Run, er
 	var prohibited bool
 	if err := q.QueryRow(`SELECT retarget_attempted IS NOT 0 OR
  EXISTS (SELECT 1 FROM commit_status_attempts WHERE run_id=?) OR
- EXISTS (SELECT 1 FROM commit_status_publications WHERE run_id=?) OR
+ EXISTS (SELECT 1 FROM commit_status_publications WHERE run_id=? AND adopted_only IS NOT 1) OR
  EXISTS (SELECT 1 FROM step_results WHERE run_id=? AND step_name='pr' AND status='completed') OR
  EXISTS (SELECT 1 FROM step_results WHERE run_id=? AND step_name='rebase' AND status='skipped')
  FROM runs WHERE id=?`, runID, runID, runID, runID, runID).Scan(&prohibited); err != nil {
 		return nil, err
 	}
-	published := r.LastPushedSHA != nil || r.PushGeneration != nil && *r.PushGeneration != 0 || prohibited
-
-	if r.Shipping != nil || published || step.Order() < types.StepRebase.Order() || step.Order() > types.StepLint.Order() ||
-		(r.Status != types.RunRunning && r.Status != types.RunPending) {
-		return nil, ErrTargetAdvanceIneligible
+	refuse := func(reason string) (*Run, error) {
+		return nil, fmt.Errorf("%w: %s", ErrTargetAdvanceIneligible, reason)
+	}
+	if r.Shipping != nil {
+		return refuse("strict shipping run")
+	}
+	if r.LastPushedSHA != nil || r.PushGeneration != nil && *r.PushGeneration != 0 {
+		return refuse("head already published")
+	}
+	if prohibited {
+		return refuse("publication, skipped Rebase, or attempted/unknown PR retarget provenance")
+	}
+	if step.Order() < types.StepRebase.Order() || step.Order() > types.StepLint.Order() {
+		return refuse("boundary outside unpublished validation: " + string(step))
+	}
+	if r.Status != types.RunRunning && r.Status != types.RunPending {
+		return refuse("run status is " + string(r.Status))
 	}
 	return r, nil
 }
@@ -130,10 +144,32 @@ func checkTargetRewindEligibility(tx *sql.Tx, runID string, previous *PRContext,
 		return nil, nil, fmt.Errorf("%w: remote source or PR observation changed during pending rewind", ErrTargetAdvanceIneligible)
 	}
 	identity := previous.PRURL == candidate.PRURL && previous.SourceRepo == candidate.SourceRepo && previous.SourceBranch == candidate.SourceBranch && previous.TargetBranch == candidate.TargetBranch && previous.ForgeHeadSHA == candidate.ForgeHeadSHA
-	pinnedPR := !req.HasPR && previous.PRURL == "" || req.HasPR && previous.PRURL != "" && previous.ForgeHeadSHA != "" && previous.ForgeHeadSHA == candidate.ForgeHeadSHA
-	if !identity || !pinnedPR ||
-		previous.LocalHeadSHA != candidate.LocalHeadSHA || r.HeadSHA != candidate.LocalHeadSHA || previous.TargetSHA == candidate.TargetSHA || previous.Generation != req.ExpectedGeneration {
-		return nil, nil, ErrTargetAdvanceIneligible
+	observation, err := targetRewindPRObservation(tx, runID)
+	if err != nil {
+		return nil, nil, err
+	}
+	pinnedPR := !req.HasPR && previous.PRURL == "" && observation == nil || req.HasPR && previous.PRURL != "" && previous.ForgeHeadSHA != "" && previous.ForgeHeadSHA == candidate.ForgeHeadSHA
+	if observation != nil && previous.PRURL == "" {
+		pinnedPR = req.HasPR && req.ObservedPRURL == observation.PRURL && req.ObservedForgeHeadSHA == observation.HeadSHA && req.SourceSHA != nil && *req.SourceSHA == observation.HeadSHA
+	}
+
+	refuse := func(reason string) (*Run, *TargetAdvanceRewind, error) {
+		return nil, nil, fmt.Errorf("%w: %s", ErrTargetAdvanceIneligible, reason)
+	}
+	if !identity {
+		return refuse("PR source, head, or target identity changed")
+	}
+	if !pinnedPR {
+		return refuse("PR discovery was not pinned at the first comparison, or its remote source changed")
+	}
+	if previous.LocalHeadSHA != candidate.LocalHeadSHA || r.HeadSHA != candidate.LocalHeadSHA {
+		return refuse("local head differs from the run comparison")
+	}
+	if previous.TargetSHA == candidate.TargetSHA {
+		return refuse("target did not advance")
+	}
+	if previous.Generation != req.ExpectedGeneration {
+		return refuse("comparison generation changed")
 	}
 	if req.SourceSHA != nil && !validGitSHA(*req.SourceSHA) {
 		return nil, nil, fmt.Errorf("invalid remote source SHA")
@@ -159,4 +195,10 @@ func (d *DB) MarkRunRetargetAttempted(runID string) error {
 		return fmt.Errorf("record PR retarget attempt: run not found")
 	}
 	return nil
+}
+
+// TargetRewindRefusal explains an excluded state without changing it.
+func (d *DB) TargetRewindRefusal(runID string, step types.StepName) error {
+	_, err := targetRewindRun(d.sql, runID, step)
+	return err
 }

@@ -15,10 +15,10 @@ import (
 )
 
 // GuardPRContext pins the exact target comparison before Rebase and checks it
-// at every later core-step boundary. A changed external comparison after a
-// completed boundary stops the run; a new run can validate that comparison
-// without replaying completed steps. A step's own forward edit advances the
-// receipt while retaining earlier evidence.
+// at every later core-step boundary. A checked target advance rewinds ordinary
+// unpublished validation; a qualified non-strict published head retains its
+// receipt when still mergeable. Other external comparison changes fail closed.
+// A step's own proven forward edit advances the receipt.
 func GuardPRContext(sctx *pipeline.StepContext, step types.StepName) (pipeline.PRContextDecision, error) {
 	if sctx != nil && sctx.PRContextAfterStep && step == types.StepPR &&
 		sctx.DB != nil && sctx.Run != nil {
@@ -208,7 +208,7 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 		candidate.SourceRepo = previous.SourceRepo
 	}
 
-	if pending != nil && !samePendingRewindIdentity(pending, previous, candidate, selection) {
+	if pending != nil && !samePendingRewindIdentity(sctx, pending, previous, candidate, selection) {
 		return pipeline.PRContextDecision{}, fmt.Errorf("PR comparison changed during pending rewind; start a new run")
 	}
 
@@ -219,6 +219,18 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 	}
 	var observedSource *string
 	targetChanged := previous != nil && (previous.TargetBranch != candidate.TargetBranch || previous.TargetSHA != candidate.TargetSHA)
+	if targetChanged && !eligible && previous != nil {
+		host, _ := buildHost(sctx, resolvedProvider(sctx))
+		if host != nil {
+			keep, err := retainPublishedComparison(sctx, host, previous, candidate)
+			if err != nil {
+				return pipeline.PRContextDecision{}, err
+			}
+			if keep {
+				return pipeline.PRContextDecision{Target: selection}, nil
+			}
+		}
+	}
 	if pending != nil || targetChanged && !(freshRetarget && previous.TargetBranch != candidate.TargetBranch) && eligible {
 		observed, cleanup, observeErr := observeRewindRemotes(sctx, selection.TargetBranch, previous.Generation)
 		if observeErr != nil {
@@ -235,6 +247,32 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 		}
 		candidate.TargetSHA, candidate.MergeBaseSHA, candidate.DiffDigest = exact.TargetSHA, exact.MergeBaseSHA, exact.DiffDigest
 		targetChanged = previous.TargetBranch != candidate.TargetBranch || previous.TargetSHA != candidate.TargetSHA
+	}
+	// A completed fix can move HEAD in the same window as a target advance.
+	// Attribute that movement before classifying drift, using the commit edges
+	// recorded by commitChanges, never mutable runs.head_sha alone.
+	if targetChanged && eligible && previous.LocalHeadSHA != candidate.LocalHeadSHA &&
+		sctx.PRContextAfterStep && step.Order() >= types.StepReview.Order() && step.Order() <= types.StepLint.Order() &&
+		sameRewindIdentity(previous, candidate) && candidate.LocalHeadSHA == sctx.Run.HeadSHA {
+		if err := sctx.DB.ValidatePipelineHeadForward(sctx.Run.ID, previous.LocalHeadSHA, candidate.LocalHeadSHA); err != nil {
+			return pipeline.PRContextDecision{}, fmt.Errorf("target advance with unexplained local head: %w", err)
+		}
+		if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", previous.LocalHeadSHA, candidate.LocalHeadSHA); err != nil {
+			return pipeline.PRContextDecision{}, fmt.Errorf("target advance with non-descendant pipeline head: %w", err)
+		}
+		// Keep the old target until the rewind transaction records the advance.
+		own, err := prComparisonAtTarget(sctx, previous.TargetBranch, previous.TargetSHA, candidate.LocalHeadSHA)
+		if err != nil {
+			return pipeline.PRContextDecision{}, err
+		}
+		own.PRURL, own.SourceRepo, own.SourceBranch, own.ForgeHeadSHA = previous.PRURL, previous.SourceRepo, previous.SourceBranch, previous.ForgeHeadSHA
+		if _, err := sctx.DB.AdvanceRunPRContext(sctx.Run.ID, own); err != nil {
+			return pipeline.PRContextDecision{}, err
+		}
+		previous, err = sctx.DB.GetRunPRContext(sctx.Run.ID)
+		if err != nil {
+			return pipeline.PRContextDecision{}, err
+		}
 	}
 	if targetChanged && !(freshRetarget && previous.TargetBranch != candidate.TargetBranch) && eligible {
 		_, bindErr := classifyTargetAdvance(sctx, step, selection, previous, candidate, observedSource)
@@ -298,6 +336,11 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 		}
 	}
 	forward = forward || pipelineOwnedPublicationAdvance
+	if targetChanged && !eligible && !freshRetarget && step.Order() > types.StepRebase.Order() {
+		if reason := sctx.DB.TargetRewindRefusal(sctx.Run.ID, step); reason != nil {
+			return pipeline.PRContextDecision{}, fmt.Errorf("PR target advanced; start a new run for the current target and head: %w", reason)
+		}
+	}
 	if previous != nil && previous.PRContextCandidate != candidate && !forward && !freshRetarget &&
 		!sameComparisonExceptNewPRIdentity(previous, candidate) && step.Order() > resetFrom.Order() {
 		return pipeline.PRContextDecision{}, fmt.Errorf("PR comparison changed after %s; start a new run for the current target and head", resetFrom)
@@ -312,6 +355,11 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 	}
 	if err != nil {
 		return pipeline.PRContextDecision{}, err
+	}
+	if previous == nil && selection.PRURL == "" && selection.ObservedPRURL != "" {
+		if err := sctx.DB.PinTargetRewindPRObservation(sctx.Run.ID, selection.ObservedPRURL, selection.ForgeHeadSHA); err != nil {
+			return pipeline.PRContextDecision{}, err
+		}
 	}
 	if candidate.PRURL != "" && runPRURL(sctx) == "" {
 		url := candidate.PRURL
@@ -480,6 +528,13 @@ func verifyCurrentPRComparison(sctx *pipeline.StepContext, host scm.Host, select
 	expected.PRURL, expected.SourceRepo, expected.SourceBranch, expected.ForgeHeadSHA = "", "", "", ""
 	if selection.State != scm.PRStateMerged {
 		if current != expected {
+			candidate := current
+			candidate.PRURL, candidate.SourceRepo, candidate.SourceBranch, candidate.ForgeHeadSHA = receipt.PRURL, receipt.SourceRepo, receipt.SourceBranch, receipt.ForgeHeadSHA
+			if keep, err := retainPublishedComparison(sctx, host, receipt, candidate); err != nil {
+				return err
+			} else if keep {
+				return nil
+			}
 			return fmt.Errorf("live target commit, merge base, or diff differs from PR comparison receipt")
 		}
 		return nil

@@ -108,8 +108,16 @@ func attachCommitStatusPublication(sctx *pipeline.StepContext) (*db.CommitStatus
 	}
 	if attempt != nil && attempt.SHA == publication.SHA && attempt.Target == safeurl.Redact(target) && attempt.Ref == ref {
 		publication = attempt.CommitStatusPublication
-	} else if err := recordCommitStatusAttempt(sctx, publication.SHA, target, ref, false, false); err != nil {
-		return nil, err
+	} else {
+		// This is an observation of code already submitted before this run,
+		// not a push. Keep that distinction durable across confirmation and
+		// status reports so target rewinds remain available during validation.
+		publication.AdoptedOnly = attempt == nil
+		if err := sctx.DB.PutCommitStatusAttempt(sctx.Run.ID, db.CommitStatusAttempt{
+			CommitStatusPublication: publication, Target: safeurl.Redact(target), Ref: ref,
+		}); err != nil {
+			return nil, err
+		}
 	}
 	confirmed, err := sctx.DB.ConfirmCommitStatusAttempt(sctx.Run.ID, publication)
 	if err != nil || !confirmed {

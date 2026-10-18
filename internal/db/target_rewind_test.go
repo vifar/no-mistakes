@@ -100,7 +100,7 @@ func TestTargetRewindTransactionChargesOnlyCommittedFastForward(t *testing.T) {
 }
 
 func TestTargetRewindTransactionRechecksEligibilityAndGeneration(t *testing.T) {
-	for _, kind := range []string{"last pushed", "push generation", "status attempt", "G attachment", "PR completed", "retarget attempted", "strict", "skipped rebase", "push step", "stale generation", "wrong local head", "cap"} {
+	for _, kind := range []string{"last pushed", "push generation", "status attempt", "legacy publication", "PR completed", "retarget attempted", "strict", "skipped rebase", "push step", "stale generation", "wrong local head", "cap"} {
 		t.Run(kind, func(t *testing.T) {
 			d, id, c, req := targetRewindDBFixture(t)
 			var err error
@@ -111,7 +111,7 @@ func TestTargetRewindTransactionRechecksEligibilityAndGeneration(t *testing.T) {
 				_, err = d.sql.Exec(`UPDATE runs SET push_generation=1 WHERE id=?`, id)
 			case "status attempt":
 				_, err = d.sql.Exec(`INSERT INTO commit_status_attempts (run_id,sha,host,repo,target,ref) VALUES (?,?,'h','r','t','ref')`, id, c.LocalHeadSHA)
-			case "G attachment":
+			case "legacy publication":
 				_, err = d.sql.Exec(`INSERT INTO commit_status_publications (run_id,sha,host,repo) VALUES (?,?,'h','r')`, id, c.LocalHeadSHA)
 			case "PR completed":
 				var row *StepResult
@@ -413,5 +413,133 @@ func TestTargetRewindPersistsPRObservation(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestTargetRewindSnapshotsSurviveReopenAndKeepGateAnswers(t *testing.T) {
+	d, id, c, req := targetRewindDBFixture(t)
+	step, err := d.InsertStepResult(id, types.StepTest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	finding := `{"findings":[{"id":"gap","description":"accepted live gap"}]}`
+	round, err := d.InsertStepRound(step.ID, 1, "initial", &finding, nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := "[]"
+	if err := d.SetStepRoundSelection(round.ID, &ids, RoundSelectionSourceUserDeclined); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.RewindRunPRContext(id, c, req); err != nil {
+		t.Fatal(err)
+	}
+	outcome := `{"Findings":"test evidence"}`
+	if err := d.RecordTargetRewindBoundary(id, 1, "test", outcome); err != nil {
+		t.Fatal(err)
+	}
+	var sequence int
+	var name, path string
+	if err := d.sql.QueryRow(`PRAGMA database_list`).Scan(&sequence, &name, &path); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	history, err := reopened.GetTargetRewindHistory(id)
+	if err != nil || len(history) != 1 || len(history[0].Rounds) != 1 {
+		t.Fatalf("lost history: %+v %v", history, err)
+	}
+	h := history[0]
+	if h.Rounds[0]["selection_source"] != RoundSelectionSourceUserDeclined || h.Rounds[0]["selected_finding_ids"] != "[]" || h.Rounds[0]["findings_json"] != finding || h.BoundaryJSON == nil || *h.BoundaryJSON != outcome {
+		t.Fatalf("lost answer/evidence: %+v", h)
+	}
+	if err := reopened.RecordTargetRewindBoundary(id, 99, "test", "wrong generation"); err == nil {
+		t.Fatal("stale boundary overwrote history")
+	}
+}
+
+func TestTargetRewindTransactionPinsInitiallyUnattachedPR(t *testing.T) {
+	d, id, c, req := targetRewindDBFixture(t)
+	url := "https://github.com/test/repo/pull/42"
+	head := c.LocalHeadSHA
+	if err := d.PinTargetRewindPRObservation(id, url, head); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.PinTargetRewindPRObservation(id, url+"0", head); err == nil {
+		t.Fatal("initial discovery could be replaced")
+	}
+	req.HasPR, req.ObservedPRURL, req.ObservedForgeHeadSHA, req.SourceSHA = true, url, head, &head
+	wrong := req
+	wrong.ObservedPRURL = url + "0"
+	if _, err := d.RewindRunPRContext(id, c, wrong); err == nil {
+		t.Fatal("transaction accepted changed PR discovery")
+	}
+	if _, err := d.RewindRunPRContext(id, c, req); err != nil {
+		t.Fatal(err)
+	}
+	assertRewindCharge(t, d, id, 1, true)
+	run, err := d.GetRun(id)
+	if err != nil || run.PRURL != nil {
+		t.Fatalf("discovery attached an unowned PR: %+v %v", run, err)
+	}
+}
+
+func TestTargetRewindAdoptionProvenance(t *testing.T) {
+	for _, kind := range []string{"adopted", "push replaces adoption", "legacy cannot become adoption", "actual attempt cannot become adoption", "uncertain adoption attempt"} {
+		t.Run(kind, func(t *testing.T) {
+			d, id, c, req := targetRewindDBFixture(t)
+			p := CommitStatusPublication{SHA: c.LocalHeadSHA, Host: "h", Repo: "r", AdoptedOnly: true}
+			if kind == "legacy cannot become adoption" {
+				legacy := p
+				legacy.AdoptedOnly = false
+				if err := d.PutCommitStatusPublication(id, legacy); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if kind == "actual attempt cannot become adoption" || kind == "uncertain adoption attempt" {
+				a := CommitStatusAttempt{CommitStatusPublication: p, Target: "t", Ref: "ref"}
+				a.AdoptedOnly = kind == "uncertain adoption attempt"
+				if err := d.PutCommitStatusAttempt(id, a); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if kind != "uncertain adoption attempt" {
+				if _, err := d.ConfirmCommitStatusAttempt(id, p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if kind == "push replaces adoption" {
+				pushed := p
+				pushed.AdoptedOnly = false
+				if err := d.PutCommitStatusAttempt(id, CommitStatusAttempt{CommitStatusPublication: pushed, Target: "t", Ref: "ref"}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := d.ConfirmCommitStatusAttempt(id, pushed); err != nil {
+					t.Fatal(err)
+				}
+				// An older reporter holding the adoption must never undo real publication.
+				if err := d.PutCommitStatusPublication(id, p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, err := d.RewindRunPRContext(id, c, req)
+			if kind == "adopted" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertRewindCharge(t, d, id, 1, true)
+			} else {
+				if err == nil {
+					t.Fatal("uncertain/actual publication acquired adoption exemption")
+				}
+				assertRewindCharge(t, d, id, 0, false)
+			}
+		})
 	}
 }

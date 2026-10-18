@@ -650,3 +650,9 @@ func RepoPath(remoteURL string) string {
 	parts[len(parts)-1] = strings.TrimSuffix(parts[len(parts)-1], ".git")
 	return strings.Join(parts, "/")
 }
+
+// BranchUpdatePolicyReader reports whether branch protection requires the PR
+// head to include the current target. An unreadable policy is never false.
+type BranchUpdatePolicyReader interface {
+	RequiresUpToDate(context.Context, *PR, string) (bool, error)
+}

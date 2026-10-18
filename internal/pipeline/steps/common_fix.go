@@ -444,6 +444,9 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if headSHA == headBeforeCommit {
 		sctx.Log("no staged agent changes to commit")
 	} else {
+		if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
+			return false, err
+		}
 		if err := recordPipelineHeadRange(sctx, headBeforeCommit, headSHA); err != nil {
 			return false, err
 		}
@@ -456,7 +459,7 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 }
 
 func runPipelineCorrectionAgent(sctx *pipeline.StepContext, invoke func() (*agent.Result, error)) (*agent.Result, error) {
-	if sctx.Run.ExternalCIOwner == "" {
+	if sctx.DB == nil {
 		return invoke()
 	}
 	before, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
@@ -478,7 +481,7 @@ func runPipelineCorrectionAgent(sctx *pipeline.StepContext, invoke func() (*agen
 }
 
 func recordPipelineHeadRange(sctx *pipeline.StepContext, before, after string) error {
-	if sctx.Run.ExternalCIOwner == "" || before == after {
+	if sctx.DB == nil || before == after {
 		return nil
 	}
 	history, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-list", "--first-parent", "--parents", after, "^"+before)

@@ -29,12 +29,19 @@ func sameRewindIdentity(p *db.PRContext, c db.PRContextCandidate) bool {
 
 // samePendingRewindIdentity validates the full discovery observation, even
 // when a discovered PR cannot attach because its head differs from local HEAD.
-func samePendingRewindIdentity(pending *db.TargetAdvanceRewind, previous *db.PRContext, candidate db.PRContextCandidate, selected pipeline.PRTargetSelection) bool {
+func samePendingRewindIdentity(c *pipeline.StepContext, pending *db.TargetAdvanceRewind, previous *db.PRContext, candidate db.PRContextCandidate, selected pipeline.PRTargetSelection) bool {
 	if previous == nil || !sameRewindIdentity(previous, candidate) {
 		return false
 	}
 	if pending.ForgeHeadSHA == nil {
-		return previous.PRURL == "" && selected.PRURL == "" && selected.ForgeHeadSHA == ""
+		observation, err := c.DB.GetTargetRewindPRObservation(c.Run.ID)
+		if err != nil {
+			return false
+		}
+		if observation != nil {
+			return previous.PRURL == "" && selected.PRURL == "" && selected.ObservedPRURL == observation.PRURL && selected.ForgeHeadSHA == observation.HeadSHA
+		}
+		return previous.PRURL == "" && selected.PRURL == "" && selected.ForgeHeadSHA == "" && selected.ObservedPRURL == ""
 	}
 	return previous.PRURL != "" && selected.PRURL == previous.PRURL && selected.ForgeHeadSHA == *pending.ForgeHeadSHA
 }
@@ -113,9 +120,8 @@ func classifyTargetAdvance(c *pipeline.StepContext, step types.StepName, selecti
 	refusal := func(cause error) (db.PRContextBindResult, error) {
 		return db.PRContextBindResult{}, fmt.Errorf("PR comparison changed after rebase; start a new run for the current target and head: %w", cause)
 	}
-	if previous == nil || !sameRewindIdentity(previous, candidate) || candidate.LocalHeadSHA != c.Run.HeadSHA || candidate.LocalHeadSHA != previous.LocalHeadSHA || previous.TargetSHA == candidate.TargetSHA ||
-		(selection.ForgeHeadSHA != "" && previous.PRURL == "") {
-		return refusal(db.ErrTargetAdvanceIneligible)
+	if previous == nil || !sameRewindIdentity(previous, candidate) || candidate.LocalHeadSHA != c.Run.HeadSHA || candidate.LocalHeadSHA != previous.LocalHeadSHA || previous.TargetSHA == candidate.TargetSHA {
+		return refusal(fmt.Errorf("%w: PR identity or local head differs from the recorded comparison", db.ErrTargetAdvanceIneligible))
 	}
 	if _, err := git.Run(c.Ctx, c.WorkDir, "merge-base", "--is-ancestor", previous.TargetSHA, candidate.TargetSHA); err != nil {
 		return refusal(fmt.Errorf("target is not a strict fast-forward: %w", err))
@@ -125,7 +131,7 @@ func classifyTargetAdvance(c *pipeline.StepContext, step types.StepName, selecti
 		maxRewinds = c.Config.Rebase.MaxTargetAdvanceRewinds
 	}
 	result, err := c.DB.RewindRunPRContext(c.Run.ID, candidate, db.TargetAdvanceRewindRequest{
-		ExpectedGeneration: previous.Generation, Step: step, MaxRewinds: maxRewinds, SourceSHA: source, HasPR: selection.ForgeHeadSHA != "",
+		ExpectedGeneration: previous.Generation, Step: step, MaxRewinds: maxRewinds, SourceSHA: source, HasPR: selection.ForgeHeadSHA != "", ObservedPRURL: selection.ObservedPRURL, ObservedForgeHeadSHA: selection.ForgeHeadSHA,
 	})
 	if err != nil {
 		return refusal(err)
@@ -188,7 +194,7 @@ func checkedRewindTargets(c *pipeline.StepContext, targets []string) (checked []
 	if previous.SourceBranch == candidate.SourceBranch && scm.SameSourceRepository(resolvedProvider(c), previous.SourceRepo, candidate.SourceRepo) {
 		candidate.SourceRepo = previous.SourceRepo
 	}
-	if head != c.Run.HeadSHA || head != previous.LocalHeadSHA || head != pending.LocalHeadSHA || !samePendingRewindIdentity(pending, previous, candidate, selected) {
+	if head != c.Run.HeadSHA || head != previous.LocalHeadSHA || head != pending.LocalHeadSHA || !samePendingRewindIdentity(c, pending, previous, candidate, selected) {
 		return nil, cleanup, fmt.Errorf("local head or PR identity changed during pending rewind")
 	}
 	if !sameRewindSource(pending.SourceSHA, observed.source) {
@@ -208,9 +214,24 @@ func checkedRewindTargets(c *pipeline.StepContext, targets []string) (checked []
 		}
 
 	}
+	// Do not replay source history whose content already survives an earlier
+	// rebase. A source not yet contained still needs normal integration; the
+	// force-push target list continues to exclude deliberately discarded work.
 	for _, target := range targets {
 		if target != "origin/"+previous.TargetBranch && observed.source != nil {
-			checked = append(checked, *observed.source)
+			contained := false
+			if _, err := git.Run(c.Ctx, c.WorkDir, "merge-base", "--is-ancestor", *observed.source, head); err == nil {
+				contained = true
+			} else if tree, err := git.Run(c.Ctx, c.WorkDir, "merge-tree", "--write-tree", head, *observed.source); err == nil {
+				headTree, err := git.Run(c.Ctx, c.WorkDir, "rev-parse", head+"^{tree}")
+				if err != nil {
+					return nil, cleanup, err
+				}
+				contained = tree == headTree
+			}
+			if !contained {
+				checked = append(checked, *observed.source)
+			}
 		}
 	}
 	checked = append(checked, observed.target)

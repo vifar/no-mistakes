@@ -513,4 +513,16 @@ var migrationStatements = []string{
    ) WHERE forge_head_sha IS NULL AND id IN (SELECT pending_target_rewind_id FROM runs)`,
 	// Explicit launch responsibility; never inferred from historical transcript IDs.
 	`ALTER TABLE runs ADD COLUMN launch_owner TEXT`,
+	`CREATE TABLE IF NOT EXISTS target_rewind_history (
+        rewind_id TEXT PRIMARY KEY REFERENCES run_target_rewinds(id) ON DELETE CASCADE,
+        comparison_json TEXT NOT NULL, review_head_sha TEXT,
+        steps_json TEXT NOT NULL, rounds_json TEXT NOT NULL,
+        boundary_step TEXT, boundary_json TEXT
+    )`,
+	`CREATE TABLE IF NOT EXISTS run_rewind_pr_observations (
+        run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+        pr_url TEXT NOT NULL, head_sha TEXT NOT NULL
+    )`,
+	`ALTER TABLE commit_status_attempts ADD COLUMN adopted_only INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE commit_status_publications ADD COLUMN adopted_only INTEGER NOT NULL DEFAULT 0`,
 }

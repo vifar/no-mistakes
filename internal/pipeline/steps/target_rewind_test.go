@@ -698,9 +698,9 @@ func TestTargetRewindPermitsEarlierOwnedFixButRejectsAtTheCap(t *testing.T) {
 	}
 }
 
-// G's real attachment writes publication provenance even without a Push step.
-// That provenance must exclude the run from both guard and transaction rewinds.
-func TestTargetRewindRefusesRealAttachPublication(t *testing.T) {
+// G's real adoption observes submitted code without publishing this run's work.
+// Keep ordinary target rewinds available after the pending status POST.
+func TestTargetRewindAllowsRealAttachAdoption(t *testing.T) {
 	c, selected := rewindFixture(t)
 	eligible, err := c.DB.CanRewindTarget(c.Run.ID, types.StepTest)
 	if err != nil || !eligible {
@@ -719,29 +719,33 @@ func TestTargetRewindRefusesRealAttachPublication(t *testing.T) {
 	c.Env = append(env, "FAKE_CLI_STATUS_API_URL="+server.URL)
 	(&PushStep{}).AttachPublishedHeadStatus(c)
 	publication, err := c.DB.GetCommitStatusPublication(c.Ctx, c.Run.ID, db.CommitStatusPublication{SHA: c.Run.HeadSHA, Host: "github.com", Repo: "test/repo"})
-	if err != nil || publication == nil || publication.Validated || publication.CIEligible {
+	if err != nil || publication == nil || !publication.AdoptedOnly || publication.Validated || publication.CIEligible {
 		t.Fatalf("real G attachment missing or credited validation: %+v %v", publication, err)
 	}
 	if states := forge.states("test/repo", c.Run.HeadSHA); len(states) != 1 || states[0] != "pending" {
 		t.Fatalf("real G attach status POSTs = %v", states)
 	}
-	if eligible, err = c.DB.CanRewindTarget(c.Run.ID, types.StepTest); err != nil || eligible {
-		t.Fatalf("G-attached run eligible: %t %v", eligible, err)
+	if eligible, err = c.DB.CanRewindTarget(c.Run.ID, types.StepTest); err != nil || !eligible {
+		t.Fatalf("G-adopted run ineligible: %t %v", eligible, err)
 	}
 	advanceRewindTarget(t, c)
-	if _, err = guardPRContextWithSelection(c, types.StepTest, selected, false); err == nil || !strings.Contains(err.Error(), "start a new run") {
-		t.Fatalf("G-attached run did not keep the existing refusal: %v", err)
+	if _, err = guardPRContextWithSelection(c, types.StepTest, selected, false); err != nil {
+		t.Fatalf("G-adopted run refused target advance: %v", err)
 	}
 	receipt, err := c.DB.GetRunPRContext(c.Run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	candidate := db.PRContextCandidate{LocalHeadSHA: receipt.LocalHeadSHA, TargetBranch: receipt.TargetBranch, TargetSHA: gitCmd(t, c.WorkDir, "rev-parse", "main"), MergeBaseSHA: receipt.MergeBaseSHA, DiffDigest: receipt.DiffDigest}
-	if _, err = c.DB.RewindRunPRContext(c.Run.ID, candidate, db.TargetAdvanceRewindRequest{ExpectedGeneration: receipt.Generation, Step: types.StepTest, MaxRewinds: 3}); err == nil {
-		t.Fatal("transaction accepted G-attached run")
+	pending, err := c.DB.GetPendingTargetRewind(c.Run.ID)
+	if err != nil || pending == nil {
+		t.Fatalf("missing adopted-head rewind: %+v %v", pending, err)
+	}
+	if _, err = c.DB.RewindRunPRContext(c.Run.ID, candidate, db.TargetAdvanceRewindRequest{ExpectedGeneration: receipt.Generation, Step: types.StepTest, MaxRewinds: 3, SourceSHA: pending.SourceSHA}); err != nil {
+		t.Fatalf("transaction refused G-adopted run: %v", err)
 	}
 	run, err := c.DB.GetRun(c.Run.ID)
-	if err != nil || run.TargetAdvanceRewinds != 0 || run.PendingTargetRewindID != nil {
-		t.Fatalf("G-attached run charged or left pending: %+v %v", run, err)
+	if err != nil || run.TargetAdvanceRewinds != 1 || run.PendingTargetRewindID == nil {
+		t.Fatalf("G-adopted run did not retain pending rewind: %+v %v", run, err)
 	}
 }

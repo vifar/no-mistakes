@@ -690,7 +690,7 @@ func TestStagePipelineChanges_KeepsRecordedSubmodulePointer(t *testing.T) {
 				}
 			}
 
-			sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+			sctx := newTestContextWithDBRecords(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
 			committed, err := commitAgentFixesWithResult(sctx, types.StepLint, "fix lint", "", nil)
 			if err != nil {
 				t.Fatalf("commit agent fixes: %v", err)
@@ -741,7 +741,7 @@ func TestStagePipelineChanges_DoesNotReAddRemovedPopulatedSubmodule(t *testing.T
 		t.Fatal(err)
 	}
 
-	sctx := newTestContext(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, &mockAgent{}, dir, baseSHA, headSHA, config.Commands{})
 	committed, err := commitAgentFixesWithResult(sctx, types.StepLint, "fix lint", "", nil)
 	if err != nil {
 		t.Fatalf("commit agent fixes: %v", err)

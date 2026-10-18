@@ -29,6 +29,9 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	if err := ensureReviewComparisonHead(sctx); err != nil {
 		return nil, err
 	}
+	if outcome, err := reusableRewindReview(sctx); outcome != nil || err != nil {
+		return outcome, err
+	}
 	planSection, err := verificationPlanPromptSection(sctx)
 	if err != nil {
 		return nil, err

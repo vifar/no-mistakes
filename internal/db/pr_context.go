@@ -225,6 +225,9 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
             VALUES (?,?,?,?,?,?,?,?,?,?)`, id, runID, previous.TargetSHA, candidate.TargetSHA, candidate.LocalHeadSHA, source, forgeHead, req.Step, generation, now()); err != nil {
 			return PRContextBindResult{}, err
 		}
+		if err = archiveTargetRewind(tx, id, runID, previous, rewindRun.ReviewApprovedHeadSHA); err != nil {
+			return PRContextBindResult{}, err
+		}
 		if _, err = tx.Exec(`UPDATE runs SET target_advance_rewinds=target_advance_rewinds+1,pending_target_rewind_id=? WHERE id=?`, id, runID); err != nil {
 			return PRContextBindResult{}, err
 		}
