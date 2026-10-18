@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -392,6 +393,71 @@ func (f *schedFixture) waitParked(runID string) {
 // check is structural (assertQueued, assertNoWorktree): a queued launch does no
 // setup work at all.
 const launchReplyBudget = 10 * time.Second
+
+// The captured test failure is the public diagnostic contract: an unexpected
+// terminal run must explain both persisted causes before its fixture is removed.
+// Removing runDiagnostics from waitStatus must fail this test, even if the daemon
+// independently logs the same cause.
+func TestQueueWaitStatusReportsTerminalCausesBeforeCleanup(t *testing.T) {
+	const childEnv = "NM_TEST_QUEUE_WAIT_DIAGNOSTICS"
+	const cleanupMessage = "scheduler diagnostic fixture cleanup complete"
+	if os.Getenv(childEnv) == "1" {
+		var root string
+		// Registered first, so this runs after the fixture's daemon, DB and root
+		// cleanups, including when waitStatus calls Fatalf.
+		t.Cleanup(func() {
+			if root == "" {
+				return
+			}
+			if _, err := os.Stat(root); !os.IsNotExist(err) {
+				t.Errorf("scheduler diagnostic fixture was not removed: %v", err)
+				return
+			}
+			t.Log(cleanupMessage)
+		})
+		f := newSchedFixture(t, "daemon:\n  max_concurrent_runs: 1\n")
+		root = f.p.Root()
+		id, _ := f.push("fail-diagnostics")
+		f.waitStarted(id)
+		f.step.release(id)
+		f.waitStatus(id, types.RunFailed)
+		// Keep the ordinary completed expectation: the deliberately failed run
+		// must reach the real wait failure path, not just its string formatter.
+		f.waitStatus(id, types.RunCompleted)
+		t.Fatal("failed run unexpectedly satisfied the completed expectation")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestQueueWaitStatusReportsTerminalCausesBeforeCleanup$", "-test.timeout=3m")
+	cmd.Env = append(os.Environ(), childEnv+"=1")
+	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("scheduler diagnostic child did not finish: %v\n%s", ctx.Err(), output)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("expected an ordinary test failure, got %v\n%s", err, output)
+	}
+	// Ignore testing's indentation, but require the causes in the wait's fatal
+	// message itself. These literals come from schedStep's induced failure and
+	// the executor's persisted run/step error contract, not runDiagnostics.
+	lines := strings.Split(string(output), "\n")
+	for i := range lines {
+		lines[i] = strings.TrimSpace(lines[i])
+	}
+	got := strings.Join(lines, "\n")
+	const want = "status = failed, want one of [completed]\n" +
+		"run status=failed error=\"step review failed: induced failure\"\n" +
+		"step=review status=failed error=\"induced failure\""
+	diagnosticAt := strings.Index(got, want)
+	if diagnosticAt < 0 {
+		t.Fatalf("wait failure omitted persisted terminal causes:\n%s", output)
+	}
+	if cleanupAt := strings.Index(got, cleanupMessage); cleanupAt <= diagnosticAt {
+		t.Fatalf("wait diagnostic did not precede completed fixture cleanup:\n%s", output)
+	}
+}
 
 func TestQueueCapTwoWithFourLaunchesRunsTwoAndQueuesTwo(t *testing.T) {
 	f := newSchedFixture(t, "daemon:\n  max_concurrent_runs: 2\n")
