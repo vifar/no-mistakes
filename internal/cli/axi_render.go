@@ -1040,7 +1040,7 @@ func emitDoc(cmd *cobra.Command, fields ...toon.Field) {
 	fmt.Fprint(cmd.OutOrStdout(), axiDoc(fields...))
 }
 
-// emitError renders a structured TOON error to stdout and returns an exitError
+// emitError renders an error through emitDoc and returns an exitError
 // so the process exits non-zero without cobra printing the Go error.
 func emitError(cmd *cobra.Command, code int, msg string, help ...string) error {
 	fields := []toon.Field{{Key: "error", Value: msg}}
