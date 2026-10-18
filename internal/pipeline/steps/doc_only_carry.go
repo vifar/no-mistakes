@@ -84,7 +84,7 @@ func docOnlyRange(sctx *pipeline.StepContext, from, to string) (bool, error) {
 		if len(edge) != 2 || edge[0] != current {
 			return false, nil // merges and ambiguous ancestry never carry
 		}
-		diff, err := stepGitRun(sctx, "diff", "--raw", "--no-abbrev", "--no-renames", "-z", edge[1], edge[0])
+		diff, err := stepGitRunRaw(sctx, "diff", "--raw", "--no-abbrev", "--no-renames", "--ignore-submodules=none", "-z", edge[1], edge[0])
 		if err != nil {
 			return false, fmt.Errorf("inspect doc-only commit: %w", err)
 		}

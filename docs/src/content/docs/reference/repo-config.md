@@ -452,7 +452,7 @@ This field decides which commits skip revalidation, so it is honored **only from
 
 Maximum accepted Document commits in one run, including commits the agent creates itself. Default: `2`. Values must be non-negative; `0` disables Document commits. This field is read only from the trusted default branch, even when `allow_repo_commands` is enabled.
 
-The budget survives step restarts. After a committed pass reports no remaining documentation gap, another pass at that head finishes without invoking the agent. A later proposal is discarded when it touches only files from the previous Document commit or reports no remaining documentation gap. A proposal that exceeds the remaining budget is also discarded. Unresolved findings remain visible for an owner decision; discarded edits never count as fixes. Skipped or discarded combined housekeeping work leaves lint to its own pass.
+The budget survives step restarts. After a committed pass reports no remaining documentation gap, another pass at that head finishes without invoking the agent. A later proposal is discarded when it touches only files from the previous committed Document pass. A proposal that exceeds the remaining budget is also discarded. Unresolved findings remain visible for an owner decision; discarded edits never count as fixes. Skipped or discarded combined housekeeping work leaves lint to its own pass.
 
 Document requires a clean starting worktree so it can discard only its own proposal, including agent-created commits. An interrupted pass with uncertain state fails closed rather than receiving a fresh budget; start a new run after resolving that state.
 

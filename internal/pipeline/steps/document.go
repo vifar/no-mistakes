@@ -3,6 +3,7 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -220,7 +221,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		prospectiveCommits++
 	}
 	capExceeded := prospectiveCommits > limit-history.commits
-	suppressed := capExceeded || (history.last != nil && (repeated || (proposedErr == nil && len(proposedDocs.Items) == 0)))
+	suppressed := capExceeded || repeated
 	if suppressed {
 		if err := discardDocumentCandidate(sctx, headBefore, untracked); err != nil {
 			return nil, err
@@ -228,10 +229,19 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		if proposedErr != nil {
 			return nil, fmt.Errorf("validate document analyzer findings: %w", proposedErr)
 		}
-		// Discarded fixes cannot certify their own gaps as resolved. Retain
-		// the previous unresolved observations if this proposal cleared them.
-		if len(proposedDocs.Items) == 0 {
-			proposedDocs = previous
+		for _, prior := range previous.Items {
+			found := false
+			for _, current := range proposedDocs.Items {
+				priorKey, currentKey := prior, current
+				priorKey.ID, currentKey.ID = "", ""
+				if reflect.DeepEqual(priorKey, currentKey) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				proposedDocs.Items = append(proposedDocs.Items, prior)
+			}
 		}
 		if capExceeded {
 			proposedDocs = documentCapFinding(proposedDocs)

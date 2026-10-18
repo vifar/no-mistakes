@@ -14,6 +14,7 @@ import (
 type documentHistory struct {
 	commits int
 	last    *db.DocumentPass
+	latest  *db.DocumentPass
 }
 
 func readDocumentHistory(sctx *pipeline.StepContext) (documentHistory, error) {
@@ -27,6 +28,7 @@ func readDocumentHistory(sctx *pipeline.StepContext) (documentHistory, error) {
 		if p.ToHeadSHA == nil {
 			return history, fmt.Errorf("Document pass %s was interrupted; refusing another pass with an uncertain commit budget", p.ID)
 		}
+		history.latest = p
 		if p.CommitCount > 0 {
 			history.commits += p.CommitCount
 			history.last = p
@@ -37,11 +39,11 @@ func readDocumentHistory(sctx *pipeline.StepContext) (documentHistory, error) {
 
 func previousDocumentFindings(history documentHistory) (Findings, error) {
 	var findings Findings
-	if history.last != nil {
-		if history.last.FindingsJSON == nil {
-			return findings, fmt.Errorf("committed Document pass has no findings record")
+	if history.latest != nil {
+		if history.latest.FindingsJSON == nil {
+			return findings, fmt.Errorf("completed Document pass has no findings record")
 		}
-		if err := validateDocumentAnalyzerFindings([]byte(*history.last.FindingsJSON), &findings, true); err != nil {
+		if err := validateDocumentAnalyzerFindings([]byte(*history.latest.FindingsJSON), &findings, true); err != nil {
 			return findings, fmt.Errorf("read previous Document findings: %w", err)
 		}
 	}
@@ -68,16 +70,49 @@ func documentCapFinding(findings Findings) Findings {
 // documentCandidatePaths includes committed, staged, unstaged, and untracked
 // changes. --no-renames preserves both sides of a move and -z preserves names.
 func documentCandidatePaths(sctx *pipeline.StepContext, from string) ([]string, []string, error) {
-	tracked, err := stepGitRun(sctx, "diff", "--name-only", "--no-renames", "-z", from)
+	head, err := stepGitRun(sctx, "rev-parse", "HEAD")
 	if err != nil {
-		return nil, nil, fmt.Errorf("read Document edits: %w", err)
+		return nil, nil, err
 	}
-	untracked, err := stepGitRun(sctx, "ls-files", "--others", "--exclude-standard", "-z")
+	paths, err := documentRangePaths(sctx, from, head)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, args := range [][]string{
+		{"diff", "--cached", "--name-only", "--no-renames", "--ignore-submodules=none", "-z", "HEAD"},
+		{"diff", "--name-only", "--no-renames", "--ignore-submodules=none", "-z"},
+	} {
+		out, err := stepGitRunRaw(sctx, args...)
+		if err != nil {
+			return nil, nil, fmt.Errorf("read Document edits: %w", err)
+		}
+		paths = append(paths, documentNULPaths(out)...)
+	}
+	untracked, err := stepGitRunRaw(sctx, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return nil, nil, fmt.Errorf("read untracked Document edits: %w", err)
 	}
 	newPaths := documentNULPaths(untracked)
-	return append(documentNULPaths(tracked), newPaths...), newPaths, nil
+	return append(paths, newPaths...), newPaths, nil
+}
+
+func documentRangePaths(sctx *pipeline.StepContext, from, to string) ([]string, error) {
+	if _, err := documentCommitCount(sctx, from, to); err != nil {
+		return nil, err
+	}
+	commits, err := stepGitRun(sctx, "rev-list", from+".."+to)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, commit := range strings.Fields(commits) {
+		out, err := stepGitRunRaw(sctx, "diff-tree", "-r", "-m", "--no-commit-id", "--name-only", "--no-renames", "--ignore-submodules=none", "-z", commit)
+		if err != nil {
+			return nil, fmt.Errorf("read Document commit paths: %w", err)
+		}
+		paths = append(paths, documentNULPaths(out)...)
+	}
+	return paths, nil
 }
 
 func documentNULPaths(out string) []string {
@@ -91,12 +126,12 @@ func documentReeditsPreviousFiles(sctx *pipeline.StepContext, previous *db.Docum
 	if previous == nil || len(paths) == 0 {
 		return false, nil
 	}
-	out, err := stepGitRun(sctx, "diff", "--name-only", "--no-renames", "-z", *previous.ToHeadSHA+"^", *previous.ToHeadSHA)
+	previousPaths, err := documentRangePaths(sctx, previous.FromHeadSHA, *previous.ToHeadSHA)
 	if err != nil {
 		return false, fmt.Errorf("read previous Document paths: %w", err)
 	}
 	allowed := make(map[string]bool)
-	for _, p := range documentNULPaths(out) {
+	for _, p := range previousPaths {
 		allowed[p] = true
 	}
 	for _, p := range paths {

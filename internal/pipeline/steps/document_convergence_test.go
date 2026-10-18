@@ -222,7 +222,7 @@ func TestDocumentConvergenceSuppressedCleanProposalRetainsGap(t *testing.T) {
 	calls := 0
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 		calls++
-		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("guide%d.md", calls)), []byte("guide\n"), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte(fmt.Sprintf("guide %d\n", calls)), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if calls == 1 {
@@ -435,5 +435,207 @@ func TestDocOnlyCarryRejectsAmbiguousChanges(t *testing.T) {
 				t.Fatalf("unsafe range accepted: %v, %v", ok, err)
 			}
 		})
+	}
+}
+
+func TestDocumentConvergenceRetainsEveryDiscardedGap(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		calls++
+		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte(fmt.Sprint(calls)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		descriptions := []string{"A", "B"}
+		if calls > 1 {
+			descriptions = []string{"B", "C"}
+		}
+		if calls > 2 {
+			descriptions = []string{"D"}
+		}
+		findings := Findings{Summary: "unresolved gaps"}
+		for _, description := range descriptions {
+			findings.Items = append(findings.Items, types.Finding{Severity: "warning", Description: description, Action: "ask-user"})
+		}
+		raw, _ := json.Marshal(findings)
+		return &agent.Result{Output: raw}, nil
+	}}
+	sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+	for pass := 0; pass < 3; pass++ {
+		out, err := (&DocumentStep{}).Execute(sc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pass == 0 {
+			continue
+		}
+		var findings Findings
+		if err := json.Unmarshal([]byte(out.Findings), &findings); err != nil {
+			t.Fatal(err)
+		}
+		seen := map[string]bool{}
+		for _, f := range findings.Items {
+			seen[f.Description] = true
+		}
+		expected := []string{"A", "B", "C"}
+		if pass > 1 {
+			expected = append(expected, "D")
+		}
+		for _, description := range expected {
+			if !seen[description] {
+				t.Errorf("pass %d lost %s: %s", pass, description, out.Findings)
+			}
+		}
+	}
+}
+
+func TestDocumentConvergenceNewRepairAfterHeadChange(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		calls++
+		writeAndCommit(fmt.Sprintf("guide%d.md", calls), "repaired\n")(t, dir)
+		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"repair guide"}`)}, nil
+	}}
+	sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+	if _, err := (&DocumentStep{}).Execute(sc); err != nil {
+		t.Fatal(err)
+	}
+	writeAndCommit("feature.txt", "review repair\n")(t, dir)
+	sc.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+	if err := sc.DB.UpdateRunHeadSHA(sc.Run.ID, sc.Run.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&DocumentStep{}).Execute(sc); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitCmd(t, dir, "show", sc.Run.HeadSHA+":guide2.md"); got != "repaired" {
+		t.Fatalf("repair lost: %q", got)
+	}
+}
+
+func TestDocumentConvergenceEveryCommitPath(t *testing.T) {
+	for _, reverted := range []bool{false, true} {
+		t.Run(fmt.Sprint(reverted), func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			calls := 0
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				calls++
+				if calls == 1 {
+					writeAndCommit("README.md", "first\n")(t, dir)
+					if reverted {
+						deleteAndCommit("README.md")(t, dir)
+					}
+					writeAndCommit("guide.md", "guide\n")(t, dir)
+				} else {
+					writeAndCommit("README.md", "second\n")(t, dir)
+					if reverted {
+						deleteAndCommit("README.md")(t, dir)
+					}
+				}
+				return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"gap","action":"ask-user"}],"summary":"guide"}`)}, nil
+			}}
+			sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+			sc.Config.Document.MaxCommitsPerRun = 6
+			if _, err := (&DocumentStep{}).Execute(sc); err != nil {
+				t.Fatal(err)
+			}
+			accepted := sc.Run.HeadSHA
+			if _, err := (&DocumentStep{}).Execute(sc); err != nil {
+				t.Fatal(err)
+			}
+			if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != accepted {
+				t.Fatalf("repeat advanced head: %s != %s", got, accepted)
+			}
+			if !reverted {
+				if got := gitCmd(t, dir, "show", "HEAD:README.md"); got != "first" {
+					t.Fatalf("repeat content survived: %q", got)
+				}
+			}
+		})
+	}
+}
+
+func TestDocOnlyCarryRejectsHiddenGitlink(t *testing.T) {
+	for _, caller := range []string{"Document", "Push"} {
+		t.Run(caller, func(t *testing.T) {
+			for _, setting := range []string{"diff.ignoreSubmodules", "submodule.dependency.ignore"} {
+				t.Run(setting, func(t *testing.T) {
+					dir, base, head := setupGitRepo(t)
+					gitCmd(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+head+",dependency")
+					if err := os.WriteFile(filepath.Join(dir, ".gitmodules"), []byte("[submodule \"dependency\"]\n path = dependency\n url = ./dependency\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+					gitCmd(t, dir, "add", ".gitmodules")
+					gitCmd(t, dir, "commit", "-qm", "add dependency")
+					head = gitCmd(t, dir, "rev-parse", "HEAD")
+					sc := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{Lint: "true"})
+					recordReviewApproval(t, sc, head)
+					recordTestedHead(t, sc, head)
+					gitCmd(t, dir, "config", setting, "all")
+					gitCmd(t, dir, "update-index", "--cacheinfo", "160000,"+base+",dependency")
+					if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("guide\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+					gitCmd(t, dir, "add", "README.md")
+					gitCmd(t, dir, "commit", "-qm", "update dependency and guide")
+					to := gitCmd(t, dir, "rev-parse", "HEAD")
+					recordDocumentPass(t, sc, head, to)
+					sc.Run.HeadSHA = to
+					if err := sc.DB.UpdateRunHeadSHA(sc.Run.ID, to); err != nil {
+						t.Fatal(err)
+					}
+					if caller == "Document" {
+						if err := carryDocumentValidation(sc, head, to); err != nil {
+							t.Fatal(err)
+						}
+						if got := testedHead(t, sc); got != head {
+							t.Errorf("Document carried over gitlink: %s", got)
+						}
+					} else {
+						restart, err := reviewRestartNeededForPush(sc, "", to)
+						if err != nil || !restart {
+							t.Errorf("Push carried over gitlink: restart=%v err=%v", restart, err)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestDocumentCandidatePathsIncludesEveryWorkspaceLayer(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	sc := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{Lint: "true"})
+	writeAndCommit("committed.md", "temporary\n")(t, dir)
+	deleteAndCommit("committed.md")(t, dir)
+	if err := os.WriteFile(filepath.Join(dir, "staged.md"), []byte("staged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "staged.md")
+	if err := os.Remove(filepath.Join(dir, "staged.md")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("unstaged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "untracked.md"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	paths, untracked, err := documentCandidatePaths(sc, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, p := range paths {
+		seen[p] = true
+	}
+	for _, p := range []string{"committed.md", "staged.md", "feature.txt", "untracked.md"} {
+		if !seen[p] {
+			t.Errorf("missing %s: %q", p, paths)
+		}
+	}
+	if len(untracked) != 1 || untracked[0] != "untracked.md" {
+		t.Fatalf("untracked cleanup paths: %q", untracked)
 	}
 }
