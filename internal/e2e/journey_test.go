@@ -456,8 +456,8 @@ func cleanReviewScenario(t *testing.T) string {
       risk_level: medium
       risk_rationale: "warning requires human review"
       risk_scope: source-or-external
-  # Push commits the agent's edit, which changes the reviewed head. The next
-  # review must cover that newly changed path in its focused completion turn.
+  # Housekeeping commits the agent's edit, then Push commits the formatter's
+  # edit. Any subsequent review must cover the newly changed paths.
   - match: "  - agent-edit.txt\n  - formatted-by-push.txt\n"
     text: "reviewed both committed agent changes"
     structured:
@@ -479,7 +479,8 @@ func cleanReviewScenario(t *testing.T) string {
       risk_scope: source-or-external
       reviewed_paths:
         - "agent-edit.txt"
-  - match: "branch: agent-edits"
+  # Keep Review and Test read-only so Document starts with a clean worktree.
+  - match: "report only what you could not resolve.\n\nContext:\n- branch: agent-edits"
     text: "agent edited a file"
     edits:
       - path: "agent-edit.txt"
