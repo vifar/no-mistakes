@@ -207,7 +207,7 @@ func (d *DB) InsertRunWithShipping(repoID, branch, headSHA, baseSHA string, inte
 
 // InsertRunWithAllOptions is the shared insertion path for shipping, PR-base,
 // external CI ownership, intent, launch, and profile options.
-func (d *DB) InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, requested, omitIntent bool, externalCIOwner string, plan *verificationplan.Snapshot, pin *agentcfg.PiProfile, shipping *types.ShippingOptions) (*Run, error) {
+func (d *DB) InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, requested, omitIntent bool, externalCIOwner string, plan *verificationplan.Snapshot, pin *agentcfg.PiProfile, shipping *types.ShippingOptions, creation ...RunCreation) (*Run, error) {
 	if err := shipping.Validate(); err != nil {
 		return nil, err
 	}
@@ -285,6 +285,53 @@ func (d *DB) InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA string, in
 		}
 		if _, err := tx.Exec("INSERT INTO owner_admission_events(run_id,payload) VALUES (?,?)", r.ID, string(payload)); err != nil {
 			return nil, fmt.Errorf("record owner admission: %w", err)
+		}
+	}
+	if len(creation) > 0 {
+		c := creation[0]
+		if c.PRURL != "" {
+			if _, err := tx.Exec("UPDATE runs SET pr_url=? WHERE id=?", c.PRURL, r.ID); err != nil {
+				return nil, err
+			}
+			r.PRURL = &c.PRURL
+		}
+		refs, err := closingissues.Normalize(c.ClosingIssueRefs)
+		if err != nil {
+			return nil, err
+		}
+		if len(refs) > 0 {
+			raw, err := closingissues.Encode(refs)
+			if err != nil {
+				return nil, err
+			}
+			if _, err := tx.Exec("UPDATE runs SET closing_issue_refs=? WHERE id=?", raw, r.ID); err != nil {
+				return nil, err
+			}
+			r.ClosingIssueRefs = refs
+		}
+		if c.DiagnosticError != "" {
+			if _, err := tx.Exec("UPDATE runs SET status=?,error=? WHERE id=?", types.RunFailed, c.DiagnosticError, r.ID); err != nil {
+				return nil, err
+			}
+			r.Status = types.RunFailed
+			r.Error = &c.DiagnosticError
+		}
+		if c.NotificationID != "" {
+			column := "run_id"
+			if c.DiagnosticError != "" {
+				column = "diagnostic_run_id"
+			}
+			result, err := tx.Exec("INSERT INTO push_notifications(notification_id,"+column+") VALUES (?,?) ON CONFLICT(notification_id) DO UPDATE SET "+column+"=excluded."+column+" WHERE push_notifications."+column+" IS NULL", c.NotificationID, r.ID)
+			if err != nil {
+				return nil, err
+			}
+			n, err := result.RowsAffected()
+			if err != nil {
+				return nil, err
+			}
+			if n != 1 {
+				return nil, fmt.Errorf("notification already recorded")
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {

@@ -1565,6 +1565,28 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return &ipc.RerunResult{RunID: runID}, nil
 	})
 
+	srv.Handle(ipc.MethodListPushNotifications, func(_ context.Context, _ json.RawMessage) (interface{}, error) { return mgr.ListPushNotifications() })
+	srv.Handle(ipc.MethodInspectPushNotification, func(_ context.Context, raw json.RawMessage) (interface{}, error) {
+		var p ipc.PushNotificationParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		return mgr.InspectPushNotification(p.ID)
+	})
+	srv.Handle(ipc.MethodReplayPushNotification, func(ctx context.Context, raw json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var p ipc.PushNotificationParams
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		id, err := mgr.ReplayPushNotification(ctx, p.ID)
+		if err != nil {
+			return nil, err
+		}
+		return &ipc.PushReceivedResult{RunID: id}, nil
+	})
 	srv.Handle(ipc.MethodPushReceived, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		// Hooks execute in a managed bare gate by definition, so only the
 		// authenticated peer ancestry is meaningful at this ingress.

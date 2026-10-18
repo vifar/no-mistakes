@@ -45,6 +45,7 @@ func newDaemonCmd() *cobra.Command {
 	cmd.AddCommand(newDaemonAdmitPushCmd())
 	cmd.AddCommand(newDaemonNotifyPushCmd())
 	cmd.AddCommand(newDaemonSetCmd())
+	cmd.AddCommand(newDaemonNotificationsCmd())
 
 	return cmd
 }
@@ -187,6 +188,7 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 
 			var result ipc.PushReceivedResult
 			err = client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+				RawPushOptions:         pushOptions,
 				Owner:                  owner,
 				OwnerValidationError:   ownerValidationError,
 				Shipping:               shipping,

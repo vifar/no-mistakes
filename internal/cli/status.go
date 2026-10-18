@@ -87,6 +87,11 @@ func newStatusCmd() *cobra.Command {
 				ts := time.Unix(activeRun.CreatedAt, 0).Format(time.DateTime)
 				fmt.Fprintf(w, "  %s  %s\n", sDim.Render("     id:"), activeRun.ID)
 				fmt.Fprintf(w, "  %s  %s\n", sDim.Render(" branch:"), activeRun.Branch)
+				owner := activeRun.Owner()
+				if owner == "" {
+					owner = "OWNERLESS (nobody recorded to drive approval gates)"
+				}
+				fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  owner:"), owner)
 				fmt.Fprintf(w, "  %s  %s\n", sDim.Render(" status:"), runStatusStyle(activeRun.Status))
 				fmt.Fprintf(w, "  %s  %s\n", sDim.Render("   head:"), sDim.Render(sha))
 				fmt.Fprintf(w, "  %s  %s\n", sDim.Render("started:"), sDim.Render(ts))
