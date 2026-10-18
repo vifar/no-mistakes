@@ -1363,12 +1363,19 @@ func assertTrustedConfigReadable(ctx context.Context, wtDir, defaultBranch, trus
 // HandlePushReceived processes a push notification from the post-receive hook.
 // A proof-mode push creates an unclaimed row: the first matching observer
 // receives the sole `created` disposition by atomically claiming it.
+type ownerAdmissionIssueKey struct{}
+
 func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushReceivedParams) (string, error) {
-	if err := types.ValidateRunOwner(params.Owner); err != nil {
-		return "", err
+	owner, issue := params.Owner, params.OwnerValidationError
+	if err := types.ValidateRunOwner(owner); err != nil {
+		issue = err.Error()
 	}
+	if issue != "" {
+		owner = ""
+	}
+	ctx = context.WithValue(ctx, ownerAdmissionIssueKey{}, issue)
 	ctx = types.WithShippingOptions(ctx, params.Shipping)
-	ctx = types.WithRunOwner(ctx, params.Owner)
+	ctx = types.WithRunOwner(ctx, owner)
 	// Ref deletion (git push remote :branch) sends new SHA as all-zeros.
 	// Nothing to validate - skip pipeline.
 	if git.IsZeroSHA(params.New) {
@@ -2148,6 +2155,17 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		runIntent = &db.RunIntent{Summary: storedIntent, Source: source, Owner: owner, SessionID: owner, Score: 1}
 	}
 
+	issue, _ := ctx.Value(ownerAdmissionIssueKey{}).(string)
+	if owner == "" && trigger == "push" && (globalCfg.Intent.RequireOwner || issue != "") {
+		if runIntent == nil {
+			runIntent = &db.RunIntent{}
+		}
+		warning := "require_owner not enforced for post-receive (TUI/direct push): no pre-receive check (follow-up #82)"
+		if issue != "" {
+			warning = "invalid launch ownership: " + issue + "; admitted ownerless after receive (follow-up #82)"
+		}
+		runIntent.OwnerAdmission = &types.OwnerAdmissionEvent{Event: "launch_owner_policy_bypassed", CallerPath: "post-receive (TUI/direct push)", OwnerlessAdmitted: true, OwnerValidationError: issue, Warning: warning}
+	}
 	storedPRBaseBranch, err := normalizeRunPRBaseBranch(prBaseBranch)
 	if err != nil {
 		trackStartFailure("invalid_pr_base_branch")
@@ -2203,8 +2221,8 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("queue_run")
 		return "", fmt.Errorf("queue run: %w", err)
 	}
-	if owner == "" && trigger == "push" && globalCfg.Intent.RequireOwner {
-		slog.Warn("require_owner not enforced for post-receive (TUI/direct push): no pre-receive check (follow-up #82)",
+	if runIntent != nil && runIntent.OwnerAdmission != nil {
+		slog.Warn(runIntent.OwnerAdmission.Warning,
 			"event", "launch_owner_policy_bypassed", "run_id", run.ID, "repo_id", repo.ID, "branch", branch,
 			"caller_path", "post-receive (TUI/direct push)", "ownerless_admitted", true)
 	}

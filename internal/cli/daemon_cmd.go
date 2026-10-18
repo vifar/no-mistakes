@@ -135,9 +135,13 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			owner, err := parseOwnerPushOptions(pushOptions)
-			if err != nil {
-				return err
+			owner, ownerErr := parseOwnerPushOptions(pushOptions)
+			// Git has already accepted these refs. Invalid ownership must not
+			// discard the notification: admit ownerless with a durable warning.
+			ownerValidationError := ""
+			if ownerErr != nil {
+				owner = ""
+				ownerValidationError = ownerErr.Error()
 			}
 			externalCIOwner, err := parseExternalCIOwnerPushOptions(pushOptions)
 			if err != nil {
@@ -182,8 +186,9 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 			defer client.Close()
 
 			var result ipc.PushReceivedResult
-			return client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+			err = client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
 				Owner:                  owner,
+				OwnerValidationError:   ownerValidationError,
 				Shipping:               shipping,
 				Gate:                   gatePath,
 				Ref:                    ref,
@@ -201,6 +206,13 @@ func newDaemonNotifyPushCmd() *cobra.Command {
 				ReconciledPreviousHead: reconciledPreviousHead,
 				ClosingIssueRefs:       closingIssues,
 			}, &result)
+			if err != nil {
+				return err
+			}
+			if ownerValidationError != "" {
+				cmd.PrintErrf("warning: invalid launch ownership (%s); admitted ownerless as run %s; inspect status for the durable admission record\n", ownerValidationError, result.RunID)
+			}
+			return nil
 		},
 	}
 

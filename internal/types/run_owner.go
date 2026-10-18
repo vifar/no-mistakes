@@ -25,3 +25,16 @@ func ValidateRunOwner(owner string) error {
 	}
 	return nil
 }
+
+// OwnerAdmissionEvent is the immutable admission audit stored with a run.
+// It is local state, independent of the daemon's configurable logging level.
+type OwnerAdmissionEvent struct {
+	Event                string `json:"event" toon:"event"`
+	RunID                string `json:"run_id" toon:"run_id"`
+	Branch               string `json:"branch" toon:"branch"`
+	CallerPath           string `json:"caller_path" toon:"caller_path"`
+	OwnerlessAdmitted    bool   `json:"ownerless_admitted" toon:"ownerless_admitted"`
+	OwnerValidationError string `json:"owner_validation_error" toon:"owner_validation_error"`
+	Warning              string `json:"warning" toon:"warning"`
+	CreatedAt            int64  `json:"created_at" toon:"created_at"`
+}

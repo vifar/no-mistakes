@@ -1748,6 +1748,11 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		CreatedAt:            r.CreatedAt,
 		UpdatedAt:            r.UpdatedAt,
 	}
+	var admissionErr error
+	info.OwnerAdmission, admissionErr = d.GetOwnerAdmission(r.ID)
+	if admissionErr != nil {
+		info.OwnerAdmissionError = admissionErr.Error()
+	}
 	if r.Shipping != nil {
 		if c := shipping.CachedStatusIdentity(d, r); c != nil {
 			info.ReviewGeneration = c.Generation

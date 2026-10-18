@@ -71,7 +71,8 @@ func runAxiAwaitingStatus(cmd *cobra.Command) error {
 			continue
 		}
 		fields := []toon.Field{{Key: "id", Value: rv.ID}, {Key: "branch", Value: rv.Branch}, {Key: "owner", Value: rv.Owner}, {Key: "ownerless", Value: rv.Owner == ""}}
-		if warning := ownerPolicyWarning(rv.Owner, env.cfg); warning != "" {
+		fields = append(fields, ownerAdmissionFields(rv)...)
+		if warning := ownerPolicyWarning(rv.Owner, env.cfg); warning != "" && rv.OwnerAdmission == nil {
 			fields = append(fields, toon.Field{Key: "owner_policy_warning", Value: warning})
 		}
 		fields = append(fields, awaitingPersonFields(rv)...)

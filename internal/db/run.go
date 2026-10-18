@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -263,12 +264,31 @@ func (d *DB) InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA string, in
 	r.PRBaseBranchRequested = requested
 	r.OmitIntent = omitIntent
 	r.ExternalCIOwner = externalCIOwner
-	_, err := d.sql.Exec(
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("begin run admission: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(
 		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_owner, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, pr_base_branch_requested, omit_intent, external_ci_owner, pi_profile, verification_plan, shipping_options, created_at, updated_at, retarget_attempted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
 		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchOwner, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.PRBaseBranch, r.PRBaseBranchRequested, r.OmitIntent, r.ExternalCIOwner, r.PiProfile, r.VerificationPlan, r.Shipping, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
+	}
+	if intent != nil && intent.OwnerAdmission != nil {
+		event := *intent.OwnerAdmission
+		event.RunID, event.Branch, event.CreatedAt = r.ID, r.Branch, ts
+		payload, err := json.Marshal(event)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec("INSERT INTO owner_admission_events(run_id,payload) VALUES (?,?)", r.ID, string(payload)); err != nil {
+			return nil, fmt.Errorf("record owner admission: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit run admission: %w", err)
 	}
 	return r, nil
 }
@@ -1062,11 +1082,12 @@ func IsAuthoritativeRunIntentSource(source string) bool {
 // RunIntent carries intent provenance and explicit launch ownership.
 // UpdateRunIntent changes provenance only; launch ownership remains immutable.
 type RunIntent struct {
-	Owner     string
-	Summary   string
-	Source    string
-	SessionID string
-	Score     float64
+	OwnerAdmission *types.OwnerAdmissionEvent
+	Owner          string
+	Summary        string
+	Source         string
+	SessionID      string
+	Score          float64
 }
 
 // UpdateRunIntent persists the inferred user intent for a run.
