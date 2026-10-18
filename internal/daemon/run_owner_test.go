@@ -97,6 +97,9 @@ func TestClaimLaunchReceiptOwnerBinding(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if err := database.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+					t.Fatal(err)
+				}
 				claim := func(owner string) (*ipc.LaunchReceipt, error) {
 					var result ipc.ClaimLaunchReceiptResult
 					params := map[string]any{"repo_id": repo.ID, "branch": "main", "launch_nonce": nonce, "submitted_head_sha": head, "validation_generation": "generation", "intent_digest": "digest", "owner": owner}

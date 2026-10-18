@@ -63,6 +63,7 @@ type RunManager struct {
 	afterPushRetained        func()
 	beforeNotificationRename func() error
 	beforeRunInsert          func()
+	afterReceiptLookup       func(*db.Run)
 	afterPushCommitted       func()
 	branchLocks              sync.Map // repoID+"/"+branch → *sync.Mutex
 
@@ -1672,6 +1673,52 @@ func validateLaunchValue(field, value string) error {
 func digestIntent(intent string) string {
 	sum := sha256.Sum256([]byte(intent))
 	return fmt.Sprintf("%x", sum)
+}
+
+func (m *RunManager) claimLaunchReceiptLocked(p *ipc.ClaimLaunchReceiptParams, prBaseBranch string) (*ipc.ClaimLaunchReceiptResult, error) {
+	existing, err := m.db.GetRunByLaunchNonce(p.RepoID, p.Branch, p.LaunchNonce)
+	if err != nil {
+		return nil, err
+	}
+	if m.afterReceiptLookup != nil {
+		m.afterReceiptLookup(existing)
+	}
+	if existing != nil {
+		if err := m.runAdmissionError(existing); err != nil {
+			return nil, err
+		}
+	}
+	run, claimed, err := m.db.ClaimLaunchReceiptWithAllOptions(p.RepoID, p.Branch, p.LaunchNonce, p.SubmittedHeadSHA, p.ValidationGeneration, p.IntentDigest, prBaseBranch, p.OmitIntent, p.Shipping, p.ExternalCIOwner, p.Owner, p.PiProfile)
+	if err != nil {
+		return nil, fmt.Errorf("claim launch receipt: %w", err)
+	}
+	if run == nil {
+		return &ipc.ClaimLaunchReceiptResult{}, nil
+	}
+	if !run.Shipping.Matches(p.Shipping) {
+		return nil, fmt.Errorf("conflicting launch_nonce: shipping pin differs")
+	}
+	if !run.PiProfile.Matches(p.PiProfile) {
+		return nil, fmt.Errorf("conflicting launch_nonce: Pi profile differs from run pin")
+	}
+	if !launchPRBaseBranchMatches(run, prBaseBranch) {
+		return nil, conflictingLaunchPRBaseBranch(p.LaunchNonce)
+	}
+	if p.OmitIntent && !run.OmitIntent {
+		return nil, conflictingLaunchOmitIntent(p.LaunchNonce)
+	}
+	if run.ExternalCIOwner != p.ExternalCIOwner {
+		return nil, fmt.Errorf("conflicting launch_nonce: external CI owner differs from run")
+	}
+
+	receipt, err := m.receiptForRun(run, claimed)
+	if err != nil {
+		return nil, err
+	}
+	if receipt.SubmittedHeadSHA != p.SubmittedHeadSHA || receipt.ValidationGeneration != p.ValidationGeneration || receipt.IntentDigest != p.IntentDigest {
+		return nil, fmt.Errorf("conflicting launch_nonce is already bound to a different validation generation, submitted head, or intent")
+	}
+	return &ipc.ClaimLaunchReceiptResult{Receipt: &receipt}, nil
 }
 
 func (m *RunManager) receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
