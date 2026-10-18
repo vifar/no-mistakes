@@ -209,7 +209,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if combinedLint {
 		proposedDocs, _ = splitHousekeepingFindings(proposed)
 	}
-	repeated, err := documentReeditsPreviousFiles(sctx, history.last, paths)
+	repeated, err := documentRepeatsUnchangedInputs(sctx, history.last, headBefore, paths)
 	if err != nil {
 		return nil, err
 	}

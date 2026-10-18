@@ -122,8 +122,25 @@ func documentNULPaths(out string) []string {
 	return strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
 }
 
-func documentReeditsPreviousFiles(sctx *pipeline.StepContext, previous *db.DocumentPass, paths []string) (bool, error) {
+// A filename alone cannot prove repetition: intervening input changes may
+// require a different repair to that same file. Bind suppression to the exact
+// accepted input tree, using the entry head captured before the agent runs.
+func documentRepeatsUnchangedInputs(sctx *pipeline.StepContext, previous *db.DocumentPass, entryHead string, paths []string) (bool, error) {
 	if previous == nil || len(paths) == 0 {
+		return false, nil
+	}
+	previousTree, err := stepGitRun(sctx, "rev-parse", "--verify", *previous.ToHeadSHA+"^{tree}")
+	if err != nil {
+		return false, fmt.Errorf("read previous Document input tree: %w", err)
+	}
+	entryTree, err := stepGitRun(sctx, "rev-parse", "--verify", entryHead+"^{tree}")
+	if err != nil {
+		return false, fmt.Errorf("read current Document input tree: %w", err)
+	}
+	if previousTree == "" || entryTree == "" {
+		return false, fmt.Errorf("Document input tree identity is empty")
+	}
+	if previousTree != entryTree {
 		return false, nil
 	}
 	previousPaths, err := documentRangePaths(sctx, previous.FromHeadSHA, *previous.ToHeadSHA)
