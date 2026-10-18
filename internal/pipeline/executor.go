@@ -90,9 +90,11 @@ type Executor struct {
 	shared   *RunShared
 	workDir  string
 
-	mu             sync.Mutex
-	activeAgentPID atomic.Int64          // live lifecycle ownership, independent of SQLite
-	approvalCh     chan approvalResponse // buffered channel for approval responses
+	crashRetryBaseSHA   string
+	crashRetryRecovered bool
+	mu                  sync.Mutex
+	activeAgentPID      atomic.Int64          // live lifecycle ownership, independent of SQLite
+	approvalCh          chan approvalResponse // buffered channel for approval responses
 	// afterApprovalDequeue pauses the channel-to-dispatch handoff in tests.
 	// Production leaves it nil; the response has left the drainable queue.
 	afterApprovalDequeue func()
@@ -898,6 +900,9 @@ func (e *Executor) prepareRestart(run *db.Run, repo *db.Repo, name types.StepNam
 	if err := e.db.ResetStepsFrom(run.ID, e.steps[index].Name().Order()); err != nil {
 		return 0, err
 	}
+	if name == types.StepReview {
+		e.crashRetryBaseSHA = ""
+	}
 	if run.Shipping != nil {
 		e.shared = &RunShared{}
 		if name.Order() <= types.StepReview.Order() {
@@ -913,6 +918,8 @@ func (e *Executor) initializeRunScopes(runID string) {
 	sessionsEnabled := e.config != nil && e.config.SessionReuse && e.agent != nil
 	e.sessions = NewRunSessions(e.db, runID, e.agent, sessionsEnabled)
 	e.shared = &RunShared{}
+	e.crashRetryBaseSHA = ""
+	e.crashRetryRecovered = false
 }
 
 type stepExecutionState struct {
@@ -1138,6 +1145,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	e.initializeRunScopes(run.ID)
 	e.attachPublishedHeadStatus(ctx, run, repo)
+	e.crashRetryRecovered = true
 
 	// A recovered gate may have been parked while the PR base or its target
 	// moved. Revalidate before its old findings can reconcile or be approved.
@@ -2020,6 +2028,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 	}
 
+	// Crash retries have a separate per-step budget, never a fix-round credit.
+	// It is not replenished by approval/fix rounds in this live execution.
+	crashRetriesRemaining := 0
+	if e.config != nil && !e.crashRetryRecovered {
+		crashRetriesRemaining = min(max(e.config.AgentCrashRetries, 0), 3)
+	}
 	// Execute with possible fix loop
 rounds:
 	for {
@@ -2037,6 +2051,9 @@ rounds:
 		}
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
+		if name == types.StepReview {
+			e.crashRetryBaseSHA = ""
+		}
 		if run.Shipping != nil && run.Shipping.Mode == types.ShippingImmutableSource {
 			if sctx.Fixing {
 				return false, "", fmt.Errorf("immutable source forbids repair rounds")

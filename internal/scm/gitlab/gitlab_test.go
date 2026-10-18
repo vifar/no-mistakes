@@ -1348,8 +1348,12 @@ func unboundChecksFixture(jobsOutput string, rest bool) map[string]gitlabTestRes
 	}
 	if rest {
 		responses["glab api --paginate projects/group%2Fproject/pipelines/77/jobs"] = gitlabTestResponse{stdout: jobsOutput}
-		responses["glab api --paginate projects/group%2Fproject/pipelines/77/trigger_jobs"] = gitlabTestResponse{stdout: "[]"}
-		responses["glab api --paginate projects/group%2Fproject/merge_requests/123/status_checks"] = gitlabTestResponse{stdout: "[]"}
+		if _, ok := responses["glab api --paginate projects/group%2Fproject/pipelines/77/trigger_jobs"]; !ok {
+			responses["glab api --paginate projects/group%2Fproject/pipelines/77/trigger_jobs"] = gitlabTestResponse{stdout: "[]"}
+		}
+		if _, ok := responses["glab api --paginate projects/group%2Fproject/merge_requests/123/status_checks"]; !ok {
+			responses["glab api --paginate projects/group%2Fproject/merge_requests/123/status_checks"] = gitlabTestResponse{stdout: "[]"}
+		}
 	} else {
 		responses["glab ci get --pipeline-id 77 --output json --with-job-details"] = gitlabTestResponse{stdout: jobsOutput}
 	}
@@ -1360,8 +1364,12 @@ func unboundChecksFixture(jobsOutput string, rest bool) map[string]gitlabTestRes
 // jobs nor external status checks reports, for a bound fixture map whose check
 // read runs with a known project path.
 func withEmptyCoverageRoutes(responses map[string]gitlabTestResponse) map[string]gitlabTestResponse {
-	responses["glab api --paginate projects/group%2Fproject/pipelines/77/trigger_jobs"] = gitlabTestResponse{stdout: "[]"}
-	responses["glab api --paginate projects/group%2Fproject/merge_requests/123/status_checks"] = gitlabTestResponse{stdout: "[]"}
+	if _, ok := responses["glab api --paginate projects/group%2Fproject/pipelines/77/trigger_jobs"]; !ok {
+		responses["glab api --paginate projects/group%2Fproject/pipelines/77/trigger_jobs"] = gitlabTestResponse{stdout: "[]"}
+	}
+	if _, ok := responses["glab api --paginate projects/group%2Fproject/merge_requests/123/status_checks"]; !ok {
+		responses["glab api --paginate projects/group%2Fproject/merge_requests/123/status_checks"] = gitlabTestResponse{stdout: "[]"}
+	}
 	return responses
 }
 

@@ -243,6 +243,8 @@ type GlobalConfig struct {
 	CIReadinessReceiptTimeout time.Duration `yaml:"-"`
 	StepQuietWarning          time.Duration `yaml:"-"`
 	AgentTimeout              time.Duration `yaml:"-"`
+	AgentCrashRetries         int           `yaml:"-"`
+	AgentTimeoutsConfigured   bool          `yaml:"-"`
 	ReviewAgentTimeout        time.Duration `yaml:"-"`
 	TestAgentTimeout          time.Duration `yaml:"-"`
 	AgentWorkingTimeout       time.Duration `yaml:"-"`
@@ -320,6 +322,7 @@ type globalConfigRaw struct {
 	BabysitTimeout            string                     `yaml:"babysit_timeout"`
 	StepQuietWarning          string                     `yaml:"step_quiet_warning"`
 	AgentTimeout              string                     `yaml:"agent_timeout"`
+	AgentCrashRetries         int                        `yaml:"agent_crash_retries"`
 	ReviewAgentTimeout        string                     `yaml:"review_agent_timeout"`
 	TestAgentTimeout          string                     `yaml:"test_agent_timeout"`
 	AgentWorkingTimeout       string                     `yaml:"agent_working_timeout"`
@@ -926,6 +929,8 @@ type Config struct {
 	CIReadinessReceiptTimeout time.Duration
 	StepQuietWarning          time.Duration
 	AgentTimeout              time.Duration
+	AgentCrashRetries         int
+	AgentTimeoutsConfigured   bool
 	ReviewAgentTimeout        time.Duration
 	TestAgentTimeout          time.Duration
 	AgentWorkingTimeout       time.Duration
@@ -1620,6 +1625,9 @@ agent_timeout: "30m"
 # Set to "0" (or unlimited/none/off/never) to rely on the wall-clock limits
 # alone.
 agent_stall_timeout: "30m"
+# Additional attempts for an agent-crashed validation step (0-3, opt-in).
+# Requires unchanged head, base, config, clean worktree and evidence.
+agent_crash_retries: 0
 
 # Optional cap for a turn that is still producing output or waiting on a live
 # child. Unset means no extension past agent_timeout. Must be at least
@@ -2861,12 +2869,18 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			cfg.StepQuietWarning = d
 		}
 	}
+	if raw.AgentCrashRetries < 0 || raw.AgentCrashRetries > 3 {
+		return nil, fmt.Errorf("agent_crash_retries must be between 0 and 3")
+	}
+	cfg.AgentCrashRetries = raw.AgentCrashRetries
+	configuredTimeout := false
 	if raw.AgentTimeout != "" {
 		d, err := parsePositiveDuration("agent_timeout", raw.AgentTimeout)
 		if err != nil {
 			return nil, err
 		}
 		cfg.AgentTimeout = d
+		configuredTimeout = d != DefaultAgentTimeout
 	}
 	if raw.AgentStallTimeout != "" {
 		d, err := parseStallTimeout(raw.AgentStallTimeout)
@@ -2881,6 +2895,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.ReviewAgentTimeout = d
+		configuredTimeout = configuredTimeout || d != DefaultReviewAgentTimeout
 	}
 	if raw.TestAgentTimeout != "" {
 		d, err := parsePositiveDuration("test_agent_timeout", raw.TestAgentTimeout)
@@ -2888,6 +2903,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.TestAgentTimeout = d
+		configuredTimeout = configuredTimeout || d != DefaultTestAgentTimeout
 	}
 	if raw.AgentWorkingTimeout != "" {
 		d, err := parsePositiveDuration("agent_working_timeout", raw.AgentWorkingTimeout)
@@ -2895,6 +2911,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.AgentWorkingTimeout = d
+		configuredTimeout = true
 	}
 	if raw.ReviewAgentWorkingTimeout != "" {
 		d, err := parsePositiveDuration("review_agent_working_timeout", raw.ReviewAgentWorkingTimeout)
@@ -2902,6 +2919,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.ReviewAgentWorkingTimeout = d
+		configuredTimeout = true
 	}
 	if raw.TestAgentWorkingTimeout != "" {
 		d, err := parsePositiveDuration("test_agent_working_timeout", raw.TestAgentWorkingTimeout)
@@ -2909,7 +2927,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.TestAgentWorkingTimeout = d
+		configuredTimeout = true
 	}
+	cfg.AgentTimeoutsConfigured = configuredTimeout
 	if err := validateWorkingCap("agent_working_timeout", "agent_timeout", cfg.AgentWorkingTimeout, cfg.AgentTimeout); err != nil {
 		return nil, err
 	}
@@ -4113,6 +4133,8 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		CIReadinessReceiptTimeout: global.CIReadinessReceiptTimeout,
 		StepQuietWarning:          global.StepQuietWarning,
 		AgentTimeout:              global.AgentTimeout,
+		AgentCrashRetries:         global.AgentCrashRetries,
+		AgentTimeoutsConfigured:   global.AgentTimeoutsConfigured,
 		ReviewAgentTimeout:        global.ReviewAgentTimeout,
 		TestAgentTimeout:          global.TestAgentTimeout,
 		AgentWorkingTimeout:       global.AgentWorkingTimeout,
