@@ -17,6 +17,73 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+// The user journey's outside-Git contract is independent of whether the user
+// has initialized a database. Exercise the command tree and its exit/output
+// contract: a missing database must not mask the repository diagnostic or be
+// created just to produce it.
+func TestRepositoryReadersOutsideGit(t *testing.T) {
+	chdir(t, t.TempDir())
+	for _, initialized := range []bool{false, true} {
+		name := "missing_database"
+		if initialized {
+			name = "current_database"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := paths.WithRoot(filepath.Join(t.TempDir(), "nmhome"))
+			t.Setenv("NM_HOME", p.Root())
+			if initialized {
+				if err := p.EnsureDirs(); err != nil {
+					t.Fatal(err)
+				}
+				d, err := db.Open(p.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				d.Close()
+			}
+			for _, args := range [][]string{{"status"}, {"runs"}, {"axi"}, {"axi", "status"}, {"axi", "status", "--json"}, {"axi", "status", "--awaiting"}, {"axi", "status", "--awaiting", "--json"}, {"axi", "logs", "--step", "review"}} {
+				t.Run(strings.Join(args, " "), func(t *testing.T) {
+					out, err := executeCmd(args...)
+					if (err == nil) != (args[0] == "status") {
+						t.Errorf("exit error = %v; only human status should succeed outside Git", err)
+					}
+					if err != nil {
+						out += err.Error()
+					}
+					if !strings.Contains(out, "not in a git repository") {
+						t.Errorf("missing repository diagnostic: %s", out)
+					}
+				})
+			}
+			if !initialized {
+				if _, err := os.Stat(p.Root()); !os.IsNotExist(err) {
+					t.Fatalf("reader created application state: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestExplicitAndGlobalReadersOutsideGit(t *testing.T) {
+	_, _, database, repo := setupReaderRepo(t)
+	r, err := database.InsertRun(repo.ID, "main", "abcdef123", "abcdef123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	chdir(t, t.TempDir())
+	for _, args := range [][]string{{"stats"}, {"axi", "status", "--run", r.ID}, {"axi", "status", "--run", r.ID, "--json"}, {"axi", "logs", "--run", r.ID, "--step", "review"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			out, err := executeCmd(args...)
+			if err != nil {
+				t.Fatalf("reader independent of current repository failed: %v\n%s", err, out)
+			}
+			if args[0] == "axi" && !strings.Contains(out, r.ID) {
+				t.Fatalf("explicit reader omitted selected run %s: %s", r.ID, out)
+			}
+		})
+	}
+}
+
 // Public reader commands share one journey's real WAL database with a live
 // daemon and a synchronized writer. SQLite's one-writer rule rejects DDL and
 // even no-op backfills; success therefore proves the readers acquire no write
