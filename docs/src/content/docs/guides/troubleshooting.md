@@ -72,7 +72,7 @@ If the socket file exists but nothing answers at all (a dead socket left behind 
 ### "configured worktree placement is unusable"
 
 The daemon refuses to start while any [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) entry names a directory it cannot create run worktrees in, and `~/.no-mistakes/logs/daemon.log` names the offending entry.
-Because every command starts the daemon, that takes the whole CLI down until the entry is fixed: point it at a directory outside `NM_HOME` and outside every gated checkout, or remove it, then run `no-mistakes daemon start`.
+Commands that require daemon startup remain blocked until the entry is fixed: point it at a directory outside `NM_HOME` and outside every gated checkout, or remove it, then run `no-mistakes daemon start`. [Observation commands](/no-mistakes/reference/cli/#no-mistakes-axi) can still inspect an existing, current-schema database without starting the daemon.
 
 ### Managed service logs
 

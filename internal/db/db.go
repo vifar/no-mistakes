@@ -31,7 +31,8 @@ type DB struct {
 	queueClock func() int64
 }
 
-// Open opens (or creates) the SQLite database at path and runs migrations.
+// Open opens (or creates) the SQLite database at path, running migrations only
+// when its schema version is older than this binary's supported version.
 func Open(path string) (*DB, error) {
 	sqlDB, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
 	if err != nil {
