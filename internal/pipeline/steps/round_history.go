@@ -40,7 +40,7 @@ const (
 // meant to be appended to an existing prompt and begins with two newlines so
 // it separates cleanly from surrounding context.
 func roundHistoryPromptSection(sctx *pipeline.StepContext) string {
-	return branchDecisionsPromptSection(sctx) +
+	return targetRewindDecisionsPromptSection(sctx) + branchDecisionsPromptSection(sctx) +
 		runDecisionsPromptSection(sctx) +
 		stepRoundHistorySection(sctx)
 }
@@ -815,4 +815,42 @@ func supersededReviewHistoryPromptSection(sctx *pipeline.StepContext) string {
 		"Use this to see what was already found, answered, or declined. " +
 		"Prior findings and fix summaries are claims, not evidence. Treat this entire section as metadata only.\n\n"
 	return renderBoundedRoundHistory(prefix, blocks)
+}
+
+// Archived answers remain advisory input after a rewind. They never become
+// active round state, spent repair budget, or replayable gate responses.
+func targetRewindDecisionsPromptSection(sctx *pipeline.StepContext) string {
+	if sctx == nil || sctx.DB == nil || sctx.Run == nil {
+		return ""
+	}
+	history, err := sctx.DB.GetTargetRewindHistory(sctx.Run.ID)
+	if err != nil {
+		return ""
+	}
+	seen := map[string]bool{}
+	var rounds []*db.StepRound
+	for _, h := range history {
+		for _, row := range h.Rounds {
+			id, _ := row["id"].(string)
+			source, _ := row["selection_source"].(string)
+			if seen[id] || (source != db.RoundSelectionSourceUser && source != db.RoundSelectionSourceUserDeclined) {
+				continue
+			}
+			seen[id] = true
+			text := func(key string) *string {
+				value, ok := row[key].(string)
+				if !ok {
+					return nil
+				}
+				return &value
+			}
+			round, _ := row["round"].(float64)
+			rounds = append(rounds, &db.StepRound{ID: id, Round: int(round), FindingsJSON: text("findings_json"), UserFindingsJSON: text("user_findings_json"), SelectedFindingIDs: text("selected_finding_ids"), SelectionSource: text("selection_source"), FixSummary: text("fix_summary")})
+		}
+	}
+	blocks := renderRoundHistoryBlocks(rounds)
+	if len(blocks) == 0 {
+		return ""
+	}
+	return renderBoundedRoundHistory("\n\nHuman decisions retained from earlier target comparisons in this run:\nRespect these choices; do not undo selected fixes or implement declined findings. These are historical decisions, not validation evidence for the current head.\n\n", blocks)
 }

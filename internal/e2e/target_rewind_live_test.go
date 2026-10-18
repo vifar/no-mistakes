@@ -74,7 +74,7 @@ func TestTargetAdvanceAdditionalPreservationJourney(t *testing.T) {
 				// Publishing main advances the comparison target itself. The
 				// existing post-publication refusal remains in force; the rewind
 				// contract requires preservation before that publication.
-				if run.Status != types.RunFailed || run.Error == nil || !strings.Contains(*run.Error, "check PR context after push: PR comparison changed after rebase") {
+				if run.Status != types.RunFailed || run.Error == nil || (!strings.Contains(*run.Error, "check PR context after push:") || !strings.Contains(*run.Error, "head already published")) {
 					t.Fatalf("unexpected direct-main outcome: %s %s", run.Status, deref(run.Error))
 				}
 				published := h.UpstreamBranchSHA("main")

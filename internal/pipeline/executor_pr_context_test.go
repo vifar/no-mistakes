@@ -946,3 +946,60 @@ func TestExecutorRecoveredApprovalRevalidatesMovedPRTargetBeforeUsingParkedVerdi
 		t.Fatalf("review approval = %v, want moved Git head %s (old parked head %s must not certify it)", completed.ReviewApprovedHeadSHA, run.HeadSHA, oldHead)
 	}
 }
+
+func TestExecutorTargetRewindArchivesJustProducedReviewVerdict(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := completionFixture(t, database, run)
+	reviewCalls := 0
+	outcome := &StepOutcome{Findings: `{"findings":[],"summary":"clean before target moved"}`, ReviewApprovedHeadSHA: run.HeadSHA}
+	wantFindings, wantHead := outcome.Findings, outcome.ReviewApprovedHeadSHA
+	steps := []Step{newPassStep(types.StepRebase), &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) { reviewCalls++; return outcome, nil }}, newPassStep(types.StepTest)}
+	executor := NewExecutor(database, p, nil, nil, steps, nil)
+	rewound := false
+	executor.SetPRContextGuard(func(c *StepContext, step types.StepName) (PRContextDecision, error) {
+		receipt, err := database.GetRunPRContext(run.ID)
+		if err != nil {
+			return PRContextDecision{}, err
+		}
+		if step == types.StepRebase && c.PRContextAfterStep && rewound {
+			pending, err := database.GetPendingTargetRewind(run.ID)
+			if err != nil {
+				return PRContextDecision{}, err
+			}
+			if pending != nil {
+				_, err = database.CompleteRebasePRContext(run.ID, receipt.PRContextCandidate, receipt.Generation)
+				if err != nil {
+					return PRContextDecision{}, err
+				}
+			}
+		}
+		if step == types.StepReview && c.PRContextAfterStep && !rewound {
+			candidate := receipt.PRContextCandidate
+			candidate.TargetSHA = "4444444444444444444444444444444444444444"
+			_, err := database.RewindRunPRContext(run.ID, candidate, db.TargetAdvanceRewindRequest{ExpectedGeneration: receipt.Generation, Step: step, MaxRewinds: 3})
+			if err != nil {
+				return PRContextDecision{}, err
+			}
+			rewound = true
+			return PRContextDecision{Target: PRTargetSelection{TargetBranch: "main"}, RestartFrom: types.StepRebase}, nil
+		}
+		return PRContextDecision{Target: PRTargetSelection{TargetBranch: "main"}}, nil
+	})
+	if err := executor.Execute(context.Background(), run, repo, workDir); err != nil {
+		t.Fatal(err)
+	}
+	history, err := database.GetTargetRewindHistory(run.ID)
+	if err != nil || len(history) != 1 || history[0].BoundaryJSON == nil {
+		t.Fatalf("missing boundary result: %+v %v", history, err)
+	}
+	var saved StepOutcome
+	if err := json.Unmarshal([]byte(*history[0].BoundaryJSON), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Findings != wantFindings || saved.ReviewApprovedHeadSHA != wantHead {
+		t.Fatalf("lost verdict: %+v", saved)
+	}
+	if reviewCalls != 2 {
+		t.Fatalf("mock guard should rerun invalidated step, got %d", reviewCalls)
+	}
+}

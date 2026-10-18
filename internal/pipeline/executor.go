@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1864,6 +1865,27 @@ rounds:
 			resetComparisonState(priorGeneration, restartIndex >= 0)
 			sctx.PRTarget, sctx.PRContext = e.prTarget, e.prContext
 			sctx.EvidenceDir = e.runEvidenceDir(run.ID)
+			if restartIndex >= 0 && e.evidenceGeneration.Load() > priorGeneration && outcome != nil {
+				// The guard runs before round persistence. Keep its just-produced
+				// verdict as superseded evidence, never as active validation.
+				data, err := json.Marshal(outcome)
+				if err != nil {
+					return false, "", err
+				}
+				if err := e.db.RecordTargetRewindBoundary(run.ID, e.evidenceGeneration.Load(), string(stepName), string(data)); err != nil {
+					return false, "", err
+				}
+				root := e.runEvidenceRoot(run.ID)
+				if root != "" {
+					dir := filepath.Join(root, "superseded", fmt.Sprintf("g%d", priorGeneration))
+					if err := os.MkdirAll(dir, 0700); err != nil {
+						return false, "", err
+					}
+					if err := os.WriteFile(filepath.Join(dir, "boundary-"+string(stepName)+".json"), data, 0600); err != nil {
+						return false, "", err
+					}
+				}
+			}
 			if restartIndex >= 0 {
 				if restartIndex < currentIndex {
 					return false, e.steps[restartIndex].Name(), nil

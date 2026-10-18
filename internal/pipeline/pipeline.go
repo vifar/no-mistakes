@@ -18,12 +18,14 @@ var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 // pipeline work. An empty PRURL means no PR is attached; discovery may still
 // supply an existing PR's target when its head differs from the local head.
 type PRTargetSelection struct {
-	PRURL        string
-	SourceRepo   string
-	SourceBranch string
-	ForgeHeadSHA string
-	TargetBranch string
-	State        scm.PRState
+	// ObservedPRURL identifies an existing PR without granting mutation authority.
+	ObservedPRURL string
+	PRURL         string
+	SourceRepo    string
+	SourceBranch  string
+	ForgeHeadSHA  string
+	TargetBranch  string
+	State         scm.PRState
 }
 
 // ErrDaemonShutdown is the cancellation cause RunManager.Shutdown gives every

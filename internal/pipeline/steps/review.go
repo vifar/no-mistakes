@@ -26,6 +26,9 @@ type ReviewStep struct {
 func (s *ReviewStep) Name() types.StepName { return types.StepReview }
 
 func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if outcome, err := reusableRewindReview(sctx); outcome != nil || err != nil {
+		return outcome, err
+	}
 	planSection, err := verificationPlanPromptSection(sctx)
 	if err != nil {
 		return nil, err

@@ -35,7 +35,7 @@ func TestCommitAgentFixes_RefusesToCommitOnOutOfBandResetHead(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
-	sctx := newTestContext(t, &mockAgent{name: "codex"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "codex"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Fixing = true
 
 	guard := filepath.Join(dir, "guard.sh")
@@ -104,7 +104,7 @@ func TestCommitAgentFixes_RefusesOnBackwardReset(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
-	sctx := newTestContext(t, &mockAgent{name: "codex"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "codex"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Fixing = true
 
 	if err := os.WriteFile(filepath.Join(dir, "guard.sh"), []byte("FORCE_INCLUDE\n"), 0o644); err != nil {
@@ -137,7 +137,7 @@ func TestCommitAgentFixes_RefusesResetDuringCommit(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
-	sctx := newTestContext(t, &mockAgent{name: "codex"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "codex"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Fixing = true
 
 	// The concurrent reset is driven by a git shim rather than a repository
@@ -180,7 +180,7 @@ func TestCommitAgentFixes_AllowsForwardAgentCommit(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
 
-	sctx := newTestContext(t, &mockAgent{name: "codex"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "codex"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Fixing = true
 
 	// Agent makes its own forward commit (descendant of the recorded head).

@@ -139,8 +139,8 @@ func TestTargetAdvanceRewindJourney(t *testing.T) {
 						tests++
 					}
 				}
-				if reviews < 2 || tests < 2 {
-					t.Fatalf("stale validation reused: reviews=%d tests=%d", reviews, tests)
+				if reviews != 1 || tests < 2 {
+					t.Fatalf("identical review must retain credit and Test must rerun: reviews=%d tests=%d", reviews, tests)
 				}
 			}
 			t.Logf("run=%s rewinds=%d final=%s head=%s target=%s", run.ID, rewinds, run.Status, run.HeadSHA, h.UpstreamBranchSHA("main"))
@@ -219,7 +219,7 @@ func TestTargetAdvanceExistingPRJourney(t *testing.T) {
 				t.Fatalf("read real attach provenance: %v %v", pubErr, attemptErr)
 			}
 			if kind == "G attached" {
-				if publication == nil || publication.Validated || publication.CIEligible {
+				if publication == nil || !publication.AdoptedOnly || publication.Validated || publication.CIEligible {
 					t.Fatalf("real G attach publication missing or credited validation: %+v", publication)
 				}
 			} else if publication != nil || attempt != nil {
@@ -237,9 +237,6 @@ func TestTargetAdvanceExistingPRJourney(t *testing.T) {
 			}
 			run := h.WaitForRun(branch, 120*time.Second)
 			want := types.RunCompleted
-			if kind != "attached without G" {
-				want = types.RunFailed
-			}
 			result := <-launch
 			if want == types.RunCompleted && result.err != nil {
 				t.Fatalf("CLI run failed: %v\n%s", result.err, result.out)

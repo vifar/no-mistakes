@@ -10,6 +10,9 @@ import (
 type CommitStatusPublication struct {
 	SHA, Host, Repo, LastState string
 	Validated, CIEligible      bool
+	// AdoptedOnly proves this run observed existing code without pushing it.
+	// Legacy/unknown publications default to false. Actual publication is sticky.
+	AdoptedOnly bool
 }
 
 // CommitStatusAttempt records a push or adoption target. An attempt is not
@@ -20,19 +23,19 @@ type CommitStatusAttempt struct {
 }
 
 func (d *DB) PutCommitStatusAttempt(runID string, p CommitStatusAttempt) error {
-	_, err := d.sql.Exec(`INSERT INTO commit_status_attempts (run_id,sha,host,repo,target,ref,validated,ci_eligible,retired)
-		VALUES (?,?,?,?,?,?,?,?,EXISTS (
+	_, err := d.sql.Exec(`INSERT INTO commit_status_attempts (run_id,sha,host,repo,target,ref,validated,ci_eligible,adopted_only,retired)
+		VALUES (?,?,?,?,?,?,?,?,?,EXISTS (
 			SELECT 1 FROM commit_status_publications p JOIN runs owner ON owner.id=p.run_id JOIN runs current ON current.id=?
 			WHERE p.host=? AND p.repo=? AND p.sha=? AND
 			(owner.created_at>current.created_at OR (owner.created_at=current.created_at AND owner.id>current.id) OR (owner.id=current.id AND p.retired=1))
-		)) ON CONFLICT(run_id) DO UPDATE SET sha=excluded.sha,host=excluded.host,repo=excluded.repo,target=excluded.target,ref=excluded.ref,validated=excluded.validated,ci_eligible=excluded.ci_eligible,
-		retired=excluded.retired`, runID, p.SHA, p.Host, p.Repo, p.Target, p.Ref, p.Validated, p.CIEligible, runID, p.Host, p.Repo, p.SHA)
+		)) ON CONFLICT(run_id) DO UPDATE SET sha=excluded.sha,host=excluded.host,repo=excluded.repo,target=excluded.target,ref=excluded.ref,validated=excluded.validated,ci_eligible=excluded.ci_eligible,adopted_only=commit_status_attempts.adopted_only AND excluded.adopted_only,
+		retired=excluded.retired`, runID, p.SHA, p.Host, p.Repo, p.Target, p.Ref, p.Validated, p.CIEligible, p.AdoptedOnly, runID, p.Host, p.Repo, p.SHA)
 	return err
 }
 
 func (d *DB) GetCommitStatusAttempt(runID string) (*CommitStatusAttempt, error) {
 	p := &CommitStatusAttempt{}
-	err := d.sql.QueryRow(`SELECT sha,host,repo,target,ref,validated,ci_eligible FROM commit_status_attempts WHERE run_id=? AND retired=0`, runID).Scan(&p.SHA, &p.Host, &p.Repo, &p.Target, &p.Ref, &p.Validated, &p.CIEligible)
+	err := d.sql.QueryRow(`SELECT sha,host,repo,target,ref,validated,ci_eligible,adopted_only FROM commit_status_attempts WHERE run_id=? AND retired=0`, runID).Scan(&p.SHA, &p.Host, &p.Repo, &p.Target, &p.Ref, &p.Validated, &p.CIEligible, &p.AdoptedOnly)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -54,10 +57,19 @@ func (d *DB) putCommitStatusPublication(runID string, p CommitStatusPublication,
 		return false, err
 	}
 	defer tx.Rollback()
+	if p.AdoptedOnly {
+		// An uncertain/actual push attempt cannot be relabeled by a fresh
+		// attach observation, including one racing with confirmation.
+		var pushed bool
+		if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM commit_status_attempts WHERE run_id=? AND adopted_only IS NOT 1)`, runID).Scan(&pushed); err != nil {
+			return false, err
+		}
+		p.AdoptedOnly = !pushed
+	}
 	// Reconfirmation updates validation evidence, not the last successful POST.
 	// In particular, an up-to-date Push must preserve attach-time deduplication.
-	if _, err := tx.Exec(`INSERT INTO commit_status_publications (run_id,sha,host,repo,last_state,validated,ci_eligible)
-		VALUES (?,?,?,?,?,?,?) ON CONFLICT(host,repo,sha,run_id) DO UPDATE SET last_state=CASE WHEN ? THEN commit_status_publications.last_state ELSE excluded.last_state END,validated=excluded.validated,ci_eligible=excluded.ci_eligible`, runID, p.SHA, p.Host, p.Repo, p.LastState, p.Validated, p.CIEligible, confirm); err != nil {
+	if _, err := tx.Exec(`INSERT INTO commit_status_publications (run_id,sha,host,repo,last_state,validated,ci_eligible,adopted_only)
+		VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(host,repo,sha,run_id) DO UPDATE SET last_state=CASE WHEN ? THEN commit_status_publications.last_state ELSE excluded.last_state END,validated=excluded.validated,ci_eligible=excluded.ci_eligible,adopted_only=commit_status_publications.adopted_only AND excluded.adopted_only`, runID, p.SHA, p.Host, p.Repo, p.LastState, p.Validated, p.CIEligible, p.AdoptedOnly, confirm); err != nil {
 		return false, err
 	}
 	for _, table := range []string{"commit_status_attempts", "commit_status_publications"} {
@@ -84,7 +96,7 @@ func (d *DB) putCommitStatusPublication(runID string, p CommitStatusPublication,
 
 func (d *DB) GetCommitStatusPublication(ctx context.Context, runID string, p CommitStatusPublication) (*CommitStatusPublication, error) {
 	current := &CommitStatusPublication{}
-	err := d.sql.QueryRowContext(ctx, `SELECT sha,host,repo,last_state,validated,ci_eligible FROM commit_status_publications WHERE run_id=? AND host=? AND repo=? AND sha=? AND retired=0`, runID, p.Host, p.Repo, p.SHA).Scan(&current.SHA, &current.Host, &current.Repo, &current.LastState, &current.Validated, &current.CIEligible)
+	err := d.sql.QueryRowContext(ctx, `SELECT sha,host,repo,last_state,validated,ci_eligible,adopted_only FROM commit_status_publications WHERE run_id=? AND host=? AND repo=? AND sha=? AND retired=0`, runID, p.Host, p.Repo, p.SHA).Scan(&current.SHA, &current.Host, &current.Repo, &current.LastState, &current.Validated, &current.CIEligible, &current.AdoptedOnly)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -92,7 +104,7 @@ func (d *DB) GetCommitStatusPublication(ctx context.Context, runID string, p Com
 }
 
 func (d *DB) GetCommitStatusPublications(ctx context.Context, runID string) ([]CommitStatusPublication, error) {
-	rows, err := d.sql.QueryContext(ctx, `SELECT sha,host,repo,last_state,validated,ci_eligible FROM commit_status_publications WHERE run_id=? AND retired=0 ORDER BY rowid`, runID)
+	rows, err := d.sql.QueryContext(ctx, `SELECT sha,host,repo,last_state,validated,ci_eligible,adopted_only FROM commit_status_publications WHERE run_id=? AND retired=0 ORDER BY rowid`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +112,7 @@ func (d *DB) GetCommitStatusPublications(ctx context.Context, runID string) ([]C
 	var publications []CommitStatusPublication
 	for rows.Next() {
 		var p CommitStatusPublication
-		if err := rows.Scan(&p.SHA, &p.Host, &p.Repo, &p.LastState, &p.Validated, &p.CIEligible); err != nil {
+		if err := rows.Scan(&p.SHA, &p.Host, &p.Repo, &p.LastState, &p.Validated, &p.CIEligible, &p.AdoptedOnly); err != nil {
 			return nil, err
 		}
 		publications = append(publications, p)

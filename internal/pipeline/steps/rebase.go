@@ -209,6 +209,9 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.Step
 			}
 		}
 		summary := fmt.Sprintf("conflict %s %s", integrationVerb(merging), strings.Join(conflictTargets, ", "))
+		if pending != nil {
+			summary = "conflict on rebase after target advance: " + strings.Join(conflictTargets, ", ")
+		}
 		findingsJSON, _ := json.Marshal(Findings{Items: dedupeRebaseFindings(conflictFindings), Summary: summary})
 		return &pipeline.StepOutcome{
 			NeedsApproval: true,
