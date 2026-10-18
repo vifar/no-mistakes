@@ -1070,6 +1070,9 @@ func claimLaunchReceiptWithOptions(shipping *types.ShippingOptions, externalCIOw
 	if shipping != nil && externalCIOwner != "" {
 		return nil, fmt.Errorf("strict shipping cannot be combined with an external CI owner")
 	}
+	if err := probeLaunchOwner(client, owner); err != nil {
+		return nil, err
+	}
 	var result ipc.ClaimLaunchReceiptResult
 	if err := client.Call(ipc.MethodClaimLaunchReceipt, &ipc.ClaimLaunchReceiptParams{
 		Owner: owner, Shipping: shipping, ExternalCIOwner: externalCIOwner, RepoID: repoID, Branch: branch, LaunchNonce: launchNonce, PiProfile: agentcfg.OptionalPiProfile(profiles),
