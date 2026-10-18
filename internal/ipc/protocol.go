@@ -611,6 +611,10 @@ type RunInfo struct {
 	ExternalCIOwner       string                   `json:"external_ci_owner,omitempty"`
 	PendingCISupport      []types.PendingCISupport `json:"pending_ci_support,omitempty"`
 	PendingCISupportError string                   `json:"pending_ci_support_error,omitempty"`
+	// QuotaRouting is the run's quota-aware agent-ordering record (the raw
+	// quotarouting.Record JSON) when the feature is on for this run, empty
+	// otherwise. Local-only observability; see internal/quotarouting.
+	QuotaRouting string `json:"quota_routing,omitempty"`
 	// AwaitingAgent is true while the run is parked at a gate awaiting the
 	// driving agent's response. AwaitingAgentSince is the unix-seconds time it
 	// parked, so a supervisor can read "parked for N seconds" in one call. Both

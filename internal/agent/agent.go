@@ -247,6 +247,10 @@ type LifecycleEvent struct {
 	Phase   string
 	PID     int
 	Message string
+	// NextAgent names the agent a LifecyclePhaseQuotaSwitch event moves the
+	// run to, so the executor can record the switch on the run's quota-routing
+	// record without parsing the prose. Empty on every other phase.
+	NextAgent string
 }
 
 // Result holds the output of an agent invocation.
@@ -264,7 +268,8 @@ type Result struct {
 	// when the adapter reports one. Callers persist it to resume later.
 	SessionID string
 	// Resumed reports whether this invocation resumed opts.Session.ID.
-	Resumed bool
+	Resumed         bool
+	ResumeRetryable *bool
 	// Model is the model the adapter reported serving this invocation, when
 	// available. Instrumentation records it, and eval replay validates it
 	// against the requested candidate.

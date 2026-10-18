@@ -1769,6 +1769,7 @@ func gateContextResult(result gatecontext.Result) ipc.GateContextResult {
 func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 	info := &ipc.RunInfo{
 		EndingEvent:          r.EndingEvent,
+		QuotaRouting:         r.QuotaRouting,
 		Owner:                r.Owner(),
 		TargetAdvanceRewinds: r.TargetAdvanceRewinds,
 		Shipping:             r.Shipping,

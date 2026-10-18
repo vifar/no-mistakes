@@ -91,7 +91,7 @@ func TestExecutor_GreenCIRunRecordsChecksPassedAndReleases(t *testing.T) {
 	if err := database.UpdateRunPRState(run.ID, "merged"); err != nil {
 		t.Fatal(err)
 	}
-	if repaired, err := database.ReconcileTerminalPRRuns(); err != nil {
+	if repaired, err := database.RecoverStaleRuns("test recovery"); err != nil {
 		t.Fatalf("ReconcileTerminalPRRuns() error = %v", err)
 	} else if repaired != 0 {
 		t.Fatalf("reconciled runs = %d, want none: a checks_passed run is already terminal", repaired)
@@ -201,7 +201,7 @@ func TestExecutor_TerminalVerdictReadErrors(t *testing.T) {
 			}
 			events := &eventCollector{}
 			exec := NewExecutor(database, p, nil, nil, nil, events.handler)
-			if err := exec.completeRun(run, repo); err == nil {
+			if err := exec.completeRun(context.Background(), run, repo); err == nil {
 				t.Fatal("unreadable verdict evidence reported success")
 			}
 			if events.findRunEvent(ipc.EventRunCompleted) != nil {

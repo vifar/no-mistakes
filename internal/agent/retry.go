@@ -226,6 +226,10 @@ var terminalNeedles = []struct {
 	needle string
 	label  string
 }{
+	// Every terminal needle is a quota-exhaustion shape: a spent
+	// subscription is the only failure a retry inside this agent can never
+	// fix. IsQuotaExhaustionError reuses exactly these so the quota-aware
+	// switch never invents a second string list.
 	{"freeusagelimit", "free usage limit"},
 	{"free usage limit", "free usage limit"},
 	{"free_usage_limit", "free usage limit"},
@@ -322,6 +326,8 @@ func isPiPermanentStderr(stderr string) bool {
 	return false
 }
 
+// isTerminalRetryError reports whether an error message names a terminal
+// failure (today: quota exhaustion), so a retry inside this agent cannot help.
 func isTerminalRetryError(msg string) bool {
 	for _, sig := range terminalNeedles {
 		if strings.Contains(msg, sig.needle) {
@@ -329,4 +335,27 @@ func isTerminalRetryError(msg string) bool {
 		}
 	}
 	return false
+}
+
+// IsQuotaExhaustionError reports whether an error is a recognised
+// subscription-quota exhaustion: the same terminal needle set the retry
+// layer has always classified (free usage limit, insufficient quota, quota
+// exceeded/exhausted) plus claude's typed usage-limit response. Only these
+// concrete shapes may trigger the quota-aware mid-run switch - transient
+// overload, unavailability, and parse failures never do.
+func IsQuotaExhaustionError(err error) bool {
+	if err == nil || IsStructuredOutputRejected(err) {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var apiErr *claudeAPIError
+	if errors.As(err, &apiErr) {
+		if apiErr.UsageLimitReached() {
+			return true
+		}
+		return isTerminalRetryError(strings.ToLower(apiErr.Message))
+	}
+	return isTerminalRetryError(strings.ToLower(err.Error()))
 }

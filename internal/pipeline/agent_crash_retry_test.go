@@ -315,7 +315,7 @@ func TestExecutor_AgentCrashRetryDoesNotRetryVerdicts(t *testing.T) {
 	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 3}, nil, []Step{step}, nil)
 	executor.onEvent = func(event ipc.Event) {
 		if event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
-			if err := executor.Respond(types.StepTest, types.ActionAbort, nil); err != nil {
+			if err := executor.Respond(types.StepTest, types.ActionAbort, nil, gateSnapshot(executor)); err != nil {
 				t.Error(err)
 			}
 		}
@@ -431,7 +431,7 @@ func TestExecutor_AgentCrashRetryDisabledAfterRecovery(t *testing.T) {
 	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, nil, []Step{newPassStep(types.StepReview), newPassStep(types.StepTest), document}, nil)
 	executor.onEvent = func(event ipc.Event) {
 		if event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
-			if err := executor.Respond(types.StepTest, types.ActionApprove, nil); err != nil {
+			if err := executor.Respond(types.StepTest, types.ActionApprove, nil, gateSnapshot(executor)); err != nil {
 				t.Error(err)
 			}
 		}
@@ -455,7 +455,7 @@ func TestExecutor_RecoveredContinuationDoesNotFalseFailBaseFence(t *testing.T) {
 	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, nil, []Step{newPassStep(types.StepReview), newPassStep(types.StepTest), document}, nil)
 	executor.onEvent = func(event ipc.Event) {
 		if event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
-			if err := executor.Respond(types.StepTest, types.ActionApprove, nil); err != nil {
+			if err := executor.Respond(types.StepTest, types.ActionApprove, nil, gateSnapshot(executor)); err != nil {
 				t.Error(err)
 			}
 		}

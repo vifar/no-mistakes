@@ -398,6 +398,13 @@ func ACPTargetFor(name AgentName) (string, bool) {
 	return target, true
 }
 
+func CanonicalAgentName(name AgentName) AgentName {
+	if target, ok := ACPTargetFor(name); ok {
+		return AgentName("acp:" + target)
+	}
+	return name
+}
+
 // ACPRawCommand resolves the raw command acpx runs for an ACP target: a
 // registry override is trimmed and wins when non-blank, otherwise the alias
 // default command is used.

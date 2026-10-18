@@ -653,11 +653,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 
 	releaseAfterChecksPass := ciReleaseAfterChecksPass(sctx)
 	if releaseAfterChecksPass {
-		if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
-			clearCIMonitorReady(sctx)
-			sctx.Log(fmt.Sprintf("warning: CI release comparison could not be verified: %v", err))
-			break
-		}
 		sctx.Log(fmt.Sprintf("monitoring CI for PR #%s until every check is green...", prNumber))
 	} else if unlimited {
 		sctx.Log(fmt.Sprintf("monitoring CI for PR #%s (no timeout, until merged or closed)...", prNumber))

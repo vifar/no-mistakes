@@ -197,6 +197,18 @@ const (
 	// does: a burst of failures inside the retention window must still not
 	// grow the directory without bound.
 	DefaultWorktreeMaxRuns = 20
+	// DefaultQuotaExpectedRunLength is the runway floor a projected
+	// exhaustion must clear for an agent to stay rankable: a subscription
+	// projected to run out inside this window cannot be trusted to carry a
+	// typical run, so the candidate drops below rankable ones. It is an
+	// expectation, not a promise - no-mistakes never cancels a run for
+	// exceeding it.
+	DefaultQuotaExpectedRunLength = 90 * time.Minute
+	// DefaultQuotaReadTimeout bounds one quota-axi read at run setup.
+	// quota-axi may delegate an expired session's renewal to the vendor CLI
+	// that owns it, so the default is generous but bounded: a slow read must
+	// never delay a run's start by more than this.
+	DefaultQuotaReadTimeout = 15 * time.Second
 )
 
 // GlobalConfig represents ~/.no-mistakes/config.yaml.
@@ -219,6 +231,19 @@ type GlobalConfig struct {
 	// which model runs with the operator's credentials, so no pushed branch may
 	// set it.
 	AgentConfig map[string]agentcfg.Profile `yaml:"agent_config"`
+	// QuotaRouting is the opt-in, global-only quota-aware agent ordering: at
+	// run setup the daemon reads one snapshot from the local quota-axi tool
+	// and reorders the resolved agent list by quota evidence. See QuotaRouting
+	// for the fields. Global-only because it decides which of this machine's
+	// credential-bearing agents a run spends, so no pushed branch may enable
+	// it, widen its budgets, or retarget its executable.
+	QuotaRouting QuotaRouting `yaml:"-"`
+	// QuotaProviders is the per-agent declared quota-axi provider id parsed
+	// from agent_config entries (quota_provider). It rides agent_config
+	// because it is per-agent machine tuning like model and effort, and it is
+	// global-only for the same reason: it decides which credential pool a
+	// run's quota evidence is read from.
+	QuotaProviders map[string]string `yaml:"-"`
 	// ReviewAgents selects independent review-loop harnesses and profiles.
 	// Global-only: repository input must not select credential/model profiles.
 	ReviewAgents map[string]ReviewAgent `yaml:"review_agents"`
@@ -309,6 +334,7 @@ type globalConfigRaw struct {
 	AgentPathOverride         map[string]string          `yaml:"agent_path_override"`
 	AgentArgsOverride         map[string][]string        `yaml:"agent_args_override"`
 	AgentConfig               map[string]agentProfileRaw `yaml:"agent_config"`
+	QuotaRouting              QuotaRoutingRaw            `yaml:"quota_routing"`
 	ReviewAgents              map[string]ReviewAgent     `yaml:"review_agents"`
 	WorktreeRoots             map[string]string          `yaml:"worktree_roots"`
 	Worktree                  WorktreeRaw                `yaml:"worktree"`
@@ -932,18 +958,22 @@ type AutoFix struct {
 
 // Config is the merged result of global + per-repo configuration.
 type Config struct {
-	ReplayGlobalYAML          []byte
-	ReplayRepoYAML            []byte
-	TrustedConfigSHA          string
-	CaptureEvalProvenance     bool
-	Agent                     types.AgentName
-	Agents                    []types.AgentName
-	ACPXPath                  string
-	ForgejoAXIPath            string
-	ACPRegistryOverrides      map[string]string
-	AgentPathOverride         map[string]string
-	AgentArgsOverride         map[string][]string
-	AgentConfig               map[string]agentcfg.Profile
+	ReplayGlobalYAML      []byte
+	ReplayRepoYAML        []byte
+	TrustedConfigSHA      string
+	CaptureEvalProvenance bool
+	Agent                 types.AgentName
+	Agents                []types.AgentName
+	ACPXPath              string
+	ForgejoAXIPath        string
+	ACPRegistryOverrides  map[string]string
+	AgentPathOverride     map[string]string
+	AgentArgsOverride     map[string][]string
+	AgentConfig           map[string]agentcfg.Profile
+	// QuotaRouting and QuotaProviders are copied from global config only (see
+	// GlobalConfig.QuotaRouting); no repository layer can set either.
+	QuotaRouting              QuotaRouting
+	QuotaProviders            map[string]string
 	ReviewAgents              map[string]ReviewAgent
 	CITimeout                 time.Duration
 	CIReadinessReceiptTimeout time.Duration
@@ -1436,6 +1466,47 @@ func applyDaemonOverrides(dst *Daemon, src *DaemonRaw) {
 	}
 }
 
+// QuotaRoutingRaw is the on-disk YAML shape of the quota_routing block.
+type QuotaRoutingRaw struct {
+	Enabled           *bool  `yaml:"enabled"`
+	ExpectedRunLength string `yaml:"expected_run_length"`
+	ReadTimeout       string `yaml:"read_timeout"`
+	QuotaAXIPath      string `yaml:"quota_axi_path"`
+}
+
+// QuotaRouting is the resolved, opt-in, global-only quota-aware agent
+// ordering. When Enabled, the daemon reads ONE snapshot from the local
+// quota-axi tool at run setup and reorders the resolved agent list by quota
+// evidence (see internal/quotarouting); a missing, slow, or unreadable
+// snapshot keeps today's configured order and never blocks a run. Each agent
+// keeps its own agent_config model and effort - only the ORDER changes.
+// Global-only because it decides which of this machine's credential-bearing
+// agents a run spends: no pushed branch may enable it, widen its budgets, or
+// retarget its executable.
+type QuotaRouting struct {
+	// Enabled is the opt-in switch; off is today's behavior exactly.
+	Enabled bool
+	// ExpectedRunLength is the runway floor a projected_exhaustion must clear
+	// for the agent to stay rankable (default 90m).
+	ExpectedRunLength time.Duration
+	// ReadTimeout bounds one quota-axi read (default 15s).
+	ReadTimeout time.Duration
+	// QuotaAXIPath names the executable; empty means "quota-axi" on PATH.
+	QuotaAXIPath string
+}
+
+// QuotaProviderFor returns the agent's declared quota-axi provider id from
+// its agent_config entry, "" when none.
+func (c *GlobalConfig) QuotaProviderFor(agent types.AgentName) string {
+	return agentSettingFor(c.QuotaProviders, agent)
+}
+
+// QuotaProviderFor is the effective-config accessor for the same map (see
+// GlobalConfig.QuotaProviderFor).
+func (c *Config) QuotaProviderFor(agent types.AgentName) string {
+	return agentSettingFor(c.QuotaProviders, agent)
+}
+
 // retiredJev names exactly the two retired jev subkeys so a global config
 // that still sets one keeps parsing under the strict known-fields rule. Both
 // are pointers so a set key is distinguishable from an absent one and can be
@@ -1693,6 +1764,30 @@ gate_reconcile_timeout: "30s"
 # Set false to force every agent invocation cold.
 session_reuse: true
 
+# Quota-aware agent routing (optional, global only, off by default). When
+# enabled, no-mistakes reads one snapshot from the local quota-axi tool at the
+# start of each run and reorders the resolved agent list by quota evidence:
+# agents whose subscription is exhausted now or at 0% move to the back, an
+# agent projected to run out of quota inside expected_run_length is treated the
+# same, and otherwise agents rank by quota-axi's own spendPriority (ties keep
+# your configured order). Each agent keeps its agent_config model and effort -
+# only the order changes. A missing, slow, or unreadable quota-axi keeps your
+# configured order, logs why, and never blocks a run. Mid-run, a recognised
+# quota error moves the run once to the next agent in the chosen order with a
+# fresh session. claude and codex map to their quota-axi providers
+# automatically. Other agents can declare quota_provider under agent_config.
+# An unmapped pi disables routing for the run with one warning; other unmapped
+# agents rank as unknown quota below agents with known headroom.
+# quota_routing:
+#   enabled: true
+#   # Runway floor: an agent projected to run out inside this window is not
+#   # chosen first. Default 90m.
+#   expected_run_length: 90m
+#   # Bound on one quota-axi read at run start. Default 15s.
+#   read_timeout: 15s
+#   # Executable to run. Default: quota-axi on PATH.
+#   quota_axi_path: quota-axi
+
 # Log level for daemon output
 # Options: debug, info, warn, error
 log_level: info
@@ -1720,8 +1815,17 @@ log_level: info
 #   claude:
 #     model: sonnet
 #     effort: high
+#   claude:
+#     model: sonnet
+#     effort: high
 #   opencode:
 #     model: openai/gpt-5
+#   # quota_provider names the quota-axi provider id quota-aware routing reads
+#   # this agent's evidence from (only read when quota_routing is enabled).
+#   # claude and codex never need it; pi always requires an explicit provider,
+#   # including when its model names a Codex account.
+#   pi:
+#     quota_provider: codex
 #
 # Extra native agent CLI flags (optional, global only)
 # Codex service_tier controls speed/priority; model_reasoning_effort controls reasoning depth.
@@ -2107,7 +2211,7 @@ func (c *Config) resolveAutoAgent(ctx context.Context, lookPath func(string) (st
 
 func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentName, lookPath func(string) (string, error)) ([]types.AgentName, error) {
 	resolved := make([]types.AgentName, 0, len(candidates))
-	seen := map[string]bool{}
+	seen := map[types.AgentName]bool{}
 	probed := make([]string, 0, len(candidates))
 	for _, candidate := range candidates {
 		name, ok, probe, err := c.resolveConfiguredAgent(ctx, candidate, lookPath)
@@ -2120,7 +2224,7 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 		if !ok {
 			continue
 		}
-		identity := resolvedAgentIdentity(name)
+		identity := types.CanonicalAgentName(name)
 		if seen[identity] {
 			continue
 		}
@@ -2131,13 +2235,6 @@ func (c *Config) resolveAgentList(ctx context.Context, candidates []types.AgentN
 		return nil, noRunnableAgentError(candidates, probed)
 	}
 	return resolved, nil
-}
-
-func resolvedAgentIdentity(name types.AgentName) string {
-	if target, ok := types.ACPTargetFor(name); ok {
-		return "acp:" + target
-	}
-	return "native:" + string(name)
 }
 
 func noRunnableAgentError(configured []types.AgentName, probed []string) error {
@@ -2321,56 +2418,75 @@ func (c *Config) AgentProfile() agentcfg.Profile {
 }
 
 func (c *Config) AgentProfileFor(name types.AgentName) agentcfg.Profile {
-	if profile, ok := c.AgentConfig[string(name)]; ok {
-		return profile
+	return agentSettingFor(c.AgentConfig, name)
+}
+
+func agentSettingFor[T any](settings map[string]T, name types.AgentName) T {
+	if value, ok := settings[string(name)]; ok {
+		return value
 	}
 	if alias, ok := types.ACPAliasFor(name); ok {
-		return c.AgentConfig["acp:"+alias.Target]
+		return settings["acp:"+alias.Target]
 	}
 	if target, ok := types.ACPTargetFor(name); ok {
 		if alias, ok := types.ACPAliasForTarget(target); ok {
-			return c.AgentConfig[string(alias.Name)]
+			return settings[string(alias.Name)]
 		}
 	}
-	return agentcfg.Profile{}
+	var zero T
+	return zero
 }
 
 // agentProfileRaw is the on-disk YAML shape of one agent_config entry. Effort
 // is a string here so an invalid level is reported as a config error naming the
 // valid vocabulary rather than decoding into a value no harness accepts.
+// QuotaProvider is the optional quota-axi provider id the quota-aware routing
+// reads this agent's evidence from; it is routing input, never a harness knob,
+// so agentcfg.Profile stays harness-only.
 type agentProfileRaw struct {
-	Model  string `yaml:"model"`
-	Effort string `yaml:"effort"`
+	Model         string `yaml:"model"`
+	Effort        string `yaml:"effort"`
+	QuotaProvider string `yaml:"quota_provider"`
 }
 
 // parseAgentConfig validates the agent_config map and resolves it to
-// harness-neutral profiles. Every knob is checked against what the named
-// harness can actually express, so an unmappable request fails at load rather
-// than being silently dropped at run time.
-func parseAgentConfig(raw map[string]agentProfileRaw) (map[string]agentcfg.Profile, error) {
+// harness-neutral profiles plus the per-agent quota_provider routing map.
+// Every knob is checked against what the named harness can actually express, so
+// an unmappable request fails at load rather than being silently dropped at
+// run time.
+func parseAgentConfig(raw map[string]agentProfileRaw) (map[string]agentcfg.Profile, map[string]string, error) {
 	profiles := make(map[string]agentcfg.Profile, len(raw))
+	providers := make(map[string]string, len(raw))
 	for name, entry := range raw {
 		agentName := types.AgentName(name)
 		if !agentcfg.Known(agentName) {
-			return nil, fmt.Errorf("invalid agent name in agent_config: %q (valid: %s, cursor, devin, acp:<target>)", name, strings.Join(agentNamesText(agentcfg.Agents()), ", "))
+			return nil, nil, fmt.Errorf("invalid agent name in agent_config: %q (valid: %s, cursor, devin, acp:<target>)", name, strings.Join(agentNamesText(agentcfg.Agents()), ", "))
 		}
 		effort, err := agentcfg.ParseEffort(entry.Effort)
 		if err != nil {
-			return nil, fmt.Errorf("invalid agent_config.%s: %w", name, err)
+			return nil, nil, fmt.Errorf("invalid agent_config.%s: %w", name, err)
 		}
 		profile := agentcfg.Profile{Model: strings.TrimSpace(entry.Model), Effort: effort}
 		if err := agentcfg.Validate(agentName, profile); err != nil {
-			return nil, fmt.Errorf("invalid agent_config.%s: %w", name, err)
+			return nil, nil, fmt.Errorf("invalid agent_config.%s: %w", name, err)
+		}
+		if provider := strings.TrimSpace(entry.QuotaProvider); provider != "" {
+			providers[name] = provider
+		} else if entry.QuotaProvider != "" {
+			return nil, nil, fmt.Errorf("invalid agent_config.%s: quota_provider must not be blank", name)
 		}
 		if profile.IsZero() {
 			continue
 		}
 		profiles[name] = profile
 	}
-	if len(profiles) == 0 {
-		return nil, nil
+	if len(providers) == 0 {
+		providers = nil
 	}
-	return profiles, nil
+	if len(profiles) == 0 {
+		return nil, providers, nil
+	}
+	return profiles, providers, nil
 }
 
 func agentNamesText(names []types.AgentName) []string {
@@ -2640,6 +2756,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		Eval:                      evalDefaults(),
 		Worktree:                  worktreeDefaults(),
 		Daemon:                    daemonDefaults(),
+		QuotaRouting:              QuotaRouting{ExpectedRunLength: DefaultQuotaExpectedRunLength, ReadTimeout: DefaultQuotaReadTimeout},
 	}
 }
 
@@ -2857,11 +2974,12 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		cfg.AgentArgsOverride = raw.AgentArgsOverride
 	}
 	if raw.AgentConfig != nil {
-		profiles, err := parseAgentConfig(raw.AgentConfig)
+		profiles, providers, err := parseAgentConfig(raw.AgentConfig)
 		if err != nil {
 			return nil, err
 		}
 		cfg.AgentConfig = profiles
+		cfg.QuotaProviders = providers
 	}
 	if err := validateReviewAgents(raw.ReviewAgents); err != nil {
 		return nil, err
@@ -3003,6 +3121,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	}
 	if raw.SessionReuse != nil {
 		cfg.SessionReuse = *raw.SessionReuse
+	}
+	if err := applyQuotaRoutingOverrides(&cfg.QuotaRouting, raw.QuotaRouting); err != nil {
+		return nil, err
 	}
 	if raw.ForgeProfiles != nil {
 		profiles, err := normalizeForgeProfiles(raw.ForgeProfiles)
@@ -3186,6 +3307,20 @@ func LoadRepoFromBytes(data []byte) (*RepoConfig, error) {
 }
 
 func parseRepoConfig(data []byte) (*RepoConfig, error) {
+	// quota_routing is global-only: it decides which of this machine's
+	// credential-bearing agents a run spends, so a pushed branch must never
+	// be able to set it. Repo parsing is otherwise lenient about unknown
+	// keys, so the key is probed by name and refused here - the same shape
+	// LoadGlobalFromBytes uses to refuse the repository-only auto_fix.gates.
+	var globalOnly struct {
+		QuotaRouting yaml.Node `yaml:"quota_routing"`
+	}
+	if err := yaml.Unmarshal(data, &globalOnly); err != nil {
+		return nil, fmt.Errorf("parse repo config: %w", err)
+	}
+	if !globalOnly.QuotaRouting.IsZero() {
+		return nil, fmt.Errorf("quota_routing is global-only; configure it in ~/.no-mistakes/config.yaml on this machine")
+	}
 	cfg := &RepoConfig{}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
@@ -3689,6 +3824,35 @@ func worktreeDefaults() Worktree {
 	return Worktree{Retention: DefaultWorktreeRetention, MaxRuns: DefaultWorktreeMaxRuns}
 }
 
+// applyQuotaRoutingOverrides applies the quota_routing block over the built-in
+// defaults. The knob vocabulary mirrors the other global-only durations:
+// unset keeps the default, and a set value must parse positive.
+func applyQuotaRoutingOverrides(dst *QuotaRouting, raw QuotaRoutingRaw) error {
+	if raw.Enabled != nil {
+		dst.Enabled = *raw.Enabled
+	}
+	if raw.ExpectedRunLength != "" {
+		d, err := parsePositiveDuration("quota_routing.expected_run_length", raw.ExpectedRunLength)
+		if err != nil {
+			return err
+		}
+		dst.ExpectedRunLength = d
+	}
+	if raw.ReadTimeout != "" {
+		d, err := parsePositiveDuration("quota_routing.read_timeout", raw.ReadTimeout)
+		if err != nil {
+			return err
+		}
+		dst.ReadTimeout = d
+	}
+	if path := strings.TrimSpace(raw.QuotaAXIPath); path != "" {
+		dst.QuotaAXIPath = path
+	} else if raw.QuotaAXIPath != "" {
+		return fmt.Errorf("quota_routing.quota_axi_path must not be blank")
+	}
+	return nil
+}
+
 // applyWorktreeOverrides applies non-nil raw values onto resolved defaults.
 // The retention value is validated at config parse time (validateWorktreeRaw).
 func applyWorktreeOverrides(dst *Worktree, src *WorktreeRaw) {
@@ -4162,6 +4326,8 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		AgentPathOverride:         global.AgentPathOverride,
 		AgentArgsOverride:         global.AgentArgsOverride,
 		AgentConfig:               global.AgentConfig,
+		QuotaRouting:              global.QuotaRouting,
+		QuotaProviders:            global.QuotaProviders,
 		ReviewAgents:              global.ReviewAgents,
 		CITimeout:                 global.CITimeout,
 		CIReadinessReceiptTimeout: global.CIReadinessReceiptTimeout,

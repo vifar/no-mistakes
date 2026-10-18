@@ -24,6 +24,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/quotarouting"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/shipping"
@@ -1833,6 +1834,17 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			// synthesized text into the log.
 			touchStepActivityThrottled(text)
 			return
+		case agent.LifecyclePhaseQuotaSwitch:
+			// The quota-aware mid-run switch already happened in the agent
+			// chain; amend the run's quota-routing record with it. Any failure
+			// here is an observability gap, never a run failure - the switch
+			// cannot be un-happened and the run continues on the next agent.
+			quotarouting.RecordSwitch(e.db, sr.RunID, quotarouting.SwitchEvent{
+				From:   event.Agent,
+				To:     event.NextAgent,
+				Reason: event.Message,
+				At:     time.Now(),
+			})
 		default:
 			if dbErr := e.db.TouchStepActivity(sr.ID, text); dbErr != nil {
 				slog.Warn("failed to touch step activity in db", "step", stepName, "error", dbErr)

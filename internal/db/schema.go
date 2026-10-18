@@ -351,6 +351,10 @@ var migrationStatements = append([]string{
 	`CREATE TRIGGER IF NOT EXISTS runs_verification_plan_immutable BEFORE UPDATE OF verification_plan ON runs WHEN NEW.verification_plan IS NOT OLD.verification_plan BEGIN SELECT RAISE(ABORT, 'run verification plan is immutable'); END`,
 	`ALTER TABLE runs ADD COLUMN shipping_options TEXT`,
 	`ALTER TABLE runs ADD COLUMN pi_profile TEXT`,
+	// quota_routing records one run's quota-aware agent ordering (the
+	// quotarouting.Record JSON). Unlike pi_profile it is intentionally
+	// mutable: a mid-run quota switch appends to the record's switch list.
+	`ALTER TABLE runs ADD COLUMN quota_routing TEXT`,
 	`CREATE TRIGGER IF NOT EXISTS runs_pi_profile_immutable BEFORE UPDATE OF pi_profile ON runs WHEN NEW.pi_profile IS NOT OLD.pi_profile BEGIN SELECT RAISE(ABORT, 'run Pi profile is immutable'); END`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
