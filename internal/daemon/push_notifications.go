@@ -431,7 +431,7 @@ func sameNotificationOptions(a, b ipc.PushReceivedParams) bool {
 
 func (m *RunManager) reattachReceivedRun(retained *retainedPush) (string, bool, error) {
 	p := &retained.Record.Params
-	if p.LaunchNonce != "" || retained.Record.PreviousRunID == "" {
+	if p.LaunchNonce != "" || retained.Record.PreviousRunID == "" || git.IsZeroSHA(p.Old) {
 		return "", false, nil
 	}
 	run, err := m.db.GetRun(retained.Record.PreviousRunID)
@@ -439,6 +439,9 @@ func (m *RunManager) reattachReceivedRun(retained *retainedPush) (string, bool, 
 		return "", true, err
 	}
 	if run == nil || run.SubmittedHeadSHA == nil || *run.SubmittedHeadSHA != p.New {
+		return "", false, nil
+	}
+	if p.Old != p.New && (p.Old == run.HeadSHA || run.LastPushedSHA != nil && p.Old == *run.LastPushedSHA) {
 		return "", false, nil
 	}
 	ids, err := m.db.PushNotificationsForRun(run.ID)
