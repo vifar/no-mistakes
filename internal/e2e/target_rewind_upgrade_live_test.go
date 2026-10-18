@@ -34,7 +34,7 @@ func TestTargetAdvanceUpgradeProvenanceJourney(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				_, err = legacy.Exec("ALTER TABLE runs DROP COLUMN retarget_attempted")
+				_, err = legacy.Exec("ALTER TABLE runs DROP COLUMN retarget_attempted; PRAGMA user_version=0")
 				closeErr := legacy.Close()
 				if err != nil || closeErr != nil {
 					t.Fatalf("prepare pre-upgrade database: %v %v", err, closeErr)
