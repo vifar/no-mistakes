@@ -96,7 +96,11 @@ func openAxiRunEnv() (*axiEnv, error) {
 }
 
 func openAxiEnvWithOptions(opts axiEnvOptions) (*axiEnv, error) {
-	p, d, err := openResources()
+	open := openReadResources
+	if opts.ensureDaemonConn {
+		open = openResources
+	}
+	p, d, err := open()
 	if err != nil {
 		return nil, err
 	}

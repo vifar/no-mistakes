@@ -26,7 +26,7 @@ func TestTestApprovalReasonMigrationAndLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.sql.Exec("ALTER TABLE step_results DROP COLUMN approval_reason"); err != nil {
+	if _, err := d.sql.Exec("ALTER TABLE step_results DROP COLUMN approval_reason; PRAGMA user_version=0"); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.Close(); err != nil {

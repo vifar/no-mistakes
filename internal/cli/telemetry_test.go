@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -109,7 +110,8 @@ func TestInitTracksCommandTelemetry(t *testing.T) {
 
 func TestStatusUninitializedRepoEmitsNoTelemetry(t *testing.T) {
 	tmpDir := t.TempDir()
-	t.Setenv("NM_HOME", t.TempDir())
+	nmHome := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
 	chdir(t, tmpDir)
 
 	recorder := &telemetryRecorder{}
@@ -122,6 +124,9 @@ func TestStatusUninitializedRepoEmitsNoTelemetry(t *testing.T) {
 
 	if got := recorder.count("command") + recorder.count("pageview"); got != 0 {
 		t.Fatalf("status emitted %d telemetry events, want 0", got)
+	}
+	if _, err := os.Stat(paths.WithRoot(nmHome).DB()); !os.IsNotExist(err) {
+		t.Fatalf("status created database: %v", err)
 	}
 }
 

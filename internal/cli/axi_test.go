@@ -1271,6 +1271,9 @@ func TestAxiAbortByRunIDNoOpWhenDaemonStopped(t *testing.T) {
 			t.Fatalf("expected %q in abort output, got:\n%s", want, got)
 		}
 	}
+	if _, err := os.Stat(paths.WithRoot(nmHome).DB()); !os.IsNotExist(err) {
+		t.Fatalf("unknown abort created database: %v", err)
+	}
 }
 
 func TestResolveRunPrefersCurrentBranchLatestRun(t *testing.T) {

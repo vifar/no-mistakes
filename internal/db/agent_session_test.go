@@ -105,7 +105,7 @@ func TestOpenMigratesRunAgentSessionsTable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := d.sql.Exec(`DROP TABLE run_agent_sessions`); err != nil {
+	if _, err := d.sql.Exec(`DROP TABLE run_agent_sessions; PRAGMA user_version=0`); err != nil {
 		t.Fatalf("drop table: %v", err)
 	}
 	if err := d.Close(); err != nil {

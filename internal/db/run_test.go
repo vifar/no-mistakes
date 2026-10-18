@@ -186,7 +186,7 @@ func TestOpenMigratesClosingIssueRefsLockedAtColumn(t *testing.T) {
 		t.Fatalf("insert run: %v", err)
 	}
 	// Simulate a pre-claim database.
-	if _, err := d.sql.Exec(`ALTER TABLE runs DROP COLUMN closing_issue_refs_locked_at`); err != nil {
+	if _, err := d.sql.Exec(`ALTER TABLE runs DROP COLUMN closing_issue_refs_locked_at; PRAGMA user_version=0`); err != nil {
 		t.Fatalf("drop column: %v", err)
 	}
 	if err := d.Close(); err != nil {

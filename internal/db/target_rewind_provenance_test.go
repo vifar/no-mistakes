@@ -33,7 +33,7 @@ func TestTargetRewindRetargetProvenanceOnUpgrade(t *testing.T) {
 				t.Fatalf("new untouched run must be eligible: %t %v", allowed, err)
 			}
 			if kind == "legacy unknown" || kind == "legacy then attempted" {
-				if _, err := d.sql.Exec(`ALTER TABLE runs DROP COLUMN retarget_attempted`); err != nil {
+				if _, err := d.sql.Exec(`ALTER TABLE runs DROP COLUMN retarget_attempted; PRAGMA user_version=0`); err != nil {
 					t.Fatal(err)
 				}
 			}

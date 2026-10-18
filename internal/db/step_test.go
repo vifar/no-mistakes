@@ -19,7 +19,7 @@ func TestAutomaticSkipReasonMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.sql.Exec("ALTER TABLE step_results DROP COLUMN skip_reason"); err != nil {
+	if _, err := d.sql.Exec("ALTER TABLE step_results DROP COLUMN skip_reason; PRAGMA user_version=0"); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.Close(); err != nil {
@@ -629,7 +629,7 @@ func TestGetStepsByRun_ReadOnlyToleratesPreActivityColumns(t *testing.T) {
 		t.Fatalf("insert step: %v", err)
 	}
 	for _, column := range []string{"last_activity_at", "last_activity", "agent_pid", "auto_fix_limit"} {
-		if _, err := d.sql.Exec(`ALTER TABLE step_results DROP COLUMN ` + column); err != nil {
+		if _, err := d.sql.Exec(`ALTER TABLE step_results DROP COLUMN ` + column + `; PRAGMA user_version=0`); err != nil {
 			t.Fatalf("drop %s: %v", column, err)
 		}
 	}
