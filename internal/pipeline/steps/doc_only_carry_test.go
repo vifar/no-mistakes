@@ -45,12 +45,13 @@ func TestIsDocOnlyPath(t *testing.T) {
 // now carries Review and Test credit onto the pushed head instead.
 func TestReviewRestartNeededForPush_DocOnlyGapCarriesValidation(t *testing.T) {
 	cases := []struct {
-		name        string
-		change      func(t *testing.T, dir string)
-		strict      bool
-		testedOther bool
-		pushCommit  bool
-		wantRestart bool
+		name         string
+		change       func(t *testing.T, dir string)
+		strict       bool
+		testedOther  bool
+		pushCommit   bool
+		unattributed bool
+		wantRestart  bool
 	}{
 		{name: "doc-only commit carries", change: writeAndCommit("docs/guide.md", "guide\n"), wantRestart: false},
 		{name: "root readme carries", change: writeAndCommit("README.md", "readme v2\n"), wantRestart: false},
@@ -60,6 +61,7 @@ func TestReviewRestartNeededForPush_DocOnlyGapCarriesValidation(t *testing.T) {
 		{name: "strict shipping restarts", change: writeAndCommit("docs/guide.md", "guide\n"), strict: true, wantRestart: true},
 		{name: "tested head elsewhere restarts", change: writeAndCommit("docs/guide.md", "guide\n"), testedOther: true, wantRestart: true},
 		{name: "push-made commit restarts", change: writeAndCommit("docs/guide.md", "guide\n"), pushCommit: true, wantRestart: true},
+		{name: "unattributed doc commit restarts", change: writeAndCommit("docs/guide.md", "guide\n"), unattributed: true, wantRestart: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -80,6 +82,9 @@ func TestReviewRestartNeededForPush_DocOnlyGapCarriesValidation(t *testing.T) {
 
 			tc.change(t, dir)
 			pushed := gitCmd(t, dir, "rev-parse", "HEAD")
+			if !tc.unattributed {
+				recordDocumentPass(t, sctx, approved, pushed)
+			}
 			if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, pushed); err != nil {
 				t.Fatal(err)
 			}
@@ -234,6 +239,7 @@ func TestReviewRestartNeededForPush_ConfiguredDocOnlyPaths(t *testing.T) {
 			recordTestedHead(t, sctx, headSHA)
 			writeAndCommit("documentation/infrastructure-cicd.md", "| row | 18 |\n")(t, dir)
 			pushed := gitCmd(t, dir, "rev-parse", "HEAD")
+			recordDocumentPass(t, sctx, headSHA, pushed)
 			if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, pushed); err != nil {
 				t.Fatal(err)
 			}
@@ -246,5 +252,16 @@ func TestReviewRestartNeededForPush_ConfiguredDocOnlyPaths(t *testing.T) {
 				t.Fatalf("restart = %v with doc_only_paths configured=%v", restart, configured)
 			}
 		})
+	}
+}
+
+func recordDocumentPass(t *testing.T, sc *pipeline.StepContext, from, to string) {
+	t.Helper()
+	id, err := sc.DB.BeginDocumentPass(sc.Run.ID, from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sc.DB.CompleteDocumentPass(id, to, 1, `{"findings":[],"summary":"documentation updated"}`); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -911,6 +911,7 @@ func (d *DB) CarryValidationOverDocOnlyCommits(runID, fromHeadSHA, toHeadSHA str
 	err = tx.QueryRow(`SELECT id, status, findings_json FROM step_results WHERE run_id = ? AND step_name = ? ORDER BY step_order, id LIMIT 1`, runID, string(types.StepTest)).Scan(&stepID, &status, &findingsJSON)
 	switch {
 	case err == sql.ErrNoRows:
+		return false, nil
 	case err != nil:
 		return false, fmt.Errorf("carry validation over doc-only commits: read test step: %w", err)
 	case status == string(types.StepStatusSkipped):
@@ -934,7 +935,16 @@ func (d *DB) CarryValidationOverDocOnlyCommits(runID, fromHeadSHA, toHeadSHA str
 			return false, err
 		}
 	}
-	result, err := tx.Exec(`UPDATE runs SET review_approved_head_sha = ?, updated_at = ? WHERE id = ? AND review_approved_head_sha = ? AND head_sha = ?`, toHeadSHA, now(), runID, fromHeadSHA, toHeadSHA)
+	// Only a completed, attributed Document pass may carry credit. Keep the
+	// historical Review/Test rounds intact and record exactly what was carried.
+	proof, err := tx.Exec(`UPDATE document_passes SET carried_review_from=? WHERE run_id=? AND from_head_sha=? AND to_head_sha=? AND commit_count>0 AND carried_review_from IS NULL`, fromHeadSHA, runID, fromHeadSHA, toHeadSHA)
+	if err != nil {
+		return false, fmt.Errorf("record Document validation carry: %w", err)
+	}
+	if rows, err := proof.RowsAffected(); err != nil || rows != 1 {
+		return false, err
+	}
+	result, err := tx.Exec(`UPDATE runs SET review_approved_head_sha = ?, updated_at = ? WHERE id = ? AND review_approved_head_sha = ? AND head_sha = ? AND shipping_options IS NULL`, toHeadSHA, now(), runID, fromHeadSHA, toHeadSHA)
 	if err != nil {
 		return false, fmt.Errorf("carry validation over doc-only commits: update review approval: %w", err)
 	}

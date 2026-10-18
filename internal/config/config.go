@@ -493,6 +493,9 @@ type RepoConfig struct {
 
 // DocumentRaw is the YAML representation of document-step settings.
 type DocumentRaw struct {
+	// MaxCommitsPerRun caps all accepted Document commits in one run,
+	// including agent-created commits. Zero disables Document commits.
+	MaxCommitsPerRun *int `yaml:"max_commits_per_run"`
 	// Instructions augment (never replace) the built-in documentation
 	// placement policy with the repository's ownership map or extra
 	// placement rules.
@@ -1068,7 +1071,8 @@ type PR struct {
 // trusted default-branch repo config and augment the built-in placement
 // policy in the document prompt.
 type Document struct {
-	Instructions string
+	MaxCommitsPerRun int
+	Instructions     string
 	// RepositoryInstructions come from the repository_overrides entry matching
 	// the repository's remote and are rendered before, never instead of,
 	// Instructions.
@@ -1076,6 +1080,16 @@ type Document struct {
 	// DocOnlyPaths are the trusted repository's documentation globs for the
 	// doc-only validation carry (see DocumentRaw.DocOnlyPaths).
 	DocOnlyPaths []string
+}
+
+const DefaultDocumentMaxCommitsPerRun = 2
+
+func resolveDocument(raw DocumentRaw) Document {
+	limit := DefaultDocumentMaxCommitsPerRun
+	if raw.MaxCommitsPerRun != nil {
+		limit = *raw.MaxCommitsPerRun
+	}
+	return Document{Instructions: strings.TrimSpace(raw.Instructions), DocOnlyPaths: trimmedPatterns(raw.DocOnlyPaths), MaxCommitsPerRun: limit}
 }
 
 // Review is the resolved review-step config. Conversation and PathInstructions
@@ -3105,6 +3119,9 @@ func parseRepoConfig(data []byte) (*RepoConfig, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
+	if cfg.Document.MaxCommitsPerRun != nil && *cfg.Document.MaxCommitsPerRun < 0 {
+		return nil, fmt.Errorf("document.max_commits_per_run must not be negative")
+	}
 	if err := validateCommitRaw(cfg.Commit); err != nil {
 		return nil, fmt.Errorf("parse repo config: %w", err)
 	}
@@ -4102,7 +4119,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		Commit:           commit,
 		Intent:           intent,
 		Test:             test,
-		Document:         Document{Instructions: strings.TrimSpace(repo.Document.Instructions), DocOnlyPaths: trimmedPatterns(repo.Document.DocOnlyPaths)},
+		Document:         resolveDocument(repo.Document),
 		// repo is the EffectiveRepoConfig result, so both repository values are
 		// already trusted-only. The operator's path instructions are added as
 		// separate sources rather than overlaid: they can only add rules, never

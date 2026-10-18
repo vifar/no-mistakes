@@ -352,7 +352,7 @@ func TestPipeline_DocumentPlusLintIsOneAgentInvocation(t *testing.T) {
 		},
 	}
 
-	cfg := &config.Config{Agent: types.AgentClaude}
+	cfg := &config.Config{Agent: types.AgentClaude, Document: config.Document{MaxCommitsPerRun: config.DefaultDocumentMaxCommitsPerRun}}
 	exec := pipeline.NewExecutor(database, paths.WithRoot(t.TempDir()), cfg, ag, []pipeline.Step{&DocumentStep{}, &LintStep{}}, nil)
 	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
 		t.Fatalf("execute: %v", err)

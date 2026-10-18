@@ -353,15 +353,18 @@ func TestDocumentStep_NoChanges_SkipsAgent(t *testing.T) {
 	sctx := newTestContext(t, ag, dir, baseSHA, baseSHA, config.Commands{})
 
 	step := &DocumentStep{}
-	outcome, err := step.Execute(sctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if callCount != 0 {
-		t.Fatalf("expected no agent call when nothing changed, got %d", callCount)
-	}
-	if outcome.NeedsApproval || outcome.AutoFixable {
-		t.Error("expected a clean no-op outcome when nothing changed")
+	for _, limit := range []int{0, config.DefaultDocumentMaxCommitsPerRun} {
+		sctx.Config.Document.MaxCommitsPerRun = limit
+		outcome, err := step.Execute(sctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if callCount != 0 {
+			t.Fatalf("expected no agent call when nothing changed, got %d", callCount)
+		}
+		if outcome.NeedsApproval || outcome.AutoFixable {
+			t.Errorf("limit %d: expected a clean no-op outcome when nothing changed", limit)
+		}
 	}
 }
 

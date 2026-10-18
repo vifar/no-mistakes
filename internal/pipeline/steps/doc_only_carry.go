@@ -14,7 +14,7 @@ var docOnlyExtensions = map[string]bool{".md": true, ".mdx": true, ".markdown": 
 
 // agentInstructionNames are prose files that steer agents or tools, so editing
 // them can change pipeline behavior; they are never documentation here.
-var agentInstructionNames = map[string]bool{"agents.md": true, "agent.md": true, "claude.md": true, "gemini.md": true, "skill.md": true}
+var agentInstructionNames = map[string]bool{"agents.md": true, "agents.override.md": true, "agent.md": true, "claude.md": true, "claude.local.md": true, "gemini.md": true, "skill.md": true, "rules.md": true, "qwen.md": true, "copilot-instructions.md": true, "instructions.md": true, "prompt.md": true}
 
 // isDocOnlyPath applies the built-in documentation rule.
 func isDocOnlyPath(p string) bool { return isDocOnlyPathFor(p, nil) }
@@ -26,16 +26,28 @@ func isDocOnlyPath(p string) bool { return isDocOnlyPathFor(p, nil) }
 // documentation; without them only prose at the repository root or under
 // docs/ counts. Everything else fails closed.
 func isDocOnlyPathFor(p string, configured []string) bool {
-	p = strings.TrimPrefix(path.Clean(p), "./")
+	if p == "" || strings.TrimSpace(p) != p || path.IsAbs(p) || path.Clean(p) != p || strings.ContainsAny(p, ":\\\x00\r\n\t") {
+		return false
+	}
 	if agentInstructionNames[strings.ToLower(path.Base(p))] {
 		return false
 	}
 	segments := strings.Split(p, "/")
 	for _, segment := range segments {
 		lower := strings.ToLower(segment)
-		if strings.HasPrefix(segment, ".") || lower == "skills" || lower == "prompts" {
+		if strings.HasPrefix(segment, ".") || lower == "skills" || lower == "skill" || lower == "prompts" || lower == "prompt" {
 			return false
 		}
+	}
+	ext := strings.ToLower(path.Ext(p))
+	stem := strings.ToLower(strings.TrimSuffix(path.Base(p), path.Ext(p)))
+	if strings.Contains(stem, "prompt") || strings.HasSuffix(stem, "-instructions") || strings.HasSuffix(stem, "_instructions") {
+		return false
+	}
+	// A trusted glob selects locations, not arbitrary file types. In
+	// particular YAML/configuration and code remain excluded under "**".
+	if !docOnlyExtensions[ext] && !(len(configured) > 0 && ext == ".html") {
+		return false
 	}
 	if len(configured) > 0 {
 		for _, pattern := range configured {
@@ -45,35 +57,53 @@ func isDocOnlyPathFor(p string, configured []string) bool {
 		}
 		return false
 	}
-	if !docOnlyExtensions[strings.ToLower(path.Ext(p))] {
-		return false
-	}
 	return len(segments) == 1 || segments[0] == "docs"
 }
 
 // docOnlyRange reports whether from..to is a descendant range whose diff
-// touches only documentation paths. Renames are split into a deletion and an
-// addition so both sides are classified.
+// touches only regular, non-executable documentation files in EVERY commit.
+// Inspecting only the net diff would hide code changes subsequently reverted.
 func docOnlyRange(sctx *pipeline.StepContext, from, to string) (bool, error) {
 	if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", from, to); err != nil {
 		return false, nil
 	}
-	out, err := stepGitRun(sctx, "diff", "--name-only", "--no-renames", "-z", from, to)
+	out, err := stepGitRun(sctx, "rev-list", "--first-parent", "--parents", to, "^"+from)
 	if err != nil {
-		return false, fmt.Errorf("list doc-only carry paths: %w", err)
+		return false, fmt.Errorf("list doc-only carry commits: %w", err)
 	}
-	paths := strings.Split(strings.TrimRight(out, "\x00"), "\x00")
-	if len(paths) == 0 || paths[0] == "" {
+	if out == "" {
 		return false, nil
 	}
 	var configured []string
 	if sctx.Config != nil {
 		configured = sctx.Config.Document.DocOnlyPaths
 	}
-	for _, p := range paths {
-		if !isDocOnlyPathFor(p, configured) {
+	current := to
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		edge := strings.Fields(line)
+		if len(edge) != 2 || edge[0] != current {
+			return false, nil // merges and ambiguous ancestry never carry
+		}
+		diff, err := stepGitRun(sctx, "diff", "--raw", "--no-abbrev", "--no-renames", "-z", edge[1], edge[0])
+		if err != nil {
+			return false, fmt.Errorf("inspect doc-only commit: %w", err)
+		}
+		records := strings.Split(strings.TrimSuffix(diff, "\x00"), "\x00")
+		if diff == "" || len(records)%2 != 0 {
 			return false, nil
 		}
+		for i := 0; i < len(records); i += 2 {
+			header := strings.Fields(records[i])
+			if len(header) != 5 || (header[0] != ":100644" && header[0] != ":000000") ||
+				(header[1] != "100644" && header[1] != "000000") ||
+				(header[4] != "A" && header[4] != "M" && header[4] != "D") || !isDocOnlyPathFor(records[i+1], configured) {
+				return false, nil
+			}
+		}
+		current = edge[1]
+	}
+	if current != from {
+		return false, nil
 	}
 	return true, nil
 }

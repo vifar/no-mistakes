@@ -8,7 +8,7 @@ Per-repo configuration lives in `.no-mistakes.yaml` at the root of your reposito
 :::caution[Security: gate-control fields are read from the default branch]
 `commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor` and `devin`, and `acp:` targets) with the maintainer's credentials.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
-The daemon also reads `document.instructions`, `document.doc_only_paths`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `staging_exclude`, `max_file_size_bytes`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `ci.required_checks`, `ci.must_pass`, `ci.external_checks`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `rebase.strategy`, `rebase.max_target_advance_rewinds`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
+The daemon also reads `document.instructions`, `document.doc_only_paths`, `document.max_commits_per_run`, `review.conversation`, `review.path_instructions`, `gates`, `auto_fix.gates`, `protected_paths`, `staging_exclude`, `max_file_size_bytes`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `ci.review_bot_comments`, `ci.required_checks`, `ci.must_pass`, `ci.external_checks`, `ci.rebase_behind`, `ci.carry_review_on_replay`, `rebase.strategy`, `rebase.max_target_advance_rewinds`, `test.prepare`, `test.base_attribution`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, `pr.publish_intent`, and `pr.appendix` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
 If the default branch cannot be fetched and resolved to a readable commit, or its present `.no-mistakes.yaml` cannot be read and parsed, the run aborts before launching an agent.
 A readable default-branch tree with no `.no-mistakes.yaml` is valid and uses defaults.
@@ -36,6 +36,7 @@ ignore_patterns:
 
 # Optional documentation ownership policy, read only from the trusted default branch.
 document:
+  max_commits_per_run: 2  # 0 disables Document commits
   instructions: |
     docs/ owns detailed product guidance; README.md owns the introduction.
   # Paths whose commits carry Review and Test credit instead of restarting them.
@@ -439,11 +440,21 @@ An operator can add their own policy for this repository through a machine-local
 
 Globs naming this repository's documentation, in the same syntax as `ignore_patterns` (`documentation/**`, `docs/**/*.html`, `*.md`).
 
-When every path changed between the review-approved head and the head being pushed is documentation, Push carries the Review approval and the Test result onto the pushed head instead of restarting Review. A Document step commit therefore no longer sends the run back through Review and Test.
+When a Document pass changes only documentation, the pipeline records a carry of the Review approval and Test result to its new head. Review and Test do not restart, and their historical rounds and review generation stay unchanged. The actual Git diff of every commit must pass the rule; agent claims and `ignore_patterns` do not grant credit. Push can recover a carry only for a recorded, completed Document pass.
 
-Unset, only prose files (`.md`, `.mdx`, `.markdown`, `.rst`, `.adoc`) at the repository root or under `docs/` count. Whichever rule applies, hidden paths, agent instruction files (`AGENTS.md`, `AGENT.md`, `CLAUDE.md`, `GEMINI.md`, `SKILL.md`), and anything under a `skills/` or `prompts/` directory never count, and any other path keeps the restart. Strict shipping never carries.
+Unset, only prose files (`.md`, `.mdx`, `.markdown`, `.rst`, `.adoc`) at the repository root or under `docs/` count. Configured globs replace those locations and also permit `.html`; they cannot admit code, YAML, or other file types.
+
+The following exclusions always win: hidden path segments; `skill`, `skills`, `prompt`, or `prompts` directories; instruction filenames (`AGENTS.md`, `AGENTS.override.md`, `AGENT.md`, `CLAUDE.md`, `CLAUDE.local.md`, `GEMINI.md`, `SKILL.md`, `RULES.md`, `QWEN.md`, `copilot-instructions.md`, `instructions.md`, `prompt.md`); filename stems containing `prompt` or ending in `-instructions` or `_instructions`; and absolute, unclean, or ambiguous paths. Instruction names and directory exclusions ignore case. Both old and new file modes must be regular, non-executable files or absent. Symlinks, submodules, merges, and unknown changes fail closed. Renames are checked as deletion plus addition, so moving or deleting code cannot carry. Intermediate changes count even when a later commit reverts them. Strict shipping never carries.
 
 This field decides which commits skip revalidation, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`: a pushed branch cannot widen it for its own run.
+
+### document.max_commits_per_run
+
+Maximum accepted Document commits in one run, including commits the agent creates itself. Default: `2`. Values must be non-negative; `0` disables Document commits. This field is read only from the trusted default branch, even when `allow_repo_commands` is enabled.
+
+The budget survives step restarts. After a committed pass reports no remaining documentation gap, another pass at that head finishes without invoking the agent. A later proposal is discarded when it touches only files from the previous Document commit or reports no remaining documentation gap. A proposal that exceeds the remaining budget is also discarded. Unresolved findings remain visible for an owner decision; discarded edits never count as fixes. Skipped or discarded combined housekeeping work leaves lint to its own pass.
+
+Document requires a clean starting worktree so it can discard only its own proposal, including agent-created commits. An interrupted pass with uncertain state fails closed rather than receiving a fresh budget; start a new run after resolving that state.
 
 ### review.conversation
 

@@ -111,6 +111,18 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if combinedLint {
 		sctx.Shared.ClearHousekeepingLint()
 	}
+	history, err := readDocumentHistory(sctx)
+	if err != nil {
+		return nil, err
+	}
+	previous, err := previousDocumentFindings(history)
+	if err != nil {
+		return nil, err
+	}
+	if history.last != nil && *history.last.ToHeadSHA == sctx.Run.HeadSHA && len(previous.Items) == 0 {
+		return stoppedDocumentOutcome(sctx, previous, "Document already committed and reported no remaining documentation gap"), nil
+	}
+	limit := sctx.Config.Document.MaxCommitsPerRun
 
 	// Skip entirely when nothing the agent would document has changed. No
 	// lint result is stashed, so the lint step falls back to its own pass -
@@ -122,6 +134,9 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if !hasNonIgnoredDocumentChanges(changedFiles, sctx.Config.IgnorePatterns) {
 		sctx.Log("no changes to document")
 		return &pipeline.StepOutcome{}, nil
+	}
+	if history.commits >= limit {
+		return stoppedDocumentOutcome(sctx, documentCapFinding(previous), "Document commit limit reached; stopping further commits"), nil
 	}
 
 	if combinedLint {
@@ -138,20 +153,98 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		purpose = "housekeeping"
 	}
 
-	// The head before the agent runs. The agent may commit its own edits;
-	// capture it so the correction wrapper and change detection both work.
+	// Own only this invocation's changes, including commits the agent makes
+	// despite the prompt. The clean start makes rejected proposals reversible.
 	headBefore := sctx.Run.HeadSHA
-	result, err := runPipelineCorrectionAgent(sctx, func() (*agent.Result, error) {
-		return sctx.RunAgentContext(ctx, agent.RunOpts{
-			Prompt:     prompt,
-			CWD:        sctx.WorkDir,
-			JSONSchema: schema,
-			OnChunk:    sctx.LogChunk,
-			Purpose:    purpose,
-		})
+	status, err := stepGitRun(sctx, "status", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	if status != "" {
+		return nil, fmt.Errorf("Document requires a clean worktree so convergence can safely discard only its own edits")
+	}
+	observed, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	if observed != headBefore {
+		return nil, fmt.Errorf("Document starting head does not match the recorded pipeline head")
+	}
+	passID, err := sctx.DB.BeginDocumentPass(sctx.Run.ID, headBefore)
+	if err != nil {
+		return nil, err
+	}
+	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
+		Prompt:     prompt,
+		CWD:        sctx.WorkDir,
+		JSONSchema: schema,
+		OnChunk:    sctx.LogChunk,
+		Purpose:    purpose,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("agent document: %w", err)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("agent document returned no result")
+	}
+	paths, untracked, err := documentCandidatePaths(sctx, headBefore)
+	if err != nil {
+		return nil, err
+	}
+	agentHead, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	agentCommits, err := documentCommitCount(sctx, headBefore, agentHead)
+	if err != nil {
+		return nil, err
+	}
+	// Parse before committing only to decide whether a later proposal has
+	// converged. The normal validation below still fails opaque output closed.
+	var proposed Findings
+	proposedErr := validateDocumentAnalyzerFindings(result.Output, &proposed, len(paths) > 0 || agentCommits > 0)
+	proposedDocs := proposed
+	if combinedLint {
+		proposedDocs, _ = splitHousekeepingFindings(proposed)
+	}
+	repeated, err := documentReeditsPreviousFiles(sctx, history.last, paths)
+	if err != nil {
+		return nil, err
+	}
+	needsCommit, err := stepGitRun(sctx, "status", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	prospectiveCommits := agentCommits
+	if needsCommit != "" {
+		prospectiveCommits++
+	}
+	capExceeded := prospectiveCommits > limit-history.commits
+	suppressed := capExceeded || (history.last != nil && (repeated || (proposedErr == nil && len(proposedDocs.Items) == 0)))
+	if suppressed {
+		if err := discardDocumentCandidate(sctx, headBefore, untracked); err != nil {
+			return nil, err
+		}
+		if proposedErr != nil {
+			return nil, fmt.Errorf("validate document analyzer findings: %w", proposedErr)
+		}
+		// Discarded fixes cannot certify their own gaps as resolved. Retain
+		// the previous unresolved observations if this proposal cleared them.
+		if len(proposedDocs.Items) == 0 {
+			proposedDocs = previous
+		}
+		if capExceeded {
+			proposedDocs = documentCapFinding(proposedDocs)
+		}
+		raw, _ := json.Marshal(proposedDocs)
+		if err := sctx.DB.CompleteDocumentPass(passID, headBefore, 0, string(raw)); err != nil {
+			return nil, err
+		}
+		return stoppedDocumentOutcome(sctx, proposedDocs, "Document converged; discarded the repeated or over-budget proposal without another commit"), nil
+	}
+	// Attribute agent-created commits only after convergence accepts them.
+	if err := recordPipelineHeadRange(sctx, headBefore, agentHead); err != nil {
+		return nil, err
 	}
 
 	// Commit whatever the agent edited, regardless of how trustworthy its
@@ -196,6 +289,16 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	findingsJSON, _ := json.Marshal(docFindings)
 
 	sctx.Log(fmt.Sprintf("document findings: %d unresolved items", len(docFindings.Items)))
+	commitCount, err := documentCommitCount(sctx, headBefore, sctx.Run.HeadSHA)
+	if err != nil {
+		return nil, err
+	}
+	if err := sctx.DB.CompleteDocumentPass(passID, sctx.Run.HeadSHA, commitCount, string(findingsJSON)); err != nil {
+		return nil, err
+	}
+	if err := carryDocumentValidation(sctx, headBefore, sctx.Run.HeadSHA); err != nil {
+		return nil, err
+	}
 
 	return &pipeline.StepOutcome{
 		NeedsApproval: needsApproval,
@@ -273,6 +376,7 @@ Task:
 
 Rules:
 %s
+- Leave edits uncommitted; the pipeline checks convergence and creates any allowed commit.
 - The summary must be one concise sentence fragment suitable for a git commit subject.
 - Keep the summary under 10 words.%s`,
 		intro,
@@ -342,8 +446,8 @@ func lintDutySection(combinedLint bool) string {
 // gate (any documentation finding parks; lint parks only on error/warning) -
 // so miscategorization fails safe.
 func splitHousekeepingFindings(findings Findings) (doc Findings, lint Findings) {
-	doc = Findings{Summary: findings.Summary}
-	lint = Findings{Summary: findings.Summary}
+	doc = Findings{Items: []Finding{}, Summary: findings.Summary}
+	lint = Findings{Items: []Finding{}, Summary: findings.Summary}
 	for _, item := range findings.Items {
 		if item.Category == types.FindingCategoryLint {
 			lint.Items = append(lint.Items, item)
