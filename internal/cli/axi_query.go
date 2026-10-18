@@ -71,6 +71,9 @@ func runAxiAwaitingStatus(cmd *cobra.Command) error {
 			continue
 		}
 		fields := []toon.Field{{Key: "id", Value: rv.ID}, {Key: "branch", Value: rv.Branch}, {Key: "owner", Value: rv.Owner}, {Key: "ownerless", Value: rv.Owner == ""}}
+		if warning := ownerPolicyWarning(rv.Owner, env.cfg); warning != "" {
+			fields = append(fields, toon.Field{Key: "owner_policy_warning", Value: warning})
+		}
 		fields = append(fields, awaitingPersonFields(rv)...)
 		fields = append(fields, toon.Field{Key: "inspect", Value: "no-mistakes axi status --run " + rv.ID})
 		rows = append(rows, toon.NewObject(fields...))
@@ -194,6 +197,7 @@ func annotateRunView(env *axiEnv, rv *runView) {
 	if env == nil || rv == nil {
 		return
 	}
+	rv.OwnerPolicyWarning = ownerPolicyWarning(rv.Owner, env.cfg)
 	if live := fetchRunScheduling(env.p, rv.ID); live != nil {
 		rv.QueuePosition, rv.QueueTotal, rv.WaitingForSlot = live.QueuePosition, live.QueueTotal, live.WaitingForSlot
 	}

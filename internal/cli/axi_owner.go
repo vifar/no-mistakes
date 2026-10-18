@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
@@ -69,4 +70,11 @@ func probeLaunchOwner(client *ipc.Client, owner string) error {
 		return fmt.Errorf("daemon did not confirm launch ownership support")
 	}
 	return nil
+}
+
+func ownerPolicyWarning(owner string, cfg *config.GlobalConfig) string {
+	if owner != "" || cfg == nil || !cfg.Intent.RequireOwner {
+		return ""
+	}
+	return "Ownerless run. Current require_owner policy: enforced on AXI launches; TUI and direct push are warned, not refused, until #82"
 }

@@ -2039,7 +2039,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", err
 	}
 	if owner == "" {
-		if globalCfg != nil && globalCfg.Intent.RequireOwner {
+		if globalCfg != nil && globalCfg.Intent.RequireOwner && trigger != "push" {
 			return "", fmt.Errorf("launch requires an owner: pass --owner or NO_MISTAKES_OWNER")
 		}
 		slog.Warn("launch has no owner; nobody is recorded to drive approval gates", "repo_id", repo.ID, "branch", branch)
@@ -2202,6 +2202,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		m.failRunSetup(ctx, run.ID, false, fmt.Sprintf("queue run: %s", err))
 		trackStartFailure("queue_run")
 		return "", fmt.Errorf("queue run: %w", err)
+	}
+	if owner == "" && trigger == "push" && globalCfg.Intent.RequireOwner {
+		slog.Warn("require_owner not enforced for post-receive (TUI/direct push): no pre-receive check (follow-up #82)",
+			"event", "launch_owner_policy_bypassed", "run_id", run.ID, "repo_id", repo.ID, "branch", branch,
+			"caller_path", "post-receive (TUI/direct push)", "ownerless_admitted", true)
 	}
 	if slot == nil {
 		telemetry.Track("run", telemetry.Fields{
