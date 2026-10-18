@@ -43,7 +43,7 @@ func previousDocumentFindings(history documentHistory) (Findings, error) {
 		if history.latest.FindingsJSON == nil {
 			return findings, fmt.Errorf("completed Document pass has no findings record")
 		}
-		if err := validateDocumentAnalyzerFindings([]byte(*history.latest.FindingsJSON), &findings, true); err != nil {
+		if err := validateDocumentAnalyzerFindings([]byte(*history.latest.FindingsJSON), &findings, history.latest.CommitCount > 0); err != nil {
 			return findings, fmt.Errorf("read previous Document findings: %w", err)
 		}
 	}

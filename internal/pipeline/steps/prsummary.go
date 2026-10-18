@@ -249,6 +249,9 @@ func attestedLiveValidation(steps []*db.StepResult, rounds map[string][]*db.Step
 		if sr == nil || sr.StepName != types.StepTest {
 			continue
 		}
+		if rounds != nil {
+			sr = testStepWithRoundEvidence(sr, rounds[sr.ID])
+		}
 		for _, raw := range testingEvidenceFindingsJSON(sr, rounds[sr.ID]) {
 			if raw == nil || strings.TrimSpace(*raw) == "" {
 				continue
@@ -267,6 +270,16 @@ func attestedLiveValidation(steps []*db.StepResult, rounds map[string][]*db.Step
 		return nil
 	}
 	return nil
+}
+
+func testStepWithRoundEvidence(sr *db.StepResult, rounds []*db.StepRound) *db.StepResult {
+	copy := *sr
+	copy.FindingsJSON = nil
+	for _, raw := range testingEvidenceFindingsJSON(&copy, rounds) {
+		copy.FindingsJSON = raw
+		break
+	}
+	return &copy
 }
 
 // rebindPipelineAttestationHead rewrites the first live v1 attestation

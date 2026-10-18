@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -995,7 +996,17 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 		}
 		return nil
 	}
-	if err := restampPRAttestationWithSteps(sctx.Ctx, host, pr, headSHA, steps, sctx.Log, attestationPolicyFrom(sctx), func() error {
+	attestationSteps := slices.Clone(steps)
+	for i, sr := range attestationSteps {
+		if sr != nil && sr.StepName == types.StepTest {
+			rounds, err := sctx.DB.GetRoundsByStep(sr.ID)
+			if err != nil {
+				return fmt.Errorf("%w: read Test rounds: %w", errAttestationWriteFailed, err)
+			}
+			attestationSteps[i] = testStepWithRoundEvidence(sr, rounds)
+		}
+	}
+	if err := restampPRAttestationWithSteps(sctx.Ctx, host, pr, headSHA, attestationSteps, sctx.Log, attestationPolicyFrom(sctx), func() error {
 		return verifyPRMutationComparison(sctx, host, pr, headSHA, true)
 	}); err != nil {
 		return fmt.Errorf("%w: %w", errAttestationWriteFailed, err)
