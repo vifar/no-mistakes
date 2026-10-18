@@ -1,10 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -100,7 +102,7 @@ func (d *DB) RecordPipelineCommitHead(runID, parentSHA, headSHA string) error {
 	if !validGitSHA(parentSHA) || !validGitSHA(headSHA) || parentSHA == headSHA {
 		return fmt.Errorf("invalid pipeline commit head proof")
 	}
-	_, err := d.sql.Exec(`INSERT INTO pipeline_commit_heads (run_id, head_sha, parent_sha) VALUES (?, ?, ?)`, runID, headSHA, parentSHA)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "RecordPipelineCommitHead", `INSERT INTO pipeline_commit_heads (run_id, head_sha, parent_sha) VALUES (?, ?, ?)`, runID, headSHA, parentSHA)
 	return err
 }
 

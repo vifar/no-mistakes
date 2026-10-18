@@ -1,8 +1,11 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
 
 // RunMediaAttachment is a GitHub user-attachment uploaded for one run's local
@@ -33,7 +36,7 @@ func (d *DB) GetRunMediaAttachment(runID, path, digest string) (RunMediaAttachme
 // of path. A changed file at the same path replaces the stale cache entry.
 func (d *DB) UpsertRunMediaAttachment(runID string, attachment RunMediaAttachment) error {
 	ts := now()
-	_, err := d.sql.Exec(`
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpsertRunMediaAttachment", `
 		INSERT INTO run_media_attachments (run_id, path, digest, url, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(run_id, path) DO UPDATE SET

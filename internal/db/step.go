@@ -1,10 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -98,7 +100,7 @@ func (d *DB) InsertStepResult(runID string, stepName types.StepName) (*StepResul
 		StepOrder: stepName.Order(),
 		Status:    types.StepStatusPending,
 	}
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "InsertStepResult",
 		`INSERT INTO step_results (id, run_id, step_name, step_order, status) VALUES (?, ?, ?, ?, ?)`,
 		s.ID, s.RunID, s.StepName, s.StepOrder, s.Status,
 	)
@@ -155,14 +157,14 @@ func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
 
 func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 	if stepOrder <= types.StepReview.Order() {
-		if _, err := d.sql.Exec(`UPDATE review_comparisons SET approved=0 WHERE run_id=?`, runID); err != nil {
+		if _, err := sqlitewrite.Exec(context.Background(), d.sql, "ResetStepsFrom", `UPDATE review_comparisons SET approved=0 WHERE run_id=?`, runID); err != nil {
 			return err
 		}
-		if _, err := d.sql.Exec(`UPDATE runs SET ci_ready_at=NULL,ci_ready_no_ci=0 WHERE id=? AND shipping_options IS NOT NULL`, runID); err != nil {
+		if _, err := sqlitewrite.Exec(context.Background(), d.sql, "ResetStepsFrom", `UPDATE runs SET ci_ready_at=NULL,ci_ready_no_ci=0 WHERE id=? AND shipping_options IS NOT NULL`, runID); err != nil {
 			return err
 		}
 	}
-	_, err := d.sql.Exec(`
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "ResetStepsFrom", `
 		UPDATE step_results
 		SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL,
 			findings_json = NULL, error = NULL, started_at = NULL,
@@ -177,7 +179,7 @@ func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 
 // UpdateStepStatus updates a step's status.
 func (d *DB) UpdateStepStatus(id string, status types.StepStatus) error {
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`, status, now(), fmt.Sprintf("status: %s", status), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateStepStatus", `UPDATE step_results SET status = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`, status, now(), fmt.Sprintf("status: %s", status), id)
 	if err != nil {
 		return fmt.Errorf("update step status: %w", err)
 	}
@@ -186,7 +188,7 @@ func (d *DB) UpdateStepStatus(id string, status types.StepStatus) error {
 
 // UpdateStepStatusWithDuration updates a step's status and execution duration together.
 func (d *DB) UpdateStepStatusWithDuration(id string, status types.StepStatus, durationMS int64) error {
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, duration_ms = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`, status, durationMS, now(), fmt.Sprintf("status: %s", status), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateStepStatusWithDuration", `UPDATE step_results SET status = ?, duration_ms = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`, status, durationMS, now(), fmt.Sprintf("status: %s", status), id)
 	if err != nil {
 		return fmt.Errorf("update step status with duration: %w", err)
 	}
@@ -197,18 +199,24 @@ func (d *DB) UpdateStepStatusWithDuration(id string, status types.StepStatus, du
 // Executors supply their exact recorded round ID; omitted round IDs select the
 // latest durable round for callers restoring an already-recorded gate.
 func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, exitCode int, durationMS int64, findingsJSON *string, roundID ...string) error {
+	return sqlitewrite.Do(context.Background(), "ParkStepForApproval", func(writeCtx context.Context) error {
+		return d.parkStepForApprovalWriteAttempt(writeCtx, runID, stepID, status, exitCode, durationMS, findingsJSON, roundID...)
+	})
+}
+
+func (d *DB) parkStepForApprovalWriteAttempt(writeCtx context.Context, runID, stepID string, status types.StepStatus, exitCode int, durationMS int64, findingsJSON *string, roundID ...string) error {
 	var parkedRound any
 	if len(roundID) > 0 {
 		parkedRound = roundID[0]
 	}
-	tx, err := d.sql.Begin()
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return fmt.Errorf("begin approval park: %w", err)
 	}
 	defer tx.Rollback()
 
 	ts := now()
-	stepResult, err := tx.Exec(
+	stepResult, err := tx.ExecContext(writeCtx,
 		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, findings_json = ?, pending_response = NULL, gate_nonce = ?, gate_round_id = COALESCE(?, (SELECT id FROM step_rounds WHERE step_result_id = ? ORDER BY round DESC LIMIT 1)), last_activity_at = ?, last_activity = ? WHERE id = ?`,
 		status, exitCode, durationMS, findingsJSON, newID(), parkedRound, stepID, ts, fmt.Sprintf("status: %s", status), stepID,
 	)
@@ -222,7 +230,7 @@ func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, 
 	if changed != 1 {
 		return fmt.Errorf("park step for approval: updated %d rows", changed)
 	}
-	runResult, err := tx.Exec(
+	runResult, err := tx.ExecContext(writeCtx,
 		`UPDATE runs SET awaiting_agent_since = ?, updated_at = ? WHERE id = ?`,
 		ts, ts, runID,
 	)
@@ -250,7 +258,7 @@ func (d *DB) SetStepPendingResponse(stepID, response, activity string, gate type
 	if !gate.SameGate(gate) {
 		return d.gateSupersededError(stepID)
 	}
-	result, err := d.sql.Exec(`UPDATE step_results SET pending_response = ?, last_activity_at = ?, last_activity = ? WHERE id = ? AND status IN (?, ?) AND (gate_nonce = ? AND gate_round_id = ? AND run_id = ? AND step_name = ? AND id = ? AND pending_response IS NULL)`,
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "SetStepPendingResponse", `UPDATE step_results SET pending_response = ?, last_activity_at = ?, last_activity = ? WHERE id = ? AND status IN (?, ?) AND (gate_nonce = ? AND gate_round_id = ? AND run_id = ? AND step_name = ? AND id = ? AND pending_response IS NULL)`,
 		response, now(), activity, stepID, types.StepStatusAwaitingApproval, types.StepStatusFixReview, gate.Nonce, gate.RoundID, gate.RunID, gate.Step, gate.StepResultID)
 	if err != nil {
 		return fmt.Errorf("record pending gate response: %w", err)
@@ -267,15 +275,21 @@ func (d *DB) SetStepPendingResponse(stepID, response, activity string, gate type
 // dispatched, clearing any pending response and the run's awaiting-agent marker
 // in one transaction.
 func (d *DB) ResumeStepFromApproval(runID, stepID, activity string, parkedMS int64, gate types.GateIdentity) error {
+	return sqlitewrite.Do(context.Background(), "ResumeStepFromApproval", func(writeCtx context.Context) error {
+		return d.resumeStepFromApprovalWriteAttempt(writeCtx, runID, stepID, activity, parkedMS, gate)
+	})
+}
+
+func (d *DB) resumeStepFromApprovalWriteAttempt(writeCtx context.Context, runID, stepID, activity string, parkedMS int64, gate types.GateIdentity) error {
 	if !gate.SameGate(gate) {
 		return d.gateSupersededError(stepID)
 	}
-	tx, err := d.sql.Begin()
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE step_results SET status = ?, pending_response = NULL, last_activity_at = ?, last_activity = ? WHERE id = ? AND run_id = ? AND (gate_nonce = ? AND gate_round_id = ? AND run_id = ? AND step_name = ? AND id = ? AND status IN (?, ?))`, types.StepStatusRunning, now(), activity, stepID, runID, gate.Nonce, gate.RoundID, gate.RunID, gate.Step, gate.StepResultID, types.StepStatusAwaitingApproval, types.StepStatusFixReview)
+	result, err := tx.ExecContext(writeCtx, `UPDATE step_results SET status = ?, pending_response = NULL, last_activity_at = ?, last_activity = ? WHERE id = ? AND run_id = ? AND (gate_nonce = ? AND gate_round_id = ? AND run_id = ? AND step_name = ? AND id = ? AND status IN (?, ?))`, types.StepStatusRunning, now(), activity, stepID, runID, gate.Nonce, gate.RoundID, gate.RunID, gate.Step, gate.StepResultID, types.StepStatusAwaitingApproval, types.StepStatusFixReview)
 	if err != nil {
 		return err
 	}
@@ -288,7 +302,7 @@ func (d *DB) ResumeStepFromApproval(runID, stepID, activity string, parkedMS int
 	if parkedMS < 0 {
 		parkedMS = 0
 	}
-	if _, err := tx.Exec(`UPDATE runs SET awaiting_agent_since = NULL,
+	if _, err := tx.ExecContext(writeCtx, `UPDATE runs SET awaiting_agent_since = NULL,
 		parked_ms = COALESCE(parked_ms, 0) + CASE WHEN awaiting_agent_since IS NOT NULL THEN ? ELSE 0 END,
 		updated_at = ? WHERE id = ?`, parkedMS, now(), runID); err != nil {
 		return err
@@ -305,7 +319,7 @@ func (d *DB) StartStep(id string) error {
 // auto-fix limit that status surfaces use while the step is active.
 func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, started_at = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, auto_fix_limit = ? WHERE id = ?`, types.StepStatusRunning, ts, ts, ts, "step started", autoFixLimitDBValue(autoFixLimit), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "StartStepWithAutoFixLimit", `UPDATE step_results SET status = ?, started_at = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, auto_fix_limit = ? WHERE id = ?`, types.StepStatusRunning, ts, ts, ts, "step started", autoFixLimitDBValue(autoFixLimit), id)
 	if err != nil {
 		return fmt.Errorf("start step: %w", err)
 	}
@@ -318,7 +332,7 @@ func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
 // one recorded by an earlier execution.
 func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = ?, override_reason = NULL, approval_reason = NULL, accepted_gaps_json = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimitDBValue(autoFixLimit), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "StartStepFixRound", `UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = ?, override_reason = NULL, approval_reason = NULL, accepted_gaps_json = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimitDBValue(autoFixLimit), id)
 	if err != nil {
 		return fmt.Errorf("start step fix round: %w", err)
 	}
@@ -326,7 +340,7 @@ func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
 }
 
 func (d *DB) SetStepAutoFixLimit(id string, autoFixLimit int) error {
-	if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = ? WHERE id = ?`, autoFixLimitDBValue(autoFixLimit), id); err != nil {
+	if _, err := sqlitewrite.Exec(context.Background(), d.sql, "SetStepAutoFixLimit", `UPDATE step_results SET auto_fix_limit = ? WHERE id = ?`, autoFixLimitDBValue(autoFixLimit), id); err != nil {
 		return fmt.Errorf("set step auto-fix limit: %w", err)
 	}
 	return nil
@@ -343,7 +357,7 @@ func (d *DB) SetStepOverrideReason(id string, reason string) error {
 	if reason == "" {
 		return fmt.Errorf("set step override reason: reason must not be empty")
 	}
-	if _, err := d.sql.Exec(`UPDATE step_results SET override_reason = ? WHERE id = ?`, reason, id); err != nil {
+	if _, err := sqlitewrite.Exec(context.Background(), d.sql, "SetStepOverrideReason", `UPDATE step_results SET override_reason = ? WHERE id = ?`, reason, id); err != nil {
 		return fmt.Errorf("set step override reason: %w", err)
 	}
 	return nil
@@ -352,7 +366,7 @@ func (d *DB) SetStepOverrideReason(id string, reason string) error {
 // SetTestApprovalReason preserves the operator's explanation without changing
 // the command failure marker or its PR-enforcement policy.
 func (d *DB) SetTestApprovalReason(id, reason string) error {
-	result, err := d.sql.Exec(`UPDATE step_results SET approval_reason = ? WHERE id = ? AND step_name = ? AND status IN (?, ?, ?)`,
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "SetTestApprovalReason", `UPDATE step_results SET approval_reason = ? WHERE id = ? AND step_name = ? AND status IN (?, ?, ?)`,
 		reason, id, types.StepTest, types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusRunning)
 	if err != nil {
 		return fmt.Errorf("record Test approval reason: %w", err)
@@ -439,7 +453,7 @@ func (d *DB) CompleteSkippedStep(id string, exitCode int, durationMS int64, logP
 }
 
 func (d *DB) completeStep(id string, status types.StepStatus, exitCode int, durationMS int64, logPath, skipReason string) error {
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "completeStep",
 		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, log_path = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, skip_reason = NULLIF(?, ''), override_reason = CASE WHEN ? THEN NULL ELSE override_reason END, approval_reason = CASE WHEN ? THEN NULL ELSE approval_reason END, accepted_gaps_json = CASE WHEN ? THEN NULL ELSE accepted_gaps_json END WHERE id = ?`,
 		status, exitCode, durationMS, logPath, now(), now(), fmt.Sprintf("status: %s", status), skipReason, status == types.StepStatusSkipped, status == types.StepStatusSkipped, status == types.StepStatusSkipped, id,
 	)
@@ -454,7 +468,13 @@ func (d *DB) completeStep(id string, status types.StepStatus, exitCode int, dura
 // fails, so a failed completion cannot create approval authority and a
 // completed review cannot lack it.
 func (d *DB) CompleteReviewStep(id, runID, approvedHeadSHA string, exitCode int, durationMS int64, logPath string, generation ...int64) error {
-	tx, err := d.sql.Begin()
+	return sqlitewrite.Do(context.Background(), "CompleteReviewStep", func(writeCtx context.Context) error {
+		return d.completeReviewStepWriteAttempt(writeCtx, id, runID, approvedHeadSHA, exitCode, durationMS, logPath, generation...)
+	})
+}
+
+func (d *DB) completeReviewStepWriteAttempt(writeCtx context.Context, id, runID, approvedHeadSHA string, exitCode int, durationMS int64, logPath string, generation ...int64) error {
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return fmt.Errorf("begin complete review step: %w", err)
 	}
@@ -462,14 +482,14 @@ func (d *DB) CompleteReviewStep(id, runID, approvedHeadSHA string, exitCode int,
 
 	ts := now()
 	var shipping *string
-	if err := tx.QueryRow(`SELECT shipping_options FROM runs WHERE id=?`, runID).Scan(&shipping); err != nil {
+	if err := tx.QueryRowContext(writeCtx, `SELECT shipping_options FROM runs WHERE id=?`, runID).Scan(&shipping); err != nil {
 		return fmt.Errorf("read review run: %w", err)
 	}
 	if shipping != nil {
 		if len(generation) != 1 || generation[0] < 1 {
 			return fmt.Errorf("strict review completion requires captured generation")
 		}
-		result, err := tx.Exec(`UPDATE review_comparisons SET approved=1 WHERE run_id=? AND head_sha=? AND generation=?`, runID, approvedHeadSHA, generation[0])
+		result, err := tx.ExecContext(writeCtx, `UPDATE review_comparisons SET approved=1 WHERE run_id=? AND head_sha=? AND generation=?`, runID, approvedHeadSHA, generation[0])
 		if err != nil {
 			return err
 		}
@@ -477,7 +497,7 @@ func (d *DB) CompleteReviewStep(id, runID, approvedHeadSHA string, exitCode int,
 			return fmt.Errorf("review completion lacks exact comparison")
 		}
 	}
-	result, err := tx.Exec(
+	result, err := tx.ExecContext(writeCtx,
 		`UPDATE step_results SET status = ?, exit_code = ?, duration_ms = ?, log_path = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ? AND run_id = ?`,
 		types.StepStatusCompleted, exitCode, durationMS, logPath, ts, ts, fmt.Sprintf("status: %s", types.StepStatusCompleted), id, runID,
 	)
@@ -487,7 +507,7 @@ func (d *DB) CompleteReviewStep(id, runID, approvedHeadSHA string, exitCode int,
 	if rows, err := result.RowsAffected(); err != nil || rows != 1 {
 		return fmt.Errorf("complete review step: step row not found")
 	}
-	result, err = tx.Exec(`UPDATE runs SET review_approved_head_sha = ?, updated_at = ? WHERE id = ?`, approvedHeadSHA, ts, runID)
+	result, err = tx.ExecContext(writeCtx, `UPDATE runs SET review_approved_head_sha = ?, updated_at = ? WHERE id = ?`, approvedHeadSHA, ts, runID)
 	if err != nil {
 		return fmt.Errorf("record review-approved head: %w", err)
 	}
@@ -502,7 +522,7 @@ func (d *DB) CompleteReviewStep(id, runID, approvedHeadSHA string, exitCode int,
 
 // FailStep marks a step as failed with an error message and duration.
 func (d *DB) FailStep(id string, errMsg string, durationMS int64) error {
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "FailStep",
 		`UPDATE step_results SET status = ?, error = ?, duration_ms = ?, completed_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, pending_response = NULL WHERE id = ?`,
 		types.StepStatusFailed, errMsg, durationMS, now(), now(), "step failed: "+errMsg, id,
 	)
@@ -515,7 +535,7 @@ func (d *DB) FailStep(id string, errMsg string, durationMS int64) error {
 // TouchStepActivity records the latest meaningful activity for an active step
 // without changing its status or current agent pid.
 func (d *DB) TouchStepActivity(id string, text string) error {
-	_, err := d.sql.Exec(`UPDATE step_results SET last_activity_at = ?, last_activity = ? WHERE id = ?`, now(), text, id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "TouchStepActivity", `UPDATE step_results SET last_activity_at = ?, last_activity = ? WHERE id = ?`, now(), text, id)
 	if err != nil {
 		return fmt.Errorf("touch step activity: %w", err)
 	}
@@ -525,7 +545,7 @@ func (d *DB) TouchStepActivity(id string, text string) error {
 // SetStepAgentActivity records an agent lifecycle activity and replaces the
 // active agent pid. Passing nil clears the pid after the process exits.
 func (d *DB) SetStepAgentActivity(id string, text string, agentPID *int) error {
-	_, err := d.sql.Exec(`UPDATE step_results SET last_activity_at = ?, last_activity = ?, agent_pid = ? WHERE id = ?`, now(), text, agentPID, id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "SetStepAgentActivity", `UPDATE step_results SET last_activity_at = ?, last_activity = ?, agent_pid = ? WHERE id = ?`, now(), text, agentPID, id)
 	if err != nil {
 		return fmt.Errorf("set step agent activity: %w", err)
 	}
@@ -534,7 +554,7 @@ func (d *DB) SetStepAgentActivity(id string, text string, agentPID *int) error {
 
 // SetStepDuration sets the execution-only duration on a step result.
 func (d *DB) SetStepDuration(id string, durationMS int64) error {
-	_, err := d.sql.Exec(`UPDATE step_results SET duration_ms = ? WHERE id = ?`, durationMS, id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "SetStepDuration", `UPDATE step_results SET duration_ms = ? WHERE id = ?`, durationMS, id)
 	if err != nil {
 		return fmt.Errorf("set step duration: %w", err)
 	}
@@ -543,7 +563,7 @@ func (d *DB) SetStepDuration(id string, durationMS int64) error {
 
 // SetStepFindings sets the findings JSON on a step result.
 func (d *DB) SetStepFindings(id string, findingsJSON string) error {
-	_, err := d.sql.Exec(`UPDATE step_results SET findings_json = ? WHERE id = ?`, findingsJSON, id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "SetStepFindings", `UPDATE step_results SET findings_json = ? WHERE id = ?`, findingsJSON, id)
 	if err != nil {
 		return fmt.Errorf("set step findings: %w", err)
 	}
@@ -552,7 +572,7 @@ func (d *DB) SetStepFindings(id string, findingsJSON string) error {
 
 // ClearStepFindings removes any stored findings JSON from a step result.
 func (d *DB) ClearStepFindings(id string) error {
-	_, err := d.sql.Exec(`UPDATE step_results SET findings_json = NULL WHERE id = ?`, id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "ClearStepFindings", `UPDATE step_results SET findings_json = NULL WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("clear step findings: %w", err)
 	}

@@ -1,9 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
 
 // UncertifiedPipelineRange is the per-branch span of pipeline-authored
@@ -30,7 +33,7 @@ func (d *DB) UpsertUncertifiedPipelineRange(repoID, branch, fromSHA, toSHA, sour
 	if repoID == "" || branch == "" || fromSHA == "" || toSHA == "" || sourceRunID == "" {
 		return fmt.Errorf("uncertified pipeline range requires repo, branch, from_sha, to_sha, and source run")
 	}
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpsertUncertifiedPipelineRange",
 		`INSERT INTO uncertified_pipeline_ranges (repo_id, branch, from_sha, to_sha, source_run_id, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(repo_id, branch) DO UPDATE SET
@@ -77,7 +80,7 @@ func (d *DB) DeleteUncertifiedPipelineRange(repoID, branch string) error {
 	if repoID == "" || branch == "" {
 		return nil
 	}
-	if _, err := d.sql.Exec(
+	if _, err := sqlitewrite.Exec(context.Background(), d.sql, "DeleteUncertifiedPipelineRange",
 		`DELETE FROM uncertified_pipeline_ranges WHERE repo_id = ? AND branch = ?`,
 		repoID, branch,
 	); err != nil {

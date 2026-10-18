@@ -39,6 +39,10 @@ func (e *Executor) attachPublishedHeadStatus(ctx context.Context, run *db.Run, r
 }
 
 func (e *Executor) reportPublishedHeadStatus(ctx context.Context, run *db.Run, repo *db.Repo, state string, validatedSHAs ...string) {
+	if state == "failure" && e.storageFailure(run) {
+		slog.Error("SQLITE_WRITE_CONTENTION: infrastructure failure; preserving published-head status", "run", run.ID)
+		return
+	}
 	e.withCommitStatusContext(ctx, run, repo, func(sctx *StepContext) {
 		for _, step := range e.steps {
 			if reporter, ok := step.(PublishedHeadStatusReporter); ok {

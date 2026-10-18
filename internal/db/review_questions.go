@@ -1,9 +1,12 @@
 package db
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
 
 // MaxBranchReviewAnswers bounds how many settled review questions are loaded
@@ -79,7 +82,7 @@ func (d *DB) RecordReviewAnswer(a ReviewAnswer) error {
 		optionsJSON = &s
 	}
 	now := time.Now().Unix()
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "RecordReviewAnswer",
 		`INSERT INTO review_questions
 		    (repo_id, branch, question_id, run_id, ask_ordinal, question, options_json, file, line,
 		     answer, answered_by, answered_at, created_at, updated_at)

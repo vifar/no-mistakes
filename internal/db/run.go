@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/buildinfo"
 	"github.com/kunchenguid/no-mistakes/internal/closingissues"
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 )
@@ -208,6 +210,12 @@ func (d *DB) InsertRunWithShipping(repoID, branch, headSHA, baseSHA string, inte
 // InsertRunWithAllOptions is the shared insertion path for shipping, PR-base,
 // external CI ownership, intent, launch, and profile options.
 func (d *DB) InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, requested, omitIntent bool, externalCIOwner string, plan *verificationplan.Snapshot, pin *agentcfg.PiProfile, shipping *types.ShippingOptions, creation ...RunCreation) (*Run, error) {
+	return sqlitewrite.Value(context.Background(), "InsertRunWithAllOptions", func(writeCtx context.Context) (*Run, error) {
+		return d.insertRunWithAllOptionsWriteAttempt(writeCtx, repoID, branch, headSHA, baseSHA, intent, launchNonce, validationGeneration, intentDigest, prBaseBranch, requested, omitIntent, externalCIOwner, plan, pin, shipping, creation...)
+	})
+}
+
+func (d *DB) insertRunWithAllOptionsWriteAttempt(writeCtx context.Context, repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, requested, omitIntent bool, externalCIOwner string, plan *verificationplan.Snapshot, pin *agentcfg.PiProfile, shipping *types.ShippingOptions, creation ...RunCreation) (*Run, error) {
 	if err := shipping.Validate(); err != nil {
 		return nil, err
 	}
@@ -264,12 +272,12 @@ func (d *DB) InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA string, in
 	r.PRBaseBranchRequested = requested
 	r.OmitIntent = omitIntent
 	r.ExternalCIOwner = externalCIOwner
-	tx, err := d.sql.Begin()
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin run admission: %w", err)
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(
+	_, err = tx.ExecContext(writeCtx,
 		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_owner, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, pr_base_branch_requested, omit_intent, external_ci_owner, pi_profile, verification_plan, shipping_options, created_at, updated_at, retarget_attempted) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
 		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchOwner, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.PRBaseBranch, r.PRBaseBranchRequested, r.OmitIntent, r.ExternalCIOwner, r.PiProfile, r.VerificationPlan, r.Shipping, r.CreatedAt, r.UpdatedAt,
 	)
@@ -283,14 +291,14 @@ func (d *DB) InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA string, in
 		if err != nil {
 			return nil, err
 		}
-		if _, err := tx.Exec("INSERT INTO owner_admission_events(run_id,payload) VALUES (?,?)", r.ID, string(payload)); err != nil {
+		if _, err := tx.ExecContext(writeCtx, "INSERT INTO owner_admission_events(run_id,payload) VALUES (?,?)", r.ID, string(payload)); err != nil {
 			return nil, fmt.Errorf("record owner admission: %w", err)
 		}
 	}
 	if len(creation) > 0 {
 		c := creation[0]
 		if c.PRURL != "" {
-			if _, err := tx.Exec("UPDATE runs SET pr_url=? WHERE id=?", c.PRURL, r.ID); err != nil {
+			if _, err := tx.ExecContext(writeCtx, "UPDATE runs SET pr_url=? WHERE id=?", c.PRURL, r.ID); err != nil {
 				return nil, err
 			}
 			r.PRURL = &c.PRURL
@@ -304,13 +312,13 @@ func (d *DB) InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA string, in
 			if err != nil {
 				return nil, err
 			}
-			if _, err := tx.Exec("UPDATE runs SET closing_issue_refs=? WHERE id=?", raw, r.ID); err != nil {
+			if _, err := tx.ExecContext(writeCtx, "UPDATE runs SET closing_issue_refs=? WHERE id=?", raw, r.ID); err != nil {
 				return nil, err
 			}
 			r.ClosingIssueRefs = refs
 		}
 		if c.DiagnosticError != "" {
-			if _, err := tx.Exec("UPDATE runs SET status=?,error=? WHERE id=?", types.RunFailed, c.DiagnosticError, r.ID); err != nil {
+			if _, err := tx.ExecContext(writeCtx, "UPDATE runs SET status=?,error=? WHERE id=?", types.RunFailed, c.DiagnosticError, r.ID); err != nil {
 				return nil, err
 			}
 			r.Status = types.RunFailed
@@ -321,7 +329,7 @@ func (d *DB) InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA string, in
 			if c.DiagnosticError != "" {
 				column = "diagnostic_run_id"
 			}
-			result, err := tx.Exec("INSERT INTO push_notifications(notification_id,"+column+") VALUES (?,?) ON CONFLICT(notification_id) DO UPDATE SET "+column+"=excluded."+column+" WHERE push_notifications."+column+" IS NULL", c.NotificationID, r.ID)
+			result, err := tx.ExecContext(writeCtx, "INSERT INTO push_notifications(notification_id,"+column+") VALUES (?,?) ON CONFLICT(notification_id) DO UPDATE SET "+column+"=excluded."+column+" WHERE push_notifications."+column+" IS NULL", c.NotificationID, r.ID)
 			if err != nil {
 				return nil, err
 			}
@@ -343,7 +351,7 @@ func (d *DB) InsertRunWithAllOptions(repoID, branch, headSHA, baseSHA string, in
 // ConsumePRBaseBranchRequest durably ends this run's one-time retarget
 // authority after the caller has verified the forge target.
 func (d *DB) ConsumePRBaseBranchRequest(runID string) error {
-	result, err := d.sql.Exec(`UPDATE runs SET pr_base_branch_requested = 0, updated_at = ? WHERE id = ?`, now(), runID)
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "ConsumePRBaseBranchRequest", `UPDATE runs SET pr_base_branch_requested = 0, updated_at = ? WHERE id = ?`, now(), runID)
 	if err != nil {
 		return fmt.Errorf("consume PR base branch request: %w", err)
 	}
@@ -537,6 +545,20 @@ func (d *DB) ClaimLaunchReceiptWithExternalOwner(repoID, branch, launchNonce, su
 // ClaimLaunchReceiptWithAllOptions validates the complete immutable launch
 // binding before consuming its first-observer marker.
 func (d *DB) ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, shipping *types.ShippingOptions, externalCIOwner, owner string, request *agentcfg.PiProfile, validators ...func(*Run) error) (*Run, bool, error) {
+	var run *Run
+	var claimed bool
+	err := sqlitewrite.Do(context.Background(), "ClaimLaunchReceiptWithAllOptions", func(writeCtx context.Context) error {
+		var err error
+		run, claimed, err = d.claimLaunchReceiptWithAllOptionsWriteAttempt(writeCtx, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, omitIntent, shipping, externalCIOwner, owner, request, validators...)
+		return err
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return run, claimed, nil
+}
+
+func (d *DB) claimLaunchReceiptWithAllOptionsWriteAttempt(writeCtx context.Context, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, shipping *types.ShippingOptions, externalCIOwner, owner string, request *agentcfg.PiProfile, validators ...func(*Run) error) (*Run, bool, error) {
 	if err := types.ValidateRunOwner(owner); err != nil {
 		return nil, false, err
 	}
@@ -574,12 +596,12 @@ func (d *DB) ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submi
 	}
 	prBaseBranch = strings.TrimSpace(prBaseBranch)
 	for {
-		tx, err := d.sql.Begin()
+		tx, err := d.sql.BeginTx(writeCtx, nil)
 		if err != nil {
 			return nil, false, fmt.Errorf("begin launch receipt claim: %w", err)
 		}
 		r := &Run{}
-		err = scanRun(tx.QueryRow(
+		err = scanRun(tx.QueryRowContext(writeCtx,
 			`UPDATE runs SET launch_receipt_claimed_at = ?
 			 WHERE repo_id = ? AND branch = ? AND launch_nonce = ?
 			   AND submitted_head_sha = ? AND launch_validation_generation = ? AND launch_intent_digest = ?
@@ -738,7 +760,7 @@ func (d *DB) GetActiveRuns() ([]*Run, error) {
 
 // UpdateRunStatus updates a run's status and updated_at timestamp.
 func (d *DB) UpdateRunStatus(id string, status types.RunStatus) error {
-	_, err := d.sql.Exec(`UPDATE runs SET status = ?, push_active = CASE WHEN ? IN ('completed', 'failed', 'cancelled') THEN 0 ELSE push_active END, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`, status, status, now(), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRunStatus", `UPDATE runs SET status = ?, push_active = CASE WHEN ? IN ('completed', 'failed', 'cancelled') THEN 0 ELSE push_active END, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`, status, status, now(), id)
 	if err != nil {
 		return fmt.Errorf("update run status: %w", err)
 	}
@@ -749,7 +771,7 @@ func (d *DB) UpdateRunStatus(id string, status types.RunStatus) error {
 // regress terminal lifecycle truth already observed by the CI monitor.
 func (d *DB) UpdateRunPRURL(id, prURL string) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE runs SET pr_url = ?, pr_state = CASE WHEN pr_state IN ('merged', 'closed') THEN pr_state ELSE 'open' END, pr_state_observed_at = ?, updated_at = ? WHERE id = ?`, prURL, ts, ts, id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRunPRURL", `UPDATE runs SET pr_url = ?, pr_state = CASE WHEN pr_state IN ('merged', 'closed') THEN pr_state ELSE 'open' END, pr_state_observed_at = ?, updated_at = ? WHERE id = ?`, prURL, ts, ts, id)
 	if err != nil {
 		return fmt.Errorf("update run pr url: %w", err)
 	}
@@ -771,7 +793,7 @@ type PushBinding struct {
 // freshly verified already-up-to-date push.
 func (d *DB) UpdateRunPushBinding(id string, binding PushBinding) error {
 	ts := now()
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRunPushBinding",
 		`UPDATE runs SET last_pushed_sha = ?, push_target_kind = ?, push_target_fingerprint = ?, push_ref = ?, last_pushed_at = ?, push_generation = COALESCE(push_generation, 0) + 1, updated_at = ? WHERE id = ?`,
 		binding.HeadSHA, binding.TargetKind, binding.TargetFingerprint, binding.Ref, ts, ts, id,
 	)
@@ -788,7 +810,7 @@ func (d *DB) UpdateRunPushBinding(id string, binding PushBinding) error {
 // reach this write.
 func (d *DB) UpdateRunPublication(id string, binding PushBinding) error {
 	ts := now()
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRunPublication",
 		`UPDATE runs SET head_sha = ?, last_pushed_sha = ?, push_target_kind = ?, push_target_fingerprint = ?, push_ref = ?, last_pushed_at = ?, push_generation = COALESCE(push_generation, 0) + 1, ci_test_restart_pending = 0, updated_at = ? WHERE id = ?`,
 		binding.HeadSHA, binding.HeadSHA, binding.TargetKind, binding.TargetFingerprint, binding.Ref, ts, ts, id,
 	)
@@ -827,7 +849,7 @@ type PushRebind struct {
 // when it equalled the old binding, so a custody-returned run keeps its own
 // recorded head.
 func (d *DB) RebindRunPushedHead(id string, rebind PushRebind) (bool, error) {
-	result, err := d.sql.Exec(
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "RebindRunPushedHead",
 		`UPDATE runs SET head_sha = CASE WHEN head_sha = last_pushed_sha THEN ? ELSE head_sha END, last_pushed_sha = ?, push_generation = COALESCE(push_generation, 0) + 1, updated_at = ?
 		WHERE id = ? AND status = ? AND last_pushed_sha = ? AND COALESCE(push_generation, 0) = ?
 			AND head_sha = ? AND (custody_returned_at IS NOT NULL) = ?
@@ -861,17 +883,21 @@ func (d *DB) SetRunCustodyReturned(id string) error {
 }
 
 func (d *DB) SetRunsCustodyReturned(ids []string) error {
+	return sqlitewrite.Do(context.Background(), "SetRunsCustodyReturned", func(writeCtx context.Context) error { return d.setRunsCustodyReturnedWriteAttempt(writeCtx, ids) })
+}
+
+func (d *DB) setRunsCustodyReturnedWriteAttempt(writeCtx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	tx, err := d.sql.Begin()
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return fmt.Errorf("set runs custody returned: begin: %w", err)
 	}
 	defer tx.Rollback()
 	ts := now()
 	for _, id := range ids {
-		if _, err := tx.Exec(`UPDATE runs SET custody_returned_at = COALESCE(custody_returned_at, ?), updated_at = ? WHERE id = ?`, ts, ts, id); err != nil {
+		if _, err := tx.ExecContext(writeCtx, `UPDATE runs SET custody_returned_at = COALESCE(custody_returned_at, ?), updated_at = ? WHERE id = ?`, ts, ts, id); err != nil {
 			return fmt.Errorf("set runs custody returned: %w", err)
 		}
 	}
@@ -884,7 +910,7 @@ func (d *DB) SetRunsCustodyReturned(ids []string) error {
 // SetRunPushActive marks whether a pipeline phase currently owns a possible
 // branch-head update. Sync refuses while this marker is set.
 func (d *DB) SetRunPushActive(id string, active bool) error {
-	_, err := d.sql.Exec(`UPDATE runs SET push_active = ?, updated_at = ? WHERE id = ?`, active, now(), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "SetRunPushActive", `UPDATE runs SET push_active = ?, updated_at = ? WHERE id = ?`, active, now(), id)
 	if err != nil {
 		return fmt.Errorf("set run push active: %w", err)
 	}
@@ -895,23 +921,27 @@ func (d *DB) SetRunPushActive(id string, active bool) error {
 // logs. A terminal PR observation does not authorize pipeline completion: the
 // executor must first validate current owner support and the live comparison.
 func (d *DB) UpdateRunPRState(id, state string) error {
+	return sqlitewrite.Do(context.Background(), "UpdateRunPRState", func(writeCtx context.Context) error { return d.updateRunPRStateWriteAttempt(writeCtx, id, state) })
+}
+
+func (d *DB) updateRunPRStateWriteAttempt(writeCtx context.Context, id, state string) error {
 	state = strings.ToLower(strings.TrimSpace(state))
 	ts := now()
-	tx, err := d.sql.Begin()
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return fmt.Errorf("update run PR state: begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	var current sql.NullString
-	if err := tx.QueryRow(`SELECT pr_state FROM runs WHERE id = ?`, id).Scan(&current); err != nil {
+	if err := tx.QueryRowContext(writeCtx, `SELECT pr_state FROM runs WHERE id = ?`, id).Scan(&current); err != nil {
 		if err == sql.ErrNoRows {
 			return nil
 		}
 		return fmt.Errorf("update run PR state: read current state: %w", err)
 	}
 	state = monotonicPRState(current.String, state)
-	if _, err := tx.Exec(`UPDATE runs SET pr_state = ?, pr_state_observed_at = ?, updated_at = ? WHERE id = ?`, state, ts, ts, id); err != nil {
+	if _, err := tx.ExecContext(writeCtx, `UPDATE runs SET pr_state = ?, pr_state_observed_at = ?, updated_at = ? WHERE id = ?`, state, ts, ts, id); err != nil {
 		return fmt.Errorf("update run PR state: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -942,40 +972,37 @@ func (d *DB) SetRunCIReady(id string, ready bool) error {
 }
 
 func (d *DB) SetRunCIReadyWithReason(id string, ready, declaredNoCI bool) error {
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return fmt.Errorf("set run CI ready: %w", err)
-	}
-	defer tx.Rollback()
-	readyValue := 0
-	declaredValue := 0
-	var readyAt any
-	if ready {
-		// Preserve verified qualification on this receipt when a later poll
-		// clears readiness. Never carry it across a changed comparison.
-		if _, err := tx.Exec(`UPDATE run_pr_contexts SET ci_qualified=1
+	return sqlitewrite.Transaction(context.Background(), d.sql, "SetRunCIReadyWithReason", func(writeCtx context.Context, tx *sql.Tx) error {
+		readyValue := 0
+		declaredValue := 0
+		var readyAt any
+		if ready {
+			// Preserve verified qualification on this receipt when a later poll
+			// clears readiness. Never carry it across a changed comparison.
+			if _, err := tx.ExecContext(writeCtx, `UPDATE run_pr_contexts SET ci_qualified=1
             WHERE run_id=? AND pr_url IS NOT NULL AND pr_url!='' AND forge_head_sha=local_head_sha
             AND EXISTS (SELECT 1 FROM runs r WHERE r.id=run_id AND r.head_sha=local_head_sha
               AND r.last_pushed_sha=local_head_sha AND r.review_approved_head_sha=local_head_sha)`, id); err != nil {
-			return fmt.Errorf("set run CI qualification: %w", err)
+				return fmt.Errorf("set run CI qualification: %w", err)
+			}
+			readyValue = 1
+			readyAt = now()
+			if declaredNoCI {
+				declaredValue = 1
+			}
 		}
-		readyValue = 1
-		readyAt = now()
-		if declaredNoCI {
-			declaredValue = 1
+		_, err := tx.ExecContext(writeCtx, `UPDATE runs SET ci_ready_at = ?, ci_ready_no_ci = ?, updated_at = ? WHERE id = ? AND ((ci_ready_at IS NULL AND ? = 1) OR (ci_ready_at IS NOT NULL AND ? = 0) OR (COALESCE(ci_ready_no_ci, 0) != ?))`, readyAt, declaredValue, now(), id, readyValue, readyValue, declaredValue)
+		if err != nil {
+			return fmt.Errorf("set run CI ready: %w", err)
 		}
-	}
-	_, err = tx.Exec(`UPDATE runs SET ci_ready_at = ?, ci_ready_no_ci = ?, updated_at = ? WHERE id = ? AND ((ci_ready_at IS NULL AND ? = 1) OR (ci_ready_at IS NOT NULL AND ? = 0) OR (COALESCE(ci_ready_no_ci, 0) != ?))`, readyAt, declaredValue, now(), id, readyValue, readyValue, declaredValue)
-	if err != nil {
-		return fmt.Errorf("set run CI ready: %w", err)
-	}
-	return tx.Commit()
+		return nil
+	})
 }
 
 // UpdateRunReviewApprovedHeadSHA replaces the run's review authority with the
 // exact commit approved by the latest successfully completed full review.
 func (d *DB) UpdateRunReviewApprovedHeadSHA(id, headSHA string) error {
-	_, err := d.sql.Exec(`UPDATE runs SET review_approved_head_sha = ?, updated_at = ? WHERE id = ?`, headSHA, now(), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRunReviewApprovedHeadSHA", `UPDATE runs SET review_approved_head_sha = ?, updated_at = ? WHERE id = ?`, headSHA, now(), id)
 	if err != nil {
 		return fmt.Errorf("update run review-approved head sha: %w", err)
 	}
@@ -987,7 +1014,7 @@ func (d *DB) UpdateRunReviewApprovedHeadSHA(id, headSHA string) error {
 // durable from the moment anything can observe the run, and never changes
 // afterwards even if the operator edits worktree_roots.
 func (d *DB) SetRunWorktreeDir(id, dir string) error {
-	_, err := d.sql.Exec(`UPDATE runs SET worktree_dir = ?, updated_at = ? WHERE id = ?`, dir, now(), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "SetRunWorktreeDir", `UPDATE runs SET worktree_dir = ?, updated_at = ? WHERE id = ?`, dir, now(), id)
 	if err != nil {
 		return fmt.Errorf("set run worktree dir: %w", err)
 	}
@@ -996,7 +1023,7 @@ func (d *DB) SetRunWorktreeDir(id, dir string) error {
 
 // UpdateRunHeadSHA updates the run head SHA and timestamp.
 func (d *DB) UpdateRunHeadSHA(id, headSHA string) error {
-	_, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, updated_at = ? WHERE id = ?`, headSHA, now(), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRunHeadSHA", `UPDATE runs SET head_sha = ?, updated_at = ? WHERE id = ?`, headSHA, now(), id)
 	if err != nil {
 		return fmt.Errorf("update run head sha: %w", err)
 	}
@@ -1006,7 +1033,7 @@ func (d *DB) UpdateRunHeadSHA(id, headSHA string) error {
 // UpdateRunHeadSHAForRevalidation records a late repair while revoking the
 // previous review binding so the repaired head must pass review before push.
 func (d *DB) UpdateRunHeadSHAForRevalidation(id, headSHA string) error {
-	_, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, review_approved_head_sha = NULL, updated_at = ? WHERE id = ?`, headSHA, now(), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRunHeadSHAForRevalidation", `UPDATE runs SET head_sha = ?, review_approved_head_sha = NULL, updated_at = ? WHERE id = ?`, headSHA, now(), id)
 	if err != nil {
 		return fmt.Errorf("update run head sha for revalidation: %w", err)
 	}
@@ -1025,7 +1052,7 @@ func (d *DB) UpdateRunHeadSHAForRevalidation(id, headSHA string) error {
 // survive a later fix response or a daemon restart while the CI step is
 // parked; the durable flag does, until UpdateRunPublication settles it.
 func (d *DB) UpdateRunHeadSHAWithCarriedReview(id, approvedHeadSHA, headSHA string) (bool, error) {
-	result, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, review_approved_head_sha = ?, ci_test_restart_pending = 1, updated_at = ? WHERE id = ? AND review_approved_head_sha = ?`, headSHA, headSHA, now(), id, approvedHeadSHA)
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRunHeadSHAWithCarriedReview", `UPDATE runs SET head_sha = ?, review_approved_head_sha = ?, ci_test_restart_pending = 1, updated_at = ? WHERE id = ? AND review_approved_head_sha = ?`, headSHA, headSHA, now(), id, approvedHeadSHA)
 	if err != nil {
 		return false, fmt.Errorf("update run head sha with carried review: %w", err)
 	}
@@ -1044,14 +1071,20 @@ func (d *DB) UpdateRunHeadSHAWithCarriedReview(id, approvedHeadSHA, headSHA stri
 // resurrected onto the new head; a skipped Test step has no tested head to
 // carry. It reports whether the carry was recorded.
 func (d *DB) CarryValidationOverDocOnlyCommits(runID, fromHeadSHA, toHeadSHA string) (bool, error) {
-	tx, err := d.sql.Begin()
+	return sqlitewrite.Value(context.Background(), "CarryValidationOverDocOnlyCommits", func(writeCtx context.Context) (bool, error) {
+		return d.carryValidationOverDocOnlyCommitsWriteAttempt(writeCtx, runID, fromHeadSHA, toHeadSHA)
+	})
+}
+
+func (d *DB) carryValidationOverDocOnlyCommitsWriteAttempt(writeCtx context.Context, runID, fromHeadSHA, toHeadSHA string) (bool, error) {
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return false, fmt.Errorf("carry validation over doc-only commits: %w", err)
 	}
 	defer tx.Rollback()
 	var stepID, status string
 	var findingsJSON sql.NullString
-	err = tx.QueryRow(`SELECT id, status, findings_json FROM step_results WHERE run_id = ? AND step_name = ? ORDER BY step_order, id LIMIT 1`, runID, string(types.StepTest)).Scan(&stepID, &status, &findingsJSON)
+	err = tx.QueryRowContext(writeCtx, `SELECT id, status, findings_json FROM step_results WHERE run_id = ? AND step_name = ? ORDER BY step_order, id LIMIT 1`, runID, string(types.StepTest)).Scan(&stepID, &status, &findingsJSON)
 	switch {
 	case err == sql.ErrNoRows:
 		return false, nil
@@ -1070,7 +1103,7 @@ func (d *DB) CarryValidationOverDocOnlyCommits(runID, fromHeadSHA, toHeadSHA str
 		if err != nil {
 			return false, fmt.Errorf("carry validation over doc-only commits: %w", err)
 		}
-		result, err := tx.Exec(`UPDATE step_results SET findings_json = ? WHERE id = ? AND findings_json = ?`, carried, stepID, findingsJSON.String)
+		result, err := tx.ExecContext(writeCtx, `UPDATE step_results SET findings_json = ? WHERE id = ? AND findings_json = ?`, carried, stepID, findingsJSON.String)
 		if err != nil {
 			return false, fmt.Errorf("carry validation over doc-only commits: update tested head: %w", err)
 		}
@@ -1080,14 +1113,14 @@ func (d *DB) CarryValidationOverDocOnlyCommits(runID, fromHeadSHA, toHeadSHA str
 	}
 	// Only a completed, attributed Document pass may carry credit. Keep the
 	// historical Review/Test rounds intact and record exactly what was carried.
-	proof, err := tx.Exec(`UPDATE document_passes SET carried_review_from=? WHERE run_id=? AND from_head_sha=? AND to_head_sha=? AND commit_count>0 AND carried_review_from IS NULL`, fromHeadSHA, runID, fromHeadSHA, toHeadSHA)
+	proof, err := tx.ExecContext(writeCtx, `UPDATE document_passes SET carried_review_from=? WHERE run_id=? AND from_head_sha=? AND to_head_sha=? AND commit_count>0 AND carried_review_from IS NULL`, fromHeadSHA, runID, fromHeadSHA, toHeadSHA)
 	if err != nil {
 		return false, fmt.Errorf("record Document validation carry: %w", err)
 	}
 	if rows, err := proof.RowsAffected(); err != nil || rows != 1 {
 		return false, err
 	}
-	result, err := tx.Exec(`UPDATE runs SET review_approved_head_sha = ?, updated_at = ? WHERE id = ? AND review_approved_head_sha = ? AND head_sha = ? AND shipping_options IS NULL`, toHeadSHA, now(), runID, fromHeadSHA, toHeadSHA)
+	result, err := tx.ExecContext(writeCtx, `UPDATE runs SET review_approved_head_sha = ?, updated_at = ? WHERE id = ? AND review_approved_head_sha = ? AND head_sha = ? AND shipping_options IS NULL`, toHeadSHA, now(), runID, fromHeadSHA, toHeadSHA)
 	if err != nil {
 		return false, fmt.Errorf("carry validation over doc-only commits: update review approval: %w", err)
 	}
@@ -1117,7 +1150,7 @@ func (d *DB) UpdateRunError(id, errMsg string) error {
 
 // UpdateRunErrorStatus sets the error message and terminal status on a run.
 func (d *DB) UpdateRunErrorStatus(id, errMsg string, status types.RunStatus) error {
-	_, err := d.sql.Exec(`UPDATE runs SET error = ?, status = ?, push_active = 0, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`, errMsg, status, now(), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRunErrorStatus", `UPDATE runs SET error = ?, status = ?, push_active = 0, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ?`, errMsg, status, now(), id)
 	if err != nil {
 		return fmt.Errorf("update run error: %w", err)
 	}
@@ -1126,7 +1159,7 @@ func (d *DB) UpdateRunErrorStatus(id, errMsg string, status types.RunStatus) err
 
 func (d *DB) UpdateRunErrorStatusWithVerifiedHead(id, errMsg string, status types.RunStatus, headSHA string) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE runs SET error = ?, status = ?, head_sha = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ?`, errMsg, status, headSHA, ts, ts, id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRunErrorStatusWithVerifiedHead", `UPDATE runs SET error = ?, status = ?, head_sha = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ?`, errMsg, status, headSHA, ts, ts, id)
 	if err != nil {
 		return fmt.Errorf("update run error with verified head: %w", err)
 	}
@@ -1135,7 +1168,7 @@ func (d *DB) UpdateRunErrorStatusWithVerifiedHead(id, errMsg string, status type
 
 func (d *DB) UpdateRunStatusWithVerifiedHead(id string, status types.RunStatus, headSHA string) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE runs SET status = ?, head_sha = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ?`, status, headSHA, ts, ts, id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRunStatusWithVerifiedHead", `UPDATE runs SET status = ?, head_sha = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ?`, status, headSHA, ts, ts, id)
 	if err != nil {
 		return fmt.Errorf("update run status with verified head: %w", err)
 	}
@@ -1144,7 +1177,7 @@ func (d *DB) UpdateRunStatusWithVerifiedHead(id string, status types.RunStatus, 
 
 func (d *DB) VerifyTerminalRunHeadRewrite(id string, status types.RunStatus, recordedHead, liveHead string) (bool, error) {
 	ts := now()
-	result, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status = ? AND head_sha = ? AND review_approved_head_sha = ? AND terminal_head_verified_at IS NULL AND custody_returned_at IS NULL`, liveHead, ts, ts, id, status, recordedHead, recordedHead)
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "VerifyTerminalRunHeadRewrite", `UPDATE runs SET head_sha = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status = ? AND head_sha = ? AND review_approved_head_sha = ? AND terminal_head_verified_at IS NULL AND custody_returned_at IS NULL`, liveHead, ts, ts, id, status, recordedHead, recordedHead)
 	if err != nil {
 		return false, fmt.Errorf("verify terminal run head rewrite: %w", err)
 	}
@@ -1157,7 +1190,7 @@ func (d *DB) VerifyTerminalRunHeadRewrite(id string, status types.RunStatus, rec
 // subsequent stale-run status transition deliberately preserves this stamp.
 func (d *DB) RecordRunTerminalHeadEvidence(id, headSHA string) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE runs SET head_sha = ?, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status IN (?, ?)`,
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "RecordRunTerminalHeadEvidence", `UPDATE runs SET head_sha = ?, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status IN (?, ?)`,
 		headSHA, ts, ts, id, types.RunPending, types.RunRunning)
 	return err
 }
@@ -1195,7 +1228,7 @@ type RunIntent struct {
 
 // UpdateRunIntent persists the inferred user intent for a run.
 func (d *DB) UpdateRunIntent(id string, intent RunIntent) error {
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRunIntent",
 		`UPDATE runs SET intent = ?, intent_source = ?, intent_session_id = ?, intent_score = ?, updated_at = ? WHERE id = ?`,
 		intent.Summary, intent.Source, intent.SessionID, intent.Score, now(), id,
 	)
@@ -1229,7 +1262,7 @@ func (d *DB) UpdateRunClosingIssueRefs(id string, refs []string) error {
 	if encoded != "" {
 		value = encoded
 	}
-	res, err := d.sql.Exec(
+	res, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRunClosingIssueRefs",
 		`UPDATE runs SET closing_issue_refs = ?, updated_at = ? WHERE id = ? AND closing_issue_refs_locked_at IS NULL`,
 		value, now(), id,
 	)
@@ -1264,6 +1297,12 @@ func (d *DB) UpdateRunClosingIssueRefs(id string, refs []string) error {
 // MergeRunClosingIssueRefs adds refs to an unclaimed run without dropping
 // values supplied when the run started or by an earlier reattachment.
 func (d *DB) MergeRunClosingIssueRefs(id string, refs []string) error {
+	return sqlitewrite.Do(context.Background(), "MergeRunClosingIssueRefs", func(writeCtx context.Context) error {
+		return d.mergeRunClosingIssueRefsWriteAttempt(writeCtx, id, refs)
+	})
+}
+
+func (d *DB) mergeRunClosingIssueRefsWriteAttempt(writeCtx context.Context, id string, refs []string) error {
 	incoming, err := closingissues.Normalize(refs)
 	if err != nil {
 		return fmt.Errorf("merge run closing issue references: %w", err)
@@ -1272,7 +1311,7 @@ func (d *DB) MergeRunClosingIssueRefs(id string, refs []string) error {
 		return nil
 	}
 
-	tx, err := d.sql.Begin()
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return fmt.Errorf("merge run closing issue references: %w", err)
 	}
@@ -1280,7 +1319,7 @@ func (d *DB) MergeRunClosingIssueRefs(id string, refs []string) error {
 
 	var storedRefs sql.NullString
 	var lockedAt sql.NullInt64
-	if err := tx.QueryRow(
+	if err := tx.QueryRowContext(writeCtx,
 		`SELECT closing_issue_refs, closing_issue_refs_locked_at FROM runs WHERE id = ?`, id,
 	).Scan(&storedRefs, &lockedAt); err != nil {
 		if err == sql.ErrNoRows {
@@ -1304,7 +1343,7 @@ func (d *DB) MergeRunClosingIssueRefs(id string, refs []string) error {
 	if err != nil {
 		return fmt.Errorf("merge run closing issue references: %w", err)
 	}
-	res, err := tx.Exec(
+	res, err := tx.ExecContext(writeCtx,
 		`UPDATE runs SET closing_issue_refs = ?, updated_at = ? WHERE id = ? AND closing_issue_refs_locked_at IS NULL`,
 		encoded, now(), id,
 	)
@@ -1333,7 +1372,13 @@ func (d *DB) MergeRunClosingIssueRefs(id string, refs []string) error {
 // to edit the PR or start a fresh run rather than being told a link was added
 // that never appears.
 func (d *DB) ClaimClosingIssueRefsForPRBody(id string) ([]string, error) {
-	tx, err := d.sql.Begin()
+	return sqlitewrite.Value(context.Background(), "ClaimClosingIssueRefsForPRBody", func(writeCtx context.Context) ([]string, error) {
+		return d.claimClosingIssueRefsForPRBodyWriteAttempt(writeCtx, id)
+	})
+}
+
+func (d *DB) claimClosingIssueRefsForPRBodyWriteAttempt(writeCtx context.Context, id string) ([]string, error) {
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("claim closing issue references: %w", err)
 	}
@@ -1341,7 +1386,7 @@ func (d *DB) ClaimClosingIssueRefsForPRBody(id string) ([]string, error) {
 
 	var storedRefs sql.NullString
 	var lockedAt sql.NullInt64
-	err = tx.QueryRow(
+	err = tx.QueryRowContext(writeCtx,
 		`SELECT closing_issue_refs, closing_issue_refs_locked_at FROM runs WHERE id = ?`, id,
 	).Scan(&storedRefs, &lockedAt)
 	if err == sql.ErrNoRows {
@@ -1352,7 +1397,7 @@ func (d *DB) ClaimClosingIssueRefsForPRBody(id string) ([]string, error) {
 	}
 
 	if !lockedAt.Valid {
-		if _, err := tx.Exec(
+		if _, err := tx.ExecContext(writeCtx,
 			`UPDATE runs SET closing_issue_refs_locked_at = ? WHERE id = ? AND closing_issue_refs_locked_at IS NULL`,
 			now(), id,
 		); err != nil {
@@ -1375,7 +1420,7 @@ func (d *DB) ClaimClosingIssueRefsForPRBody(id string) ([]string, error) {
 // This is an observability signal only; it does not change gate resolution.
 func (d *DB) SetRunAwaitingAgent(id string) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE runs SET awaiting_agent_since = ?, updated_at = ? WHERE id = ?`, ts, ts, id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "SetRunAwaitingAgent", `UPDATE runs SET awaiting_agent_since = ?, updated_at = ? WHERE id = ?`, ts, ts, id)
 	if err != nil {
 		return fmt.Errorf("set run awaiting agent: %w", err)
 	}
@@ -1386,7 +1431,7 @@ func (d *DB) SetRunAwaitingAgent(id string) error {
 // time. Executor gate transitions use ResumeStepFromApproval or
 // CompleteRunAwaitingAgent to preserve that timing atomically.
 func (d *DB) ClearRunAwaitingAgent(id string) error {
-	_, err := d.sql.Exec(`UPDATE runs SET awaiting_agent_since = NULL, updated_at = ? WHERE id = ?`, now(), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "ClearRunAwaitingAgent", `UPDATE runs SET awaiting_agent_since = NULL, updated_at = ? WHERE id = ?`, now(), id)
 	if err != nil {
 		return fmt.Errorf("clear run awaiting agent: %w", err)
 	}
@@ -1399,7 +1444,7 @@ func (d *DB) AddRunParkedDuration(id string, ms int64) error {
 	if ms <= 0 {
 		return nil
 	}
-	_, err := d.sql.Exec(`UPDATE runs SET parked_ms = COALESCE(parked_ms, 0) + ?, updated_at = ? WHERE id = ?`, ms, now(), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "AddRunParkedDuration", `UPDATE runs SET parked_ms = COALESCE(parked_ms, 0) + ?, updated_at = ? WHERE id = ?`, ms, now(), id)
 	if err != nil {
 		return fmt.Errorf("add run parked duration: %w", err)
 	}
@@ -1410,7 +1455,7 @@ func (d *DB) CompleteRunAwaitingAgent(id string, ms int64) error {
 	if ms < 0 {
 		ms = 0
 	}
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "CompleteRunAwaitingAgent",
 		`UPDATE runs SET awaiting_agent_since = NULL,
 			parked_ms = COALESCE(parked_ms, 0) + CASE WHEN awaiting_agent_since IS NOT NULL THEN ? ELSE 0 END,
 			updated_at = ? WHERE id = ?`,
@@ -1434,9 +1479,15 @@ func (d *DB) RecoverStaleRuns(errMsg string) (int, error) {
 // preserved. Callers use preserved only after independently proving a run
 // can be reconstructed safely.
 func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}) (int, error) {
+	return sqlitewrite.Value(context.Background(), "RecoverStaleRunsExcept", func(writeCtx context.Context) (int, error) {
+		return d.recoverStaleRunsExceptWriteAttempt(writeCtx, errMsg, preserved)
+	})
+}
+
+func (d *DB) recoverStaleRunsExceptWriteAttempt(writeCtx context.Context, errMsg string, preserved map[string]struct{}) (int, error) {
 	ts := now()
 
-	tx, err := d.sql.Begin()
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("begin transaction: %w", err)
 	}
@@ -1453,7 +1504,7 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 	ciArgs := []any{types.RunCIMonitorInterrupted, types.RunCIMonitorInterruptedReason, ts}
 	ciArgs = append(ciArgs, ciMonitorRunArgs()...)
 	ciArgs = append(ciArgs, args...)
-	ciResult, err := tx.Exec(
+	ciResult, err := tx.ExecContext(writeCtx,
 		`UPDATE runs
 		 SET status = ?, error = ?, awaiting_agent_since = NULL, updated_at = ?
 		 WHERE `+ciMonitorRunCondition+placeholders,
@@ -1469,7 +1520,7 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 
 	// Mark the CI monitor step for each run just recovered above as skipped so
 	// the broad step-failure update below leaves it alone.
-	_, err = tx.Exec(
+	_, err = tx.ExecContext(writeCtx,
 		`UPDATE step_results
 		 SET status = ?, error = ?, completed_at = ?
 		 WHERE step_name = ?
@@ -1498,7 +1549,7 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 		types.RunPending, types.RunRunning,
 	}
 	stepArgs = append(stepArgs, args...)
-	_, err = tx.Exec(
+	_, err = tx.ExecContext(writeCtx,
 		`UPDATE step_results SET status = ?, error = ?, completed_at = ?
 		 WHERE status IN (?, ?, ?, ?) AND run_id IN (
 			SELECT id FROM runs WHERE status IN (?, ?)`+placeholders+`
@@ -1515,7 +1566,7 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 	// the parked evidence survives the crash.
 	runArgs := []any{types.RunFailed, errMsg, ts, ts, ts, types.RunPending, types.RunRunning}
 	runArgs = append(runArgs, args...)
-	result, err := tx.Exec(
+	result, err := tx.ExecContext(writeCtx,
 		`UPDATE runs SET status = ?, error = ?, push_active = 0,
 			parked_ms = COALESCE(parked_ms, 0) + CASE
 				WHEN awaiting_agent_since IS NOT NULL AND ? > awaiting_agent_since
@@ -1618,7 +1669,7 @@ func (d *DB) GetRunGates(id string) (string, error) {
 // record a single step. Once pinned, the sequence stays fixed even if the
 // trusted default branch's gates change; a queued run has no pin yet.
 func (d *DB) SetRunGates(id, gates string) error {
-	_, err := d.sql.Exec(`UPDATE runs SET gates_json = ?, updated_at = ? WHERE id = ?`, gates, now(), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "SetRunGates", `UPDATE runs SET gates_json = ?, updated_at = ? WHERE id = ?`, gates, now(), id)
 	if err != nil {
 		return fmt.Errorf("set run gates: %w", err)
 	}
@@ -1643,7 +1694,7 @@ func (d *DB) GetRunCheckScope(id string) (string, error) {
 // SetRunCheckScope records the check-scope policy the CI step evaluates this
 // run's checks under, so the strict readiness receipt applies the same one.
 func (d *DB) SetRunCheckScope(id, scope string) error {
-	_, err := d.sql.Exec(`UPDATE runs SET check_scope_json = ?, updated_at = ? WHERE id = ?`, scope, now(), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "SetRunCheckScope", `UPDATE runs SET check_scope_json = ?, updated_at = ? WHERE id = ?`, scope, now(), id)
 	if err != nil {
 		return fmt.Errorf("set run check scope: %w", err)
 	}
@@ -1671,7 +1722,7 @@ func (d *DB) GetRunCIRerunState(id string) (string, error) {
 // reservation and the request costs the budget instead of handing the recovered
 // run a rerun the limit already accounted for.
 func (d *DB) SetRunCIRerunState(id, state string) error {
-	_, err := d.sql.Exec(`UPDATE runs SET ci_rerun_state = ?, updated_at = ? WHERE id = ?`, state, now(), id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "SetRunCIRerunState", `UPDATE runs SET ci_rerun_state = ?, updated_at = ? WHERE id = ?`, state, now(), id)
 	if err != nil {
 		return fmt.Errorf("set run ci rerun state: %w", err)
 	}
@@ -1684,6 +1735,10 @@ func (d *DB) SetRunCIRerunState(id, state string) error {
 // start needs that the row does not already hold. It applies only to a run that
 // has not started, so a racing status change is never overwritten.
 func (d *DB) MarkRunQueued(id, spec string) (int64, error) {
+	return sqlitewrite.Value(context.Background(), "MarkRunQueued", func(writeCtx context.Context) (int64, error) { return d.markRunQueuedWriteAttempt(writeCtx, id, spec) })
+}
+
+func (d *DB) markRunQueuedWriteAttempt(writeCtx context.Context, id, spec string) (int64, error) {
 	clock := d.queueClock
 	if clock == nil {
 		clock = func() int64 { return time.Now().UnixNano() }
@@ -1693,12 +1748,12 @@ func (d *DB) MarkRunQueued(id, spec string) (int64, error) {
 	// otherwise reorder the queue). The stamp is therefore at least one past
 	// the highest stamp already stored. Callers serialize admission, so the
 	// highest stored stamp is always the previous admission's.
-	tx, err := d.sql.Begin()
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("mark run queued: %w", err)
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE runs SET status = ?, queued_at = MAX(?, COALESCE((SELECT MAX(queued_at) FROM runs WHERE queued_at IS NOT NULL), 0) + 1), queue_spec = ?, updated_at = ? WHERE id = ? AND status = ?`,
+	result, err := tx.ExecContext(writeCtx, `UPDATE runs SET status = ?, queued_at = MAX(?, COALESCE((SELECT MAX(queued_at) FROM runs WHERE queued_at IS NOT NULL), 0) + 1), queue_spec = ?, updated_at = ? WHERE id = ? AND status = ?`,
 		types.RunQueued, clock(), spec, now(), id, types.RunPending)
 	if err != nil {
 		return 0, fmt.Errorf("mark run queued: %w", err)
@@ -1709,7 +1764,7 @@ func (d *DB) MarkRunQueued(id, spec string) (int64, error) {
 		return 0, fmt.Errorf("mark run queued: run %s is not pending", id)
 	}
 	var ts int64
-	if err := tx.QueryRow(`SELECT queued_at FROM runs WHERE id = ?`, id).Scan(&ts); err != nil {
+	if err := tx.QueryRowContext(writeCtx, `SELECT queued_at FROM runs WHERE id = ?`, id).Scan(&ts); err != nil {
 		return 0, fmt.Errorf("mark run queued: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -1722,7 +1777,7 @@ func (d *DB) MarkRunQueued(id, spec string) (int64, error) {
 // it. It reports false when the run is no longer queued (for example it was
 // aborted first), in which case the caller must not start it.
 func (d *DB) ClaimQueuedRun(id string) (bool, error) {
-	result, err := d.sql.Exec(`UPDATE runs SET status = ?, updated_at = ? WHERE id = ? AND status = ?`,
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "ClaimQueuedRun", `UPDATE runs SET status = ?, updated_at = ? WHERE id = ? AND status = ?`,
 		types.RunPending, now(), id, types.RunQueued)
 	if err != nil {
 		return false, fmt.Errorf("claim queued run: %w", err)
@@ -1737,7 +1792,7 @@ func (d *DB) ClaimQueuedRun(id string) (bool, error) {
 // every daemon-side write that is not the executor's own goes through this
 // conditional update. It reports whether the row changed.
 func (d *DB) TerminateActiveRun(id, errMsg string, status types.RunStatus) (bool, error) {
-	result, err := d.sql.Exec(`UPDATE runs SET error = ?, status = ?, push_active = 0, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ? AND status IN (?, ?)`,
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "TerminateActiveRun", `UPDATE runs SET error = ?, status = ?, push_active = 0, terminal_head_verified_at = NULL, updated_at = ? WHERE id = ? AND status IN (?, ?)`,
 		errMsg, status, now(), id, types.RunPending, types.RunRunning)
 	if err != nil {
 		return false, fmt.Errorf("terminate active run: %w", err)
@@ -1758,7 +1813,7 @@ func (d *DB) TerminateUnstartedRun(id, reason string, status types.RunStatus) (b
 
 func (d *DB) terminateUnstartedRun(id, reason string, status, expected types.RunStatus) (bool, error) {
 	ts := now()
-	result, err := d.sql.Exec(`UPDATE runs SET status = ?, error = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status = ?`,
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "terminateUnstartedRun", `UPDATE runs SET status = ?, error = ?, push_active = 0, terminal_head_verified_at = ?, updated_at = ? WHERE id = ? AND status = ?`,
 		status, reason, ts, ts, id, expected)
 	if err != nil {
 		return false, fmt.Errorf("terminate unstarted run: %w", err)

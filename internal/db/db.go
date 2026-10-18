@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/oklog/ulid/v2"
 	_ "modernc.org/sqlite"
 )
@@ -37,7 +39,7 @@ type DB struct {
 // database: those binaries do not inspect user_version. Downgrade safety is not
 // guaranteed; use a separate root or a compatible backup when changing versions.
 func Open(path string) (*DB, error) {
-	sqlDB, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
+	sqlDB, err := sql.Open("sqlite", fmt.Sprintf("%s?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(%d)", path, sqlitewrite.BusyTimeout.Milliseconds()))
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -50,6 +52,15 @@ func Open(path string) (*DB, error) {
 }
 
 func migrate(sqlDB *sql.DB) error {
+	// The startup migration has no caller deadline. Bound contention retries,
+	// but retain main's uninterrupted schema upgrade: its many DDL statements
+	// can legitimately take longer than the retry budget without any lock.
+	return sqlitewrite.Do(context.Background(), "database migration", func(context.Context) error {
+		return migrateWriteAttempt(sqlDB)
+	})
+}
+
+func migrateWriteAttempt(sqlDB *sql.DB) error {
 	var version int
 	if err := sqlDB.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("read db schema version: %w", err)

@@ -27,6 +27,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/shipping"
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -607,6 +608,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	if err := e.db.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
 	}
+	if err := e.clearStorageFailure(run.ID); err != nil {
+		return e.failRun(run, repo, err)
+	}
 	run.Status = types.RunRunning
 	e.emitRunEvent(ipc.EventRunUpdated, run, repo)
 
@@ -913,6 +917,12 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return fmt.Errorf("recovered run has no repository")
 	}
 	if err := e.RegisterRecoveredGate(run); err != nil {
+		if sqlitewrite.IsContention(err) {
+			e.recordStorageFailure(run, err)
+		}
+		return err
+	}
+	if err := e.clearStorageFailure(run.ID); err != nil {
 		return err
 	}
 	e.mu.Lock()
@@ -1459,7 +1469,7 @@ func (e *Executor) refuseSkippedPRWithClosingIssues(run *db.Run, repo *db.Repo, 
 		slog.Warn("failed to mark step as failed in db", "step", name, "error", dbErr)
 	}
 	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, name, string(types.StepStatusFailed), "", err.Error(), nil)
-	return fmt.Errorf("step %s failed: %s", name, err)
+	return fmt.Errorf("step %s failed: %w", name, err)
 }
 
 func recoveredStepDuration(step *db.StepResult) int64 {
@@ -1911,6 +1921,9 @@ rounds:
 		if err != nil && stepName == types.StepCI && e.ciMonitorInterruptedByShutdown(run.ID, err, ctx) {
 			fmt.Fprintf(logFile, "\n%s; leaving the CI monitor for restart recovery\n", ErrDaemonShutdown)
 			return false, "", ErrCIMonitorInterruptedAtShutdown
+		}
+		if sqlitewrite.IsContention(err) {
+			return false, "", fmt.Errorf("step %s infrastructure failure: %w", stepName, err)
 		}
 		if err != nil {
 			durationMS := executionMS + roundDuration
@@ -2956,8 +2969,18 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if e.ciMonitorInterruptedByShutdown(run.ID, err, ctxs...) {
 		return ErrCIMonitorInterruptedAtShutdown
 	}
+	infrastructure := sqlitewrite.IsContention(err)
 	errMsg := err.Error()
+	if infrastructure {
+		e.recordStorageFailure(run, err)
+		errMsg = *run.Error
+	} else if sqlitewrite.RecordedContention(errMsg) {
+		errMsg = "pipeline execution failure: " + errMsg
+	}
 	for _, ctx := range ctxs {
+		if infrastructure {
+			break
+		}
 		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {
 			errMsg = cause.Error()
 			break
@@ -2969,7 +2992,13 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	}
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
 	var dbErr error
-	if verified {
+	if infrastructure {
+		head := ""
+		if verified {
+			head = verifiedHead
+		}
+		dbErr = e.db.FailRunInfrastructure(run.ID, errMsg, head)
+	} else if verified {
 		dbErr = e.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, errMsg, runStatus, verifiedHead)
 	} else {
 		dbErr = e.db.UpdateRunErrorStatus(run.ID, errMsg, runStatus)

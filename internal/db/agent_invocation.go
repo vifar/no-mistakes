@@ -1,8 +1,11 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
 
 // Agent invocation session modes recorded for local performance telemetry.
@@ -143,7 +146,7 @@ const agentInvocationInsertPlaceholders = `?, ?, ?, ?, ?, ?, ?, ?,
 // fields are stored as SQL NULL (database/sql dereferences non-nil pointers).
 func (d *DB) InsertAgentInvocation(inv AgentInvocation) (*AgentInvocation, error) {
 	inv.ID = newID()
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "InsertAgentInvocation",
 		`INSERT INTO agent_invocations (`+agentInvocationColumns+`)
 		 VALUES (`+agentInvocationInsertPlaceholders+`)`,
 		inv.ID, inv.RunID, inv.StepName, inv.Round, inv.Purpose, inv.Agent, inv.Model, inv.ModelProvider,

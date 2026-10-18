@@ -1,8 +1,11 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
 
 // RecoveryArchive is an immutable provenance snapshot for an existing Git
@@ -46,7 +49,7 @@ func (d *DB) RecordRecoveryArchive(record RecoveryArchive) (*RecoveryArchive, er
 		return nil, fmt.Errorf("recovery archive %s for run %s is already bound with different provenance", record.ArchiveRef, record.OwnerRunID)
 	}
 
-	_, err = d.sql.Exec(`
+	_, err = sqlitewrite.Exec(context.Background(), d.sql, "RecordRecoveryArchive", `
 		INSERT INTO recovery_archives
 			(id, owner_run_id, repo_id, run_id, branch, required_head_sha, preserved_head_sha, archive_ref, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,

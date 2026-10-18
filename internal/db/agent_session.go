@@ -1,6 +1,11 @@
 package db
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
+)
 
 // RunAgentSession is the minimum session-resume metadata for one durable
 // per-run, per-role agent session. Production resumes only the review-fixer
@@ -21,7 +26,7 @@ type RunAgentSession struct {
 // run+role. A run has at most one session per role.
 func (d *DB) UpsertRunAgentSession(runID, role, agent, sessionID string) error {
 	ts := now()
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpsertRunAgentSession",
 		`INSERT INTO run_agent_sessions (run_id, role, agent, session_id, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(run_id, role) DO UPDATE SET agent = excluded.agent, session_id = excluded.session_id, updated_at = excluded.updated_at`,
@@ -58,7 +63,7 @@ func (d *DB) GetRunAgentSessions(runID string) ([]RunAgentSession, error) {
 // DeleteRunAgentSession drops one role's session identity so the next turn
 // starts a fresh same-role session (used after a failed resume).
 func (d *DB) DeleteRunAgentSession(runID, role string) error {
-	_, err := d.sql.Exec(`DELETE FROM run_agent_sessions WHERE run_id = ? AND role = ?`, runID, role)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "DeleteRunAgentSession", `DELETE FROM run_agent_sessions WHERE run_id = ? AND role = ?`, runID, role)
 	if err != nil {
 		return fmt.Errorf("delete run agent session: %w", err)
 	}

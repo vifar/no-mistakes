@@ -140,7 +140,7 @@ func TestPRContextContention(t *testing.T) {
 			if err := d.UpdateRunReviewApprovedHeadSHA(runID, candidate.LocalHeadSHA); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestPRContextContentionProcess$")
 			cmd.Env = append(os.Environ(), "NM_TEST_RECEIPT_CONTENTION="+mode, "NM_TEST_RECEIPT_DB="+path, "NM_TEST_RECEIPT_RUN="+runID)
@@ -212,10 +212,10 @@ func TestPRContextContention(t *testing.T) {
 					t.Fatalf("receipt and authority must commit together: receipt=%+v run=%+v review=%+v", receipt, run, review)
 				}
 			} else {
-				// The bound is four full transactions, not an unbounded spin. An
+				// The shared time budget bounds full transactions. An
 				// exhausted stale snapshot must preserve the old receipt + authority.
-				if result.Error == "" || result.Code != 517 || result.Changed || result.Generation != 0 || result.Attempts != 4 || barriers != 4 {
-					t.Fatalf("writer must fail closed after four attempts: %+v, barriers=%d", *result, barriers)
+				if !strings.Contains(result.Error, "SQLITE_WRITE_CONTENTION:") || result.Code != 517 || result.Changed || result.Generation != 0 || result.Attempts < 4 || barriers != result.Attempts {
+					t.Fatalf("writer must fail closed after the shared retry budget: %+v, barriers=%d", *result, barriers)
 				}
 				if receipt.Generation != 1 || receipt.PRContextCandidate != candidate || run.ReviewApprovedHeadSHA == nil || review.Status != types.StepStatusCompleted {
 					t.Fatalf("exhaustion changed receipt or authority: receipt=%+v run=%+v review=%+v", receipt, run, review)

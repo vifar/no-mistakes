@@ -33,6 +33,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/shipping"
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
@@ -991,7 +992,11 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 					slog.Error("failed to mark recovered run failed", "run_id", plan.run.ID, "error", dbErr)
 				}
 			}
-			slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", err)
+			if sqlitewrite.IsContention(err) {
+				slog.Error("recovered pipeline infrastructure failure", "run_id", plan.run.ID, "error", err)
+			} else {
+				slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", err)
+			}
 		}
 		fields := telemetry.Fields{
 			"action":      "finished",
@@ -2726,7 +2731,11 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 			}
 			addRunPerformanceSummary(m.db, run.ID, fields)
 			telemetry.Track("run", fields)
-			slog.Error("pipeline failed", "run_id", run.ID, "error", err)
+			if sqlitewrite.IsContention(err) {
+				slog.Error("pipeline infrastructure failure", "run_id", run.ID, "error", err)
+			} else {
+				slog.Error("pipeline failed", "run_id", run.ID, "error", err)
+			}
 		} else {
 			fields := telemetry.Fields{
 				"action":      "finished",

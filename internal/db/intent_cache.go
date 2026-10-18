@@ -1,9 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
 
 // IntentCacheEntry is a cached summarization for a known agent session.
@@ -35,7 +38,7 @@ func (d *DB) PutIntentCache(e IntentCacheEntry) error {
 	if e.CreatedAt == 0 {
 		e.CreatedAt = now()
 	}
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "PutIntentCache",
 		`INSERT OR REPLACE INTO intent_cache (cache_key, summary, agent_name, session_id, created_at) VALUES (?, ?, ?, ?, ?)`,
 		e.CacheKey, e.Summary, e.AgentName, e.SessionID, e.CreatedAt,
 	)
@@ -48,7 +51,7 @@ func (d *DB) PutIntentCache(e IntentCacheEntry) error {
 // CleanupOldIntentCache deletes entries older than maxAge. Returns rows deleted.
 func (d *DB) CleanupOldIntentCache(maxAge time.Duration) (int64, error) {
 	cutoff := time.Now().Add(-maxAge).Unix()
-	result, err := d.sql.Exec(`DELETE FROM intent_cache WHERE created_at < ?`, cutoff)
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "CleanupOldIntentCache", `DELETE FROM intent_cache WHERE created_at < ?`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("cleanup intent cache: %w", err)
 	}

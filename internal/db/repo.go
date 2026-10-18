@@ -1,9 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
 
 // Repo represents a registered repository.
@@ -46,7 +49,7 @@ func (d *DB) InsertRepoWithIDAndFork(id, workingPath, upstreamURL, forkURL, defa
 		DefaultBranch: defaultBranch,
 		CreatedAt:     now(),
 	}
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "InsertRepoWithIDAndFork",
 		`INSERT INTO repos (id, working_path, upstream_url, fork_url, default_branch, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		r.ID, r.WorkingPath, r.UpstreamURL, nullableString(r.ForkURL), r.DefaultBranch, r.CreatedAt,
 	)
@@ -71,7 +74,7 @@ func (d *DB) InsertRepoWithFork(workingPath, upstreamURL, forkURL, defaultBranch
 		DefaultBranch: defaultBranch,
 		CreatedAt:     now(),
 	}
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "InsertRepoWithFork",
 		`INSERT INTO repos (id, working_path, upstream_url, fork_url, default_branch, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 		r.ID, r.WorkingPath, r.UpstreamURL, nullableString(r.ForkURL), r.DefaultBranch, r.CreatedAt,
 	)
@@ -167,13 +170,19 @@ func (d *DB) GetRepoByPath(workingPath string) (*Repo, error) {
 // returns the committed record. A failure leaves the exact prior registration
 // intact.
 func (d *DB) ReplaceRepoURLs(id, upstreamURL, forkURL string) (*Repo, error) {
-	tx, err := d.sql.Begin()
+	return sqlitewrite.Value(context.Background(), "ReplaceRepoURLs", func(writeCtx context.Context) (*Repo, error) {
+		return d.replaceRepoURLsWriteAttempt(writeCtx, id, upstreamURL, forkURL)
+	})
+}
+
+func (d *DB) replaceRepoURLsWriteAttempt(writeCtx context.Context, id, upstreamURL, forkURL string) (*Repo, error) {
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin repo URL replacement: %w", err)
 	}
 	defer tx.Rollback()
 
-	result, err := tx.Exec(
+	result, err := tx.ExecContext(writeCtx,
 		`UPDATE repos SET upstream_url = ?, fork_url = ? WHERE id = ?`,
 		upstreamURL, nullableString(forkURL), id,
 	)
@@ -187,7 +196,7 @@ func (d *DB) ReplaceRepoURLs(id, upstreamURL, forkURL string) (*Repo, error) {
 	}
 
 	r := &Repo{}
-	if err := tx.QueryRow(
+	if err := tx.QueryRowContext(writeCtx,
 		`SELECT id, working_path, upstream_url, COALESCE(fork_url, ''), default_branch, created_at FROM repos WHERE id = ?`, id,
 	).Scan(&r.ID, &r.WorkingPath, &r.UpstreamURL, &r.ForkURL, &r.DefaultBranch, &r.CreatedAt); err != nil {
 		return nil, fmt.Errorf("read replaced repo URLs: %w", err)
@@ -201,7 +210,7 @@ func (d *DB) ReplaceRepoURLs(id, upstreamURL, forkURL string) (*Repo, error) {
 // UpdateRepoMetadata refreshes mutable repository metadata while preserving the
 // stable repo ID, created_at timestamp, and any existing fork push URL.
 func (d *DB) UpdateRepoMetadata(id, upstreamURL, defaultBranch string) (*Repo, error) {
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRepoMetadata",
 		`UPDATE repos SET upstream_url = ?, default_branch = ? WHERE id = ?`,
 		upstreamURL, defaultBranch, id,
 	)
@@ -214,7 +223,7 @@ func (d *DB) UpdateRepoMetadata(id, upstreamURL, defaultBranch string) (*Repo, e
 // UpdateRepoMetadataWithFork refreshes repo metadata and explicitly sets the
 // optional fork push URL.
 func (d *DB) UpdateRepoMetadataWithFork(id, upstreamURL, forkURL, defaultBranch string) (*Repo, error) {
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRepoMetadataWithFork",
 		`UPDATE repos SET upstream_url = ?, fork_url = ?, default_branch = ? WHERE id = ?`,
 		upstreamURL, nullableString(forkURL), defaultBranch, id,
 	)
@@ -226,7 +235,7 @@ func (d *DB) UpdateRepoMetadataWithFork(id, upstreamURL, forkURL, defaultBranch 
 
 // UpdateRepoForkURL sets or clears the optional fork push URL.
 func (d *DB) UpdateRepoForkURL(id, forkURL string) (*Repo, error) {
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRepoForkURL",
 		`UPDATE repos SET fork_url = ? WHERE id = ?`,
 		nullableString(forkURL), id,
 	)
@@ -240,7 +249,7 @@ func (d *DB) UpdateRepoForkURL(id, forkURL string) (*Repo, error) {
 // the repo ID (and with it the gate and run history) when the working
 // directory is renamed or moved on disk.
 func (d *DB) UpdateRepoWorkingPath(id, workingPath string) (*Repo, error) {
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "UpdateRepoWorkingPath",
 		`UPDATE repos SET working_path = ? WHERE id = ?`,
 		workingPath, id,
 	)
@@ -254,17 +263,23 @@ func (d *DB) UpdateRepoWorkingPath(id, workingPath string) (*Repo, error) {
 // Both admitted and diagnostic notification bindings must be removed before the
 // run cascade, or their foreign keys would prevent repository deletion.
 func (d *DB) DeleteRepo(id string) error {
-	tx, err := d.sql.Begin()
+	return sqlitewrite.Do(context.Background(), "DeleteRepo", func(writeCtx context.Context) error {
+		return d.deleteRepoWriteAttempt(writeCtx, id)
+	})
+}
+
+func (d *DB) deleteRepoWriteAttempt(writeCtx context.Context, id string) error {
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return fmt.Errorf("begin delete repo: %w", err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM push_notifications
+	if _, err := tx.ExecContext(writeCtx, `DELETE FROM push_notifications
 		WHERE run_id IN (SELECT id FROM runs WHERE repo_id = ?)
 		OR diagnostic_run_id IN (SELECT id FROM runs WHERE repo_id = ?)`, id, id); err != nil {
 		return fmt.Errorf("delete repo push notifications: %w", err)
 	}
-	if _, err := tx.Exec(`DELETE FROM repos WHERE id = ?`, id); err != nil {
+	if _, err := tx.ExecContext(writeCtx, `DELETE FROM repos WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("delete repo: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

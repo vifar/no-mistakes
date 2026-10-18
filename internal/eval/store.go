@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 
 	_ "modernc.org/sqlite"
 )
@@ -40,7 +41,7 @@ func Open(root string) (*Store, error) {
 	}
 	// Keep the database's journal mode: switching to WAL on each connection
 	// can itself race another opener before migration acquires its writer lock.
-	database, err := sql.Open("sqlite", filepath.Join(root, "registry.sqlite")+"?_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
+	database, err := sql.Open("sqlite", fmt.Sprintf("%s?_pragma=foreign_keys(on)&_pragma=busy_timeout(%d)", filepath.Join(root, "registry.sqlite"), sqlitewrite.BusyTimeout.Milliseconds()))
 	if err != nil {
 		return nil, fmt.Errorf("open eval registry: %w", err)
 	}
@@ -54,10 +55,13 @@ func Open(root string) (*Store, error) {
 }
 
 func (s *Store) migrate() error {
+	return sqlitewrite.Do(context.Background(), "eval migration", s.migrateAttempt)
+}
+
+func (s *Store) migrateAttempt(ctx context.Context) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("eval registry is closed")
 	}
-	ctx := context.Background()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("connect eval migration: %w", err)
@@ -69,7 +73,9 @@ func (s *Store) migrate() error {
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return fmt.Errorf("begin eval migration: %w", err)
 	}
-	defer conn.ExecContext(ctx, "ROLLBACK")
+	// Cleanup must outlive the expired retry context so a pooled connection
+	// never retains an unfinished manual transaction.
+	defer conn.ExecContext(context.Background(), "ROLLBACK")
 	if err := dropParkPassSchema(ctx, conn); err != nil {
 		return err
 	}
@@ -283,7 +289,7 @@ func (s *Store) registerCase(c Case) error {
 		return fmt.Errorf("eval registry is closed")
 	}
 	language, size, severity := caseComposition(c)
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO cases
+	_, err := sqlitewrite.Exec(context.Background(), s.db, "eval registerCase", `INSERT OR IGNORE INTO cases
 (id, source_run_id, source_round_id, captured_at, repo_fingerprint, branch, language, size_bucket, severity, gold_count, path)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		c.ID, c.SourceRunID, c.SourceRoundID, c.CapturedAt, c.RepoFingerprint, c.Branch, language, size, severity, len(c.Labels.Findings), c.Dir)
@@ -332,7 +338,7 @@ func (s *Store) appendFindingGold(c Case, added []FindingGold) (Case, int, error
 		return Case{}, 0, fmt.Errorf("write case labels: %w", err)
 	}
 	c.Labels = labels
-	if _, err := s.db.Exec(`UPDATE cases SET gold_count = ? WHERE id = ?`, len(labels.Findings), c.ID); err != nil {
+	if _, err := sqlitewrite.Exec(context.Background(), s.db, "eval appendFindingGold", `UPDATE cases SET gold_count = ? WHERE id = ?`, len(labels.Findings), c.ID); err != nil {
 		return Case{}, 0, fmt.Errorf("update eval case gold count: %w", err)
 	}
 	return c, n, nil
@@ -455,24 +461,17 @@ func (s *Store) loadDiversifiedPins() ([]diversifiedPin, error) {
 }
 
 func (s *Store) replaceDiversifiedPins(pins []diversifiedPin) error {
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin diversified pin update: %w", err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM diversified_pins`); err != nil {
-		return fmt.Errorf("clear diversified pins: %w", err)
-	}
-	for _, pin := range pins {
-		if _, err := tx.Exec(`INSERT INTO diversified_pins (case_id, stratum, rank, pinned_at) VALUES (?, ?, ?, ?)`,
-			pin.CaseID, pin.Stratum, pin.Rank, pin.PinnedAt); err != nil {
-			return fmt.Errorf("insert diversified pin %s: %w", pin.CaseID, err)
+	return sqlitewrite.Transaction(context.Background(), s.db, "replace diversified pins", func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM diversified_pins`); err != nil {
+			return err
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit diversified pins: %w", err)
-	}
-	return nil
+		for _, pin := range pins {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO diversified_pins (case_id, stratum, rank, pinned_at) VALUES (?, ?, ?, ?)`, pin.CaseID, pin.Stratum, pin.Rank, pin.PinnedAt); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func (s *Store) casesForRun(runID string) ([]Case, error) {
@@ -506,7 +505,7 @@ func (s *Store) updateCaseGoldCount(id string, n int) error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("eval registry is closed")
 	}
-	if _, err := s.db.Exec(`UPDATE cases SET gold_count = ? WHERE id = ?`, n, id); err != nil {
+	if _, err := sqlitewrite.Exec(context.Background(), s.db, "eval updateCaseGoldCount", `UPDATE cases SET gold_count = ? WHERE id = ?`, n, id); err != nil {
 		return fmt.Errorf("update eval case gold count: %w", err)
 	}
 	return nil
@@ -577,7 +576,7 @@ func (s *Store) Prune(ctx context.Context, maxCases int) (int, error) {
 	if err := s.cleanupPendingCaseDeletions(ctx); err != nil {
 		return 0, err
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM replay_case_reservations WHERE reserved_until <= ?`, time.Now().Unix()); err != nil {
+	if _, err := sqlitewrite.Exec(ctx, s.db, "eval Prune", `DELETE FROM replay_case_reservations WHERE reserved_until <= ?`, time.Now().Unix()); err != nil {
 		return 0, fmt.Errorf("release abandoned eval replay reservations: %w", err)
 	}
 	if maxCases <= 0 {
@@ -616,19 +615,15 @@ ORDER BY c.captured_at, c.id LIMIT ?`, time.Now().Unix(), excess)
 
 	pruned := 0
 	for _, v := range victims {
-		tx, err := s.db.BeginTx(ctx, nil)
+		err := sqlitewrite.Transaction(ctx, s.db, "prune eval case", func(ctx context.Context, tx *sql.Tx) error {
+			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO pending_case_deletions (id, path, repo_fingerprint) VALUES (?, ?, ?)`, v.id, v.dir, v.fingerprint); err != nil {
+				return err
+			}
+			_, err := tx.ExecContext(ctx, `DELETE FROM cases WHERE id = ?`, v.id)
+			return err
+		})
 		if err != nil {
-			return pruned, fmt.Errorf("begin eval case prune: %w", err)
-		}
-		if _, err = tx.ExecContext(ctx, `INSERT OR REPLACE INTO pending_case_deletions (id, path, repo_fingerprint) VALUES (?, ?, ?)`, v.id, v.dir, v.fingerprint); err == nil {
-			_, err = tx.ExecContext(ctx, `DELETE FROM cases WHERE id = ?`, v.id)
-		}
-		if err != nil {
-			_ = tx.Rollback()
 			return pruned, fmt.Errorf("stage eval case %q deletion: %w", v.id, err)
-		}
-		if err := tx.Commit(); err != nil {
-			return pruned, fmt.Errorf("commit eval case %q deletion: %w", v.id, err)
 		}
 		pruned++
 	}
@@ -665,7 +660,7 @@ func (s *Store) cleanupPendingCaseDeletions(ctx context.Context) error {
 		if err := os.RemoveAll(item.dir); err != nil {
 			return fmt.Errorf("remove eval case %q: %w", item.id, err)
 		}
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM pending_case_deletions WHERE id = ?`, item.id); err != nil {
+		if _, err := sqlitewrite.Exec(ctx, s.db, "eval cleanupPendingCaseDeletions", `DELETE FROM pending_case_deletions WHERE id = ?`, item.id); err != nil {
 			return fmt.Errorf("finish eval case %q deletion: %w", item.id, err)
 		}
 	}

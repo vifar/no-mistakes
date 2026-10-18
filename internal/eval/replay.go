@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -133,22 +135,17 @@ func (s *Store) prepareReplay(ctx context.Context, opts ReplayOptions) ([]Case, 
 		return nil, Session{}, fmt.Errorf("create eval sessions directory: %w", err)
 	}
 	sessionPath := filepath.Join(sessionsDir, session.ID+".json")
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, Session{}, fmt.Errorf("begin eval replay reservation: %w", err)
-	}
-	reservedUntil := time.Now().Add(replayReservationLease).Unix()
-	for _, c := range cases {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO replay_case_reservations (session_id, case_id, reserved_until) VALUES (?, ?, ?)`, session.ID, c.ID, reservedUntil); err != nil {
-			_ = tx.Rollback()
-			return nil, Session{}, fmt.Errorf("reserve eval case %q: %w", c.ID, err)
+	err = sqlitewrite.Transaction(ctx, s.db, "reserve eval replay", func(ctx context.Context, tx *sql.Tx) error {
+		reservedUntil := time.Now().Add(replayReservationLease).Unix()
+		for _, c := range cases {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO replay_case_reservations (session_id, case_id, reserved_until) VALUES (?, ?, ?)`, session.ID, c.ID, reservedUntil); err != nil {
+				return fmt.Errorf("reserve eval case %q: %w", c.ID, err)
+			}
 		}
-	}
-	if err := writeJSON(sessionPath, session); err != nil {
-		_ = tx.Rollback()
-		return nil, Session{}, fmt.Errorf("write eval session: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
+		// Same session identity/path on every attempt; this local replacement is idempotent.
+		return writeJSON(sessionPath, session)
+	})
+	if err != nil {
 		_ = os.Remove(sessionPath)
 		return nil, Session{}, fmt.Errorf("commit eval replay reservation: %w", err)
 	}
@@ -170,7 +167,7 @@ func (s *Store) keepReplayReservation(ctx context.Context, cancelReplay context.
 				return
 			case <-ticker.C:
 				reservedUntil := time.Now().Add(replayReservationLease).Unix()
-				if _, err := s.db.ExecContext(ctx, `UPDATE replay_case_reservations SET reserved_until = ? WHERE session_id = ?`, reservedUntil, sessionID); err != nil {
+				if _, err := sqlitewrite.Exec(ctx, s.db, "eval func", `UPDATE replay_case_reservations SET reserved_until = ? WHERE session_id = ?`, reservedUntil, sessionID); err != nil {
 					cancelReplay()
 					return
 				}
@@ -184,7 +181,7 @@ func (s *Store) keepReplayReservation(ctx context.Context, cancelReplay context.
 }
 
 func (s *Store) releaseReplayReservation(sessionID string) {
-	_, _ = s.db.Exec(`DELETE FROM replay_case_reservations WHERE session_id = ?`, sessionID)
+	_, _ = sqlitewrite.Exec(context.Background(), s.db, "eval releaseReplayReservation", `DELETE FROM replay_case_reservations WHERE session_id = ?`, sessionID)
 }
 
 func replayOne(ctx context.Context, store *Store, c Case, session Session, candidate Candidate, repeat int) (evaluation Evaluation) {
@@ -580,7 +577,7 @@ func (s *Store) persistEvaluation(c Case, evaluation Evaluation) error {
 	if evaluation.TokensReported {
 		reported = 1
 	}
-	_, err := s.db.Exec(`INSERT INTO evaluations
+	_, err := sqlitewrite.Exec(context.Background(), s.db, "eval persistEvaluation", `INSERT INTO evaluations
 (id, session_id, case_id, candidate, repeat_number, started_at, completed_at, status, gold_count, true_positive, false_negative, false_positive, pending, tokens_reported, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, fresh_input_tokens, duration_ms, path)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		evaluation.ID, evaluation.SessionID, evaluation.CaseID, evaluation.Candidate, evaluation.Repeat,

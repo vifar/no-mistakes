@@ -1,9 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
 
 const (
@@ -216,7 +219,7 @@ func (d *DB) insertStepRound(stepResultID string, round int, trigger string, fin
 		DurationMS:       durationMS,
 		CreatedAt:        now(),
 	}
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "insertStepRound",
 		`INSERT INTO step_rounds (id, step_result_id, round, trigger_type, findings_json, reviewed_head_sha, starting_head_sha, trusted_config_sha, global_config_yaml, repo_config_yaml, user_findings_json, selected_finding_ids, selection_source, fix_summary, repair_published, duration_ms, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.StepResultID, r.Round, r.Trigger, r.FindingsJSON, r.ReviewedHeadSHA, r.StartingHeadSHA, r.TrustedConfigSHA, r.GlobalConfigYAML, r.RepoConfigYAML, r.UserFindingsJSON, r.SelectedFindingIDs, r.SelectionSource, r.FixSummary, r.RepairPublished, r.DurationMS, r.CreatedAt,
 	)
@@ -239,7 +242,7 @@ func (d *DB) SetStepRoundSelection(id string, selectedFindingIDs *string, source
 	if selectedFindingIDs != nil && *selectedFindingIDs != "" && source != "" {
 		selectionSource = &source
 	}
-	if _, err := d.sql.Exec(
+	if _, err := sqlitewrite.Exec(context.Background(), d.sql, "SetStepRoundSelection",
 		`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ? WHERE id = ?`,
 		selectedFindingIDs, selectionSource, id,
 	); err != nil {
@@ -260,7 +263,7 @@ func (d *DB) SetStepRoundUserDecision(id string, selectedFindingIDs *string, sou
 	if selectedFindingIDs != nil && *selectedFindingIDs != "" && source != "" {
 		selectionSource = &source
 	}
-	if _, err := d.sql.Exec(
+	if _, err := sqlitewrite.Exec(context.Background(), d.sql, "SetStepRoundUserDecision",
 		`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?, user_findings_json = ? WHERE id = ?`,
 		selectedFindingIDs, selectionSource, userFindingsJSON, id,
 	); err != nil {
@@ -279,7 +282,7 @@ func (d *DB) SetStepRoundSelectedFindingIDs(id string, selectedFindingIDs *strin
 // instructions attached and user-added findings appended) that was
 // dispatched to the fix agent for the round. Passing nil clears the column.
 func (d *DB) SetStepRoundUserFindings(id string, userFindingsJSON *string) error {
-	if _, err := d.sql.Exec(
+	if _, err := sqlitewrite.Exec(context.Background(), d.sql, "SetStepRoundUserFindings",
 		`UPDATE step_rounds SET user_findings_json = ? WHERE id = ?`,
 		userFindingsJSON, id,
 	); err != nil {

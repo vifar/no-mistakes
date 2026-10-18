@@ -150,6 +150,14 @@ The global [`daemon` configuration](/no-mistakes/reference/global-config/#daemon
 This is another reason the daemon exists: branch-level coordination is easier to
 reason about in one long-lived process than inside independent hook invocations.
 
+## Database write contention
+
+The daemon and pipeline keep SQLite's five-second busy timeout and retry busy or locked writes with jitter for a 30-second retry budget. A final in-flight busy handler can take up to another five seconds. Transactions restart from a fresh snapshot; agent turns and forge operations are never replayed by this retry.
+
+An exhausted write returns `SQLITE_WRITE_CONTENTION`, an infrastructure failure. The run stops with that named error, and its existing published-head status is preserved. It does not become a code-failure status or gain a success status. Inspect the daemon log, release the database lock, and rerun the affected branch when ready.
+
+The daemon also retains a small record under `<NM_HOME>/infrastructure-failures/<runID>.json` so restart recovery preserves that distinction even if SQLite could not save the terminal outcome. These records are outside log and evidence retention. A new execution of the same run clears its record; a new run has its own identity. Keep these files with database backups. If both SQLite and this independent record are unwritable, the daemon reports `SQLITE_INFRASTRUCTURE_RECORD_FAILED`; repair storage before restarting or retrying recovery.
+
 ## Crash recovery
 
 A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) leaves a run that is fully recorded as waiting at an approval gate exactly as a crash would, so the next start resumes it at that gate. This also preserves a recovered gate interrupted before dispatch, including during slot admission, comparison checks, or pending reconciliation retries: its parked state, any accepted response, and worktree remain available for the next restart. A clean stop also leaves a run that is monitoring CI for an already-created PR as a crash would, so the next start records it as `ci_monitor_interrupted` (see below). The stop posts no failure status for it. A clean stop still fails any other run that is in the middle of executing a step.

@@ -1,12 +1,14 @@
 package db
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -224,7 +226,7 @@ func (d *DB) RecordAcceptedGaps(id string, gaps AcceptedGaps, strict bool) (Acce
 	if err != nil {
 		return AcceptedGaps{}, err
 	}
-	result, err := d.sql.Exec(`UPDATE step_results SET accepted_gaps_json = ? WHERE id = ? AND step_name = ? AND status IN (?, ?, ?)`,
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "RecordAcceptedGaps", `UPDATE step_results SET accepted_gaps_json = ? WHERE id = ? AND step_name = ? AND status IN (?, ?, ?)`,
 		string(raw), id, types.StepTest, types.StepStatusAwaitingApproval, types.StepStatusFixReview, types.StepStatusRunning)
 	if err != nil {
 		return AcceptedGaps{}, fmt.Errorf("record accepted gaps: %w", err)

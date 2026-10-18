@@ -1,17 +1,15 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"math"
 	"net/url"
 	"strings"
-	"time"
 
-	"modernc.org/sqlite"
-	sqlite3 "modernc.org/sqlite/lib"
-
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -85,41 +83,25 @@ func (d *DB) AdvanceRunPRContext(runID string, candidate PRContextCandidate) (PR
 }
 
 func (d *DB) bindRunPRContext(runID string, candidate PRContextCandidate, resetFrom types.StepName, forward bool, options *prContextBindOptions) (PRContextBindResult, error) {
-	const attempts = 4
-	const initialBackoff = 25 * time.Millisecond
-	for attempt := 0; ; attempt++ {
-		result, err := d.bindRunPRContextOnce(runID, candidate, resetFrom, forward, options)
-		var sqliteErr *sqlite.Error
-		// Include extended codes such as SQLITE_BUSY_SNAPSHOT (517). Its
-		// snapshot cannot be upgraded even after busy_timeout: release the
-		// transaction and re-read the receipt, generation and authority checks.
-		// SQLITE_LOCKED and non-driver errors are not this recovery contract.
-		if !errors.As(err, &sqliteErr) || sqliteErr.Code()&0xff != sqlite3.SQLITE_BUSY {
-			return result, err
-		}
-		if attempt+1 == attempts {
-			return PRContextBindResult{}, fmt.Errorf("bind run PR context after %d attempts: %w", attempts, err)
-		}
-		// Once has already rolled back before waiting, so the backoff holds
-		// neither the stale snapshot nor this DB's sole connection.
-		time.Sleep(initialBackoff << attempt)
-	}
+	return sqlitewrite.Value(context.Background(), "bind run PR context", func(writeCtx context.Context) (PRContextBindResult, error) {
+		return d.bindRunPRContextOnce(writeCtx, runID, candidate, resetFrom, forward, options)
+	})
 }
 
-func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, resetFrom types.StepName, forward bool, options *prContextBindOptions) (PRContextBindResult, error) {
+func (d *DB) bindRunPRContextOnce(writeCtx context.Context, runID string, candidate PRContextCandidate, resetFrom types.StepName, forward bool, options *prContextBindOptions) (PRContextBindResult, error) {
 	if err := validatePRContextCandidate(candidate); err != nil {
 		return PRContextBindResult{}, err
 	}
 	if resetFrom != types.StepRebase && resetFrom != types.StepReview {
 		return PRContextBindResult{}, fmt.Errorf("bind run PR context: reset boundary must be rebase or review")
 	}
-	tx, err := d.sql.Begin()
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return PRContextBindResult{}, fmt.Errorf("bind run PR context: begin: %w", err)
 	}
 	defer tx.Rollback()
 	var recordedPRURL sql.NullString
-	if err := tx.QueryRow(`SELECT pr_url FROM runs WHERE id = ?`, runID).Scan(&recordedPRURL); err != nil {
+	if err := tx.QueryRowContext(writeCtx, `SELECT pr_url FROM runs WHERE id = ?`, runID).Scan(&recordedPRURL); err != nil {
 		return PRContextBindResult{}, fmt.Errorf("bind run PR context: run lookup: %w", err)
 	}
 	if recordedPRURL.Valid && recordedPRURL.String != "" && recordedPRURL.String != candidate.PRURL {
@@ -127,7 +109,7 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 	}
 	previous := &PRContext{}
 	var prURL, sourceRepo, sourceBranch, forgeHead sql.NullString
-	err = tx.QueryRow(`SELECT pr_url, source_repo, source_branch, forge_head_sha,
+	err = tx.QueryRowContext(writeCtx, `SELECT pr_url, source_repo, source_branch, forge_head_sha,
 		local_head_sha, target_branch, target_sha, merge_base_sha, diff_digest,
 		observed_at, generation FROM run_pr_contexts WHERE run_id = ?`, runID).Scan(
 		&prURL, &sourceRepo, &sourceBranch, &forgeHead,
@@ -184,7 +166,7 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 			return PRContextBindResult{}, err
 		}
 		var head string
-		if err = tx.QueryRow(`SELECT head_sha FROM runs WHERE id=?`, runID).Scan(&head); err != nil {
+		if err = tx.QueryRowContext(writeCtx, `SELECT head_sha FROM runs WHERE id=?`, runID).Scan(&head); err != nil {
 			return PRContextBindResult{}, err
 		}
 		if initial || previous.Generation != *options.completeGeneration || pending == nil ||
@@ -194,7 +176,7 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 			previous.SourceRepo != candidate.SourceRepo || previous.SourceBranch != candidate.SourceBranch || previous.ForgeHeadSHA != candidate.ForgeHeadSHA {
 			return PRContextBindResult{}, fmt.Errorf("pending Rebase completion differs from classified comparison")
 		}
-		if _, err = tx.Exec(`UPDATE runs SET pending_target_rewind_id=NULL WHERE id=?`, runID); err != nil {
+		if _, err = tx.ExecContext(writeCtx, `UPDATE runs SET pending_target_rewind_id=NULL WHERE id=?`, runID); err != nil {
 			return PRContextBindResult{}, err
 		}
 		if previous.PRContextCandidate == candidate {
@@ -224,19 +206,19 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 			source, forgeHead = pending.SourceSHA, pending.ForgeHeadSHA
 		}
 		id := newID()
-		if _, err = tx.Exec(`INSERT INTO run_target_rewinds (id,run_id,old_target_sha,target_sha,local_head_sha,source_sha,forge_head_sha,step,generation,at)
+		if _, err = tx.ExecContext(writeCtx, `INSERT INTO run_target_rewinds (id,run_id,old_target_sha,target_sha,local_head_sha,source_sha,forge_head_sha,step,generation,at)
             VALUES (?,?,?,?,?,?,?,?,?,?)`, id, runID, previous.TargetSHA, candidate.TargetSHA, candidate.LocalHeadSHA, source, forgeHead, req.Step, generation, now()); err != nil {
 			return PRContextBindResult{}, err
 		}
 		if err = archiveTargetRewind(tx, id, runID, previous, rewindRun.ReviewApprovedHeadSHA); err != nil {
 			return PRContextBindResult{}, err
 		}
-		if _, err = tx.Exec(`UPDATE runs SET target_advance_rewinds=target_advance_rewinds+1,pending_target_rewind_id=? WHERE id=?`, id, runID); err != nil {
+		if _, err = tx.ExecContext(writeCtx, `UPDATE runs SET target_advance_rewinds=target_advance_rewinds+1,pending_target_rewind_id=? WHERE id=?`, id, runID); err != nil {
 			return PRContextBindResult{}, err
 		}
 	}
 	ts := now()
-	if _, err := tx.Exec(`INSERT INTO run_pr_contexts (
+	if _, err := tx.ExecContext(writeCtx, `INSERT INTO run_pr_contexts (
 		run_id, pr_url, source_repo, source_branch, forge_head_sha,
 		local_head_sha, target_branch, target_sha, merge_base_sha, diff_digest,
 		observed_at, generation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -254,27 +236,27 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 		return PRContextBindResult{}, fmt.Errorf("bind run PR context: write receipt: %w", err)
 	}
 	if candidate.PRURL != "" && recordedPRURL.String == "" {
-		if _, err := tx.Exec(`UPDATE runs SET pr_url=?, pr_state='open', pr_state_observed_at=?, updated_at=? WHERE id=? AND (pr_url IS NULL OR pr_url='')`, candidate.PRURL, ts, ts, runID); err != nil {
+		if _, err := tx.ExecContext(writeCtx, `UPDATE runs SET pr_url=?, pr_state='open', pr_state_observed_at=?, updated_at=? WHERE id=? AND (pr_url IS NULL OR pr_url='')`, candidate.PRURL, ts, ts, runID); err != nil {
 			return PRContextBindResult{}, fmt.Errorf("bind run PR context: attach discovered PR: %w", err)
 		}
 	}
 	if !initial && !identityOnlyAttach && forward {
-		if _, err := tx.Exec(`UPDATE runs SET ci_ready_at=NULL, ci_ready_no_ci=0,
+		if _, err := tx.ExecContext(writeCtx, `UPDATE runs SET ci_ready_at=NULL, ci_ready_no_ci=0,
 			terminal_head_verified_at=NULL, updated_at=? WHERE id=?`, ts, runID); err != nil {
 			return PRContextBindResult{}, fmt.Errorf("advance run PR context: revoke terminal evidence: %w", err)
 		}
 	}
 	if !initial && !identityOnlyAttach && !forward {
 		if rewindRun != nil {
-			if _, err := tx.Exec(`UPDATE review_comparisons SET approved=0 WHERE run_id=?`, runID); err != nil {
+			if _, err := tx.ExecContext(writeCtx, `UPDATE review_comparisons SET approved=0 WHERE run_id=?`, runID); err != nil {
 				return PRContextBindResult{}, err
 			}
 		}
-		if _, err := tx.Exec(`DELETE FROM step_rounds WHERE step_result_id IN (
+		if _, err := tx.ExecContext(writeCtx, `DELETE FROM step_rounds WHERE step_result_id IN (
 			SELECT id FROM step_results WHERE run_id=? AND step_order>=?)`, runID, resetFrom.Order()); err != nil {
 			return PRContextBindResult{}, fmt.Errorf("bind run PR context: discard superseded rounds: %w", err)
 		}
-		if _, err := tx.Exec(`UPDATE runs SET review_approved_head_sha=NULL,
+		if _, err := tx.ExecContext(writeCtx, `UPDATE runs SET review_approved_head_sha=NULL,
 			ci_ready_at=NULL, ci_ready_no_ci=0, terminal_head_verified_at=NULL,
 			awaiting_agent_since=NULL, updated_at=? WHERE id=?`, ts, runID); err != nil {
 			return PRContextBindResult{}, fmt.Errorf("bind run PR context: revoke run authority: %w", err)
@@ -283,7 +265,7 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 		// credit. Keep that choice durable if this rewind later parks, while
 		// discarding all its evidence and rerunning every custom gate.
 		preserveSkips := options != nil && (options.rewind != nil || options.completeGeneration != nil)
-		if _, err := tx.Exec(`UPDATE step_results SET status=CASE WHEN ? AND status='skipped'
+		if _, err := tx.ExecContext(writeCtx, `UPDATE step_results SET status=CASE WHEN ? AND status='skipped'
             AND step_name IN ('review','test','document','lint','push','pr','ci') THEN 'skipped' ELSE ? END, exit_code=NULL,
 			duration_ms=NULL, log_path=NULL, findings_json=NULL, error=NULL,
 			started_at=NULL, round_started_at=NULL, completed_at=NULL,

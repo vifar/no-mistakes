@@ -1,8 +1,10 @@
 package db
 
 import (
+	"context"
 	"fmt"
 
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -103,7 +105,7 @@ func (d *DB) GetBranchDecisionRounds(repoID, branch, excludeRunID string, limit 
 // the caller.
 func (d *DB) SetStepRoundDeclined(id string) error {
 	declined := DeclinedSelectionJSON
-	if _, err := d.sql.Exec(
+	if _, err := sqlitewrite.Exec(context.Background(), d.sql, "SetStepRoundDeclined",
 		`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?
 		  WHERE id = ? AND selection_source IS NULL`,
 		declined, RoundSelectionSourceUserDeclined, id,

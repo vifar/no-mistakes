@@ -1,10 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -187,7 +189,7 @@ func checkTargetRewindEligibility(tx *sql.Tx, runID string, previous *PRContext,
 // MarkRunRetargetAttempted is monotonic. An uncertain forge call counts as an
 // attempt, so this write must succeed BEFORE calling the forge.
 func (d *DB) MarkRunRetargetAttempted(runID string) error {
-	result, err := d.sql.Exec(`UPDATE runs SET retarget_attempted=1,updated_at=? WHERE id=?`, now(), runID)
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "MarkRunRetargetAttempted", `UPDATE runs SET retarget_attempted=1,updated_at=? WHERE id=?`, now(), runID)
 	if err != nil {
 		return fmt.Errorf("record PR retarget attempt: %w", err)
 	}

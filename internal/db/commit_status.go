@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"database/sql"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
 
 // CommitStatusPublication binds reporting to a confirmed publication by this
@@ -23,7 +25,7 @@ type CommitStatusAttempt struct {
 }
 
 func (d *DB) PutCommitStatusAttempt(runID string, p CommitStatusAttempt) error {
-	_, err := d.sql.Exec(`INSERT INTO commit_status_attempts (run_id,sha,host,repo,target,ref,validated,ci_eligible,adopted_only,retired)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "PutCommitStatusAttempt", `INSERT INTO commit_status_attempts (run_id,sha,host,repo,target,ref,validated,ci_eligible,adopted_only,retired)
 		VALUES (?,?,?,?,?,?,?,?,?,EXISTS (
 			SELECT 1 FROM commit_status_publications p JOIN runs owner ON owner.id=p.run_id JOIN runs current ON current.id=?
 			WHERE p.host=? AND p.repo=? AND p.sha=? AND
@@ -52,7 +54,13 @@ func (d *DB) PutCommitStatusPublication(runID string, p CommitStatusPublication)
 }
 
 func (d *DB) putCommitStatusPublication(runID string, p CommitStatusPublication, confirm bool) (bool, error) {
-	tx, err := d.sql.Begin()
+	return sqlitewrite.Value(context.Background(), "putCommitStatusPublication", func(writeCtx context.Context) (bool, error) {
+		return d.putCommitStatusPublicationWriteAttempt(writeCtx, runID, p, confirm)
+	})
+}
+
+func (d *DB) putCommitStatusPublicationWriteAttempt(writeCtx context.Context, runID string, p CommitStatusPublication, confirm bool) (bool, error) {
+	tx, err := d.sql.BeginTx(writeCtx, nil)
 	if err != nil {
 		return false, err
 	}
@@ -61,19 +69,19 @@ func (d *DB) putCommitStatusPublication(runID string, p CommitStatusPublication,
 		// An uncertain/actual push attempt cannot be relabeled by a fresh
 		// attach observation, including one racing with confirmation.
 		var pushed bool
-		if err := tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM commit_status_attempts WHERE run_id=? AND adopted_only IS NOT 1)`, runID).Scan(&pushed); err != nil {
+		if err := tx.QueryRowContext(writeCtx, `SELECT EXISTS (SELECT 1 FROM commit_status_attempts WHERE run_id=? AND adopted_only IS NOT 1)`, runID).Scan(&pushed); err != nil {
 			return false, err
 		}
 		p.AdoptedOnly = !pushed
 	}
 	// Reconfirmation updates validation evidence, not the last successful POST.
 	// In particular, an up-to-date Push must preserve attach-time deduplication.
-	if _, err := tx.Exec(`INSERT INTO commit_status_publications (run_id,sha,host,repo,last_state,validated,ci_eligible,adopted_only)
+	if _, err := tx.ExecContext(writeCtx, `INSERT INTO commit_status_publications (run_id,sha,host,repo,last_state,validated,ci_eligible,adopted_only)
 		VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(host,repo,sha,run_id) DO UPDATE SET last_state=CASE WHEN ? THEN commit_status_publications.last_state ELSE excluded.last_state END,validated=excluded.validated,ci_eligible=excluded.ci_eligible,adopted_only=commit_status_publications.adopted_only AND excluded.adopted_only`, runID, p.SHA, p.Host, p.Repo, p.LastState, p.Validated, p.CIEligible, p.AdoptedOnly, confirm); err != nil {
 		return false, err
 	}
 	for _, table := range []string{"commit_status_attempts", "commit_status_publications"} {
-		if _, err = tx.Exec(`UPDATE `+table+` SET retired=1 WHERE host=? AND repo=? AND sha=? AND run_id IN (
+		if _, err = tx.ExecContext(writeCtx, `UPDATE `+table+` SET retired=1 WHERE host=? AND repo=? AND sha=? AND run_id IN (
 			SELECT older.id FROM runs older JOIN runs newer
 			ON newer.created_at>older.created_at OR (newer.created_at=older.created_at AND newer.id>older.id)
 			JOIN commit_status_publications owner ON owner.run_id=newer.id
@@ -83,12 +91,12 @@ func (d *DB) putCommitStatusPublication(runID string, p CommitStatusPublication,
 		}
 	}
 	if confirm {
-		if _, err = tx.Exec(`DELETE FROM commit_status_attempts WHERE run_id=? AND retired=0`, runID); err != nil {
+		if _, err = tx.ExecContext(writeCtx, `DELETE FROM commit_status_attempts WHERE run_id=? AND retired=0`, runID); err != nil {
 			return false, err
 		}
 	}
 	var retired bool
-	if err := tx.QueryRow(`SELECT retired FROM commit_status_publications WHERE run_id=? AND host=? AND repo=? AND sha=?`, runID, p.Host, p.Repo, p.SHA).Scan(&retired); err != nil {
+	if err := tx.QueryRowContext(writeCtx, `SELECT retired FROM commit_status_publications WHERE run_id=? AND host=? AND repo=? AND sha=?`, runID, p.Host, p.Repo, p.SHA).Scan(&retired); err != nil {
 		return false, err
 	}
 	return !retired, tx.Commit()
