@@ -180,9 +180,10 @@ rather than as a bare Git error. The guard resolves this evidence on the AXI
 submission paths only, which supply the repository's own run records; publication
 reconciliation supplies none; its run-owned-head and recovery-anchor rules remain in force.
 
-The exception deliberately does not extend to a verified final head that carries
-commits made after review (document/lint and CI-repair rounds commit after
-review completes, so such a run records `HeadSHA != ReviewApprovedHeadSHA`).
+The exception deliberately does not extend to a verified final head beyond its
+recorded Review approval (`HeadSHA != ReviewApprovedHeadSHA`). See the
+[documentation-only carry rules](/no-mistakes/reference/repo-config/#documentdoc_only_paths)
+for when Document can advance that binding.
 That shape is refused like any other unproven head, but it is named in its own
 terms: the guard reports the condition (which run submitted the head, its
 reviewed head, and its verified post-review head) and the step that actually
