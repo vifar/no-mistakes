@@ -170,7 +170,7 @@ func discardDocumentCandidate(sctx *pipeline.StepContext, from string, untracked
 			return fmt.Errorf("remove converged Document additions: %w", err)
 		}
 	}
-	status, err := stepGitRun(sctx, "status", "--porcelain")
+	status, err := stepGitRun(sctx, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	if err != nil {
 		return err
 	}

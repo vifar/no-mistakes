@@ -157,7 +157,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	// Own only this invocation's changes, including commits the agent makes
 	// despite the prompt. The clean start makes rejected proposals reversible.
 	headBefore := sctx.Run.HeadSHA
-	status, err := stepGitRun(sctx, "status", "--porcelain")
+	status, err := stepGitRun(sctx, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +212,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if err != nil {
 		return nil, err
 	}
-	needsCommit, err := stepGitRun(sctx, "status", "--porcelain")
+	needsCommit, err := stepGitRun(sctx, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	if err != nil {
 		return nil, err
 	}
