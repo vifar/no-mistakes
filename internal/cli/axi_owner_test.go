@@ -95,6 +95,9 @@ func TestOwnerReceiptClaimsAndOutput(t *testing.T) {
 	for _, owner := range []string{"Firstmate", ""} {
 		t.Run("owner="+owner, func(t *testing.T) {
 			olderDaemonFixture(t, nil, func(srv *ipc.Server) {
+				srv.Handle(ipc.MethodProbeRunOwner, func(context.Context, json.RawMessage) (interface{}, error) {
+					return &ipc.ProbeRunOwnerResult{OK: true}, nil
+				})
 				srv.HandleStream(ipc.MethodSubscribe, hangSubscribe)
 				srv.Handle(ipc.MethodClaimLaunchReceipt, func(_ context.Context, raw json.RawMessage) (interface{}, error) {
 					var params map[string]any
