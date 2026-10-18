@@ -238,6 +238,26 @@ func TestDocumentConvergenceSuppressedCleanProposalRetainsGap(t *testing.T) {
 	if err != nil || !out.NeedsApproval || !strings.Contains(out.Findings, "gap still open") {
 		t.Fatalf("discarded edits erased the gap: %+v, %v", out, err)
 	}
+	if !strings.Contains(out.Findings, "Document discarded a repeated repair of README.md") {
+		t.Errorf("existing finding hid the discarded repair: %s", out.Findings)
+	}
+	var visible Findings
+	if err := json.Unmarshal([]byte(out.Findings), &visible); err != nil {
+		t.Fatal(err)
+	}
+	discardRow := false
+	for _, finding := range visible.Items {
+		if finding.Action == "ask-user" && finding.File == "README.md" && strings.Contains(finding.Description, "Document discarded a repeated repair") {
+			discardRow = true
+		}
+	}
+	if !discardRow {
+		t.Errorf("discard notice is not an ask-user finding row alongside the earlier gap: %s", out.Findings)
+	}
+	passes, err := sc.DB.GetDocumentPasses(sc.Run.ID)
+	if err != nil || len(passes) != 2 || passes[1].FindingsJSON == nil || !strings.Contains(*passes[1].FindingsJSON, "Document discarded a repeated repair of README.md") {
+		t.Errorf("discard notice was not persisted alongside the pending gap: %+v, %v", passes, err)
+	}
 	if got := gitCmd(t, dir, "rev-list", "--count", head+"..HEAD"); got != "1" {
 		t.Fatalf("created %s commits", got)
 	}

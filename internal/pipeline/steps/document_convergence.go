@@ -122,6 +122,34 @@ func documentNULPaths(out string) []string {
 	return strings.Split(strings.TrimSuffix(out, "\x00"), "\x00")
 }
 
+// Porcelain cannot prove clean entry while either index flag hides raw bytes.
+// Refuse even an apparently unmodified entry; never clear a user's flags.
+func assertDocumentIndexVisible(sctx *pipeline.StepContext) error {
+	out, err := stepGitRunRaw(sctx, "ls-files", "-v", "-z")
+	if err != nil {
+		return fmt.Errorf("inspect Document index flags: %w", err)
+	}
+	var hidden []string
+	count := 0
+	for _, entry := range documentNULPaths(out) {
+		if len(entry) < 3 || entry[1] != ' ' {
+			return fmt.Errorf("Document cannot verify index flags: malformed index entry")
+		}
+		// -v lowercases the tag for assume-unchanged, including 's' when
+		// both flags are set. 'S' independently identifies skip-worktree.
+		if entry[0] == 'S' || (entry[0] >= 'a' && entry[0] <= 'z') {
+			count++
+			if len(hidden) < 10 {
+				hidden = append(hidden, strconv.Quote(entry[2:]))
+			}
+		}
+	}
+	if count > 0 {
+		return fmt.Errorf("%d entries are hidden from status by index flags; Document cannot verify a clean entry (first %d paths: %s)", count, len(hidden), strings.Join(hidden, ", "))
+	}
+	return nil
+}
+
 // A filename alone cannot prove repetition: intervening input changes may
 // require a different repair to that same file. Bind suppression to the exact
 // accepted input tree, using the entry head captured before the agent runs.
@@ -177,14 +205,56 @@ func documentCommitCount(sctx *pipeline.StepContext, from, to string) (int, erro
 // The caller proved a clean starting tree BEFORE invoking the agent. Only
 // that invocation's edits may be discarded, including its own commits. A
 // failed restoration aborts the step instead of leaving edits for Push.
-func discardDocumentCandidate(sctx *pipeline.StepContext, from string, untracked []string) error {
-	if _, err := stepGitRun(sctx, "reset", "--hard", from); err != nil {
-		return fmt.Errorf("restore converged Document head: %w", err)
+func discardDocumentCandidate(sctx *pipeline.StepContext, from string, paths, untracked []string) error {
+	// Recheck before ANY mutation: the agent may have set flags after entry.
+	// Refusal leaves its commits, files, flags and pending pass untouched.
+	if err := assertDocumentIndexVisible(sctx); err != nil {
+		return err
+	}
+	head, err := stepGitRun(sctx, "rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	// Restore only proposal paths present in the entry tree or current index.
+	// Paths added and removed inside an intermediate commit need no restore;
+	// untracked-only paths are removed separately below.
+	tracked := make(map[string]bool)
+	for _, args := range [][]string{
+		{"ls-tree", "-r", "--name-only", "-z", from},
+		{"ls-files", "--cached", "-z"},
+	} {
+		out, err := stepGitRunRaw(sctx, args...)
+		if err != nil {
+			return fmt.Errorf("read converged Document restoration paths: %w", err)
+		}
+		for _, path := range documentNULPaths(out) {
+			tracked[path] = true
+		}
+	}
+	var restore []string
+	for _, path := range paths {
+		if tracked[path] {
+			restore = append(restore, path)
+			delete(tracked, path)
+		}
+	}
+	if len(restore) > 0 {
+		args := append([]string{"--literal-pathspecs", "restore", "--source=" + from, "--staged", "--worktree", "--"}, restore...)
+		if _, err := stepGitRun(sctx, args...); err != nil {
+			return fmt.Errorf("restore converged Document proposal paths: %w", err)
+		}
 	}
 	if len(untracked) > 0 {
 		args := append([]string{"--literal-pathspecs", "clean", "-f", "--"}, untracked...)
 		if _, err := stepGitRun(sctx, args...); err != nil {
 			return fmt.Errorf("remove converged Document additions: %w", err)
+		}
+	}
+	// Rewind the ref without rewriting unrelated index or worktree paths.
+	// The expected old head refuses an intervening ref move.
+	if head != from {
+		if _, err := stepGitRun(sctx, "update-ref", "-m", "no-mistakes: discard Document proposal", "HEAD", from, head); err != nil {
+			return fmt.Errorf("restore converged Document head: %w", err)
 		}
 	}
 	status, err := stepGitRun(sctx, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")

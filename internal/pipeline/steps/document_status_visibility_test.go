@@ -109,7 +109,7 @@ func TestDocumentSubmoduleStatusVisibility(t *testing.T) {
 					if err != nil || string(got) != "owner work\n" {
 						t.Errorf("submodule work lost: %q %v", got, err)
 					}
-					if err := discardDocumentCandidate(sc, head, nil); err == nil || !strings.Contains(err.Error(), "remain") {
+					if err := discardDocumentCandidate(sc, head, nil, nil); err == nil || !strings.Contains(err.Error(), "remain") {
 						t.Errorf("rollback certified dirty submodule: %v", err)
 					}
 				}

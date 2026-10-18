@@ -115,6 +115,9 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	// Own only this invocation's changes, including commits the agent makes
 	// despite the prompt. The clean start makes rejected proposals reversible.
 	headBefore := sctx.Run.HeadSHA
+	if err := assertDocumentIndexVisible(sctx); err != nil {
+		return nil, err
+	}
 	status, err := stepGitRun(sctx, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	if err != nil {
 		return nil, err
@@ -224,7 +227,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	capExceeded := prospectiveCommits > limit-history.commits
 	suppressed := capExceeded || repeated
 	if suppressed {
-		if err := discardDocumentCandidate(sctx, headBefore, untracked); err != nil {
+		if err := discardDocumentCandidate(sctx, headBefore, paths, untracked); err != nil {
 			return nil, err
 		}
 		if proposedErr != nil {
@@ -247,12 +250,22 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		if capExceeded {
 			proposedDocs = documentCapFinding(proposedDocs)
 		}
-		if repeated && len(proposedDocs.Items) == 0 {
-			proposedDocs.Items = append(proposedDocs.Items, types.Finding{
+		if repeated {
+			discarded := types.Finding{
 				Severity: "warning", Action: "ask-user", File: paths[0],
 				Description: "Document discarded a repeated repair of " + strings.Join(paths, ", ") +
 					"; the repair was not applied. Inspect the pending documentation gap before continuing.",
-			})
+			}
+			found := false
+			for _, finding := range proposedDocs.Items {
+				if finding.Action == discarded.Action && finding.File == discarded.File && finding.Description == discarded.Description {
+					found = true
+					break
+				}
+			}
+			if !found {
+				proposedDocs.Items = append(proposedDocs.Items, discarded)
+			}
 		}
 		raw, _ := json.Marshal(proposedDocs)
 		if err := sctx.DB.CompleteDocumentPass(passID, headBefore, 0, string(raw)); err != nil {
