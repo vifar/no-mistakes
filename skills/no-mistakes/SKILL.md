@@ -282,6 +282,11 @@ Run the pipeline and decide on its findings as they come up:
      and merge it (the PR link is in the `help` line). no-mistakes keeps
      monitoring the PR in the background until it is merged, closed, or its
      configured idle timeout elapses, so a human can watch it in the TUI.
+     Under the opt-in `ci.release_after_checks_pass` the run instead finishes at
+     the verdict: `run.status` is `checks_passed`, the run released its worktree,
+     and nothing is left watching the PR.
+     An update it needs later is a fresh `no-mistakes axi run` on the updated head;
+     this run will not rebase or re-push it.
    - `passed` - the pipeline completed under the requested steps, including any
      explicit per-run skips. This alone is not evidence that a PR was merged.
    - `passed-with-override` - the pipeline completed with an explicitly approved Test exception or CI failure.
@@ -353,6 +358,8 @@ The CI step deliberately keeps watching the PR after checks pass, so
 `axi run` returns `checks-passed` when the
 [CI readiness rules](https://kunchenguid.github.io/no-mistakes/reference/pipeline-steps/#ci) are met rather than
 blocking on the human merge. Never poll or re-run waiting for the merge yourself.
+That monitor is live by default; only the opt-in
+`ci.release_after_checks_pass` finishes the run at the verdict instead.
 Never treat "no CI checks reported" alone as green.
 
 A published qualified head and original comparison are retained only when live protection permits being behind and the forge confirms mergeability. The following stale-comparison fallback applies otherwise.

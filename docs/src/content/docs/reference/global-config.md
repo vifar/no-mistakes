@@ -581,7 +581,7 @@ The [provider plugin protocol](/no-mistakes/reference/provider-plugin-protocol/)
 
 ### ci_timeout
 
-How long the CI step monitors an open PR, including provider CI status and PR mergeability (on GitHub, GitLab, Forgejo, Azure DevOps, Cursor Origin, or a provider plugin declaring `mergeable_state`), before giving up.
+How long the CI step waits for provider CI status to settle before giving up, and how long it keeps monitoring an open PR after every check is green.
 
 |         |                                                 |
 | ------- | ----------------------------------------------- |
@@ -597,7 +597,7 @@ Repeated failures to read the PR target do not bypass this deadline: the monitor
 While that CI gate is parked, the daemon continues bounded read-only PR-state checks.
 If the PR is merged or closed externally, an eligible stale gate returns to CI execution under the [CI completion rules](/no-mistakes/reference/pipeline-steps/#ci); the observation alone does not complete the run. An open, unknown, or temporarily unreachable PR remains parked for a user decision.
 
-Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to disable the idle deadline. Healthy monitoring can continue until the PR is merged, closed, or the run is aborted with `no-mistakes axi abort --run <id>`; the separate [`ci_readiness_receipt_timeout`](#ci_readiness_receipt_timeout) still applies to missing comparison proof.
+Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to disable the idle deadline. Healthy monitoring can continue until the PR is merged, closed, or the run is aborted with `no-mistakes axi abort --run <id>`, or end at readiness under `ci.release_after_checks_pass`; the separate [`ci_readiness_receipt_timeout`](#ci_readiness_receipt_timeout) still applies to missing comparison proof.
 
 Legacy alias: `babysit_timeout`.
 
@@ -1594,3 +1594,7 @@ This is a global default. Per-repo config can override it via `providers.origin.
 ## Environment variables
 
 See [Environment Variables](/no-mistakes/reference/environment/) for `NM_HOME`, `NM_DAEMON_CONNECT_TIMEOUT`, Forgejo host and token settings, Bitbucket Cloud credentials, and update-check suppression.
+
+### `ci.release_after_checks_pass`
+
+Defaults to `false`. The global setting or trusted repository configuration may opt into finishing a run once its checks pass. The run then records `checks_passed`, releases its worktree and stops monitoring the PR. The human merge decision remains separate. When disabled, the existing monitor stays active until merge, closure or its idle timeout. Readiness and final comparison checks still apply.

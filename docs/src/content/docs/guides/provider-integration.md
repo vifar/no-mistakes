@@ -52,7 +52,7 @@ Once the host is wired up, `no-mistakes` can keep owning the branch after it
 pushes to the configured target:
 
 - create or update the PR automatically
-- keep polling hosted CI under the [CI step's monitoring and termination rules](/no-mistakes/reference/pipeline-steps/#ci)
+- poll hosted CI according to the [CI step lifecycle](/no-mistakes/reference/pipeline-steps/#ci)
 - fetch failing job logs for the CI auto-fix loop when the provider exposes them
 - watch mergeability and fix merge conflicts on the providers listed in the table above
 
@@ -89,7 +89,7 @@ If one daemon serves repositories that require non-overlapping accounts, give ea
 **What you get:**
 
 - PR creation and update on pushes
-- CI check polling with exponential backoff (30s → 60s → 120s) under the [shared CI monitoring rules](/no-mistakes/reference/pipeline-steps/#ci)
+- CI polling follows the [CI step lifecycle](/no-mistakes/reference/pipeline-steps/#ci)
 - Failed job log fetching (`gh run view --log-failed`) for the CI auto-fix step
 - Greptile review-thread comments surfaced under the [CI review-bot policy](/no-mistakes/reference/repo-config/#cireview_bot_comments); the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns finding handling and repair-prompt safety
 - PR mergeability polling, and agent-driven resolution when the provider reports an actual merge conflict
@@ -133,7 +133,7 @@ glab auth login
 **What you get:**
 
 - PR (merge request) creation and update
-- CI pipeline status polling under the [shared CI monitoring rules](/no-mistakes/reference/pipeline-steps/#ci)
+- CI polling follows the [CI step lifecycle](/no-mistakes/reference/pipeline-steps/#ci)
 - Failed job trace fetching (`glab ci trace`) for the CI auto-fix step
 - Merge-conflict polling and auto-fix, same as GitHub
 - A supported review bot's unresolved merge request discussion notes as `ask-user` CI findings under [`ci.review_bot_comments: always`](/no-mistakes/reference/repo-config/#cireview_bot_comments) (see the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for the identity and filtering rules)
@@ -176,7 +176,7 @@ Get an API token from [Bitbucket account settings](https://bitbucket.org/account
 **What you get:**
 
 - PR creation and update
-- CI pipeline status polling under the [shared CI monitoring rules](/no-mistakes/reference/pipeline-steps/#ci)
+- CI polling follows the [CI step lifecycle](/no-mistakes/reference/pipeline-steps/#ci)
 - Failed pipeline step log fetching for the CI auto-fix step
 
 **What you don't get (yet):**
@@ -262,7 +262,7 @@ Verify with `tea logins list` (tea 0.x) or `tea auth status` (tea 1.0).
 **What you get:**
 
 - PR creation and update (`tea pulls create`/`edit` on tea 0.x, `tea pr create`/`edit` on tea 1.0)
-- CI status polling through Gitea Actions under the [shared CI monitoring rules](/no-mistakes/reference/pipeline-steps/#ci). Job-level pass/fail comes from Gitea's Actions REST API (`GET .../actions/runs/{run}/jobs`), reached through `tea api` (which reuses the same stored login/token, so no separate HTTP client or credential is needed) - `tea`'s own `--output json` on `actions runs view --jobs` reports each job's run/queued/completed status but not its pass/fail conclusion.
+- CI status polling through Gitea Actions follows the [CI step lifecycle](/no-mistakes/reference/pipeline-steps/#ci). Job-level pass/fail comes from Gitea's Actions REST API (`GET .../actions/runs/{run}/jobs`), reached through `tea api` (which reuses the same stored login/token, so no separate HTTP client or credential is needed) - `tea`'s own `--output json` on `actions runs view --jobs` reports each job's run/queued/completed status but not its pass/fail conclusion.
 - Failed job log fetching (`tea actions runs logs`, or `tea run logs` on tea 1.0) for the CI auto-fix step
 
 **What you don't get (yet):**

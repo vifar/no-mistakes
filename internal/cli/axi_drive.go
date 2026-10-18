@@ -114,6 +114,12 @@ func outcomeFor(status string) string {
 	switch types.RunStatus(status) {
 	case types.RunCompleted:
 		return "passed"
+	case types.RunChecksPassed:
+		// The run reached its validation verdict and stopped observing the PR,
+		// so this is the same word the still-monitoring acknowledgement uses:
+		// checks passed, the PR is ready for a human to merge. It stays
+		// checks-passed for good, because the merge is never observed here.
+		return "checks-passed"
 	case types.RunFailed:
 		return "failed"
 	case types.RunCancelled:
@@ -129,14 +135,17 @@ func outcomeFor(status string) string {
 // or whose publication/verification automatically skipped. Explicit per-run
 // skips carry no automatic cause and retain their existing outcome.
 func outcomeForRun(rv runView) string {
-	word := outcomeFor(rv.Status)
+	return qualifyOutcome(outcomeFor(rv.Status), rv)
+}
+
+func qualifyOutcome(word string, rv runView) string {
 	if word == "passed" && rv.ExternalCIOwner == types.ExternalCIOwnerControllerShipPR && rv.PendingCISupportError != "" {
 		return "external-ci-handoff-unavailable"
 	}
 	if word == "passed" && rv.ExternalCIOwner == types.ExternalCIOwnerControllerShipPR && len(rv.PendingCISupport) > 0 {
 		return "pending-external-ci"
 	}
-	if word == "passed" && (rv.CIOverrideReason != "" || rv.TestOverrideReason != "") {
+	if (word == "passed" || word == "checks-passed") && (rv.CIOverrideReason != "" || rv.TestOverrideReason != "") {
 		return "passed-with-override"
 	}
 	if word == "passed" && len(rv.automaticSkips()) > 0 {
@@ -1348,11 +1357,14 @@ func emitLaunchReceipt(cmd *cobra.Command, receipt ipc.LaunchReceipt) {
 // does a gate holding an open review question or an unreadable question history
 // (pipeline.HasUnansweredReviewQuestion / HasUnreadableReviewQuestionHistory).
 //
-// The CI step monitors an open PR until a human merges or closes it (a live
-// status the TUI shows), so it never reaches a terminal state on its own. An
-// agent driving the run must not block on that human action, so once CI checks
-// pass driveRun returns with ciReady=true: the change is validated and the PR is
-// ready for a human to merge. The daemon keeps monitoring in the background.
+// The CI step keeps monitoring an open PR until a human merges or closes it (a
+// live status the TUI shows), so it never reaches a terminal state on its own
+// by default. An agent driving the run must not block on that human action, so
+// once CI checks pass driveRun returns with ciReady=true: the change is
+// validated and the PR is ready for a human to merge. The daemon keeps
+// monitoring in the background. Under the opt-in ci.release_after_checks_pass
+// the step finishes there instead and the run completes, so driveRun returns
+// the terminal checks-passed outcome.
 func driveRun(ctx context.Context, progress io.Writer, client *ipc.Client, socketPath, runID string, autoApprove bool) (run *ipc.RunInfo, ciReady bool, err error) {
 	return driveRunSelected(ctx, progress, client, socketPath, runID, autoApprove, false)
 }
@@ -1714,6 +1726,31 @@ func renderDriveResultForRun(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool,
 		return nil
 	}
 
+	// The opt-in release verdict: only ci.release_after_checks_pass ends the run
+	// at its checks verdict and releases the branch, so this shape reports the
+	// same outcome word with the released contract instead of the
+	// still-monitoring one.
+	if rv.Status == string(types.RunChecksPassed) {
+		activity := cimonitor.FromAuthoritative(rv.CIReady, rv.CIReadyNoCI, nil)
+		fields = append(fields, toon.Field{Key: "outcome", Value: qualifyOutcome("checks-passed", rv)})
+		fixes := rv.fixRows()
+		fields = appendFixesField(fields, fixes)
+		help := append([]string{checksPassedMergeLine(rv, activity)}, successReportHelp(fixes)...)
+		if rv.CIOverrideReason != "" {
+			help = append(help, fmt.Sprintf("A human approved past a live CI failure: %s", rv.CIOverrideReason))
+		}
+		if rv.TestOverrideReason != "" {
+			help = append(help, "Report the approved Test exception, not a clean Test pass: "+rv.TestOverrideReason)
+		}
+		if hasBranchSync {
+			help = append(help, branchSyncAgentGuidance)
+		}
+		help = cloneScopedNote(append(help, releasedChecksPassedGuidance))
+		fields = append(fields, toon.Field{Key: "help", Value: help})
+		emitDoc(cmd, fields...)
+		return nil
+	}
+
 	if gate, ok := rv.awaitingStep(); ok {
 		fields = append(fields, gateFieldsFor(gate, runID, rv.Shipping != nil)...)
 		emitDoc(cmd, fields...)
@@ -1782,6 +1819,20 @@ func renderDriveResultForRun(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool,
 	fields = append(fields, toon.Field{Key: "help", Value: help})
 	emitDoc(cmd, fields...)
 	return &exitError{code: 1}
+}
+
+// checksPassedMergeLine is the shared "checks passed, the PR is ready for a
+// human to merge" sentence, used both at the opt-in monitor's stopping point
+// and by a run that reached its validation verdict and released the lane.
+func checksPassedMergeLine(rv runView, activity cimonitor.Activity) string {
+	merge := "CI checks passed - the PR is ready. Ask the user to review and merge it."
+	if activity.DeclaredNoCI {
+		merge = "Repository declares no CI (no_ci: true on the trusted default branch) and no checks are registered - treated as all checks passed. Ask the user to review and merge it."
+	}
+	if rv.PRURL != "" {
+		merge = fmt.Sprintf("%s: %s", strings.TrimSuffix(merge, "."), rv.PRURL)
+	}
+	return merge
 }
 
 // appendFixesField adds a fixes table when the pipeline applied any fixes.

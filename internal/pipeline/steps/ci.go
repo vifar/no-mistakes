@@ -43,7 +43,9 @@ func ciPollInterval(sctx *pipeline.StepContext, elapsed, override time.Duration)
 // producers and consumers agree on them.
 const (
 	ciChecksPassedMsg           = cimonitor.ChecksPassedMsg
+	ciChecksPassedCompleteMsg   = cimonitor.ChecksPassedCompleteMsg
 	ciNoChecksPassedMsg         = cimonitor.NoChecksPassedMsg
+	ciNoChecksPassedCompleteMsg = cimonitor.NoChecksPassedCompleteMsg
 	ciChecksRunningMsg          = cimonitor.ChecksRunningMsg
 	ciChecksAwaitingApprovalMsg = cimonitor.ChecksAwaitingApprovalMsg
 	ciBehindBaseMsg             = cimonitor.BehindBaseMsg
@@ -51,7 +53,16 @@ const (
 
 // CIStep monitors an open PR until it is merged, closed, or its configured idle
 // timeout elapses, and repairs CI failures through the executor's shared
-// findings machinery.
+// findings machinery. With ci.release_after_checks_pass it instead finishes the
+// run at the checks verdict.
+//
+// By default the green observation only clears the failure signal: the monitor
+// keeps watching the PR, so the run stays open and a later base-branch advance
+// is still repaired on its own. That is also why the recorded step duration
+// includes merge-waiting time. The opt-in release finishes the step there
+// instead, recording readiness and completing the run with the terminal
+// checks_passed status, which releases its worktree and lane and leaves the
+// merge decision to a human.
 //
 // Execute has the same shape as the review step's: when the executor
 // re-executes it as a fix round (sctx.Fixing), it first repairs the findings
@@ -640,7 +651,15 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		timeout = config.DefaultCITimeout
 	}
 
-	if unlimited {
+	releaseAfterChecksPass := ciReleaseAfterChecksPass(sctx)
+	if releaseAfterChecksPass {
+		if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
+			clearCIMonitorReady(sctx)
+			sctx.Log(fmt.Sprintf("warning: CI release comparison could not be verified: %v", err))
+			break
+		}
+		sctx.Log(fmt.Sprintf("monitoring CI for PR #%s until every check is green...", prNumber))
+	} else if unlimited {
 		sctx.Log(fmt.Sprintf("monitoring CI for PR #%s (no timeout, until merged or closed)...", prNumber))
 	} else {
 		sctx.Log(fmt.Sprintf("monitoring CI for PR #%s (timeout: %s)...", prNumber, timeout))
@@ -1205,6 +1224,27 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						return ciObservationOutcome(findings), nil
 					}
 					sctx.DeferredFindings = ""
+					declaredNoCI := len(checks) == 0 && !scoped.Ready()
+					// The default keeps watching: the green observation only
+					// clears the failure signal, as it always has, so the run
+					// stays open until the PR is merged, closed, or declined.
+					// ci.release_after_checks_pass opts into finishing here
+					// instead, which records the checks verdict and releases the
+					// run's worktree and lane.
+					if releaseAfterChecksPass {
+						if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
+							clearCIMonitorReady(sctx)
+							sctx.Log(fmt.Sprintf("warning: CI release comparison could not be verified: %v", err))
+							break
+						}
+						completeMsg := ciChecksPassedCompleteMsg
+						if declaredNoCI {
+							completeMsg = ciNoChecksPassedCompleteMsg
+						}
+						sctx.Log(completeMsg)
+						sctx.Log("validation complete: releasing the run now; the PR is ready for a human to merge")
+						return &pipeline.StepOutcome{CIReadyNoCI: &declaredNoCI}, nil
+					}
 					passedMsg := ciChecksPassedMsg
 					if !rollupObserved && sctx.Config != nil && sctx.Config.NoCI {
 						passedMsg = ciNoChecksPassedMsg
@@ -1263,8 +1303,7 @@ func ciWaitingMessage(checks []scm.Check) string {
 
 func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) string {
 	if message != previous {
-		ready := message == ciChecksPassedMsg || message == ciNoChecksPassedMsg
-		declaredNoCI := message == ciNoChecksPassedMsg
+		ready, declaredNoCI := ciReadyMessage(message)
 		if err := setCIMonitorReadiness(sctx, ready, declaredNoCI); err != nil {
 			sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
 		}
@@ -1320,6 +1359,24 @@ func verifyCIMonitorComparison(sctx *pipeline.StepContext, host scm.Host, checks
 	selection := pipeline.PRTargetSelection{PRURL: facts.PR.URL, State: facts.State, SourceRepo: facts.SourceRepository,
 		SourceBranch: facts.SourceBranch, ForgeHeadSHA: facts.HeadSHA, TargetBranch: facts.BaseBranch}
 	return verifyCurrentPRComparison(sctx, host, selection, receipt, &facts)
+}
+
+func ciReadyMessage(message string) (ready, declaredNoCI bool) {
+	switch message {
+	case ciChecksPassedMsg:
+		return true, false
+	case ciNoChecksPassedMsg:
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+// ciReleaseAfterChecksPass reports whether the operator opted into finishing the
+// run at the checks verdict. The default is off: the monitor keeps watching the
+// PR until it is merged or closed, exactly as it always has.
+func ciReleaseAfterChecksPass(sctx *pipeline.StepContext) bool {
+	return sctx != nil && sctx.Config != nil && sctx.Config.CI.ReleaseAfterChecksPass
 }
 
 func clearCIMonitorReady(sctx *pipeline.StepContext) {

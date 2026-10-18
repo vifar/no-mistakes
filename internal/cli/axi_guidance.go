@@ -2,6 +2,14 @@ package cli
 
 const staleMonitorGuidance = "A published qualified head and original comparison are retained only when live protection permits being behind and the forge confirms mergeability. The following stale-comparison fallback applies otherwise. For ordinary runs, when the live target commit advances with green checks and no merge conflict, CI clears readiness and keeps monitoring, withholding checks-passed. It may wait until ci_timeout, or indefinitely when unlimited. When CI returns, including with findings, the boundary guard rejects the changed comparison and terminates the run. The monitor does not automatically repair or revalidate that changed comparison. After termination, restart from the current target and head; never hand-rebase. After the run stops, use `no-mistakes rerun` to validate the selected gate or preserved head; it refuses a known clean caller HEAD mismatch. If heads differ, inspect `no-mistakes axi status` and follow its exact `branch_sync.next_action.command` for custody or synchronization, then submit intended local commits with a fresh `no-mistakes axi run` once custody permits. Reattaching with `axi run` while the monitor is still active leaves HEAD unchanged and does not refresh the target comparison."
 
+// releasedChecksPassedGuidance is the canonical, point-of-use guidance an agent
+// reads when `axi run` returns the terminal `checks-passed` outcome: the run
+// reached its validation verdict and released the branch, so no monitor is left
+// watching the PR and the merge is entirely the user's decision. Only the
+// opt-in `ci.release_after_checks_pass` produces this shape; the default
+// behaviour keeps monitoring and carries staleMonitorGuidance instead.
+const releasedChecksPassedGuidance = "This run is finished: it validated the head and released the branch, so nothing is left watching the PR and the merge decision is the user's. If the PR later falls behind the default branch or conflicts before it is merged, this run will not rebase or re-push it - update the branch and start a fresh `no-mistakes axi run` on the updated head instead. This shape only exists when the operator enabled `ci.release_after_checks_pass`; without it the run keeps watching a green PR until it is merged."
+
 // preserveGateFixCommitsGuidance is the canonical, point-of-use guidance an
 // agent reads when it needs to make another fix after a gate round already
 // produced fix commits: keep those commits on the same branch and start a fresh

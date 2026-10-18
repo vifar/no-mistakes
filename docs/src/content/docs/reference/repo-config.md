@@ -1318,3 +1318,7 @@ Override the [global Cursor Origin draft setting](/no-mistakes/reference/global-
 |---|---|
 | Type | `bool` |
 | Default | Inherits from global (default `false`) |
+
+### `ci.release_after_checks_pass`
+
+Defaults to `false`. The global setting or trusted repository configuration may opt into finishing a run once its checks pass. The run then records `checks_passed`, releases its worktree and stops monitoring the PR. The human merge decision remains separate. When disabled, the existing monitor stays active until merge, closure or its idle timeout. Readiness and final comparison checks still apply.
