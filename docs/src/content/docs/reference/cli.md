@@ -414,7 +414,7 @@ Answering requires an active run, because only its executor can resume the revie
 
 ## no-mistakes axi status
 
-When `--run` is omitted, show this branch's run: its active run, else its most recent one.
+When neither `--run` nor `--awaiting` is supplied, show this branch's run: its active run, else its most recent one.
 Resolution is scoped to the current branch and never falls back to another branch's run, because one clone commonly has several worktrees on different branches.
 On a successful status response, when the current branch has no run of its own - including a detached `HEAD`, which owns no branch and so reports `current_branch: unknown` - the output carries no run object at all.
 It reports `current_branch`, `runs_on_current_branch: 0` where a branch is known, and the recent-runs listing, so an unrelated run can never be read as this worktree's.
