@@ -440,7 +440,7 @@ An operator can add their own policy for this repository through a machine-local
 
 Globs naming this repository's documentation, in the same syntax as `ignore_patterns` (`documentation/**`, `docs/**/*.html`, `*.md`).
 
-When a Document pass changes only documentation, the pipeline records a carry of the Review approval and Test result to its new head. Review and Test do not restart, and their historical rounds and review generation stay unchanged. The actual Git diff of every commit must pass the rule; agent claims and `ignore_patterns` do not grant credit. Push can recover a carry only for a recorded, completed Document pass.
+When a completed, recorded Document pass changes only documentation, the pipeline atomically carries the Review approval and completed Test credit from that pass's starting head to its new head, recording the source head as provenance. Both must still name the starting head; a skipped Test stays skipped and carries only Review approval. Review and Test do not restart, and their historical rounds and review generation stay unchanged. The actual Git diff of every commit must pass the rule; agent claims and `ignore_patterns` do not grant credit. Push can recover the same carry. The [PR attestation reference](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) owns how live-validation evidence remains tied to the head actually exercised.
 
 Unset, only prose files (`.md`, `.mdx`, `.markdown`, `.rst`, `.adoc`) at the repository root or under `docs/` count. Configured globs replace those locations and also permit `.html`; they cannot admit code, YAML, or other file types.
 
@@ -452,7 +452,7 @@ This field decides which commits skip revalidation, so it is honored **only from
 
 Maximum accepted Document commits in one run, including commits the agent creates itself. Default: `2`. Values must be non-negative; `0` disables Document commits. This field is read only from the trusted default branch, even when `allow_repo_commands` is enabled.
 
-The budget survives step restarts. After a committed pass reports no remaining documentation gap, another pass at that head finishes without invoking the agent. A later proposal is discarded when it touches only files from the previous committed Document pass. A proposal that exceeds the remaining budget is also discarded. Unresolved findings remain visible for an owner decision; discarded edits never count as fixes. Skipped or discarded combined housekeeping work leaves lint to its own pass.
+The budget survives step resets and database reopen. After a committed pass reports no remaining documentation gap, another pass at that head finishes without invoking the agent. Otherwise, when changes need documenting and the budget is exhausted (including a zero limit), Document stops before invoking the agent and parks for an owner decision. A later proposal is discarded when it touches only files from the previous committed Document pass. A proposal that exceeds the remaining budget is also discarded. Unresolved findings remain visible for an owner decision; discarded edits never count as fixes. Skipped or discarded combined housekeeping work leaves lint to its own pass.
 
 Document requires a clean starting worktree so it can discard only its own proposal, including agent-created commits. An interrupted pass with uncertain state fails closed rather than receiving a fresh budget; start a new run after resolving that state.
 

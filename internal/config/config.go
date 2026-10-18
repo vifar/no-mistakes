@@ -1517,10 +1517,6 @@ func copyAgents(names []types.AgentName) []types.AgentName {
 	return out
 }
 
-// resolvePathInstructions trims every entry and drops the ones left without a
-// path or without instruction text that survives prompt rendering, so the
-// resolved config never carries an entry the review step would have to skip.
-// Parsing already rejects those, but Merge also runs on configs built in code.
 // trimmedPatterns drops blank globs and surrounding whitespace.
 func trimmedPatterns(patterns []string) []string {
 	var out []string
@@ -1532,6 +1528,10 @@ func trimmedPatterns(patterns []string) []string {
 	return out
 }
 
+// resolvePathInstructions trims every entry and drops the ones left without a
+// path or without instruction text that survives prompt rendering, so the
+// resolved config never carries an entry the review step would have to skip.
+// Parsing already rejects those, but Merge also runs on configs built in code.
 func resolvePathInstructions(entries []PathInstruction) []PathInstruction {
 	if len(entries) == 0 {
 		return nil

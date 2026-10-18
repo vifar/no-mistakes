@@ -241,9 +241,9 @@ func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.Step
 	return attestation
 }
 
-// attestedLiveValidation derives the live-validation payload from the test
-// step's recorded findings. It returns nil - and the field is then omitted -
-// whenever no verdict was recorded or the verdict belongs to another head.
+// attestedLiveValidation uses Test-round evidence when available so carried
+// step credit cannot claim live validation at a head Test never exercised.
+// It omits the payload when evidence is absent, invalid, or for another head.
 func attestedLiveValidation(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string) *pipelineAttestationLiveValidation {
 	for _, sr := range steps {
 		if sr == nil || sr.StepName != types.StepTest {
