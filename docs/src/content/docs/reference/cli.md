@@ -167,7 +167,7 @@ Ordinary reattachment to an in-flight run does not require intent input and neve
 
 Use `--owner <session-or-thread-id>` on `axi run` or `rerun` to record who will drive the run's approval gates. For environment input and flag precedence, see [`NO_MISTAKES_OWNER`](/no-mistakes/reference/environment/#no_mistakes_owner). Values must be valid UTF-8, at most 256 bytes before trimming, and contain no control characters; surrounding whitespace is trimmed. Ordinary reattachment keeps the existing run's owner; a new run or rerun uses the launching caller's input rather than inheriting an old owner.
 
-See global [`intent.require_owner`](/no-mistakes/reference/global-config/#intent) for ownerless-launch policy. Owner metadata assigns responsibility but grants no approval authority, sends no notification, and never answers a gate. The daemon must support owner input; an older daemon is refused before an owned `axi run` takes branch custody. The explicit owner is stored independently of transcript provenance, so later intent inference cannot erase it; historical transcript session IDs do not establish ownership.
+See global [`intent.require_owner`](/no-mistakes/reference/global-config/#intent) for ownerless-launch policy. Owner metadata assigns responsibility but grants no approval authority, sends no notification, and never answers a gate. Owned launches probe daemon support before taking branch custody. Owned receipt claims also probe before sending the claim, on both initial nonce replay and polling, so an unsupported daemon cannot consume the first `created` disposition. Ownerless calls remain compatible with older daemons. The explicit owner is stored independently of transcript provenance, so later intent inference cannot erase it; historical transcript session IDs do not establish ownership.
 
 ### Intent input
 
@@ -283,14 +283,14 @@ no-mistakes axi run --intent "the user's goal" \
 
 After durable creation or claim, AXI writes a TOON `launch_receipt` object to stdout **before** driving the run.
 The receipt remains available to a caller that captures stdout even if driving later stops at a gate or fails.
-It contains `run_id`, `disposition` (`created` or `reused`), `owner`, `launch_nonce`, `validation_generation`, `branch`, `head_sha`, `submitted_head_sha`, and `intent_digest`.
+It contains `run_id`, `disposition` (`created` or `reused`), `owner`, `launch_nonce`, `validation_generation`, `branch`, `head_sha`, `submitted_head_sha`, and `intent_digest`. The `owner` field contains the persisted launch owner and is explicitly empty for an ownerless run.
 Both head fields contain the full, immutable submitted commit SHA; `intent_digest` is the lowercase SHA-256 digest of the exact persisted intent bytes, including whitespace.
 Raw intent is not included in receipts, and generic run/status output does not expose the nonce binding or intent digest.
 
 The nonce is scoped to the repository and branch.
 The first successful receipt claim returns `created`; subsequent matching claims return `reused` for that same run, including after the gate or pipeline head advances.
 A conflicting submitted head, validation generation, intent, [pinned Pi profile](/no-mistakes/reference/global-config/#per-run-pi-profiles), or explicit [shipping mode/draft pin](#strict-shipping-and-review-receipts) is refused.
-The [launch owner](#launch-owner) must also match exactly on strict-launch replay; omitting it does not match a run created with an owner.
+The [launch owner](#launch-owner) must also match exactly on strict-launch replay; omitting it does not match a run created with an owner. The daemon validates ownership before consuming the first `created` disposition, so a rejected claim leaves it available to a matching caller.
 A different nonce creates a distinct run rather than reattaching to a same-head run; both post-receive creation and the up-to-date-push fallback follow this contract.
 The up-to-date-push fallback preserves the latest same-head run's PR URL unless its recorded PR state is closed or merged, including when an explicit `--base-branch` retargets that PR.
 An explicit `--base-branch` is persisted on creation and must match the stored per-run base on replay; omitting it on replay preserves the stored base.
