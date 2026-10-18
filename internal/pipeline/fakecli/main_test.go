@@ -28,3 +28,19 @@ func TestIsFakeProviderPlugin(t *testing.T) {
 		}
 	}
 }
+
+func TestFakePipelineStatusHonorsAllowFailure(t *testing.T) {
+	t.Setenv("FAKE_CLI_PIPELINE_STATUS", "")
+	for _, tc := range []struct {
+		jobs string
+		want string
+	}{
+		{`[{"status":"success"},{"status":"failed","allow_failure":true}]`, "success"},
+		{`[{"status":"failed","allow_failure":true},{"status":"failed"}]`, "failed"},
+		{`[{"status":"failed"}]`, "failed"},
+	} {
+		if got := fakePipelineStatus(tc.jobs); got != tc.want {
+			t.Errorf("fakePipelineStatus(%s) = %q, want %q", tc.jobs, got, tc.want)
+		}
+	}
+}
