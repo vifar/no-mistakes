@@ -475,12 +475,13 @@ body - silently.
 The ask ordinal arrived with the table, so every installation's database has it.
 A *development* database created from an earlier commit of this feature's branch
 does not, and there this store cannot work at all: every read and every write
-names the column, so each one fails and says so at ERROR level. The remedy is to
-drop `review_questions` by hand (`sqlite3 <db> 'DROP TABLE review_questions'`)
-and let it be recreated. There is deliberately no migration - SQLite cannot
-ALTER a column into a primary key, and the migration list is re-run with its
-errors tolerated on every start, which a create/copy/drop/rename could not
-survive. Nothing else in the daemon is affected by such a table: an opt-in
+names the column, so each one fails and says so at ERROR level. For that
+unsupported development schema, stop the daemon and back up the database before
+dropping and recreating `review_questions` manually from its current definition
+in `internal/db/schema.go`; this discards its stored settled answers. Dropping
+the table and restarting alone is insufficient: [current-schema opens skip DDL](/no-mistakes/reference/cli/#no-mistakes-axi).
+There is no automatic migration for that unpublished table layout; SQLite cannot
+ALTER a column into a primary key. Nothing else in the daemon is affected by such a table: an opt-in
 review feature must not be able to stop the daemon starting, or block custody
 recovery, for a repository that does not use it.
 
