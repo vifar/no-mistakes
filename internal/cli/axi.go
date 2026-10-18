@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -96,6 +97,13 @@ func openAxiRunEnv() (*axiEnv, error) {
 }
 
 func openAxiEnvWithOptions(opts axiEnvOptions) (*axiEnv, error) {
+	// Implicit observations need a repository even before a database exists.
+	// Explicit run IDs can be inspected from any directory.
+	if !opts.ensureDaemonConn && opts.explicitRunID == "" {
+		if _, err := git.FindGitRoot("."); err != nil {
+			return nil, fmt.Errorf("not in a git repository")
+		}
+	}
 	open := openReadResources
 	if opts.ensureDaemonConn {
 		open = openResources
