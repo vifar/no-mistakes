@@ -87,38 +87,11 @@ type recoverFixture struct {
 func newRecoverFixture(t *testing.T, status types.RunStatus) *recoverFixture {
 	t.Helper()
 	ctx := context.Background()
-	root := t.TempDir()
+	root, heads := copyGitFixture(t, "recover", buildRecoverRepositories)
 	remote := filepath.Join(root, "upstream.git")
-	mustRun(t, root, "init", "--bare", remote)
-
 	local := filepath.Join(root, "operator")
-	mustRun(t, root, "init", "-b", "main", local)
-	configureIdentity(t, local)
-	mustWrite(t, filepath.Join(local, "file.txt"), "base\n")
-	mustRun(t, local, "add", "file.txt")
-	mustRun(t, local, "commit", "-m", "base")
-	base := mustRun(t, local, "rev-parse", "HEAD")
-	mustRun(t, local, "checkout", "-b", "feature/recover")
-	mustWrite(t, filepath.Join(local, "file.txt"), "feature\n")
-	mustRun(t, local, "commit", "-am", "feature")
-	submitted := mustRun(t, local, "rev-parse", "HEAD")
-
-	// The gate receives the submitted branch, then the pipeline commits fixes
-	// onto the gate branch; nothing is ever pushed to the upstream.
 	gate := filepath.Join(root, "gate.git")
-	mustRun(t, root, "init", "--bare", gate)
-	mustRun(t, local, "push", gate, "refs/heads/feature/recover:refs/heads/feature/recover")
-	pipeline := filepath.Join(root, "pipeline")
-	mustRun(t, root, "-c", "core.autocrlf=false", "clone", gate, pipeline)
-	configureIdentity(t, pipeline)
-	mustRun(t, pipeline, "checkout", "feature/recover")
-	mustWrite(t, filepath.Join(pipeline, "fix.txt"), "pipeline fix\n")
-	mustRun(t, pipeline, "add", "fix.txt")
-	mustRun(t, pipeline, "commit", "-m", "no-mistakes(review): fix")
-	mustWrite(t, filepath.Join(pipeline, "fix.txt"), "pipeline fix 2\n")
-	mustRun(t, pipeline, "commit", "-am", "no-mistakes(lint): fix")
-	preserved := mustRun(t, pipeline, "rev-parse", "HEAD")
-	mustRun(t, pipeline, "push", "origin", "HEAD:refs/heads/feature/recover")
+	base, submitted, preserved := heads.base, heads.submitted, heads.preserved
 
 	database, err := db.Open(filepath.Join(root, "state.sqlite"))
 	if err != nil {
@@ -154,6 +127,43 @@ func newRecoverFixture(t *testing.T, status types.RunStatus) *recoverFixture {
 	}
 }
 
+type recoverHeads struct{ base, submitted, preserved string }
+
+func buildRecoverRepositories(t *testing.T, root string) recoverHeads {
+	t.Helper()
+	remote := filepath.Join(root, "upstream.git")
+	mustRun(t, root, "init", "--bare", remote)
+
+	local := filepath.Join(root, "operator")
+	mustRun(t, root, "init", "-b", "main", local)
+	mustWrite(t, filepath.Join(local, "file.txt"), "base\n")
+	mustRun(t, local, "add", "file.txt")
+	mustRun(t, local, "commit", "-m", "base")
+	base := mustRun(t, local, "rev-parse", "HEAD")
+	mustRun(t, local, "checkout", "-b", "feature/recover")
+	mustWrite(t, filepath.Join(local, "file.txt"), "feature\n")
+	mustRun(t, local, "commit", "-am", "feature")
+	submitted := mustRun(t, local, "rev-parse", "HEAD")
+
+	// The gate receives the submitted branch, then the pipeline commits fixes
+	// onto the gate branch; nothing is ever pushed to the upstream.
+	gate := filepath.Join(root, "gate.git")
+	mustRun(t, root, "init", "--bare", gate)
+	mustRun(t, local, "push", gate, "refs/heads/feature/recover:refs/heads/feature/recover")
+	pipeline := filepath.Join(root, "pipeline")
+	mustRun(t, root, "-c", "core.autocrlf=false", "clone", gate, pipeline)
+	mustRun(t, pipeline, "checkout", "feature/recover")
+	mustWrite(t, filepath.Join(pipeline, "fix.txt"), "pipeline fix\n")
+	mustRun(t, pipeline, "add", "fix.txt")
+	mustRun(t, pipeline, "commit", "-m", "no-mistakes(review): fix")
+	mustWrite(t, filepath.Join(pipeline, "fix.txt"), "pipeline fix 2\n")
+	mustRun(t, pipeline, "commit", "-am", "no-mistakes(lint): fix")
+	preserved := mustRun(t, pipeline, "rev-parse", "HEAD")
+	mustRun(t, pipeline, "push", "origin", "HEAD:refs/heads/feature/recover")
+	removeScratchClone(t, pipeline)
+	return recoverHeads{base: base, submitted: submitted, preserved: preserved}
+}
+
 func newDivergentArchiveRecoverFixture(t *testing.T) (*recoverFixture, string) {
 	t.Helper()
 	ctx := context.Background()
@@ -162,7 +172,6 @@ func newDivergentArchiveRecoverFixture(t *testing.T) (*recoverFixture, string) {
 	mustRun(t, root, "init", "--bare", remote)
 	local := filepath.Join(root, "operator")
 	mustRun(t, root, "init", "-b", "main", local)
-	configureIdentity(t, local)
 	mustWrite(t, filepath.Join(local, "file.txt"), "base\n")
 	mustRun(t, local, "add", "file.txt")
 	mustRun(t, local, "commit", "-m", "base")
@@ -197,7 +206,6 @@ func newDivergentArchiveRecoverFixture(t *testing.T) (*recoverFixture, string) {
 
 	writer := filepath.Join(root, "divergent-archive-writer")
 	mustRun(t, root, "-c", "core.autocrlf=false", "clone", local, writer)
-	configureIdentity(t, writer)
 	mustRun(t, writer, "checkout", "-b", "divergent-later", base)
 	mustWrite(t, filepath.Join(writer, "later.txt"), "divergent later validation work\n")
 	mustRun(t, writer, "add", "later.txt")
@@ -266,6 +274,7 @@ func TestTerminalPrePushRunSurfacesGuardedCustodyRecovery(t *testing.T) {
 
 	for _, status := range []types.RunStatus{types.RunCancelled, types.RunFailed, types.RunCompleted} {
 		t.Run(string(status), func(t *testing.T) {
+			t.Parallel()
 			f := newRecoverFixture(t, status)
 			state := f.service.InspectCached(f.ctx)
 			if state.State != StatePipelineOwned || state.Safety != "blocked_pipeline_owned_recoverable" {
@@ -779,7 +788,6 @@ func TestBoundArchiveProofMatrixFailsClosedWithoutGitMutation(t *testing.T) {
 	t.Run("moved gate branch", func(t *testing.T) {
 		writer := filepath.Join(filepath.Dir(f.local), "archive-gate-writer")
 		mustRun(t, filepath.Dir(writer), "-c", "core.autocrlf=false", "clone", f.gate, writer)
-		configureIdentity(t, writer)
 		mustRun(t, writer, "checkout", "feature/recover")
 		mustWrite(t, filepath.Join(writer, "other.txt"), "other gate work\n")
 		mustRun(t, writer, "add", "other.txt")
@@ -836,10 +844,10 @@ func TestRecoverGateDivergenceAndUnavailabilityFailClosed(t *testing.T) {
 	t.Parallel()
 
 	t.Run("gate branch moved", func(t *testing.T) {
+		t.Parallel()
 		f := newRecoverFixture(t, types.RunCancelled)
 		writer := filepath.Join(t.TempDir(), "writer")
 		mustRun(t, filepath.Dir(writer), "-c", "core.autocrlf=false", "clone", f.gate, writer)
-		configureIdentity(t, writer)
 		mustRun(t, writer, "checkout", "feature/recover")
 		mustWrite(t, filepath.Join(writer, "other.txt"), "other\n")
 		mustRun(t, writer, "add", "other.txt")
@@ -858,6 +866,7 @@ func TestRecoverGateDivergenceAndUnavailabilityFailClosed(t *testing.T) {
 		}
 	})
 	t.Run("gate branch deleted with recovery ref", func(t *testing.T) {
+		t.Parallel()
 		f := newRecoverFixture(t, types.RunCancelled)
 		mustRun(t, f.gate, "update-ref", f.anchorRef(), f.preserved)
 		mustRun(t, f.gate, "update-ref", "-d", "refs/heads/feature/recover")
@@ -870,6 +879,7 @@ func TestRecoverGateDivergenceAndUnavailabilityFailClosed(t *testing.T) {
 		}
 	})
 	t.Run("gate missing", func(t *testing.T) {
+		t.Parallel()
 		f := newRecoverFixture(t, types.RunCancelled)
 		if err := os.RemoveAll(f.gate); err != nil {
 			t.Fatal(err)
@@ -954,7 +964,6 @@ func TestRecoverKeepLocalAnchorsIndependentlyMovedGateHead(t *testing.T) {
 	f := newRecoverFixture(t, types.RunCancelled)
 	writer := filepath.Join(t.TempDir(), "writer")
 	mustRun(t, filepath.Dir(writer), "-c", "core.autocrlf=false", "clone", f.gate, writer)
-	configureIdentity(t, writer)
 	mustRun(t, writer, "checkout", "feature/recover")
 	mustWrite(t, filepath.Join(writer, "other.txt"), "independent gate work\n")
 	mustRun(t, writer, "add", "other.txt")
@@ -1039,16 +1048,13 @@ func TestRecoverRefusesWhenNothingIsStranded(t *testing.T) {
 // run carries no push provenance and no custody stamp. Cancellation releases
 // ownership of this shape: it must classify user_owned, never wrong-branch
 // ambiguity and never recoverable pipeline custody.
-func newUnmovedRecoverFixture(t *testing.T, status types.RunStatus) *recoverFixture {
+func buildUnmovedRecoverRepositories(t *testing.T, root string) recoverHeads {
 	t.Helper()
-	ctx := context.Background()
-	root := t.TempDir()
 	remote := filepath.Join(root, "upstream.git")
 	mustRun(t, root, "init", "--bare", remote)
 
 	local := filepath.Join(root, "operator")
 	mustRun(t, root, "init", "-b", "main", local)
-	configureIdentity(t, local)
 	mustWrite(t, filepath.Join(local, "file.txt"), "base\n")
 	mustRun(t, local, "add", "file.txt")
 	mustRun(t, local, "commit", "-m", "base")
@@ -1063,6 +1069,17 @@ func newUnmovedRecoverFixture(t *testing.T, status types.RunStatus) *recoverFixt
 	gate := filepath.Join(root, "gate.git")
 	mustRun(t, root, "init", "--bare", gate)
 	mustRun(t, local, "push", gate, "refs/heads/feature/recover:refs/heads/feature/recover")
+	return recoverHeads{base: base, submitted: submitted, preserved: submitted}
+}
+
+func newUnmovedRecoverFixture(t *testing.T, status types.RunStatus) *recoverFixture {
+	t.Helper()
+	ctx := context.Background()
+	root, heads := copyGitFixture(t, "unmoved-recover", buildUnmovedRecoverRepositories)
+	remote := filepath.Join(root, "upstream.git")
+	local := filepath.Join(root, "operator")
+	gate := filepath.Join(root, "gate.git")
+	base, submitted := heads.base, heads.submitted
 
 	database, err := db.Open(filepath.Join(root, "state.sqlite"))
 	if err != nil {
@@ -1108,7 +1125,6 @@ func TestCancellationReconcilesCommittedWorktreeHeadBeforeReleaseClassification(
 	if err := gitpkg.WorktreeAdd(f.ctx, f.gate, managed, f.submitted); err != nil {
 		t.Fatal(err)
 	}
-	configureIdentity(t, managed)
 
 	p := paths.WithRoot(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {
@@ -1391,6 +1407,8 @@ func TestRecoverKeepLocalPreservesHeadRestoredAfterPreflight(t *testing.T) {
 }
 
 func TestRecoverKeepLocalIgnoresSupersededUnpublishedRuns(t *testing.T) {
+	t.Parallel()
+
 	f := newRecoverFixture(t, types.RunCancelled)
 	binding := db.PushBinding{HeadSHA: f.submitted, TargetKind: "upstream", TargetFingerprint: TargetFingerprint(f.remote), Ref: "refs/heads/feature/recover"}
 	if err := f.db.UpdateRunPushBinding(f.run.ID, binding); err != nil {
@@ -1436,6 +1454,8 @@ func TestRecoverKeepLocalIgnoresSupersededUnpublishedRuns(t *testing.T) {
 }
 
 func TestRecoverKeepLocalPreflightsEveryStrandedRun(t *testing.T) {
+	t.Parallel()
+
 	for _, tt := range []struct {
 		name  string
 		setup func(*recoverFixture, *db.Run)
@@ -1462,6 +1482,7 @@ func TestRecoverKeepLocalPreflightsEveryStrandedRun(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			f := newRecoverFixture(t, types.RunCancelled)
 			tt.setup(f, f.run)
 			time.Sleep(1100 * time.Millisecond)
@@ -1493,6 +1514,8 @@ func TestRecoverKeepLocalPreflightsEveryStrandedRun(t *testing.T) {
 }
 
 func TestRecoverMissingHeadRevalidatesGateBeforeStamping(t *testing.T) {
+	t.Parallel()
+
 	for _, tt := range []struct {
 		name       string
 		mutateGate func(*recoverFixture)
@@ -1516,6 +1539,7 @@ func TestRecoverMissingHeadRevalidatesGateBeforeStamping(t *testing.T) {
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			f := newRecoverFixture(t, types.RunCancelled)
 			if err := f.db.UpdateRunHeadSHA(f.run.ID, strings.Repeat("f", 40)); err != nil {
 				t.Fatal(err)
@@ -1535,6 +1559,8 @@ func TestRecoverMissingHeadRevalidatesGateBeforeStamping(t *testing.T) {
 }
 
 func TestRecoverKeepLocalRefusesDanglingIndependentGateHead(t *testing.T) {
+	t.Parallel()
+
 	f := newRecoverFixture(t, types.RunCancelled)
 	if err := f.db.UpdateRunHeadSHA(f.run.ID, strings.Repeat("f", 40)); err != nil {
 		t.Fatal(err)
@@ -1670,6 +1696,7 @@ func TestCancellationReleaseRequiresVerifiedManagedHead(t *testing.T) {
 		{name: "missing worktree keeps custody", wantState: StatePipelineOwned, wantSafety: "blocked_pipeline_owned_recoverable"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			f := newUnmovedRecoverFixture(t, types.RunCancelled)
 			if err := f.db.UpdateRunStatus(f.run.ID, types.RunPending); err != nil {
 				t.Fatal(err)
@@ -1784,6 +1811,7 @@ func TestTerminalUnmovedPrePushRunReportsUserOwnedRelease(t *testing.T) {
 
 	for _, status := range []types.RunStatus{types.RunCancelled, types.RunFailed} {
 		t.Run(string(status), func(t *testing.T) {
+			t.Parallel()
 			f := newUnmovedRecoverFixture(t, status)
 			state := f.service.InspectCached(f.ctx)
 			if state.State != StateUserOwned || state.Safety != "user_owned" {
@@ -1903,7 +1931,6 @@ func TestReleasedBranchIgnoresHiddenManagedCopyTip(t *testing.T) {
 	f := newUnmovedRecoverFixture(t, types.RunCancelled)
 	writer := filepath.Join(t.TempDir(), "writer")
 	mustRun(t, filepath.Dir(writer), "-c", "core.autocrlf=false", "clone", f.gate, writer)
-	configureIdentity(t, writer)
 	mustRun(t, writer, "checkout", "feature/recover")
 	mustWrite(t, filepath.Join(writer, "hidden.txt"), "hidden\n")
 	mustRun(t, writer, "add", "hidden.txt")
@@ -1929,6 +1956,7 @@ func TestReleasedBranchAfterUserResetOrDivergenceStaysUserOwned(t *testing.T) {
 	t.Parallel()
 
 	t.Run("reset behind clean", func(t *testing.T) {
+		t.Parallel()
 		f := newUnmovedRecoverFixture(t, types.RunCancelled)
 		mustRun(t, f.local, "reset", "--hard", f.base)
 		state := f.service.InspectCached(f.ctx)
@@ -1938,12 +1966,14 @@ func TestReleasedBranchAfterUserResetOrDivergenceStaysUserOwned(t *testing.T) {
 		assertReleasedNoOpRecover(t, f, false, f.base)
 	})
 	t.Run("reset behind dirty", func(t *testing.T) {
+		t.Parallel()
 		f := newUnmovedRecoverFixture(t, types.RunCancelled)
 		mustRun(t, f.local, "reset", "--hard", f.base)
 		mustWrite(t, filepath.Join(f.local, "file.txt"), "dirty\n")
 		assertReleasedNoOpRecover(t, f, false, f.base)
 	})
 	t.Run("diverged with keep-local", func(t *testing.T) {
+		t.Parallel()
 		f := newUnmovedRecoverFixture(t, types.RunCancelled)
 		mustRun(t, f.local, "reset", "--hard", f.base)
 		mustWrite(t, filepath.Join(f.local, "rescope.txt"), "rescope\n")
@@ -1966,6 +1996,7 @@ func TestUnmovedRunSelectionPrefersNewerAuthoritativeRuns(t *testing.T) {
 	t.Parallel()
 
 	t.Run("newer active run wins", func(t *testing.T) {
+		t.Parallel()
 		f := newUnmovedRecoverFixture(t, types.RunCancelled)
 		time.Sleep(1100 * time.Millisecond)
 		fresh, err := f.db.InsertRun(f.repo.ID, "feature/recover", f.submitted, f.base)
@@ -1988,6 +2019,7 @@ func TestUnmovedRunSelectionPrefersNewerAuthoritativeRuns(t *testing.T) {
 		}
 	})
 	t.Run("newer pushed binding wins", func(t *testing.T) {
+		t.Parallel()
 		f := newUnmovedRecoverFixture(t, types.RunCancelled)
 		time.Sleep(1100 * time.Millisecond)
 		mustRun(t, f.local, "push", f.remote, "refs/heads/feature/recover:refs/heads/feature/recover")
@@ -2017,6 +2049,7 @@ func TestUnmovedRunWrongContextsStayRefusedWithoutStamp(t *testing.T) {
 	t.Parallel()
 
 	t.Run("different branch", func(t *testing.T) {
+		t.Parallel()
 		f := newUnmovedRecoverFixture(t, types.RunCancelled)
 		mustRun(t, f.local, "checkout", "-b", "feature/other")
 		state := f.service.InspectCached(f.ctx)
@@ -2032,6 +2065,7 @@ func TestUnmovedRunWrongContextsStayRefusedWithoutStamp(t *testing.T) {
 		}
 	})
 	t.Run("detached head", func(t *testing.T) {
+		t.Parallel()
 		f := newUnmovedRecoverFixture(t, types.RunCancelled)
 		mustRun(t, f.local, "checkout", "--detach", f.submitted)
 		state := f.service.InspectCached(f.ctx)
@@ -2061,7 +2095,6 @@ func TestRecoverConcurrentGatePushLosesCleanly(t *testing.T) {
 	f.service.beforeGateReset = func() {
 		writer := filepath.Join(t.TempDir(), "racer")
 		mustRun(t, filepath.Dir(writer), "-c", "core.autocrlf=false", "clone", f.gate, writer)
-		configureIdentity(t, writer)
 		mustRun(t, writer, "checkout", "feature/recover")
 		mustWrite(t, filepath.Join(writer, "race.txt"), "race\n")
 		mustRun(t, writer, "add", "race.txt")
@@ -2107,7 +2140,6 @@ func TestRecoverRetryDoesNotOverwriteIndependentGateAnchor(t *testing.T) {
 	mustRun(t, f.local, "commit", "-m", "diverging rescope")
 	writer := filepath.Join(t.TempDir(), "writer")
 	mustRun(t, filepath.Dir(writer), "-c", "core.autocrlf=false", "clone", f.gate, writer)
-	configureIdentity(t, writer)
 	mustRun(t, writer, "checkout", "feature/recover")
 	mustWrite(t, filepath.Join(writer, "first.txt"), "first independent head\n")
 	mustRun(t, writer, "add", "first.txt")
@@ -2148,7 +2180,10 @@ func TestRecoverRetryDoesNotOverwriteIndependentGateAnchor(t *testing.T) {
 // though the preserved head carries every local change.
 func newRebasedRecoverFixture(t *testing.T, status types.RunStatus) *recoverFixture {
 	t.Helper()
-	return newRebasedRecoverFixtureWithPipelineWork(t, status, nil)
+	root, heads := copyGitFixture(t, "rebased-recover", func(t *testing.T, root string) recoverHeads {
+		return buildRebasedRecoverRepositories(t, root, nil)
+	})
+	return newRebasedRecoverRun(t, root, heads, status)
 }
 
 // newRebasedRecoverFixtureWithPipelineWork builds the same rebase state and
@@ -2156,14 +2191,17 @@ func newRebasedRecoverFixture(t *testing.T, status types.RunStatus) *recoverFixt
 // modelling the fix rounds a cancelled run may have produced.
 func newRebasedRecoverFixtureWithPipelineWork(t *testing.T, status types.RunStatus, pipelineWork func(t *testing.T, pipelineDir string)) *recoverFixture {
 	t.Helper()
-	ctx := context.Background()
 	root := t.TempDir()
+	return newRebasedRecoverRun(t, root, buildRebasedRecoverRepositories(t, root, pipelineWork), status)
+}
+
+func buildRebasedRecoverRepositories(t *testing.T, root string, pipelineWork func(t *testing.T, pipelineDir string)) recoverHeads {
+	t.Helper()
 	remote := filepath.Join(root, "upstream.git")
 	mustRun(t, root, "init", "--bare", remote)
 
 	local := filepath.Join(root, "operator")
 	mustRun(t, root, "init", "-b", "main", local)
-	configureIdentity(t, local)
 	mustWrite(t, filepath.Join(local, "file.txt"), "base\n")
 	mustRun(t, local, "add", "file.txt")
 	mustRun(t, local, "commit", "-m", "base")
@@ -2191,7 +2229,6 @@ func newRebasedRecoverFixtureWithPipelineWork(t *testing.T, status types.RunStat
 
 	pipeline := filepath.Join(root, "pipeline")
 	mustRun(t, root, "-c", "core.autocrlf=false", "clone", gate, pipeline)
-	configureIdentity(t, pipeline)
 	mustRun(t, pipeline, "checkout", "feature/recover")
 	mustRun(t, pipeline, "rebase", "origin/main")
 	if pipelineWork != nil {
@@ -2199,6 +2236,17 @@ func newRebasedRecoverFixtureWithPipelineWork(t *testing.T, status types.RunStat
 	}
 	preserved := mustRun(t, pipeline, "rev-parse", "HEAD")
 	mustRun(t, pipeline, "push", "--force", "origin", "HEAD:refs/heads/feature/recover")
+	removeScratchClone(t, pipeline)
+	return recoverHeads{base: base, submitted: submitted, preserved: preserved}
+}
+
+func newRebasedRecoverRun(t *testing.T, root string, heads recoverHeads, status types.RunStatus) *recoverFixture {
+	t.Helper()
+	ctx := context.Background()
+	remote := filepath.Join(root, "upstream.git")
+	local := filepath.Join(root, "operator")
+	gate := filepath.Join(root, "gate.git")
+	base, submitted, preserved := heads.base, heads.submitted, heads.preserved
 
 	database, err := db.Open(filepath.Join(root, "state.sqlite"))
 	if err != nil {
@@ -2232,13 +2280,18 @@ func (f *recoverFixture) localAnchorRef() string {
 	return "refs/no-mistakes/recover-local/" + f.run.ID
 }
 
-func newTerminalEqualTreeRewriteFixture(t *testing.T) (*recoverFixture, string) {
+type terminalRewriteHeads struct {
+	rebased        recoverHeads
+	recorded, live string
+}
+
+func buildTerminalEqualTreeRewriteRepositories(t *testing.T, root string) terminalRewriteHeads {
 	t.Helper()
-	f := newRebasedRecoverFixture(t, types.RunFailed)
-	pipeline := filepath.Join(filepath.Dir(f.local), "terminal-rewrite")
-	mustRun(t, filepath.Dir(f.local), "-c", "core.autocrlf=false", "clone", f.gate, pipeline)
-	configureIdentity(t, pipeline)
-	mustRun(t, pipeline, "checkout", "--detach", f.submitted)
+	rebased := buildRebasedRecoverRepositories(t, root, nil)
+	gate := filepath.Join(root, "gate.git")
+	pipeline := filepath.Join(root, "terminal-rewrite")
+	mustRun(t, root, "-c", "core.autocrlf=false", "clone", gate, pipeline)
+	mustRun(t, pipeline, "checkout", "--detach", rebased.submitted)
 	mustWrite(t, filepath.Join(pipeline, "feature.txt"), "pipeline reviewed replacement\n")
 	mustRun(t, pipeline, "commit", "-am", "reviewed pipeline result")
 	recorded := mustRun(t, pipeline, "rev-parse", "HEAD")
@@ -2246,7 +2299,16 @@ func newTerminalEqualTreeRewriteFixture(t *testing.T) (*recoverFixture, string) 
 	live := mustRun(t, pipeline, "commit-tree", tree, "-p", "origin/main", "-m", "terminal equal-tree rewrite")
 	mustRun(t, pipeline, "push", "origin", recorded+":refs/no-mistakes/test-recorded")
 	mustRun(t, pipeline, "push", "--force", "origin", live+":refs/heads/feature/recover")
-	mustRun(t, f.gate, "update-ref", "-d", "refs/no-mistakes/test-recorded")
+	mustRun(t, gate, "update-ref", "-d", "refs/no-mistakes/test-recorded")
+	removeScratchClone(t, pipeline)
+	return terminalRewriteHeads{rebased: rebased, recorded: recorded, live: live}
+}
+
+func newTerminalEqualTreeRewriteFixture(t *testing.T) (*recoverFixture, string) {
+	t.Helper()
+	root, heads := copyGitFixture(t, "terminal-equal-tree-rewrite", buildTerminalEqualTreeRewriteRepositories)
+	f := newRebasedRecoverRun(t, root, heads.rebased, types.RunFailed)
+	recorded, live := heads.recorded, heads.live
 	if err := f.db.UpdateRunHeadSHA(f.run.ID, recorded); err != nil {
 		t.Fatal(err)
 	}
@@ -2333,7 +2395,6 @@ func pushTerminalRewrite(t *testing.T, f *recoverFixture, mutate func(string)) s
 	t.Helper()
 	pipeline := filepath.Join(t.TempDir(), "rewrite")
 	mustRun(t, filepath.Dir(pipeline), "-c", "core.autocrlf=false", "clone", f.gate, pipeline)
-	configureIdentity(t, pipeline)
 	mustRun(t, pipeline, "checkout", "feature/recover")
 	mutate(pipeline)
 	mustRun(t, pipeline, "add", "-A")
@@ -2373,6 +2434,7 @@ func TestRecoverTerminalUnverifiedRewriteNegativeControls(t *testing.T) {
 	t.Parallel()
 
 	t.Run("different tree", func(t *testing.T) {
+		t.Parallel()
 		f, _ := newTerminalEqualTreeRewriteFixture(t)
 		pushTerminalRewrite(t, f, func(dir string) { mustWrite(t, filepath.Join(dir, "pipeline.txt"), "different tree\n") })
 		if state := assertUnverifiedRecoveryRefusalNoMutation(t, f); state.Safety != "blocked_recover_unverified_head" {
@@ -2383,6 +2445,7 @@ func TestRecoverTerminalUnverifiedRewriteNegativeControls(t *testing.T) {
 		}
 	})
 	t.Run("drops local hunk", func(t *testing.T) {
+		t.Parallel()
 		f, _ := newTerminalEqualTreeRewriteFixture(t)
 		mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", mustRun(t, f.gate, "rev-parse", "refs/heads/main"))
 		if state := assertUnverifiedRecoveryRefusalNoMutation(t, f); state.Safety != "blocked_recover_unverified_head" {
@@ -2390,6 +2453,7 @@ func TestRecoverTerminalUnverifiedRewriteNegativeControls(t *testing.T) {
 		}
 	})
 	t.Run("rewrites operator line", func(t *testing.T) {
+		t.Parallel()
 		f, _ := newTerminalEqualTreeRewriteFixture(t)
 		pushTerminalRewrite(t, f, func(dir string) { mustWrite(t, filepath.Join(dir, "feature.txt"), "pipeline replacement\n") })
 		if state := assertUnverifiedRecoveryRefusalNoMutation(t, f); state.Safety != "blocked_recover_unverified_head" {
@@ -2397,6 +2461,7 @@ func TestRecoverTerminalUnverifiedRewriteNegativeControls(t *testing.T) {
 		}
 	})
 	t.Run("conflicting create-only anchor", func(t *testing.T) {
+		t.Parallel()
 		f, recorded := newTerminalEqualTreeRewriteFixture(t)
 		mustRun(t, f.gate, "update-ref", f.anchorRef(), recorded)
 		if state := assertUnverifiedRecoveryRefusalNoMutation(t, f); state.Safety != "blocked_recover_anchor_mismatch" {
@@ -2404,6 +2469,7 @@ func TestRecoverTerminalUnverifiedRewriteNegativeControls(t *testing.T) {
 		}
 	})
 	t.Run("untrusted recorded head", func(t *testing.T) {
+		t.Parallel()
 		f, _ := newTerminalEqualTreeRewriteFixture(t)
 		if err := f.db.UpdateRunReviewApprovedHeadSHA(f.run.ID, f.submitted); err != nil {
 			t.Fatal(err)
@@ -2413,10 +2479,10 @@ func TestRecoverTerminalUnverifiedRewriteNegativeControls(t *testing.T) {
 		}
 	})
 	t.Run("recorded head does not preserve local", func(t *testing.T) {
+		t.Parallel()
 		f, _ := newTerminalEqualTreeRewriteFixture(t)
 		pipeline := filepath.Join(t.TempDir(), "uncontained-recorded")
 		mustRun(t, filepath.Dir(pipeline), "-c", "core.autocrlf=false", "clone", f.gate, pipeline)
-		configureIdentity(t, pipeline)
 		mustRun(t, pipeline, "checkout", "--detach", "origin/main")
 		mustWrite(t, filepath.Join(pipeline, "feature.txt"), "recorded without local work\n")
 		mustRun(t, pipeline, "add", "feature.txt")
@@ -2438,6 +2504,7 @@ func TestRecoverTerminalUnverifiedRewriteNegativeControls(t *testing.T) {
 		}
 	})
 	t.Run("symbolic live branch", func(t *testing.T) {
+		t.Parallel()
 		f, _ := newTerminalEqualTreeRewriteFixture(t)
 		mustRun(t, f.gate, "update-ref", "refs/no-mistakes/symbolic-live", f.preserved)
 		mustRun(t, f.gate, "symbolic-ref", "refs/heads/feature/recover", "refs/no-mistakes/symbolic-live")
@@ -2446,6 +2513,7 @@ func TestRecoverTerminalUnverifiedRewriteNegativeControls(t *testing.T) {
 		}
 	})
 	t.Run("active run", func(t *testing.T) {
+		t.Parallel()
 		f, _ := newTerminalEqualTreeRewriteFixture(t)
 		if err := f.db.UpdateRunStatus(f.run.ID, types.RunRunning); err != nil {
 			t.Fatal(err)
@@ -2455,6 +2523,7 @@ func TestRecoverTerminalUnverifiedRewriteNegativeControls(t *testing.T) {
 		}
 	})
 	t.Run("dirty worktree", func(t *testing.T) {
+		t.Parallel()
 		f, _ := newTerminalEqualTreeRewriteFixture(t)
 		mustWrite(t, filepath.Join(f.local, "feature.txt"), "dirty local edit\n")
 		if state := assertUnverifiedRecoveryRefusalNoMutation(t, f); state.Safety != "blocked_recover_unverified_head" {
@@ -2465,6 +2534,7 @@ func TestRecoverTerminalUnverifiedRewriteNegativeControls(t *testing.T) {
 		}
 	})
 	t.Run("racing local branch", func(t *testing.T) {
+		t.Parallel()
 		f, _ := newTerminalEqualTreeRewriteFixture(t)
 		f.service.beforeRecoverTerminalHeadPreserve = func() {
 			mustRun(t, f.local, "checkout", "-b", "racing-branch", f.submitted)
@@ -2808,7 +2878,6 @@ func TestRecoverSquashedEquivalentPreservedHeadAdopts(t *testing.T) {
 	f := newRebasedRecoverFixture(t, types.RunCancelled)
 	pipeline := filepath.Join(filepath.Dir(f.local), "squash")
 	mustRun(t, filepath.Dir(f.local), "-c", "core.autocrlf=false", "clone", f.gate, pipeline)
-	configureIdentity(t, pipeline)
 	mustRun(t, pipeline, "checkout", "feature/recover")
 	mustRun(t, pipeline, "reset", "--soft", "origin/main")
 	mustRun(t, pipeline, "commit", "-m", "no-mistakes(rebase): squashed feature")
@@ -2846,7 +2915,6 @@ func TestRecoverSquashedPreservedHeadStillEscalatesForDroppedLocalWork(t *testin
 	f := newRebasedRecoverFixture(t, types.RunCancelled)
 	pipeline := filepath.Join(filepath.Dir(f.local), "squash-drop")
 	mustRun(t, filepath.Dir(f.local), "-c", "core.autocrlf=false", "clone", f.gate, pipeline)
-	configureIdentity(t, pipeline)
 	mustRun(t, pipeline, "checkout", "feature/recover")
 	mustRun(t, pipeline, "reset", "--soft", "origin/main")
 	// The second of the operator's two lines never makes it into the squash.
@@ -2914,6 +2982,8 @@ func publishedRebaseAfterCustody(t *testing.T, f *recoverFixture) string {
 // context it would have succeeded against this local remote and the lane would
 // have been adopted instead of refusing.
 func TestAdoptPublishedFetchHonorsTheRemoteTimeout(t *testing.T) {
+	t.Parallel()
+
 	f := newRecoverFixture(t, types.RunCancelled)
 	rebased := publishedRebaseAfterCustody(t, f)
 
@@ -2981,7 +3051,10 @@ func TestAdoptPublishedFetchSucceedsWithinItsOwnBudget(t *testing.T) {
 }
 
 func TestAdoptPublishedRefusesReplacedPushTarget(t *testing.T) {
+	t.Parallel()
+
 	t.Run("before adoption", func(t *testing.T) {
+		t.Parallel()
 		f := newRecoverFixture(t, types.RunCancelled)
 		publishedRebaseAfterCustody(t, f)
 		replacement := filepath.Join(t.TempDir(), "replacement.git")
@@ -3000,6 +3073,7 @@ func TestAdoptPublishedRefusesReplacedPushTarget(t *testing.T) {
 	})
 
 	t.Run("during verification", func(t *testing.T) {
+		t.Parallel()
 		f := newRecoverFixture(t, types.RunCancelled)
 		rebased := publishedRebaseAfterCustody(t, f)
 		replacement := filepath.Join(t.TempDir(), "replacement.git")
