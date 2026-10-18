@@ -1499,7 +1499,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 				return "", fmt.Errorf("conflicting launch_nonce: external CI owner differs from run")
 			}
 
-			replayed, err := receiptForRun(existing, false)
+			replayed, err := m.receiptForRun(existing, false)
 			if err != nil {
 				return "", err
 			}
@@ -1530,7 +1530,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 				return "", conflictingLaunchPRBaseBranch(launchNonce)
 			}
 
-			receipt, err = receiptForRun(claimedRun, claimed)
+			receipt, err = m.receiptForRun(claimedRun, claimed)
 			if err != nil {
 				return "", err
 			}
@@ -1581,7 +1581,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 			return "", fmt.Errorf("read created run: %w", err)
 		}
 		if trigger == "push" {
-			receipt, err = receiptForRun(run, true)
+			receipt, err = m.receiptForRun(run, true)
 			if err != nil {
 				return "", err
 			}
@@ -1597,7 +1597,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 				return "", conflictingLaunchPRBaseBranch(launchNonce)
 			}
 
-			receipt, err = receiptForRun(claimedRun, claimed)
+			receipt, err = m.receiptForRun(claimedRun, claimed)
 			if err != nil {
 				return "", err
 			}
@@ -1659,9 +1659,12 @@ func digestIntent(intent string) string {
 	return fmt.Sprintf("%x", sum)
 }
 
-func receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
+func (m *RunManager) receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
 	if run == nil {
 		return ipc.LaunchReceipt{}, fmt.Errorf("run is required")
+	}
+	if err := m.runAdmissionError(run); err != nil {
+		return ipc.LaunchReceipt{}, err
 	}
 	if run.SubmittedHeadSHA == nil || *run.SubmittedHeadSHA == "" {
 		return ipc.LaunchReceipt{}, fmt.Errorf("run %s has no submitted head binding", run.ID)
@@ -2036,7 +2039,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			return "", err
 		}
 		if previous != nil {
-			return previous.ID, nil
+			return previous.ID, m.runAdmissionError(previous)
+		}
+		if id, handled, err := m.reattachReceivedRun(retained); handled || err != nil {
+			return id, err
 		}
 	}
 	globalCfg, globalCfgErr := config.LoadGlobal(m.paths.ConfigFile())
@@ -2225,7 +2231,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", fmt.Errorf("create run: %w", err)
 	}
 	if err := m.cancelRunIDs(predecessors); err != nil {
-		return "", err
+		m.failRunSetup(ctx, run.ID, false, fmt.Sprintf("supersede predecessor: %s", err))
+		trackStartFailure("supersede_predecessor")
+		return "", fmt.Errorf("supersede predecessor for replacement run %s: %w; inspect no-mistakes axi status --run %s and correct the fault before no-mistakes rerun", run.ID, err, run.ID)
 	}
 
 	// Admission. The run row is durable from here on. A run that fits under

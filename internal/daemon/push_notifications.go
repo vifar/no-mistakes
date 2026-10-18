@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,11 +12,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 type pushNotification struct {
@@ -26,6 +29,7 @@ type pushNotification struct {
 	PreviousRunID string                 `json:"previous_run_id"`
 	Checksum      string                 `json:"checksum"`
 	Params        ipc.PushReceivedParams `json:"params"`
+	ReceiveID     string                 `json:"receive_id,omitempty"`
 }
 
 type retainedPush struct {
@@ -39,6 +43,9 @@ func (m *RunManager) notificationPath(id string) string {
 }
 
 func notificationID(record *pushNotification) string {
+	if record.Version == 3 {
+		return record.ReceiveID
+	}
 	copyRecord := *record
 	if copyRecord.Version == 1 {
 		copyRecord.PreviousRunID = ""
@@ -48,12 +55,6 @@ func notificationID(record *pushNotification) string {
 	raw, _ := json.Marshal(copyRecord)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
-}
-
-func notificationPayloadID(record *pushNotification) string {
-	copyRecord := *record
-	copyRecord.Version = 1
-	return notificationID(&copyRecord)
 }
 
 func notificationChecksum(record *pushNotification) string {
@@ -76,7 +77,11 @@ func syncNotificationDir(dir string) error {
 func (m *RunManager) retainPush(params *ipc.PushReceivedParams, repo *db.Repo) (*retainedPush, error) {
 	m.notificationMu.Lock()
 	defer m.notificationMu.Unlock()
-	record := &pushNotification{Version: 2, RepoID: repo.ID, WorkingPath: repo.WorkingPath, GateIdentity: canonicalRoot(params.Gate), Params: *params}
+	var entropy [32]byte
+	if _, err := rand.Read(entropy[:]); err != nil {
+		return nil, fmt.Errorf("mint receive ID: %w", err)
+	}
+	record := &pushNotification{Version: 3, ReceiveID: hex.EncodeToString(entropy[:]), RepoID: repo.ID, WorkingPath: repo.WorkingPath, GateIdentity: canonicalRoot(params.Gate), Params: *params}
 	dir := filepath.Join(m.paths.Root(), "push-notifications")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
@@ -94,47 +99,10 @@ func (m *RunManager) retainPush(params *ipc.PushReceivedParams, repo *db.Repo) (
 			break
 		}
 	}
-	reuse := func(id string) (*retainedPush, error) {
-		existing, err := m.readNotification(id)
-		if err != nil {
-			return nil, err
-		}
-		if err := syncNotificationDir(dir); err != nil {
-			return nil, err
-		}
-		return &retainedPush{ID: id, Record: existing}, nil
-	}
-	if record.PreviousRunID != "" {
-		ids, err := m.db.PushNotificationsForRun(record.PreviousRunID)
-		if err != nil {
-			return nil, err
-		}
-		for _, id := range ids {
-			existing, err := m.readNotification(id)
-			if err != nil {
-				return nil, err
-			}
-			if notificationPayloadID(existing) == notificationPayloadID(record) {
-				return reuse(id)
-			}
-		}
-	}
-	id := notificationID(record)
+	id := record.ReceiveID
 	path := m.notificationPath(id)
 	if _, err := os.Lstat(path); err == nil {
-		return reuse(id)
-	} else if !os.IsNotExist(err) {
-		return nil, err
-	}
-	legacyID := notificationPayloadID(record)
-	if _, err := os.Lstat(m.notificationPath(legacyID)); err == nil {
-		legacy, err := m.readNotification(legacyID)
-		if err != nil {
-			return nil, err
-		}
-		if legacy.PreviousRunID == record.PreviousRunID {
-			return reuse(legacyID)
-		}
+		return nil, fmt.Errorf("minted receive ID already exists")
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
@@ -193,7 +161,7 @@ func (m *RunManager) readNotification(id string) (*pushNotification, error) {
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return nil, fmt.Errorf("corrupt notification: trailing data")
 	}
-	if notificationID(&record) != id || (record.Version != 1 && record.Version != 2) || record.Checksum != notificationChecksum(&record) {
+	if notificationID(&record) != id || (record.Version != 1 && record.Version != 2 && record.Version != 3) || record.Checksum != notificationChecksum(&record) {
 		return nil, fmt.Errorf("corrupt notification: identity/version mismatch")
 	}
 	return &record, nil
@@ -239,13 +207,11 @@ func (m *RunManager) validateNotification(ctx context.Context, retained *retaine
 	}
 	latest := ""
 	for _, run := range rows {
-		if diagnostic != nil && run.ID == diagnostic.ID {
+		if diagnostic != nil && run.ID == diagnostic.ID && run.ID != record.PreviousRunID {
 			continue
 		}
 		if run.Branch == branchFromRef(p.Ref) {
-			if p.LaunchNonce == "" && run.SubmittedHeadSHA != nil && *run.SubmittedHeadSHA == p.New {
-				return fmt.Errorf("stale notification: submitted head already belongs to later branch work")
-			}
+
 			latest = run.ID
 			break
 		}
@@ -284,14 +250,18 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 func (m *RunManager) admitRetainedPush(ctx context.Context, retained *retainedPush) (string, error) {
 	admitted, _, err := m.db.PushNotificationRuns(retained.ID)
 	if err == nil && admitted != nil {
-		return admitted.ID, nil
+		if err = m.runAdmissionError(admitted); err == nil {
+			return admitted.ID, nil
+		}
 	}
 	if err == nil {
 		ctx = context.WithValue(ctx, pushNotificationKey{}, retained)
 		var id string
 		id, err = m.handleRetainedPush(ctx, &retained.Record.Params)
 		if err == nil {
-			return id, nil
+			if err = m.bindLegacyRunAttachment(retained, id); err == nil {
+				return id, nil
+			}
 		}
 	}
 	return "", fmt.Errorf("%w; retained notification %s at %s; resolve with NM_HOME=%q no-mistakes daemon notifications replay %s", err, retained.ID, m.notificationPath(retained.ID), m.paths.Root(), retained.ID)
@@ -309,6 +279,9 @@ func (m *RunManager) InspectPushNotification(id string) (*ipc.PushNotificationIn
 	info := &ipc.PushNotificationInfo{ID: id, Path: m.notificationPath(id), Pending: admitted == nil, Params: &record.Params}
 	if admitted != nil {
 		info.RunID = admitted.ID
+		if err := m.runAdmissionError(admitted); err != nil {
+			info.Error = err.Error()
+		}
 	}
 	if diagnostic != nil {
 		info.DiagnosticRunID = diagnostic.ID
@@ -363,6 +336,9 @@ func (m *RunManager) ListPushNotifications(requests ...ipc.PushNotificationParam
 			}
 			info = &ipc.PushNotificationInfo{ID: id, Path: m.notificationPath(id), Pending: true, Error: string(message)}
 		}
+		if message := []rune(info.Error); len(message) > 256 {
+			info.Error = string(message[:256])
+		}
 		info.Params = nil
 		raw, err := json.Marshal(info)
 		if err != nil {
@@ -393,7 +369,7 @@ func (m *RunManager) ReplayPushNotification(ctx context.Context, id string) (str
 	return m.admitRetainedPush(ctx, retained)
 }
 
-func cleanupPushNotificationTemps(p *paths.Paths) error {
+func cleanupPushNotificationTemps(p *paths.Paths, cutoff time.Time) error {
 	dir := filepath.Join(p.Root(), "push-notifications")
 	info, err := os.Lstat(dir)
 	if os.IsNotExist(err) {
@@ -429,7 +405,7 @@ func cleanupPushNotificationTemps(p *paths.Paths) error {
 		if err != nil {
 			return fmt.Errorf("clean push notification temporary files: %w", err)
 		}
-		if !info.Mode().IsRegular() {
+		if !info.Mode().IsRegular() || !info.ModTime().Before(cutoff) {
 			continue
 		}
 		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
@@ -440,6 +416,115 @@ func cleanupPushNotificationTemps(p *paths.Paths) error {
 	if changed {
 		if err := syncNotificationDir(dir); err != nil {
 			return fmt.Errorf("clean push notification temporary files: %w", err)
+		}
+	}
+	return nil
+}
+
+func sameNotificationOptions(a, b ipc.PushReceivedParams) bool {
+	a.Gate = canonicalRoot(a.Gate)
+	b.Gate = canonicalRoot(b.Gate)
+	left, _ := json.Marshal(a)
+	right, _ := json.Marshal(b)
+	return bytes.Equal(left, right)
+}
+
+func (m *RunManager) reattachReceivedRun(retained *retainedPush) (string, bool, error) {
+	p := &retained.Record.Params
+	if p.LaunchNonce != "" || retained.Record.PreviousRunID == "" {
+		return "", false, nil
+	}
+	run, err := m.db.GetRun(retained.Record.PreviousRunID)
+	if err != nil {
+		return "", true, err
+	}
+	if run == nil || run.SubmittedHeadSHA == nil || *run.SubmittedHeadSHA != p.New {
+		return "", false, nil
+	}
+	ids, err := m.db.PushNotificationsForRun(run.ID)
+	if err != nil {
+		return "", true, err
+	}
+	for _, id := range ids {
+		prior, err := m.readNotification(id)
+		if err != nil {
+			return "", true, err
+		}
+		if !sameNotificationOptions(prior.Params, *p) {
+			continue
+		}
+		admitted, diagnostic, err := m.db.PushNotificationRuns(id)
+		if err != nil {
+			return "", true, err
+		}
+		if admitted != nil {
+			if err := m.db.BindPushNotification(retained.ID, run.ID); err != nil {
+				return "", true, err
+			}
+			return run.ID, true, m.runAdmissionError(run)
+		}
+		if diagnostic != nil {
+			if err := m.db.BindPushDiagnostic(retained.ID, run.ID); err != nil {
+				return "", true, err
+			}
+			return "", false, nil
+		}
+	}
+	return "", true, fmt.Errorf("stale notification: submitted head already belongs to later branch work")
+}
+
+func (m *RunManager) bindLegacyRunAttachment(retained *retainedPush, runID string) error {
+	if retained.Record.Version != 3 {
+		return nil
+	}
+	for _, version := range []int{1, 2} {
+		legacy := *retained.Record
+		legacy.Version = version
+		legacy.ReceiveID = ""
+		legacy.Checksum = ""
+		id := notificationID(&legacy)
+		if _, err := os.Lstat(m.notificationPath(id)); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		record, err := m.readNotification(id)
+		if err != nil {
+			return err
+		}
+		if record.PreviousRunID != retained.Record.PreviousRunID || !sameNotificationOptions(record.Params, retained.Record.Params) {
+			continue
+		}
+		admitted, _, err := m.db.PushNotificationRuns(id)
+		if err != nil {
+			return err
+		}
+		if admitted == nil {
+			if err := m.db.BindPushNotification(id, runID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (m *RunManager) runAdmissionError(run *db.Run) error {
+	if run == nil {
+		return fmt.Errorf("admission run missing")
+	}
+	if run.Status == types.RunFailed || run.Status == types.RunCancelled && (run.Error == nil || *run.Error != types.RunCancelReasonSuperseded) {
+		reason := ""
+		if run.Error != nil {
+			reason = *run.Error
+		}
+		return fmt.Errorf("run %s %s: %s; inspect no-mistakes axi status --run %s; after correcting the fault, start a new validation with no-mistakes rerun from the repository", run.ID, run.Status, reason, run.ID)
+	}
+	if run.Status == types.RunPending {
+		m.mu.Lock()
+		owned := m.runs[run.ID] != nil
+		m.mu.Unlock()
+		if !owned {
+			return fmt.Errorf("run %s pending without scheduler or manager ownership; inspect no-mistakes axi status --run %s before recovery", run.ID, run.ID)
 		}
 	}
 	return nil
