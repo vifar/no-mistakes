@@ -75,3 +75,18 @@ func (d *DB) PushNotificationsForRun(runID string) ([]string, error) {
 	}
 	return ids, rows.Err()
 }
+
+func (d *DB) BindPushDiagnostic(id, runID string) error {
+	_, err := d.sql.Exec(`INSERT INTO push_notifications(notification_id,diagnostic_run_id) VALUES (?,?) ON CONFLICT(notification_id) DO UPDATE SET diagnostic_run_id=excluded.diagnostic_run_id WHERE push_notifications.diagnostic_run_id IS NULL AND push_notifications.run_id IS NULL`, id, runID)
+	if err != nil {
+		return err
+	}
+	_, diagnostic, err := d.PushNotificationRuns(id)
+	if err != nil {
+		return err
+	}
+	if diagnostic == nil || diagnostic.ID != runID {
+		return fmt.Errorf("conflicting notification diagnostic")
+	}
+	return nil
+}

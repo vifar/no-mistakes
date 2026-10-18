@@ -214,7 +214,7 @@ func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
 // consumer would let one startup act on two different documents, and every later
 // read needs a fallback for a failure the caller has already refused to start on.
 func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConfig, stepFactory StepFactory, startupStarted time.Time) error {
-	if err := cleanupPushNotificationTemps(p); err != nil {
+	if err := cleanupPushNotificationTemps(p, startupStarted); err != nil {
 		return err
 	}
 	// Refuse an unusable worktree placement before anything walks, sweeps, or
@@ -1417,6 +1417,15 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if p.Shipping != nil && p.ExternalCIOwner != "" {
 			return nil, fmt.Errorf("strict shipping cannot be combined with external CI ownership")
 		}
+		existing, err := d.GetRunByLaunchNonce(p.RepoID, p.Branch, p.LaunchNonce)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			if err := mgr.runAdmissionError(existing); err != nil {
+				return nil, err
+			}
+		}
 		run, claimed, err := d.ClaimLaunchReceiptWithAllOptions(p.RepoID, p.Branch, p.LaunchNonce, p.SubmittedHeadSHA, p.ValidationGeneration, p.IntentDigest, prBaseBranch, p.OmitIntent, p.Shipping, p.ExternalCIOwner, p.Owner, p.PiProfile)
 		if err != nil {
 			return nil, fmt.Errorf("claim launch receipt: %w", err)
@@ -1440,7 +1449,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			return nil, fmt.Errorf("conflicting launch_nonce: external CI owner differs from run")
 		}
 
-		receipt, err := receiptForRun(run, claimed)
+		receipt, err := mgr.receiptForRun(run, claimed)
 		if err != nil {
 			return nil, err
 		}
