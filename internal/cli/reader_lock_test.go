@@ -64,6 +64,58 @@ func TestRepositoryReadersOutsideGit(t *testing.T) {
 	}
 }
 
+func TestRepositoryReadersOutsideGitIgnoreAdverseState(t *testing.T) {
+	chdir(t, t.TempDir())
+	for _, fixture := range []string{"blocked_home", "old_schema"} {
+		t.Run(fixture, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "nmhome")
+			var before []byte
+			if fixture == "blocked_home" {
+				if err := os.WriteFile(root, []byte("not a directory"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.Mkdir(root, 0700); err != nil {
+					t.Fatal(err)
+				}
+				old, err := sql.Open("sqlite", filepath.Join(root, "state.sqlite"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := old.Exec("CREATE TABLE legacy (id INTEGER)"); err != nil {
+					t.Fatal(err)
+				}
+				if err := old.Close(); err != nil {
+					t.Fatal(err)
+				}
+				before, err = os.ReadFile(filepath.Join(root, "state.sqlite"))
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("NM_HOME", root)
+			for _, args := range [][]string{{"status"}, {"runs"}, {"axi"}, {"axi", "status"}, {"axi", "status", "--json"}, {"axi", "status", "--awaiting"}, {"axi", "status", "--awaiting", "--json"}, {"axi", "logs", "--step", "review"}} {
+				t.Run(strings.Join(args, " "), func(t *testing.T) {
+					out, err := executeCmd(args...)
+					if args[0] == "status" {
+						if err != nil || out != "not in a git repository\n" {
+							t.Fatalf("human status must succeed with exact Git diagnostic before accessing adverse state: err=%v output=%q", err, out)
+						}
+					} else if err == nil || !strings.Contains(out+err.Error(), "not in a git repository") {
+						t.Fatalf("repository query must fail with Git diagnostic before accessing adverse state: err=%v output=%q", err, out)
+					}
+				})
+			}
+			if fixture == "old_schema" {
+				after, err := os.ReadFile(filepath.Join(root, "state.sqlite"))
+				if err != nil || !bytes.Equal(before, after) {
+					t.Fatalf("outside-Git queries changed old database: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestExplicitAndGlobalReadersOutsideGit(t *testing.T) {
 	_, _, database, repo := setupReaderRepo(t)
 	r, err := database.InsertRun(repo.ID, "main", "abcdef123", "abcdef123")

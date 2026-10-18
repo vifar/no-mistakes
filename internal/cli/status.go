@@ -19,14 +19,14 @@ func newStatusCmd() *cobra.Command {
 		Short: "Show status of the current repository",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if _, err := git.FindGitRoot("."); err != nil {
+				fmt.Fprintln(cmd.OutOrStdout(), "not in a git repository")
+				return nil
+			}
 			p, d, err := openReadResources()
 			if err != nil {
 				if errors.Is(err, os.ErrNotExist) {
-					if _, gitErr := git.FindGitRoot("."); gitErr != nil {
-						fmt.Fprintln(cmd.OutOrStdout(), "not in a git repository")
-					} else {
-						fmt.Fprintln(cmd.OutOrStdout(), "repo not initialized (run 'no-mistakes init' first)")
-					}
+					fmt.Fprintln(cmd.OutOrStdout(), "repo not initialized (run 'no-mistakes init' first)")
 					return nil
 				}
 				return err
