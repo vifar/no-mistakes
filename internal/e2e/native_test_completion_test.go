@@ -80,7 +80,17 @@ func TestNativeTestCompletionOnRealBinary(t *testing.T) {
 			branch := "feature/native-completion-" + mode
 			h.CommitChange(branch, "feature.txt", "native child completion\n", "add completion probe")
 			h.PushToGate(branch)
-			run := h.WaitForRun(branch, 90*time.Second)
+			wait := 90 * time.Second
+			if mode == "rejected-submission" {
+				// Three analyzer turns each exhaust four Claude attempts. The
+				// bounded Test-step reproduction measured 61.723s for all 12;
+				// jitter alone permits 78.75s of sleeps. Keep 71.25s beyond that
+				// for the other stages and process overhead on a busy runner.
+				// WithFastBackoff is in-process only; this daemon runs the real
+				// separately built CLI, so it cannot use that test clock seam.
+				wait = 150 * time.Second
+			}
+			run := h.WaitForRun(branch, wait)
 			step, ok := findStep(run.Steps, types.StepTest)
 			if !ok {
 				t.Fatalf("run has no test result: %+v", run)

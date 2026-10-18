@@ -232,6 +232,34 @@ func (f *schedFixture) status(runID string) types.RunStatus {
 	return run.Status
 }
 
+// Read persisted causes while the fixture DB and step logs still exist.
+func (f *schedFixture) runDiagnostics(runID string) string {
+	f.t.Helper()
+	var detail strings.Builder
+	run, err := f.d.GetRun(runID)
+	if err != nil || run == nil {
+		fmt.Fprintf(&detail, "read run: %v (found=%t)\n", err, run != nil)
+	} else {
+		cause := "<nil>"
+		if run.Error != nil {
+			cause = *run.Error
+		}
+		fmt.Fprintf(&detail, "run status=%s error=%q\n", run.Status, cause)
+	}
+	steps, err := f.d.GetStepsByRun(runID)
+	if err != nil {
+		fmt.Fprintf(&detail, "read steps: %v\n", err)
+	}
+	for _, step := range steps {
+		cause := "<nil>"
+		if step.Error != nil {
+			cause = *step.Error
+		}
+		fmt.Fprintf(&detail, "step=%s status=%s error=%q\n", step.StepName, step.Status, cause)
+	}
+	return detail.String()
+}
+
 func (f *schedFixture) waitStatus(runID string, want ...types.RunStatus) types.RunStatus {
 	f.t.Helper()
 	deadline := time.Now().Add(60 * time.Second)
@@ -245,7 +273,7 @@ func (f *schedFixture) waitStatus(runID string, want ...types.RunStatus) types.R
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	f.t.Fatalf("run %s status = %s, want one of %v", runID, got, want)
+	f.t.Fatalf("run %s status = %s, want one of %v\n%s", runID, got, want, f.runDiagnostics(runID))
 	return got
 }
 
@@ -260,7 +288,7 @@ func (f *schedFixture) waitStarted(runID string) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	f.t.Fatalf("run %s never started executing; started = %v", runID, f.step.startedIDs())
+	f.t.Fatalf("run %s never started executing; started = %v\n%s", runID, f.step.startedIDs(), f.runDiagnostics(runID))
 }
 
 // assertNotStarted settles the scheduler (a no-op round trip) and then checks
@@ -356,7 +384,7 @@ func (f *schedFixture) waitParked(runID string) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	f.t.Fatalf("run %s never parked", runID)
+	f.t.Fatalf("run %s never parked\n%s", runID, f.runDiagnostics(runID))
 }
 
 // launchReplyBudget is deliberately loose: it only has to tell "replied" from
