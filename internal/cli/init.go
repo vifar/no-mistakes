@@ -138,9 +138,8 @@ func newInitCmd() *cobra.Command {
 //
 // Finally it refuses a root another checkout has already claimed, which the
 // config loader rejects. All of it belongs here rather than only in the daemon:
-// the daemon refuses to start on a config it cannot load or place, and every
-// command starts the daemon, so printing such an entry would hand the operator a
-// paste that takes their whole CLI down instead of placing anything - the failure
+// the daemon refuses to start on a config it cannot load or place, so printing
+// such an entry would block commands that need daemon startup - the failure
 // belongs where they can still pick another directory.
 func resolveWorktreeRoot(p *paths.Paths, d *db.DB, workDir, root string) (string, error) {
 	root = strings.TrimSpace(root)
@@ -174,7 +173,7 @@ func resolveWorktreeRoot(p *paths.Paths, d *db.DB, workDir, root string) (string
 // while a configured entry is unusable. Registering a checkout AROUND an existing
 // root therefore reaches the very state --worktree-root is careful never to
 // print, from the other direction - and the operator would find out at the next
-// daemon start, when every command goes down with it, from a message naming a
+// daemon start, when commands requiring startup fail, from a message naming a
 // config entry they did not touch. Refusing here leaves them a checkout they can
 // still place elsewhere and an entry they can still repoint.
 //
@@ -185,8 +184,8 @@ func resolveWorktreeRoot(p *paths.Paths, d *db.DB, workDir, root string) (string
 // A config that does not load is refused outright instead, naming the fault. It
 // cannot be judged - the entries it would be judged against are the ones that
 // did not load - and registering into it is never useful: the daemon refuses to
-// start on that same config, so the registration lands in a CLI that is already
-// down, and the placement it may have broken then surfaces as a second fault to
+// start on that same config, so registration cannot produce a usable daemon,
+// and the placement it may have broken then surfaces as a second fault to
 // find by hand.
 func assertCheckoutHoldsNoConfiguredWorktreeRoot(p *paths.Paths, workDir string) error {
 	checkout, err := git.FindMainRepoRoot(workDir)
@@ -265,8 +264,8 @@ func checkoutClaimingWorktreeRoot(p *paths.Paths, checkout, root string) (string
 //
 // What it prints is whatever edit leaves the config loadable, because YAML
 // rejects a duplicate key at either level and a config that no longer loads is a
-// daemon that refuses to start - every command runs EnsureDaemon, so the
-// operator's whole CLI goes with it. Four edits, four shapes:
+// daemon that refuses to start, blocking commands that require startup.
+// Four edits, four shapes:
 //
 //   - No key: the key and the entry.
 //   - The key is there but nothing can be added under it - `worktree_roots: {}`,

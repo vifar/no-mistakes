@@ -91,8 +91,8 @@ func RecordedDir(p *paths.Paths, recorded, repoID, runID string) string {
 // CheckPlacement reports why root cannot hold the run worktrees of the
 // repository checked out at checkout, or nil when it can. It is the one owner of
 // that policy, so `init --worktree-root` refuses exactly what the daemon refuses
-// to start on: a divergence there would print an entry that stops the daemon
-// once pasted, and every command starts the daemon.
+// to start on: a divergence there would print an entry that blocks daemon startup
+// once pasted.
 //
 // internal/config validates every worktree_roots entry it can judge on its own
 // (absolute paths, two checkouts sharing a root, a root equal to its checkout),
