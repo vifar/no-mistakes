@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
@@ -70,6 +71,10 @@ func newStatusCmd() *cobra.Command {
 				fmt.Fprintf(w, "\n  %s  %s\n", sDim.Render("local branch:"), humanSyncSummary(syncState))
 			}
 			if activeRun != nil {
+				cfg, _ := config.LoadGlobal(p.ConfigFile())
+				if warning := ownerPolicyWarning(activeRun.Owner(), cfg); warning != "" {
+					fmt.Fprintln(w, warning)
+				}
 				fmt.Fprintln(w)
 				fmt.Fprintf(w, "  %s\n", sCyan.Render("Active run"))
 				sha := activeRun.HeadSHA[:minLen(len(activeRun.HeadSHA), 8)]

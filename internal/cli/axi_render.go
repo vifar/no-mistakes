@@ -120,6 +120,7 @@ type stepView struct {
 
 // runView is a render-ready view of a pipeline run.
 type runView struct {
+	OwnerPolicyWarning   string
 	Owner                string
 	TargetAdvanceRewinds int64
 	Shipping             *types.ShippingOptions
@@ -639,6 +640,9 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 		}
 	}
 	fields = append(fields, toon.Field{Key: "owner", Value: rv.Owner}, toon.Field{Key: "ownerless", Value: rv.Owner == ""})
+	if rv.OwnerPolicyWarning != "" {
+		fields = append(fields, toon.Field{Key: "owner_policy_warning", Value: rv.OwnerPolicyWarning})
+	}
 	fields = append(fields, awaitingPersonFields(rv)...)
 	fields = append(fields, toon.Field{Key: "head", Value: shortSHA(rv.HeadSHA)})
 	fields = append(fields, toon.Field{Key: "head_sha", Value: rv.HeadSHA}, toon.Field{Key: "target_advance_rewinds", Value: rv.TargetAdvanceRewinds})
