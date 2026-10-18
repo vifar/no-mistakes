@@ -110,6 +110,34 @@ func TestBodyDocumentsAxiGateGuidance(t *testing.T) {
 	}
 }
 
+func TestMarkdownDocumentsStatusSelectors(t *testing.T) {
+	// Check the emitted guidance, which is both installed and generated, against
+	// the CLI's status selectors rather than inspecting the source constant.
+	_, reading, ok := strings.Cut(Markdown(), "## Reading the output\n")
+	if !ok {
+		t.Fatal("generated skill missing output-reading guidance")
+	}
+	for _, want := range []string{
+		"Output defaults to [TOON](https://toonformat.dev)",
+		"`axi status --json` selects JSON for both the default view and `--awaiting`",
+		"`axi status` is scoped to your current branch when neither `--run` nor `--awaiting` is supplied",
+		"`--awaiting` lists unanswered live gates across this repository's branches and cannot be combined with `--run`",
+		"In a successful default status response, no run object at all means this branch has no run yet",
+	} {
+		if !strings.Contains(reading, want) {
+			t.Errorf("generated status guidance missing %q", want)
+		}
+	}
+	for _, stale := range []string{
+		"Output is TOON:",
+		"`axi status` is scoped to your current branch when `--run` is omitted:",
+	} {
+		if strings.Contains(reading, stale) {
+			t.Errorf("generated status guidance retains stale claim %q", stale)
+		}
+	}
+}
+
 func TestInstallWritesBothPaths(t *testing.T) {
 	root := t.TempDir()
 	written, err := Install(root)

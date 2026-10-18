@@ -9,7 +9,7 @@ user-invocable: true
 `no-mistakes` is a local gate that validates your code changes through a pipeline
 (intent, rebase, review, test, document, lint, push, PR, CI) before they reach
 the configured push target. You drive it through the `no-mistakes axi` command family, which prints
-machine-readable [TOON](https://toonformat.dev) to stdout and progress to stderr.
+machine-readable output to stdout and progress to stderr.
 
 
 ## Active validation-step boundary
@@ -419,8 +419,8 @@ no-mistakes axi respond --run <id> --action approve   # answer a specific run's 
 
 ## Reading the output
 
-- Output is TOON: `key: value` pairs, `name[N]{cols}:` tables, and `help[N]:` hints.
-- `axi status` is scoped to your current branch when `--run` is omitted: with a known current branch, an implicitly resolved `run:` is this branch's. A run under `other_branch_run:` is one you named with `--run <id>` that belongs to another branch - never read its status or outcome as your own work. An explicit `--run <id>` rendered under `run:` while the current branch is unknown (detached `HEAD` or a branch-lookup failure) encodes no branch relationship. In a successful status response, no run object at all means this branch has no run yet, whatever the recent-runs table lists; an `error:` response proves nothing about run ownership, so act on the error instead of concluding the branch is idle.
+- Output defaults to [TOON](https://toonformat.dev): `key: value` pairs, `name[N]{cols}:` tables, and `help[N]:` hints. `axi status --json` selects JSON for both the default view and `--awaiting`; `review-receipt` and `ci-handoff` emit JSON on success.
+- `axi status` is scoped to your current branch when neither `--run` nor `--awaiting` is supplied; `--awaiting` lists unanswered live gates across this repository's branches and cannot be combined with `--run`. In the default view, with a known current branch, an implicitly resolved `run:` is this branch's. A run under `other_branch_run:` is one you named with `--run <id>` that belongs to another branch - never read its status or outcome as your own work. An explicit `--run <id>` rendered under `run:` while the current branch is unknown (detached `HEAD` or a branch-lookup failure) encodes no branch relationship. In a successful default status response, no run object at all means this branch has no run yet, whatever the recent-runs table lists; an `error:` response proves nothing about run ownership, so act on the error instead of concluding the branch is idle.
 - A non-terminal run object may include `awaiting_agent: parked <duration>` immediately after `status`; that means the run is parked at a gate. Only an implicitly resolved current-branch gate offers bare `axi respond`; an explicit `--run <id>` status is inspection-only even when its branch matches, because the branch may have a newer active run, and names `axi respond --run <id>` as its response command. Follow the response's `help`.
 - A run object with a `running` or `fixing` step may include an `active_steps` table. `active_for` is the enclosing step duration; `round_active_for` is the displayed execution or fix round duration and resets for a fix round. Older runs without round timing leave `round_active_for` empty.
 - The `help` list at the bottom of most responses tells you the next commands to run.
