@@ -165,15 +165,9 @@ Ordinary reattachment to an in-flight run does not require intent input and neve
 
 ### Launch owner
 
-Use `--owner <session-or-thread-id>` on `axi run` or `rerun` to record who will drive the run's approval gates. It overrides [`NO_MISTAKES_OWNER`](/no-mistakes/reference/environment/#no_mistakes_owner), including when explicitly empty. Values are trimmed, valid UTF-8, at most 256 bytes, and contain no control characters. No provider or T3 thread ID is guessed. Reattachment keeps the existing run's owner; a new run or rerun uses the launching caller's input rather than inheriting an old owner.
+Use `--owner <session-or-thread-id>` on `axi run` or `rerun` to record who will drive the run's approval gates. For environment input and flag precedence, see [`NO_MISTAKES_OWNER`](/no-mistakes/reference/environment/#no_mistakes_owner). Values must be valid UTF-8, at most 256 bytes before trimming, and contain no control characters; surrounding whitespace is trimmed. Ordinary reattachment keeps the existing run's owner; a new run or rerun uses the launching caller's input rather than inheriting an old owner.
 
-Ownerless launches warn by default. The global [`intent.require_owner`](/no-mistakes/reference/global-config/#intent) setting can refuse them. Owner metadata assigns responsibility but grants no approval authority, sends no notification, and never answers a gate. The daemon must support owner input; an older daemon is refused before an owned `axi run` takes branch custody. The explicit owner is stored independently of transcript provenance, so later intent inference cannot erase it; historical transcript session IDs do not establish ownership.
-
-```sh
-no-mistakes axi run --owner "$CODEX_THREAD_ID" --intent-file ./intent.md
-```
-
-Use that example only where the launching environment actually provides `CODEX_THREAD_ID`; otherwise pass the known responsible session or person explicitly.
+See global [`intent.require_owner`](/no-mistakes/reference/global-config/#intent) for ownerless-launch policy. Owner metadata assigns responsibility but grants no approval authority, sends no notification, and never answers a gate. The daemon must support owner input; an older daemon is refused before an owned `axi run` takes branch custody. The explicit owner is stored independently of transcript provenance, so later intent inference cannot erase it; historical transcript session IDs do not establish ownership.
 
 ### Intent input
 
@@ -289,13 +283,14 @@ no-mistakes axi run --intent "the user's goal" \
 
 After durable creation or claim, AXI writes a TOON `launch_receipt` object to stdout **before** driving the run.
 The receipt remains available to a caller that captures stdout even if driving later stops at a gate or fails.
-It contains `run_id`, `disposition` (`created` or `reused`), `launch_nonce`, `validation_generation`, `branch`, `head_sha`, `submitted_head_sha`, and `intent_digest`.
+It contains `run_id`, `disposition` (`created` or `reused`), `owner`, `launch_nonce`, `validation_generation`, `branch`, `head_sha`, `submitted_head_sha`, and `intent_digest`.
 Both head fields contain the full, immutable submitted commit SHA; `intent_digest` is the lowercase SHA-256 digest of the exact persisted intent bytes, including whitespace.
 Raw intent is not included in receipts, and generic run/status output does not expose the nonce binding or intent digest.
 
 The nonce is scoped to the repository and branch.
 The first successful receipt claim returns `created`; subsequent matching claims return `reused` for that same run, including after the gate or pipeline head advances.
 A conflicting submitted head, validation generation, intent, [pinned Pi profile](/no-mistakes/reference/global-config/#per-run-pi-profiles), or explicit [shipping mode/draft pin](#strict-shipping-and-review-receipts) is refused.
+The [launch owner](#launch-owner) must also match exactly on strict-launch replay; omitting it does not match a run created with an owner.
 A different nonce creates a distinct run rather than reattaching to a same-head run; both post-receive creation and the up-to-date-push fallback follow this contract.
 The up-to-date-push fallback preserves the latest same-head run's PR URL unless its recorded PR state is closed or merged, including when an explicit `--base-branch` retargets that PR.
 An explicit `--base-branch` is persisted on creation and must match the stored per-run base on replay; omitting it on replay preserves the stored base.
@@ -442,7 +437,7 @@ no-mistakes axi status --awaiting --json
 
 Every run object and recent-run row includes `owner` (empty when absent) and `ownerless` (a boolean). Run objects also include `awaiting_person`: true only for a nonterminal run with an `awaiting_approval` or `fix_review` step and its matching durable gate identity. An accepted response waiting for a slot is already answered and reports false. The signal does not use `pending_response` being populated as evidence of a wait, nor the historical `N awaiting` findings count; a completed step retaining findings reports false.
 
-A waiting run includes `awaiting_step`, `awaiting_since` (Unix seconds), `awaiting_seconds`, human-readable `awaiting_for`, `gate_question` (the bounded gate summary, or descriptions if no summary), and `gate_questions` (full finding descriptions). Age uses the persisted park timestamp, clamped at zero if the clock moves backward; unavailable timestamps yield null age fields rather than an invented duration. `--awaiting` returns an `awaiting_runs` array, including ownerless runs, age, questions, and an explicit inspection command per run. The empty result is an empty array. This read-only repository-wide query does not change the default current-branch resolution or answer any gate.
+A waiting run includes `awaiting_step`, `awaiting_since` (Unix seconds), `awaiting_seconds`, `gate_question` (the bounded gate summary, or descriptions if no summary), and `gate_questions` (full finding descriptions). Age uses the persisted park timestamp, clamped at zero if the clock moves backward, with human-readable `awaiting_for` when the timestamp is known. An unavailable timestamp yields null `awaiting_since` and `awaiting_seconds` and omits `awaiting_for`. `--awaiting` returns an `awaiting_runs` array, including ownerless runs, age, questions, and an explicit inspection command per run. The empty result is an empty array. This read-only repository-wide query does not change the default current-branch resolution or answer any gate.
 
 A parked `gate:` includes `run_id`, `step_result_id`, `round_id`, and `nonce`, alongside its step and status. The nonce changes on every park, even when the same round parks again. IPC run-status payloads expose the same identity as each step's `gate` object. Every non-abort IPC response must supply it as `expected_gate`; missing or mismatched identities are refused with `gate_superseded` and the current gate identity. Abort is exempt. Accepted pending responses always store their full identity and are replayed only against that same park after restart. Recovery refuses a park without a saved nonce and matching round ID, even when no response is pending; it also refuses a pending response with a missing or mismatched identity.
 
@@ -622,6 +617,8 @@ Opens the TUI for the active run anywhere in the current repo. If `--run` is spe
 ## no-mistakes rerun
 
 Rerun the pipeline for the current branch.
+
+`--owner` selects the [launch owner](#launch-owner) for the new run.
 
 ```sh
 no-mistakes rerun
