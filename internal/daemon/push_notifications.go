@@ -30,6 +30,7 @@ type pushNotification struct {
 	Checksum      string                 `json:"checksum"`
 	Params        ipc.PushReceivedParams `json:"params"`
 	ReceiveID     string                 `json:"receive_id,omitempty"`
+	Validated     bool                   `json:"validated,omitempty"`
 }
 
 type retainedPush struct {
@@ -47,6 +48,7 @@ func notificationID(record *pushNotification) string {
 		return record.ReceiveID
 	}
 	copyRecord := *record
+	copyRecord.Validated = false
 	if copyRecord.Version == 1 {
 		copyRecord.PreviousRunID = ""
 	}
@@ -106,33 +108,79 @@ func (m *RunManager) retainPush(params *ipc.PushReceivedParams, repo *db.Repo) (
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
+	if err := m.writeNotification(id, record); err != nil {
+		return nil, err
+	}
+	return &retainedPush{ID: id, Record: record}, nil
+}
+
+func (m *RunManager) writeNotification(id string, record *pushNotification) error {
 	record.Checksum = notificationChecksum(record)
+	dir := filepath.Dir(m.notificationPath(id))
+	path := m.notificationPath(id)
 	raw, err := json.Marshal(record)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	f, err := os.CreateTemp(dir, ".notification-")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer os.Remove(f.Name())
 	defer f.Close()
 	if _, err = f.Write(raw); err != nil {
-		return nil, err
+		return err
 	}
 	if err = f.Sync(); err != nil {
-		return nil, err
+		return err
 	}
 	if err = f.Close(); err != nil {
-		return nil, err
+		return err
+	}
+	if m.beforeNotificationRename != nil {
+		if err := m.beforeNotificationRename(); err != nil {
+			return err
+		}
 	}
 	if err = os.Rename(f.Name(), path); err != nil {
-		return nil, err
+		return err
 	}
 	if err = syncNotificationDir(dir); err != nil {
-		return nil, err
+		return err
 	}
-	return &retainedPush{ID: id, Record: record}, nil
+	return nil
+}
+
+func (m *RunManager) validateAndMarkNotification(ctx context.Context, retained *retainedPush) error {
+	if err := m.validateNotification(ctx, retained); err != nil {
+		return err
+	}
+	if retained.Record.Version != 3 {
+		return nil
+	}
+	m.notificationMu.Lock()
+	defer m.notificationMu.Unlock()
+	record, err := m.readNotification(retained.ID)
+	if err != nil {
+		return fmt.Errorf("persist notification validation: %w", err)
+	}
+	original, stored := *retained.Record, *record
+	original.Validated, stored.Validated = false, false
+	if notificationChecksum(&original) != notificationChecksum(&stored) {
+		return fmt.Errorf("persist notification validation: received record changed")
+	}
+	if record.Validated {
+		if err := syncNotificationDir(filepath.Dir(m.notificationPath(retained.ID))); err != nil {
+			return fmt.Errorf("persist notification validation: %w", err)
+		}
+	} else {
+		record.Validated = true
+		if err := m.writeNotification(retained.ID, record); err != nil {
+			return fmt.Errorf("persist notification validation: %w", err)
+		}
+	}
+	retained.Record = record
+	return nil
 }
 
 func (m *RunManager) readNotification(id string) (*pushNotification, error) {
@@ -444,6 +492,13 @@ func (m *RunManager) reattachReceivedRun(retained *retainedPush) (string, bool, 
 	if p.Old != p.New && (p.Old == run.HeadSHA || run.LastPushedSHA != nil && p.Old == *run.LastPushedSHA) {
 		return "", false, nil
 	}
+	transition, err := m.hasValidatedReturnTransition(retained)
+	if err != nil {
+		return "", true, err
+	}
+	if transition {
+		return "", false, nil
+	}
 	ids, err := m.db.PushNotificationsForRun(run.ID)
 	if err != nil {
 		return "", true, err
@@ -474,6 +529,37 @@ func (m *RunManager) reattachReceivedRun(retained *retainedPush) (string, bool, 
 		}
 	}
 	return "", true, fmt.Errorf("stale notification: submitted head already belongs to later branch work")
+}
+
+func (m *RunManager) hasValidatedReturnTransition(retained *retainedPush) (bool, error) {
+	current := retained.Record
+	if current.Params.Old == current.Params.New {
+		return false, nil
+	}
+	entries, err := os.ReadDir(filepath.Dir(m.notificationPath(retained.ID)))
+	if err != nil {
+		return false, fmt.Errorf("read validated ref transitions: %w", err)
+	}
+	for _, entry := range entries {
+		if !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		if id == retained.ID {
+			continue
+		}
+		prior, err := m.readNotification(id)
+		if err != nil || prior.Version != 3 || !prior.Validated {
+			continue
+		}
+		if prior.RepoID == current.RepoID && prior.WorkingPath == current.WorkingPath &&
+			prior.GateIdentity == current.GateIdentity && canonicalRoot(prior.Params.Gate) == current.GateIdentity &&
+			prior.PreviousRunID == current.PreviousRunID && prior.Params.Ref == current.Params.Ref &&
+			prior.Params.Old == current.Params.New && prior.Params.New == current.Params.Old {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *RunManager) bindLegacyRunAttachment(retained *retainedPush, runID string) error {
