@@ -177,6 +177,18 @@ Ownership uses additive RPC extensions (`probe_run_owner` and fields on launch, 
 
 For post-receive notifications, malformed base64, duplicate owner options, or invalid decoded owners are admitted **ownerless with an explicit warning**, because Git has already accepted the refs. The run and `owner_admission_events` record are committed atomically. Status/JSON exposes `owner_admission_event`, including the validation error, branch, caller path, run ID and `ownerless_admitted`; this durable record survives `log_level: error` and subsequent policy changes. It is not a silent successful owner assignment. Valid owned admissions and deletions produce no bypass event.
 
+Post-receive admission is not atomic with Git's ref update. Before attempting admission, the daemon fsyncs a notification under the owning root's private `push-notifications/` directory. If config loading or run/event insertion fails, active predecessors remain intact and the notification stays pending. A legacy unpinned launch without an active predecessor may record a failed diagnostic row; that row does not acknowledge admission. After correcting the fault, replay can admit the retained notification without another push. If retention itself fails, the daemon returns `retain post-receive notification failed`; the accepted ref may then lack a recoverable notification or run.
+
+Use the supported recovery commands against the owning root:
+
+```sh
+NM_HOME=/path/to/root no-mistakes daemon notifications list
+NM_HOME=/path/to/root no-mistakes daemon notifications inspect <id>
+NM_HOME=/path/to/root no-mistakes daemon notifications replay <id>
+```
+
+These commands return JSON. List/inspect report `pending`, the full received options, and any diagnostic or admitted run ID. Replay resolves admission and revalidates the registered repository, canonical owned gate, current ref/head, and branch run context; stale or corrupt notifications are refused and retained. A notification's admission binding commits with its run and owner event, so duplicate delivery and replay after a lost acknowledgement cannot create another run or cancel newer work. Identical received payloads share an identity. Files remain available for inspection after admission; they are private operational records, not published evidence. Successful admission does not guarantee pipeline completion. The running daemon is required; `NM_HOME` selects its owning root.
+
 New read-only clients reject an older database schema and ask the daemon to migrate it. This does not make an upgraded database safe against pre-versioning executables: they ignore `user_version` and may run DDL/backfills. Do not point an older executable at the upgraded root; use a separate root or a compatible backup.
 
 ### Intent input

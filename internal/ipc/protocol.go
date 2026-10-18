@@ -15,6 +15,9 @@ const MaxFrameBytes = 1024 * 1024
 // JSON-RPC 2.0 method names.
 const (
 	MethodPushReceived              = "push_received"
+	MethodListPushNotifications     = "list_push_notifications"
+	MethodInspectPushNotification   = "inspect_push_notification"
+	MethodReplayPushNotification    = "replay_push_notification"
 	MethodResolvePiProfile          = "resolve_pi_profile"
 	MethodProbeOmitIntent           = "probe_omit_intent"
 	MethodProbeExternalCIOwner      = "probe_external_ci_owner"
@@ -94,6 +97,7 @@ type ProbeRunOwnerResult struct {
 // intent from local transcripts. LaunchNonce and ValidationGeneration together
 // opt into a nonce-bound launch proof.
 type PushReceivedParams struct {
+	RawPushOptions []string `json:"raw_push_options,omitempty"`
 	// OwnerValidationError retains a post-receive owner decoding failure.
 	OwnerValidationError string                 `json:"owner_validation_error,omitempty"`
 	Owner                string                 `json:"owner"`
@@ -740,4 +744,17 @@ func NewErrorResponse(id int64, code int, message string) *Response {
 		Error:   &RPCError{Code: code, Message: message},
 		ID:      id,
 	}
+}
+
+type PushNotificationParams struct {
+	ID string `json:"id"`
+}
+type PushNotificationInfo struct {
+	ID              string              `json:"id"`
+	Path            string              `json:"path"`
+	Pending         bool                `json:"pending"`
+	RunID           string              `json:"run_id,omitempty"`
+	DiagnosticRunID string              `json:"diagnostic_run_id,omitempty"`
+	Error           string              `json:"error,omitempty"`
+	Params          *PushReceivedParams `json:"params,omitempty"`
 }

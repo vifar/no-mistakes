@@ -54,7 +54,7 @@ func mutatesPipelineControl(cmd *cobra.Command) bool {
 	case "no-mistakes", "no-mistakes init", "no-mistakes eject", "no-mistakes rerun",
 		"no-mistakes axi run", "no-mistakes axi respond", "no-mistakes axi abort",
 		"no-mistakes daemon start", "no-mistakes daemon stop", "no-mistakes daemon restart",
-		"no-mistakes daemon uninstall",
+		"no-mistakes daemon uninstall", "no-mistakes daemon notifications replay",
 		"no-mistakes update":
 		return true
 	case "no-mistakes sync", "no-mistakes axi sync":
