@@ -124,7 +124,8 @@ func OpenReadOnly(path string) (*DB, error) {
 
 // isDuplicateColumnErr reports whether err is SQLite's "duplicate column name"
 // error, which ALTER TABLE ADD COLUMN emits when the column already exists.
-// Treating this as a no-op keeps migrations idempotent without a version table.
+// Historical unversioned databases may already contain some additive columns;
+// treating this as a no-op lets their complete upgrade finish before stamping.
 func isDuplicateColumnErr(err error) bool {
 	if err == nil {
 		return false

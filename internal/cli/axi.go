@@ -24,7 +24,7 @@ import (
 const recentRunsHomeLimit = 10
 
 // newAxiCmd builds the agent-facing command tree. Everything under `axi`
-// follows AXI conventions: TOON on stdout, progress on stderr, structured
+// follows AXI conventions: structured stdout, progress on stderr, structured
 // errors, and explicit exit codes. It is the surface an agent (or the
 // /no-mistakes skill) drives; humans use the bare `no-mistakes` TUI instead.
 func newAxiCmd() *cobra.Command {
@@ -83,7 +83,7 @@ func (e *axiEnv) close() {
 // openAxiEnv resolves paths, opens the DB, and finds the repo for the current
 // directory. When ensureDaemon is true it also starts (if needed) and dials
 // the daemon, populating client. Errors are returned for the caller to render
-// as structured TOON.
+// as structured output in the command's selected format.
 func openAxiEnv(ensureDaemonConn bool) (*axiEnv, error) {
 	return openAxiEnvWithOptions(axiEnvOptions{ensureDaemonConn: ensureDaemonConn})
 }
