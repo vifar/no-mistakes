@@ -37,7 +37,7 @@ func TestCombinedOptionsAdmissionAndLaunchReceipt(t *testing.T) {
 			t.Fatal(err)
 		}
 		claim := func(owner string, request *agentcfg.PiProfile) (*Run, bool, error) {
-			return d.ClaimLaunchReceiptWithAllOptions(repo.ID, "feature", "nonce", "head", "generation", "digest", "release", false, nil, owner, request)
+			return d.ClaimLaunchReceiptWithAllOptions(repo.ID, "feature", "nonce", "head", "generation", "digest", "release", false, nil, owner, "", request)
 		}
 		wrongOwner, claimed, err := claim("", pin)
 		if err != nil || claimed || wrongOwner == nil || wrongOwner.ID != run.ID {
@@ -71,7 +71,7 @@ func TestCombinedOptionsAdmissionAndLaunchReceipt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got, claimed, err := d.ClaimLaunchReceiptWithAllOptions(repo.ID, "feature", "nonce", "head", "generation", "digest", "", false, nil, "", nil)
+		got, claimed, err := d.ClaimLaunchReceiptWithAllOptions(repo.ID, "feature", "nonce", "head", "generation", "digest", "", false, nil, "", "", nil)
 		if err != nil || !claimed || got == nil || got.ID != run.ID {
 			t.Fatalf("ordinary claim = %#v, %v, %v", got, claimed, err)
 		}

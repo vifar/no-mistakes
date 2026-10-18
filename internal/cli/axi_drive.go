@@ -388,7 +388,7 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		if strings.TrimSpace(validationGeneration) == "" {
 			return emitError(cmd, 2, "--validation-generation is required with --launch-nonce")
 		}
-		receipt, err := claimLaunchReceiptWithOptions(types.ShippingFromContext(ctx), externalCIOwner, env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profile)
+		receipt, err := claimLaunchReceiptWithOptions(types.ShippingFromContext(ctx), externalCIOwner, types.RunOwnerFromContext(ctx), env.client, env.repo.ID, branch, launchNonce, headSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profile)
 		if err != nil {
 			return emitError(cmd, 1, fmt.Sprintf("claim launch receipt: %v", err))
 		}
@@ -1063,16 +1063,16 @@ func claimLaunchReceipt(client *ipc.Client, repoID, branch, launchNonce, submitt
 }
 
 func claimShippingLaunchReceipt(shipping *types.ShippingOptions, client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch string, omitIntent bool, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
-	return claimLaunchReceiptWithOptions(shipping, "", client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch, omitIntent, profiles...)
+	return claimLaunchReceiptWithOptions(shipping, "", "", client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch, omitIntent, profiles...)
 }
 
-func claimLaunchReceiptWithOptions(shipping *types.ShippingOptions, externalCIOwner string, client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch string, omitIntent bool, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
+func claimLaunchReceiptWithOptions(shipping *types.ShippingOptions, externalCIOwner, owner string, client *ipc.Client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, baseBranch string, omitIntent bool, profiles ...*agentcfg.PiProfile) (*ipc.LaunchReceipt, error) {
 	if shipping != nil && externalCIOwner != "" {
 		return nil, fmt.Errorf("strict shipping cannot be combined with an external CI owner")
 	}
 	var result ipc.ClaimLaunchReceiptResult
 	if err := client.Call(ipc.MethodClaimLaunchReceipt, &ipc.ClaimLaunchReceiptParams{
-		Shipping: shipping, ExternalCIOwner: externalCIOwner, RepoID: repoID, Branch: branch, LaunchNonce: launchNonce, PiProfile: agentcfg.OptionalPiProfile(profiles),
+		Owner: owner, Shipping: shipping, ExternalCIOwner: externalCIOwner, RepoID: repoID, Branch: branch, LaunchNonce: launchNonce, PiProfile: agentcfg.OptionalPiProfile(profiles),
 		SubmittedHeadSHA: submittedHeadSHA, ValidationGeneration: validationGeneration, IntentDigest: intentDigest, PRBaseBranch: baseBranch, OmitIntent: omitIntent,
 	}, &result); err != nil {
 		return nil, err
@@ -1176,7 +1176,7 @@ func waitForLaunchReceipt(ctx context.Context, client *ipc.Client, repoID, branc
 	poll := time.NewTicker(150 * time.Millisecond)
 	defer poll.Stop()
 	for {
-		receipt, err := claimLaunchReceiptWithOptions(types.ShippingFromContext(ctx), externalCIOwner, client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profiles...)
+		receipt, err := claimLaunchReceiptWithOptions(types.ShippingFromContext(ctx), externalCIOwner, types.RunOwnerFromContext(ctx), client, repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, digestLaunchIntent(intent), baseBranch, omitIntent, profiles...)
 		if err != nil {
 			return nil, err
 		}
@@ -1295,6 +1295,7 @@ func emitLaunchReceipt(cmd *cobra.Command, receipt ipc.LaunchReceipt) {
 	emitDoc(cmd, toon.Field{Key: "launch_receipt", Value: toon.NewObject(
 		toon.Field{Key: "run_id", Value: receipt.RunID},
 		toon.Field{Key: "disposition", Value: receipt.Disposition},
+		toon.Field{Key: "owner", Value: receipt.Owner},
 		toon.Field{Key: "launch_nonce", Value: receipt.LaunchNonce},
 		toon.Field{Key: "validation_generation", Value: receipt.ValidationGeneration},
 		toon.Field{Key: "branch", Value: receipt.Branch},

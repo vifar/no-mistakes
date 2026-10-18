@@ -1,8 +1,16 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	toon "github.com/toon-format/toon-go"
@@ -79,6 +87,79 @@ func TestAxiAwaitingRequiresLiveGate(t *testing.T) {
 			if doc.Run.Awaiting != tc.want {
 				t.Fatalf("awaiting_person=%v; want %v", doc.Run.Awaiting, tc.want)
 			}
+		})
+	}
+}
+
+func TestOwnerReceiptClaimsAndOutput(t *testing.T) {
+	for _, owner := range []string{"Firstmate", ""} {
+		t.Run("owner="+owner, func(t *testing.T) {
+			olderDaemonFixture(t, nil, func(srv *ipc.Server) {
+				srv.HandleStream(ipc.MethodSubscribe, hangSubscribe)
+				srv.Handle(ipc.MethodClaimLaunchReceipt, func(_ context.Context, raw json.RawMessage) (interface{}, error) {
+					var params map[string]any
+					if err := json.Unmarshal(raw, &params); err != nil {
+						return nil, err
+					}
+					if got, _ := params["owner"].(string); got != owner {
+						return nil, fmt.Errorf("conflicting owner: got %q, want %q", got, owner)
+					}
+					return &ipc.ClaimLaunchReceiptResult{Receipt: &ipc.LaunchReceipt{RunID: "owned-run", Owner: owner, Disposition: "reused"}}, nil
+				})
+				srv.Handle(ipc.MethodGetRun, func(context.Context, json.RawMessage) (interface{}, error) {
+					return &ipc.GetRunResult{Run: &ipc.RunInfo{ID: "owned-run", Status: types.RunCompleted}}, nil
+				})
+			})
+			writeGlobalConfig(t, "")
+			t.Setenv("NO_MISTAKES_OWNER", "")
+			cmd := newAxiRunCmd()
+			cmd.SetArgs([]string{"--intent", "intent", "--owner=" + owner, "--launch-nonce", "nonce", "--validation-generation", "generation"})
+			var out bytes.Buffer
+			cmd.SetOut(&out)
+			cmd.SetErr(io.Discard)
+			if err := cmd.Execute(); err != nil {
+				t.Fatal(err)
+			}
+			var doc struct {
+				Receipt map[string]any `toon:"launch_receipt"`
+			}
+			if err := toon.UnmarshalString(out.String(), &doc); err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := doc.Receipt["owner"]; !ok || got != owner {
+				t.Errorf("stdout owner = %v, present=%v; want %q", got, ok, owner)
+			}
+			p, err := paths.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, err := ipc.Dial(p.Socket())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			ctx := types.WithRunOwner(context.Background(), owner)
+			receipt, err := waitForLaunchReceipt(ctx, client, "repo", "branch", "nonce", "head", "generation", "intent", "", false, "", time.Second)
+			if err != nil || receipt == nil || receipt.Owner != owner {
+				t.Fatalf("poll receipt = %+v, %v", receipt, err)
+			}
+			for _, requested := range []string{"Other", ""} {
+				if requested == owner {
+					continue
+				}
+				cmd := newAxiRunCmd()
+				cmd.SetArgs([]string{"--intent", "intent", "--owner=" + requested, "--launch-nonce", "nonce", "--validation-generation", "generation"})
+				cmd.SetOut(io.Discard)
+				cmd.SetErr(io.Discard)
+				if err := cmd.Execute(); err == nil {
+					t.Errorf("initial replay accepted owner %q for %q", requested, owner)
+				}
+				ctx := types.WithRunOwner(context.Background(), requested)
+				if receipt, err := waitForLaunchReceipt(ctx, client, "repo", "branch", "nonce", "head", "generation", "intent", "", false, "", time.Second); err == nil {
+					t.Errorf("poll accepted owner %q for %q: %+v", requested, owner, receipt)
+				}
+			}
+
 		})
 	}
 }
