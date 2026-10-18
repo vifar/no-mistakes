@@ -1924,8 +1924,10 @@ func TestCorrectionInvocationHandoff(t *testing.T) {
 				ag := &mockAgent{name: "test"}
 				sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
 				prepareAgentCIHandoff(t, sctx, head)
+				var externalHead string
 				if mutation == "external before" {
 					gitCmd(t, dir, "commit", "--allow-empty", "-m", "external before invocation")
+					externalHead = gitCmd(t, dir, "rev-parse", "HEAD")
 				}
 				ag.runFn = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 					if opts.CWD != dir {
@@ -1957,6 +1959,27 @@ func TestCorrectionInvocationHandoff(t *testing.T) {
 				case "fix":
 					sctx.Fixing = true
 					_, err = executeFixMode(sctx, types.StepTest, fixExecutionOptions{FallbackSummary: "correction"})
+				}
+				// Document's clean-entry contract requires the exact recorded head;
+				// an external forward commit must be refused before any agent work.
+				if route == "document" && mutation == "external before" {
+					if err == nil || !strings.Contains(err.Error(), "starting head does not match") {
+						t.Fatalf("expected Document head mismatch refusal, got %v", err)
+					}
+					if len(ag.calls) != 0 {
+						t.Fatalf("Document launched %d agent calls on an external head", len(ag.calls))
+					}
+					if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != externalHead {
+						t.Fatalf("Document changed external head: got %s, want %s", got, externalHead)
+					}
+					persisted, readErr := sctx.DB.GetRun(sctx.Run.ID)
+					if readErr != nil || persisted == nil || persisted.HeadSHA != head || sctx.Run.HeadSHA != head {
+						t.Fatalf("Document changed recorded head: run=%+v, memory=%s, err=%v", persisted, sctx.Run.HeadSHA, readErr)
+					}
+					if proofErr := sctx.DB.ValidatePipelineHeadForward(sctx.Run.ID, head, externalHead); proofErr == nil {
+						t.Fatal("external commit earned pipeline provenance")
+					}
+					return
 				}
 				if mutation == "rewrite" || mutation == "second-parent ancestry" || mutation == "failed invocation" {
 					if err == nil {
