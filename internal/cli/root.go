@@ -152,3 +152,17 @@ func openResources() (*paths.Paths, *db.DB, error) {
 	}
 	return p, d, nil
 }
+
+// openReadResources leaves schema upgrades and directory creation to mutating
+// initialization. Observation also works with the daemon stopped.
+func openReadResources() (*paths.Paths, *db.DB, error) {
+	p, err := paths.New()
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve paths: %w", err)
+	}
+	d, err := db.OpenReader(p.DB())
+	if err != nil {
+		return nil, nil, fmt.Errorf("open database: %w", err)
+	}
+	return p, d, nil
+}

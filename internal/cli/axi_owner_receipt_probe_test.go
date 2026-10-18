@@ -16,14 +16,14 @@ import (
 
 func TestOwnerReceiptCapabilityBeforeClaim(t *testing.T) {
 	for _, path := range []string{"initial replay", "polling"} {
-		for _, capability := range []string{"missing", "declined", "malformed", "error", "supported", "ownerless legacy"} {
+		for _, capability := range []string{"missing", "declined", "malformed", "error", "supported", "ownerless legacy", "ownerless current policy"} {
 			t.Run(path+"/"+capability, func(t *testing.T) {
 				var mu sync.Mutex
 				var receipt ipc.LaunchReceipt
 				claimed := false
 				var calls []string
 				owner := "Firstmate"
-				if capability == "ownerless legacy" {
+				if capability == "ownerless legacy" || capability == "ownerless current policy" {
 					owner = ""
 				}
 				allowed := capability == "supported" || owner == ""
@@ -44,6 +44,8 @@ func TestOwnerReceiptCapabilityBeforeClaim(t *testing.T) {
 							switch capability {
 							case "malformed":
 								return json.RawMessage(`"unsupported"`), nil
+							case "ownerless current policy":
+								return nil, fmt.Errorf("launch requires an owner: pass --owner")
 							case "error":
 								return nil, fmt.Errorf("probe failed")
 							default:

@@ -187,7 +187,7 @@ func TestAcceptedGapsColumnMigration(t *testing.T) {
 	repo, _ := d.InsertRepo("/synthetic", "origin", "main")
 	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
 	step, _ := d.InsertStepResult(run.ID, types.StepTest)
-	if _, err := d.sql.Exec("ALTER TABLE step_results DROP COLUMN accepted_gaps_json"); err != nil {
+	if _, err := d.sql.Exec("ALTER TABLE step_results DROP COLUMN accepted_gaps_json; PRAGMA user_version=0"); err != nil {
 		t.Fatal(err)
 	}
 	d.Close()

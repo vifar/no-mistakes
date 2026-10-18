@@ -79,7 +79,7 @@ func newEvalCaptureCmd() *cobra.Command {
 		Short: "Capture every review pass from a run into local cases",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, database, err := openResources()
+			p, database, err := openReadResources()
 			if err != nil {
 				return err
 			}
@@ -134,7 +134,7 @@ func newEvalMissIngestCmd() *cobra.Command {
 				}
 				misses = append(misses, miss)
 			}
-			p, database, err := openResources()
+			p, database, err := openReadResources()
 			if err != nil {
 				return err
 			}
@@ -264,7 +264,7 @@ func newEvalRelabelCmd() *cobra.Command {
 		Short: "Refresh gold labels when a source PR has merged after capture",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, database, err := openResources()
+			p, database, err := openReadResources()
 			if err != nil {
 				return err
 			}

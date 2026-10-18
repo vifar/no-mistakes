@@ -387,7 +387,7 @@ func TestTargetRewindPersistsPRObservation(t *testing.T) {
 				// Remove only the new column to model the already-supported pending
 				// rewind schema before reopening through the real migration path.
 				if legacy {
-					if _, err := d.sql.Exec(`ALTER TABLE run_target_rewinds DROP COLUMN forge_head_sha`); err != nil {
+					if _, err := d.sql.Exec(`ALTER TABLE run_target_rewinds DROP COLUMN forge_head_sha; PRAGMA user_version=0`); err != nil {
 						t.Fatal(err)
 					}
 				}

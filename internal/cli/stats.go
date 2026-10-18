@@ -32,7 +32,7 @@ func newStatsCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return trackCommand("stats", func() error {
-				_, database, err := openResources()
+				_, database, err := openReadResources()
 				if err != nil {
 					return err
 				}

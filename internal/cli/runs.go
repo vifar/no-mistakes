@@ -17,7 +17,7 @@ func newRunsCmd() *cobra.Command {
 		Short: "List pipeline runs for the current repository",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, d, err := openResources()
+			_, d, err := openReadResources()
 			if err != nil {
 				return err
 			}

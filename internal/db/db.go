@@ -18,6 +18,11 @@ var (
 	entropy   = ulid.Monotonic(rand.Reader, 0)
 )
 
+// Bump whenever schemaSQL or migrationStatements changes. Version zero is the
+// historical, unversioned schema; its complete upgrade runs once before the
+// stamp is committed. Current opens execute no DDL or backfill DML.
+const schemaVersion = 1
+
 // DB wraps a SQLite database connection.
 type DB struct {
 	sql *sql.DB
@@ -33,17 +38,68 @@ func Open(path string) (*DB, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 	sqlDB.SetMaxOpenConns(1)
-	if _, err := sqlDB.Exec(schemaSQL); err != nil {
+	if err := migrate(sqlDB); err != nil {
 		sqlDB.Close()
-		return nil, fmt.Errorf("migrate db: %w", err)
-	}
-	for _, stmt := range migrationStatements {
-		if _, err := sqlDB.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
-			sqlDB.Close()
-			return nil, fmt.Errorf("migrate db: %w", err)
-		}
+		return nil, err
 	}
 	return &DB{sql: sqlDB}, nil
+}
+
+func migrate(sqlDB *sql.DB) error {
+	var version int
+	if err := sqlDB.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("read db schema version: %w", err)
+	}
+	if version == schemaVersion {
+		return nil
+	}
+	if version > schemaVersion {
+		return fmt.Errorf("database schema %d is newer than supported schema %d; update this binary", version, schemaVersion)
+	}
+	tx, err := sqlDB.Begin()
+	if err != nil {
+		return fmt.Errorf("begin db migration: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(schemaSQL); err != nil {
+		return fmt.Errorf("migrate db (schemaSQL): %w", err)
+	}
+	for _, stmt := range migrationStatements {
+		if _, err := tx.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
+			return fmt.Errorf("migrate db (%s): %w", stmt, err)
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
+		return fmt.Errorf("migrate db (PRAGMA user_version): %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit db migration: %w", err)
+	}
+	return nil
+}
+
+// OpenReader opens only an existing, current schema. CLI observations must not
+// migrate the daemon's database or silently change an older offline database.
+// OpenReadOnly remains available for pre-mutation authorization that reads only
+// historical columns and must also work before an upgrade.
+func OpenReader(path string) (*DB, error) {
+	d, err := OpenReadOnly(path)
+	if err != nil {
+		return nil, err
+	}
+	var version int
+	if err := d.sql.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		d.Close()
+		return nil, fmt.Errorf("read db schema version: %w", err)
+	}
+	if version != schemaVersion {
+		d.Close()
+		if version < schemaVersion {
+			return nil, fmt.Errorf("database schema too old (%d, need %d); the daemon must be updated and started to migrate it", version, schemaVersion)
+		}
+		return nil, fmt.Errorf("database schema %d is newer than supported schema %d; update this binary", version, schemaVersion)
+	}
+	return d, nil
 }
 
 // OpenReadOnly opens an existing database without creating or migrating it.

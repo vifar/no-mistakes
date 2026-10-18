@@ -62,7 +62,7 @@ func TestOpenMigratesPiProfileWithoutPinningHistoricalRows(t *testing.T) {
 	if _, err := d.sql.Exec(`DROP TRIGGER runs_pi_profile_immutable`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.sql.Exec(`ALTER TABLE runs DROP COLUMN pi_profile`); err != nil {
+	if _, err := d.sql.Exec(`ALTER TABLE runs DROP COLUMN pi_profile; PRAGMA user_version=0`); err != nil {
 		t.Fatal(err)
 	}
 	d.Close()

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -54,11 +55,14 @@ func parseOwnerPushOptions(options []string) (string, error) {
 }
 
 func probeLaunchOwner(client *ipc.Client, owner string) error {
-	if owner == "" {
-		return nil
-	}
 	var result ipc.ProbeRunOwnerResult
 	if err := client.Call(ipc.MethodProbeRunOwner, &ipc.ProbeRunOwnerParams{Owner: owner}, &result); err != nil {
+		// Legacy daemons have no owner policy. Only an ownerless launch can
+		// remain compatible; an explicit owner must never be silently dropped.
+		var rpcErr *ipc.RPCError
+		if owner == "" && errors.As(err, &rpcErr) && rpcErr.Code == ipc.ErrMethodNotFound {
+			return nil
+		}
 		return fmt.Errorf("daemon cannot accept launch ownership (update it before launching with --owner): %w", err)
 	}
 	if !result.OK {

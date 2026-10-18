@@ -410,11 +410,11 @@ func TestOpenMigratesAgentInvocationsAndParkedMS(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if _, err := d.sql.Exec(`DROP TABLE agent_invocations`); err != nil {
+	if _, err := d.sql.Exec(`DROP TABLE agent_invocations; PRAGMA user_version=0`); err != nil {
 		t.Fatalf("drop table: %v", err)
 	}
 	// Simulate a pre-parked_ms runs table by rebuilding it without the column.
-	if _, err := d.sql.Exec(`ALTER TABLE runs DROP COLUMN parked_ms`); err != nil {
+	if _, err := d.sql.Exec(`ALTER TABLE runs DROP COLUMN parked_ms; PRAGMA user_version=0`); err != nil {
 		t.Fatalf("drop column: %v", err)
 	}
 	if err := d.Close(); err != nil {
@@ -465,7 +465,7 @@ func TestOpenMigratesSessionFidelityColumns(t *testing.T) {
 	// legacy row that has no fidelity data.
 	for _, col := range []string{"model_provider", "fallback_reason", "subprocess_wait_ms",
 		"fresh_input_tokens", "reasoning_tokens", "model_roundtrips", "tool_calls", "finding_count"} {
-		if _, err := d.sql.Exec(`ALTER TABLE agent_invocations DROP COLUMN ` + col); err != nil {
+		if _, err := d.sql.Exec(`ALTER TABLE agent_invocations DROP COLUMN ` + col + `; PRAGMA user_version=0`); err != nil {
 			t.Fatalf("drop %s: %v", col, err)
 		}
 	}

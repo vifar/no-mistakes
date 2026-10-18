@@ -105,6 +105,8 @@ At the TOON output boundary, unsupported C0 control bytes are rendered as visibl
 If TOON encoding still fails, AXI prints a structured error instead of returning successful empty stdout.
 The calling agent drives AXI approval gates but does not replace the configured pipeline agent that performs validation.
 
+Observation commands (`status`, `runs`, `stats`, AXI home/status/logs, and the database check in `doctor`) open the existing state database read-only. They do not migrate it, including when the daemon is stopped. If its schema is too old, update and start the daemon to upgrade it before querying again. Schema upgrades preserve historical runs; subsequent opens at the current schema skip DDL and backfills.
+
 ```sh
 no-mistakes axi
 ```

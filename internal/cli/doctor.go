@@ -95,7 +95,7 @@ func newDoctorCmd() *cobra.Command {
 					if _, err := os.Stat(p.DB()); os.IsNotExist(err) {
 						warn("database      ", "not found "+sDim.Render("(will be created on first use)"))
 					} else {
-						d, err := db.Open(p.DB())
+						d, err := db.OpenReader(p.DB())
 						if err != nil {
 							fail("database      ", fmt.Sprintf("error (%v)", err))
 							allOK = false

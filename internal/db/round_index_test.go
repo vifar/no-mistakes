@@ -69,7 +69,7 @@ func TestStepRoundsIndexExistingDatabase(t *testing.T) {
 					d.Close()
 				}
 			}()
-			if _, err := d.sql.Exec(`DROP INDEX IF EXISTS idx_step_rounds_step_result_round`); err != nil {
+			if _, err := d.sql.Exec(`DROP INDEX IF EXISTS idx_step_rounds_step_result_round; PRAGMA user_version=0`); err != nil {
 				t.Fatal(err)
 			}
 			t.Logf("old schema query plan: %s", roundsByStepQueryPlan(t, d))

@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/spf13/cobra"
 )
@@ -16,8 +19,16 @@ func newStatusCmd() *cobra.Command {
 		Short: "Show status of the current repository",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			p, d, err := openResources()
+			p, d, err := openReadResources()
 			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					if _, gitErr := git.FindGitRoot("."); gitErr != nil {
+						fmt.Fprintln(cmd.OutOrStdout(), "not in a git repository")
+					} else {
+						fmt.Fprintln(cmd.OutOrStdout(), "repo not initialized (run 'no-mistakes init' first)")
+					}
+					return nil
+				}
 				return err
 			}
 			defer d.Close()

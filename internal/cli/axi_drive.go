@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -1070,8 +1071,12 @@ func claimLaunchReceiptWithOptions(shipping *types.ShippingOptions, externalCIOw
 	if shipping != nil && externalCIOwner != "" {
 		return nil, fmt.Errorf("strict shipping cannot be combined with an external CI owner")
 	}
-	if err := probeLaunchOwner(client, owner); err != nil {
-		return nil, err
+	// An ownerless lookup may reattach to an existing receipt even when new
+	// ownerless launches are forbidden. Admission is checked after a miss.
+	if owner != "" {
+		if err := probeLaunchOwner(client, owner); err != nil {
+			return nil, err
+		}
 	}
 	var result ipc.ClaimLaunchReceiptResult
 	if err := client.Call(ipc.MethodClaimLaunchReceipt, &ipc.ClaimLaunchReceiptParams{
@@ -2403,14 +2408,17 @@ func resolveInactiveAbortTruth(cmd *cobra.Command, client *ipc.Client, runID str
 // recorded nonterminal or unreadable run is the nonzero terminal-unconfirmed
 // contract - never a claimed cancellation and never a started daemon.
 func resolveDaemonDownAbortTruth(cmd *cobra.Command, p *paths.Paths, runID string) error {
-	database, err := db.Open(p.DB())
-	if err != nil {
+	database, err := db.OpenReader(p.DB())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return emitUnconfirmedAbort(cmd, runID, "", fmt.Sprintf("the daemon is not running and the durable run record could not be opened: %v", err), nil, false)
 	}
-	defer database.Close()
-	run, err := database.GetRun(runID)
-	if err != nil {
-		return emitUnconfirmedAbort(cmd, runID, "", fmt.Sprintf("the daemon is not running and the durable run record could not be read: %v", err), nil, false)
+	var run *db.Run
+	if database != nil {
+		defer database.Close()
+		run, err = database.GetRun(runID)
+		if err != nil {
+			return emitUnconfirmedAbort(cmd, runID, "", fmt.Sprintf("the daemon is not running and the durable run record could not be read: %v", err), nil, false)
+		}
 	}
 	if run == nil {
 		emitDoc(cmd,
