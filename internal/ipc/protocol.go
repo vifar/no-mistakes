@@ -194,6 +194,7 @@ type ProbeAcceptedGapsResult struct {
 // ClaimLaunchReceiptParams identifies one exact opaque receipt binding.
 // Generic run/status surfaces never expose launch bindings or intent digests.
 type ClaimLaunchReceiptParams struct {
+	Owner     string                 `json:"owner,omitempty"`
 	Shipping  *types.ShippingOptions `json:"shipping,omitempty"`
 	PiProfile *agentcfg.PiProfile    `json:"pi_profile,omitempty"`
 

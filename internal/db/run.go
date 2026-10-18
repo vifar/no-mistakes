@@ -444,18 +444,22 @@ func (d *DB) GetRunByLaunchNonce(repoID, branch, launchNonce string) (*Run, erro
 // including an explicit PR base branch, is part of the UPDATE predicate, so a
 // conflicting observer cannot consume `created`.
 func (d *DB) ClaimLaunchReceipt(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, shipping *types.ShippingOptions, profiles ...*agentcfg.PiProfile) (*Run, bool, error) {
-	return d.ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, omitIntent, shipping, "", agentcfg.OptionalPiProfile(profiles))
+	return d.ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, omitIntent, shipping, "", "", agentcfg.OptionalPiProfile(profiles))
 }
 
 // ClaimLaunchReceiptWithExternalOwner refuses a mismatched owner before the
 // first-observer marker can be consumed by an incompatible proof request.
 func (d *DB) ClaimLaunchReceiptWithExternalOwner(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, externalCIOwner string, profiles ...*agentcfg.PiProfile) (*Run, bool, error) {
-	return d.ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, omitIntent, nil, externalCIOwner, agentcfg.OptionalPiProfile(profiles))
+	return d.ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, omitIntent, nil, externalCIOwner, "", agentcfg.OptionalPiProfile(profiles))
 }
 
 // ClaimLaunchReceiptWithAllOptions validates the complete immutable launch
 // binding before consuming its first-observer marker.
-func (d *DB) ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, shipping *types.ShippingOptions, externalCIOwner string, request *agentcfg.PiProfile) (*Run, bool, error) {
+func (d *DB) ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, shipping *types.ShippingOptions, externalCIOwner, owner string, request *agentcfg.PiProfile) (*Run, bool, error) {
+	if err := types.ValidateRunOwner(owner); err != nil {
+		return nil, false, err
+	}
+	owner = strings.TrimSpace(owner)
 	if err := shipping.Validate(); err != nil {
 		return nil, false, err
 	}
@@ -499,11 +503,12 @@ func (d *DB) ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submi
 			   AND (? = '' OR json_extract(shipping_options, '$.mode') = ?)
 			   AND (? IS NULL OR json_extract(shipping_options, '$.draft') = ?)
 			   AND external_ci_owner = ?
+			   AND COALESCE(launch_owner, '') = ?
 			   AND (? = '' OR json_extract(pi_profile, '$.model') = ?)
 			   AND (? = '' OR json_extract(pi_profile, '$.effort') = ?)
 			   AND launch_receipt_claimed_at IS NULL
 			 RETURNING `+runColumns,
-			now(), repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, prBaseBranch, omitIntent, omitIntent, shippingMode, shippingMode, shippingDraft, shippingDraft, externalCIOwner, model, model, effort, effort,
+			now(), repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, prBaseBranch, omitIntent, omitIntent, shippingMode, shippingMode, shippingDraft, shippingDraft, externalCIOwner, owner, model, model, effort, effort,
 		), r)
 		if err == nil {
 			return r, true, nil
@@ -514,6 +519,9 @@ func (d *DB) ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submi
 		r, err = d.GetRunByLaunchNonce(repoID, branch, launchNonce)
 		if err != nil {
 			return nil, false, err
+		}
+		if r != nil && r.Owner() != owner {
+			return nil, false, fmt.Errorf("conflicting launch_nonce: owner differs from run")
 		}
 		if r == nil || !r.Shipping.Matches(shipping) || !r.PiProfile.Matches(request) || r.ExternalCIOwner != externalCIOwner || r.LaunchReceiptClaimedAt != nil ||
 			r.SubmittedHeadSHA == nil || *r.SubmittedHeadSHA != submittedHeadSHA ||

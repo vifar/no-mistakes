@@ -1421,7 +1421,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if p.Shipping != nil && p.ExternalCIOwner != "" {
 			return nil, fmt.Errorf("strict shipping cannot be combined with external CI ownership")
 		}
-		run, claimed, err := d.ClaimLaunchReceiptWithAllOptions(p.RepoID, p.Branch, p.LaunchNonce, p.SubmittedHeadSHA, p.ValidationGeneration, p.IntentDigest, prBaseBranch, p.OmitIntent, p.Shipping, p.ExternalCIOwner, p.PiProfile)
+		run, claimed, err := d.ClaimLaunchReceiptWithAllOptions(p.RepoID, p.Branch, p.LaunchNonce, p.SubmittedHeadSHA, p.ValidationGeneration, p.IntentDigest, prBaseBranch, p.OmitIntent, p.Shipping, p.ExternalCIOwner, p.Owner, p.PiProfile)
 		if err != nil {
 			return nil, fmt.Errorf("claim launch receipt: %w", err)
 		}

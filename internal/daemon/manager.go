@@ -1504,7 +1504,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 				receipt = replayed
 				return existing.ID, nil
 			}
-			claimedRun, claimed, err := m.db.ClaimLaunchReceiptWithAllOptions(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent, types.ShippingFromContext(ctx), externalCIOwner, request)
+			claimedRun, claimed, err := m.db.ClaimLaunchReceiptWithAllOptions(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent, types.ShippingFromContext(ctx), externalCIOwner, types.RunOwnerFromContext(ctx), request)
 			if err != nil {
 				return "", err
 			}
@@ -1571,7 +1571,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 				return "", err
 			}
 		} else {
-			claimedRun, claimed, err := m.db.ClaimLaunchReceiptWithAllOptions(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent, types.ShippingFromContext(ctx), externalCIOwner, request)
+			claimedRun, claimed, err := m.db.ClaimLaunchReceiptWithAllOptions(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent, types.ShippingFromContext(ctx), externalCIOwner, types.RunOwnerFromContext(ctx), request)
 			if err != nil {
 				return "", err
 			}

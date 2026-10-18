@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -73,5 +74,68 @@ func TestLaunchOwner(t *testing.T) {
 				t.Fatalf("snapshot owner = %v; want %q", info["run"], tc.owner)
 			}
 		})
+	}
+}
+
+func TestClaimLaunchReceiptOwnerBinding(t *testing.T) {
+	p, database := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{&mockPassStep{name: types.StepReview}} })
+	repo, head := setupTestGitRepo(t, p, database, "claim-owner")
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	for _, persisted := range []string{"A", ""} {
+		for _, requested := range []string{"A", "B", ""} {
+			t.Run("stored="+persisted+"/requested="+requested, func(t *testing.T) {
+				nonce := "nonce-" + persisted + "-" + requested
+				var intent *db.RunIntent
+				if persisted != "" {
+					intent = &db.RunIntent{Owner: persisted, Summary: "intent"}
+				}
+				run, err := database.InsertRunWithIntentAndLaunchNonce(repo.ID, "main", head, head, intent, nonce, "generation", "digest", "", false, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				claim := func(owner string) (*ipc.LaunchReceipt, error) {
+					var result ipc.ClaimLaunchReceiptResult
+					params := map[string]any{"repo_id": repo.ID, "branch": "main", "launch_nonce": nonce, "submitted_head_sha": head, "validation_generation": "generation", "intent_digest": "digest", "owner": owner}
+					if owner == "" {
+						delete(params, "owner")
+					}
+					err := client.Call(ipc.MethodClaimLaunchReceipt, params, &result)
+					return result.Receipt, err
+				}
+				receipt, err := claim(requested)
+				if requested != persisted {
+					if err == nil || !strings.Contains(err.Error(), "owner") {
+						t.Errorf("conflicting claim = %+v, %v", receipt, err)
+					}
+					stored, e := database.GetRun(run.ID)
+					if e != nil {
+						t.Fatal(e)
+					}
+					if stored.LaunchReceiptClaimedAt != nil {
+						t.Error("conflicting claim consumed created disposition")
+					}
+					receipt, err = claim(persisted)
+				}
+				if err != nil || receipt == nil {
+					t.Fatalf("matching claim = %+v, %v", receipt, err)
+				}
+				if receipt.Disposition != "created" || receipt.Owner != persisted {
+					t.Errorf("first matching receipt = %+v", receipt)
+				}
+				receipt, err = claim(persisted)
+				if err != nil || receipt == nil || receipt.Disposition != "reused" {
+					t.Fatalf("matching replay = %+v, %v", receipt, err)
+				}
+				if requested != persisted {
+					if receipt, err = claim(requested); err == nil {
+						t.Fatalf("conflicting replay = %+v", receipt)
+					}
+				}
+			})
+		}
 	}
 }
