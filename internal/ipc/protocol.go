@@ -94,10 +94,12 @@ type ProbeRunOwnerResult struct {
 // intent from local transcripts. LaunchNonce and ValidationGeneration together
 // opt into a nonce-bound launch proof.
 type PushReceivedParams struct {
-	Owner              string                 `json:"owner"`
-	VerificationPlanID string                 `json:"verification_plan_id,omitempty"`
-	Shipping           *types.ShippingOptions `json:"shipping,omitempty"`
-	PiProfile          *agentcfg.PiProfile    `json:"pi_profile,omitempty"`
+	// OwnerValidationError retains a post-receive owner decoding failure.
+	OwnerValidationError string                 `json:"owner_validation_error,omitempty"`
+	Owner                string                 `json:"owner"`
+	VerificationPlanID   string                 `json:"verification_plan_id,omitempty"`
+	Shipping             *types.ShippingOptions `json:"shipping,omitempty"`
+	PiProfile            *agentcfg.PiProfile    `json:"pi_profile,omitempty"`
 	// Gate is the absolute path to the gate bare repo.
 	Gate                 string           `json:"gate"`
 	Ref                  string           `json:"ref"`
@@ -528,6 +530,8 @@ type ShutdownResult struct {
 
 // RunInfo is the IPC representation of a pipeline run.
 type RunInfo struct {
+	OwnerAdmission       *types.OwnerAdmissionEvent `json:"owner_admission_event,omitempty"`
+	OwnerAdmissionError  string                     `json:"owner_admission_error,omitempty"`
 	Owner                string                     `json:"owner"`
 	TargetAdvanceRewinds int64                      `json:"target_advance_rewinds"`
 	VerificationPlan     *verificationplan.Snapshot `json:"verification_plan"`

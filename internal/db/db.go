@@ -21,7 +21,7 @@ var (
 // Bump whenever schemaSQL or migrationStatements changes. Version zero is the
 // historical, unversioned schema; its complete upgrade runs once before the
 // stamp is committed. Current opens execute no DDL or backfill DML.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // DB wraps a SQLite database connection.
 type DB struct {
@@ -33,6 +33,9 @@ type DB struct {
 
 // Open opens (or creates) the SQLite database at path, running migrations only
 // when its schema version is older than this binary's supported version.
+// This check cannot prevent pre-versioning executables from writing the same
+// database: those binaries do not inspect user_version. Downgrade safety is not
+// guaranteed; use a separate root or a compatible backup when changing versions.
 func Open(path string) (*DB, error) {
 	sqlDB, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
 	if err != nil {
@@ -62,7 +65,18 @@ func migrate(sqlDB *sql.DB) error {
 		return fmt.Errorf("begin db migration: %w", err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(schemaSQL); err != nil {
+	// Version 1 is already fully migrated: add only the audit table. Do not
+	// rerun historical backfills on this upgrade.
+	if version == 1 {
+		if _, err := tx.Exec(ownerAdmissionSchema); err != nil {
+			return fmt.Errorf("migrate db (owner_admission_events): %w", err)
+		}
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
+	if _, err := tx.Exec(schemaSQL + ownerAdmissionSchema); err != nil {
 		return fmt.Errorf("migrate db (schemaSQL): %w", err)
 	}
 	for _, stmt := range migrationStatements {

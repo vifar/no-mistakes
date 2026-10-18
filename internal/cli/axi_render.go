@@ -120,6 +120,8 @@ type stepView struct {
 
 // runView is a render-ready view of a pipeline run.
 type runView struct {
+	OwnerAdmission       *types.OwnerAdmissionEvent
+	OwnerAdmissionError  string
 	OwnerPolicyWarning   string
 	Owner                string
 	TargetAdvanceRewinds int64
@@ -171,6 +173,7 @@ func ordinaryReviewGeneration(r *ipc.RunInfo) *int64 {
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
 	rv := runView{
+		OwnerAdmission: r.OwnerAdmission, OwnerAdmissionError: r.OwnerAdmissionError,
 		Owner:                 r.Owner,
 		TargetAdvanceRewinds:  r.TargetAdvanceRewinds,
 		Shipping:              r.Shipping,
@@ -254,6 +257,11 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 		ExternalCIOwner:      r.ExternalCIOwner,
 	}
 	if database != nil {
+		var err error
+		rv.OwnerAdmission, err = database.GetOwnerAdmission(r.ID)
+		if err != nil {
+			rv.OwnerAdmissionError = err.Error()
+		}
 		if r.Status == types.RunQueued {
 			if position, total, err := database.QueuePosition(r.ID); err == nil {
 				rv.QueuePosition, rv.QueueTotal = position, total
@@ -640,7 +648,8 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 		}
 	}
 	fields = append(fields, toon.Field{Key: "owner", Value: rv.Owner}, toon.Field{Key: "ownerless", Value: rv.Owner == ""})
-	if rv.OwnerPolicyWarning != "" {
+	fields = append(fields, ownerAdmissionFields(rv)...)
+	if rv.OwnerPolicyWarning != "" && rv.OwnerAdmission == nil {
 		fields = append(fields, toon.Field{Key: "owner_policy_warning", Value: rv.OwnerPolicyWarning})
 	}
 	fields = append(fields, awaitingPersonFields(rv)...)
@@ -1057,4 +1066,16 @@ func emitError(cmd *cobra.Command, code int, msg string, help ...string) error {
 
 func gateIdentityFields(g types.GateIdentity) []toon.Field {
 	return []toon.Field{{Key: "run_id", Value: g.RunID}, {Key: "step_result_id", Value: g.StepResultID}, {Key: "round_id", Value: g.RoundID}, {Key: "nonce", Value: g.Nonce}}
+}
+
+// Admission evidence is persisted history, independent of current owner policy.
+func ownerAdmissionFields(rv runView) []toon.Field {
+	var fields []toon.Field
+	if rv.OwnerAdmission != nil {
+		fields = append(fields, toon.Field{Key: "owner_admission_event", Value: rv.OwnerAdmission}, toon.Field{Key: "owner_policy_warning", Value: rv.OwnerAdmission.Warning})
+	}
+	if rv.OwnerAdmissionError != "" {
+		fields = append(fields, toon.Field{Key: "owner_admission_error", Value: rv.OwnerAdmissionError})
+	}
+	return fields
 }

@@ -72,7 +72,13 @@ func newStatusCmd() *cobra.Command {
 			}
 			if activeRun != nil {
 				cfg, _ := config.LoadGlobal(p.ConfigFile())
-				if warning := ownerPolicyWarning(activeRun.Owner(), cfg); warning != "" {
+				admission, err := d.GetOwnerAdmission(activeRun.ID)
+				if err != nil {
+					return err
+				}
+				if admission != nil {
+					fmt.Fprintln(w, admission.Warning)
+				} else if warning := ownerPolicyWarning(activeRun.Owner(), cfg); warning != "" {
 					fmt.Fprintln(w, warning)
 				}
 				fmt.Fprintln(w)
