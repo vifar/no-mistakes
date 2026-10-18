@@ -111,7 +111,7 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 				return emitError(cmd, 1, fmt.Sprintf("list runs: %v", err))
 			}
 		}
-		return emitNoRunForCaller(cmd, env, branch, runs)
+		return emitNoRunForCaller(cmd, env, branch, runs, refReconciliationFields(cmd.Context(), env)...)
 	}
 
 	steps, err := env.d.GetStepsByRun(run.ID)
@@ -133,6 +133,7 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 		fields = append(fields, toon.Field{Key: "current_branch", Value: branch})
 	}
 	fields = append(fields, runObjectFieldWithKey(runKey, rv))
+	fields = append(fields, refReconciliationFields(cmd.Context(), env)...)
 	fields = append(fields, slotsFields(env.p)...)
 	if syncField := cachedBranchSyncField(cmd, run.ID); syncField != nil {
 		fields = append(fields, *syncField)
@@ -168,12 +169,13 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 // It never substitutes some other branch's run. It names the branch it looked
 // for, lists the repository's recent runs so a deliberate
 // `--run <id>` inspection is one step away, and provides next-step help.
-func emitNoRunForCaller(cmd *cobra.Command, env *axiEnv, branch string, runs []*db.Run) error {
+func emitNoRunForCaller(cmd *cobra.Command, env *axiEnv, branch string, runs []*db.Run, diagnostics ...toon.Field) error {
 	branchDisplay := branch
 	if branchDisplay == "" {
 		branchDisplay = "unknown"
 	}
 	fields := []toon.Field{{Key: "current_branch", Value: branchDisplay}}
+	fields = append(fields, diagnostics...)
 	fields = append(fields, slotsFields(env.p)...)
 	if branch != "" {
 		fields = append(fields, toon.Field{Key: "runs_on_current_branch", Value: 0})

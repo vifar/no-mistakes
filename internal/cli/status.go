@@ -53,6 +53,9 @@ func newStatusCmd() *cobra.Command {
 				fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  fork:"), safeurl.Redact(repo.ForkURL))
 			}
 			fmt.Fprintf(w, "  %s  %s\n", sDim.Render("  gate:"), p.RepoDir(repo.ID))
+			for _, message := range refReconciliationMessages(cmd.Context(), d, p, repo) {
+				fmt.Fprintf(w, "  %s\n", message)
+			}
 
 			// Check daemon status.
 			alive, _ := daemon.IsRunning(p)

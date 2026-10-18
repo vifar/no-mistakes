@@ -279,6 +279,11 @@ func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConf
 	if err != nil {
 		return fmt.Errorf("restore queued runs: %w", err)
 	}
+	// A ref can move before the first durable post-receive record exists.
+	// Account for that crash window before recovery starts any pipeline work.
+	if err := reconcileRefsOnStartup(d, p); err != nil {
+		return err
+	}
 	// Queued runs are registered now but not started, and the limit watcher is
 	// not running, until IPC is serving (releaseQueue below).
 	mgr.holdQueue()
