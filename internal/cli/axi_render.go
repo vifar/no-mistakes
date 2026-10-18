@@ -1027,7 +1027,7 @@ func axiEncodingError(err error) string {
 	return out + "\n"
 }
 
-// emitDoc writes a finished TOON document to stdout.
+// emitDoc writes a finished document to stdout as TOON, or JSON when requested.
 func emitDoc(cmd *cobra.Command, fields ...toon.Field) {
 	if asJSON, _ := cmd.Flags().GetBool("json"); asJSON {
 		var doc map[string]any
