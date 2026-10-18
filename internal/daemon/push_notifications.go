@@ -285,17 +285,19 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	if repo == nil {
 		return "", fmt.Errorf("unknown repo for gate %s", params.Gate)
 	}
-	retained, err := m.retainPush(params, repo)
-	if err != nil {
-		return "", fmt.Errorf("retain post-receive notification failed (accepted Git ref may lack a run): %w", err)
-	}
-	if m.afterPushRetained != nil {
-		m.afterPushRetained()
-	}
-	return m.admitRetainedPush(ctx, retained)
+	return m.withBranchLock(repoID, branchFromRef(params.Ref), func() (string, error) {
+		retained, err := m.retainPush(params, repo)
+		if err != nil {
+			return "", fmt.Errorf("retain post-receive notification failed (accepted Git ref may lack a run): %w", err)
+		}
+		if m.afterPushRetained != nil {
+			m.afterPushRetained()
+		}
+		return m.admitRetainedPushLocked(ctx, retained)
+	})
 }
 
-func (m *RunManager) admitRetainedPush(ctx context.Context, retained *retainedPush) (string, error) {
+func (m *RunManager) admitRetainedPushLocked(ctx context.Context, retained *retainedPush) (string, error) {
 	admitted, _, err := m.db.PushNotificationRuns(retained.ID)
 	if err == nil && admitted != nil {
 		if err = m.runAdmissionError(admitted); err == nil {
@@ -305,7 +307,7 @@ func (m *RunManager) admitRetainedPush(ctx context.Context, retained *retainedPu
 	if err == nil {
 		ctx = context.WithValue(ctx, pushNotificationKey{}, retained)
 		var id string
-		id, err = m.handleRetainedPush(ctx, &retained.Record.Params)
+		id, err = m.handleRetainedPushLocked(ctx, &retained.Record.Params)
 		if err == nil {
 			if err = m.bindLegacyRunAttachment(retained, id); err == nil {
 				return id, nil
@@ -410,11 +412,13 @@ func (m *RunManager) ReplayPushNotification(ctx context.Context, id string) (str
 	if err != nil {
 		return "", err
 	}
-	retained := &retainedPush{ID: id, Record: record}
-	if err := m.validateNotification(ctx, retained); err != nil {
-		return "", err
-	}
-	return m.admitRetainedPush(ctx, retained)
+	return m.withBranchLock(record.RepoID, branchFromRef(record.Params.Ref), func() (string, error) {
+		retained := &retainedPush{ID: id, Record: record}
+		if err := m.validateNotification(ctx, retained); err != nil {
+			return "", err
+		}
+		return m.admitRetainedPushLocked(ctx, retained)
+	})
 }
 
 func cleanupPushNotificationTemps(p *paths.Paths, cutoff time.Time) error {
@@ -540,6 +544,7 @@ func (m *RunManager) hasValidatedReturnTransition(retained *retainedPush) (bool,
 	if err != nil {
 		return false, fmt.Errorf("read validated ref transitions: %w", err)
 	}
+	edges := make(map[string][]string)
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -554,9 +559,23 @@ func (m *RunManager) hasValidatedReturnTransition(retained *retainedPush) (bool,
 		}
 		if prior.RepoID == current.RepoID && prior.WorkingPath == current.WorkingPath &&
 			prior.GateIdentity == current.GateIdentity && canonicalRoot(prior.Params.Gate) == current.GateIdentity &&
-			prior.PreviousRunID == current.PreviousRunID && prior.Params.Ref == current.Params.Ref &&
-			prior.Params.Old == current.Params.New && prior.Params.New == current.Params.Old {
-			return true, nil
+			prior.PreviousRunID == current.PreviousRunID && prior.Params.Ref == current.Params.Ref {
+			edges[prior.Params.Old] = append(edges[prior.Params.Old], prior.Params.New)
+		}
+	}
+	seen := map[string]bool{current.Params.New: true}
+	pending := []string{current.Params.New}
+	for len(pending) > 0 {
+		head := pending[0]
+		pending = pending[1:]
+		for _, next := range edges[head] {
+			if next == current.Params.Old {
+				return true, nil
+			}
+			if !seen[next] {
+				seen[next] = true
+				pending = append(pending, next)
+			}
 		}
 	}
 	return false, nil

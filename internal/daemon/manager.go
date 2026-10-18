@@ -62,6 +62,7 @@ type RunManager struct {
 	notificationMu           sync.Mutex
 	afterPushRetained        func()
 	beforeNotificationRename func() error
+	beforeRunInsert          func()
 	afterPushCommitted       func()
 	branchLocks              sync.Map // repoID+"/"+branch → *sync.Mutex
 
@@ -1369,7 +1370,7 @@ func assertTrustedConfigReadable(ctx context.Context, wtDir, defaultBranch, trus
 // receives the sole `created` disposition by atomically claiming it.
 type ownerAdmissionIssueKey struct{}
 
-func (m *RunManager) handleRetainedPush(ctx context.Context, params *ipc.PushReceivedParams) (string, error) {
+func (m *RunManager) handleRetainedPushLocked(ctx context.Context, params *ipc.PushReceivedParams) (string, error) {
 	owner, issue := params.Owner, params.OwnerValidationError
 	if err := types.ValidateRunOwner(owner); err != nil {
 		issue = err.Error()
@@ -1409,13 +1410,13 @@ func (m *RunManager) handleRetainedPush(ctx context.Context, params *ipc.PushRec
 		baseSHA = strings.TrimSpace(params.ReconciledPreviousHead)
 	}
 	if params.LaunchNonce != "" {
-		receipt, err := m.startFreshLaunch(ctx, repo, branch, params.New, baseSHA, params.Gate, params.SkipSteps, params.Intent, params.LaunchNonce, params.ValidationGeneration, params.PRBaseBranch, params.OmitIntent, params.ExternalCIOwner, "push", params.VerificationPlanID, params.ClosingIssueRefs, params.PiProfile)
+		receipt, err := m.startFreshLaunchLocked(ctx, repo, branch, params.New, baseSHA, params.Gate, params.SkipSteps, params.Intent, params.LaunchNonce, params.ValidationGeneration, params.PRBaseBranch, params.OmitIntent, params.ExternalCIOwner, "push", params.VerificationPlanID, params.ClosingIssueRefs, params.PiProfile)
 		if err != nil {
 			return "", err
 		}
 		return receipt.RunID, nil
 	}
-	return m.startRun(ctx, repo, branch, params.New, baseSHA, "push", params.SkipSteps, params.Intent, params.PRBaseBranch, params.OmitIntent, params.ExternalCIOwner, params.VerificationPlanID, params.ClosingIssueRefs, params.PiProfile)
+	return m.startRunWithIntentSourceLocked(ctx, repo, branch, params.New, baseSHA, "push", params.SkipSteps, params.Intent, db.RunIntentSourceAgent, "", "", "", params.PRBaseBranch, strings.TrimSpace(params.PRBaseBranch) != "", params.OmitIntent, params.ExternalCIOwner, "", params.VerificationPlanID, params.ClosingIssueRefs, params.PiProfile)
 }
 
 // HandleStartFreshRun creates or replays a proof-mode launch only after
@@ -1440,6 +1441,16 @@ func (m *RunManager) HandleStartFreshRun(ctx context.Context, params *ipc.StartF
 // replay only its immutable submitted-head, generation, and persisted-intent
 // digest. It must never fall back to ordinary same-head reattachment.
 func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, gateDir string, skipSteps []types.StepName, intent, launchNonce, validationGeneration, prBaseBranch string, omitIntent bool, externalCIOwner, trigger, planID string, closingIssues []string, profiles ...*agentcfg.PiProfile) (ipc.LaunchReceipt, error) {
+	var receipt ipc.LaunchReceipt
+	_, err := m.withBranchLock(repo.ID, branch, func() (string, error) {
+		var err error
+		receipt, err = m.startFreshLaunchLocked(ctx, repo, branch, headSHA, baseSHA, gateDir, skipSteps, intent, launchNonce, validationGeneration, prBaseBranch, omitIntent, externalCIOwner, trigger, planID, closingIssues, profiles...)
+		return receipt.RunID, err
+	})
+	return receipt, err
+}
+
+func (m *RunManager) startFreshLaunchLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, gateDir string, skipSteps []types.StepName, intent, launchNonce, validationGeneration, prBaseBranch string, omitIntent bool, externalCIOwner, trigger, planID string, closingIssues []string, profiles ...*agentcfg.PiProfile) (ipc.LaunchReceipt, error) {
 	if err := types.ValidateExternalCIOwnerRequest(externalCIOwner, skipSteps); err != nil {
 		return ipc.LaunchReceipt{}, err
 	}
@@ -1469,7 +1480,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 	persistedIntent := intent
 	requestDigest := digestIntent(persistedIntent)
 	var receipt ipc.LaunchReceipt
-	_, err = m.withBranchLock(repo.ID, branch, func() (string, error) {
+	_, err = func() (string, error) {
 		existing, err := m.db.GetRunByLaunchNonce(repo.ID, branch, launchNonce)
 		if err != nil {
 			return "", err
@@ -1607,7 +1618,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 			}
 		}
 		return runID, nil
-	})
+	}()
 	if err != nil {
 		return ipc.LaunchReceipt{}, err
 	}
@@ -2228,6 +2239,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	creation := db.RunCreation{PRURL: strings.TrimSpace(inheritedPRURL), ClosingIssueRefs: closingIssues}
 	if retained != nil {
 		creation.NotificationID = retained.ID
+	}
+	if m.beforeRunInsert != nil {
+		m.beforeRunInsert()
 	}
 	run, err := m.db.InsertRunWithAllOptions(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, prBaseBranchRequested, storedOmitIntent, externalCIOwner, plan, pin, shippingPin, creation)
 	if err != nil {
