@@ -334,13 +334,9 @@ func loadBranchReviewAnswers(sctx *pipeline.StepContext) ([]db.ReviewAnswer, boo
 // own branch, and every statement here and in the read path names that column,
 // so a database created by an earlier commit of that branch fails every write
 // and every read. No released version ships the old shape - CREATE TABLE gives
-// every other database the five-column key - and migrationStatements could not
-// carry the remedy anyway: they are re-executed with their errors TOLERATED on
-// every start, which is safe for an additive ALTER and destructive for the
-// create/copy/drop/rename a key change needs, since SQLite cannot ALTER a
-// column into a primary key. The blast radius stays this store: such a
-// development database reports loudly here and is repaired by dropping the
-// table by hand, and nothing else in the application is affected.
+// every other database the five-column key. The blast radius stays this store:
+// such a development database reports loudly here. Its manual repair procedure
+// is owned by docs/src/content/docs/concepts/review-conversation.md.
 func recordAnsweredQuestions(sctx *pipeline.StepContext, conv reviewqa.Conversation) {
 	if sctx == nil || sctx.DB == nil || sctx.Repo == nil || sctx.Run == nil {
 		return
