@@ -59,10 +59,11 @@ type RunManager struct {
 	paths        *paths.Paths
 	steps        StepFactory
 
-	notificationMu     sync.Mutex
-	afterPushRetained  func()
-	afterPushCommitted func()
-	branchLocks        sync.Map // repoID+"/"+branch → *sync.Mutex
+	notificationMu           sync.Mutex
+	afterPushRetained        func()
+	beforeNotificationRename func() error
+	afterPushCommitted       func()
+	branchLocks              sync.Map // repoID+"/"+branch → *sync.Mutex
 
 	// sched enforces daemon.max_concurrent_runs and owns the start order of
 	// queued runs; limitsMu/limitsCache memoise the live global config it reads.
@@ -1512,6 +1513,9 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 			// unclaimed push row for the first matching receipt observer.
 			if trigger == "push" {
 				if retained, _ := ctx.Value(pushNotificationKey{}).(*retainedPush); retained != nil {
+					if err := m.validateAndMarkNotification(ctx, retained); err != nil {
+						return "", err
+					}
 					if err := m.db.BindPushNotification(retained.ID, existing.ID); err != nil {
 						return "", err
 					}
@@ -2031,7 +2035,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	}
 	retained, _ := ctx.Value(pushNotificationKey{}).(*retainedPush)
 	if retained != nil {
-		if err := m.validateNotification(ctx, retained); err != nil {
+		if err := m.validateAndMarkNotification(ctx, retained); err != nil {
 			return "", err
 		}
 		previous, _, err := m.db.PushNotificationRuns(retained.ID)
