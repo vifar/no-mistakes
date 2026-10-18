@@ -146,7 +146,7 @@ Use `/no-mistakes <task>` to have the agent first do the task, commit only that 
 In both modes, it resolves low-risk findings on its own and stops to relay anything that needs your decision.
 
 Grok Build is a pipeline runner, not a driving-skill target. See the [`init` reference](/no-mistakes/reference/cli/#no-mistakes-init) for skill installation and refresh, the installation opt-out, supported consumers, symlinked home directories, and legacy vendored copies.
-The skill drives `no-mistakes axi`, a non-interactive command surface that prints TOON to stdout and progress to stderr.
+The skill drives [`no-mistakes axi`](/no-mistakes/reference/cli/#no-mistakes-axi); the CLI reference owns its output formats and status selectors.
 When CI is ready but the PR is still open, `axi run` and `axi respond` return `outcome: checks-passed` with a help line pointing at the PR instead of waiting for a human merge. See the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for the readiness rules.
 That is a successful agent stopping point: report that the PR is ready and ask the user to review and merge it.
 Successful outcomes also instruct the agent to summarize the run for the user.
