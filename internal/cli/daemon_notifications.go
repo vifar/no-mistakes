@@ -11,6 +11,8 @@ import (
 
 func newDaemonNotificationsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "notifications", Short: "Inspect and replay retained post-receive notifications"}
+	var after string
+	var limit int
 	for _, action := range []string{"list", "inspect", "replay"} {
 		action := action
 		use := action
@@ -32,6 +34,10 @@ func newDaemonNotificationsCmd() *cobra.Command {
 			var result json.RawMessage
 			method := ipc.MethodListPushNotifications
 			params := ipc.PushNotificationParams{}
+			if action == "list" {
+				params.After = after
+				params.Limit = limit
+			}
 			if action != "list" {
 				params.ID = args[0]
 			}
@@ -46,6 +52,10 @@ func newDaemonNotificationsCmd() *cobra.Command {
 			}
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(result)
 		}}
+		if action == "list" {
+			sub.Flags().StringVar(&after, "after", "", "continue after the previous page's next_cursor")
+			sub.Flags().IntVar(&limit, "limit", 100, "maximum summaries per page (1-100)")
+		}
 		cmd.AddCommand(sub)
 	}
 	return cmd

@@ -214,6 +214,9 @@ func RunWithOptions(p *paths.Paths, d *db.DB, stepFactory StepFactory) error {
 // consumer would let one startup act on two different documents, and every later
 // read needs a fallback for a failure the caller has already refused to start on.
 func runWithOptionsLocked(p *paths.Paths, d *db.DB, globalCfg *config.GlobalConfig, stepFactory StepFactory, startupStarted time.Time) error {
+	if err := cleanupPushNotificationTemps(p); err != nil {
+		return err
+	}
 	// Refuse an unusable worktree placement before anything walks, sweeps, or
 	// removes a directory under it. This is the second half of worktree_roots
 	// validation: internal/config checks every entry it can judge without
@@ -1572,7 +1575,15 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return &ipc.RerunResult{RunID: runID}, nil
 	})
 
-	srv.Handle(ipc.MethodListPushNotifications, func(_ context.Context, _ json.RawMessage) (interface{}, error) { return mgr.ListPushNotifications() })
+	srv.Handle(ipc.MethodListPushNotifications, func(_ context.Context, raw json.RawMessage) (interface{}, error) {
+		var p ipc.PushNotificationParams
+		if len(raw) > 0 && string(raw) != "null" {
+			if err := json.Unmarshal(raw, &p); err != nil {
+				return nil, err
+			}
+		}
+		return mgr.ListPushNotifications(p)
+	})
 	srv.Handle(ipc.MethodInspectPushNotification, func(_ context.Context, raw json.RawMessage) (interface{}, error) {
 		var p ipc.PushNotificationParams
 		if err := json.Unmarshal(raw, &p); err != nil {

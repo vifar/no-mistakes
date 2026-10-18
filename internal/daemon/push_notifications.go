@@ -15,6 +15,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
 
 type pushNotification struct {
@@ -39,12 +40,20 @@ func (m *RunManager) notificationPath(id string) string {
 
 func notificationID(record *pushNotification) string {
 	copyRecord := *record
-	copyRecord.PreviousRunID = ""
+	if copyRecord.Version == 1 {
+		copyRecord.PreviousRunID = ""
+	}
 	copyRecord.Checksum = ""
 	copyRecord.Params.Gate = copyRecord.GateIdentity
 	raw, _ := json.Marshal(copyRecord)
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+func notificationPayloadID(record *pushNotification) string {
+	copyRecord := *record
+	copyRecord.Version = 1
+	return notificationID(&copyRecord)
 }
 
 func notificationChecksum(record *pushNotification) string {
@@ -67,26 +76,12 @@ func syncNotificationDir(dir string) error {
 func (m *RunManager) retainPush(params *ipc.PushReceivedParams, repo *db.Repo) (*retainedPush, error) {
 	m.notificationMu.Lock()
 	defer m.notificationMu.Unlock()
-	record := &pushNotification{Version: 1, RepoID: repo.ID, WorkingPath: repo.WorkingPath, GateIdentity: canonicalRoot(params.Gate), Params: *params}
-	id := notificationID(record)
-	path := m.notificationPath(id)
-	dir := filepath.Dir(path)
+	record := &pushNotification{Version: 2, RepoID: repo.ID, WorkingPath: repo.WorkingPath, GateIdentity: canonicalRoot(params.Gate), Params: *params}
+	dir := filepath.Join(m.paths.Root(), "push-notifications")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
 	}
 	if err := syncNotificationDir(m.paths.Root()); err != nil {
-		return nil, err
-	}
-	if _, err := os.Lstat(path); err == nil {
-		existing, err := m.readNotification(id)
-		if err != nil {
-			return nil, err
-		}
-		if err := syncNotificationDir(dir); err != nil {
-			return nil, err
-		}
-		return &retainedPush{ID: id, Record: existing}, nil
-	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
 	rows, err := m.db.GetRunsByRepo(repo.ID)
@@ -98,6 +93,50 @@ func (m *RunManager) retainPush(params *ipc.PushReceivedParams, repo *db.Repo) (
 			record.PreviousRunID = run.ID
 			break
 		}
+	}
+	reuse := func(id string) (*retainedPush, error) {
+		existing, err := m.readNotification(id)
+		if err != nil {
+			return nil, err
+		}
+		if err := syncNotificationDir(dir); err != nil {
+			return nil, err
+		}
+		return &retainedPush{ID: id, Record: existing}, nil
+	}
+	if record.PreviousRunID != "" {
+		ids, err := m.db.PushNotificationsForRun(record.PreviousRunID)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			existing, err := m.readNotification(id)
+			if err != nil {
+				return nil, err
+			}
+			if notificationPayloadID(existing) == notificationPayloadID(record) {
+				return reuse(id)
+			}
+		}
+	}
+	id := notificationID(record)
+	path := m.notificationPath(id)
+	if _, err := os.Lstat(path); err == nil {
+		return reuse(id)
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	legacyID := notificationPayloadID(record)
+	if _, err := os.Lstat(m.notificationPath(legacyID)); err == nil {
+		legacy, err := m.readNotification(legacyID)
+		if err != nil {
+			return nil, err
+		}
+		if legacy.PreviousRunID == record.PreviousRunID {
+			return reuse(legacyID)
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
 	}
 	record.Checksum = notificationChecksum(record)
 	raw, err := json.Marshal(record)
@@ -154,7 +193,7 @@ func (m *RunManager) readNotification(id string) (*pushNotification, error) {
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		return nil, fmt.Errorf("corrupt notification: trailing data")
 	}
-	if notificationID(&record) != id || record.Version != 1 || record.Checksum != notificationChecksum(&record) {
+	if notificationID(&record) != id || (record.Version != 1 && record.Version != 2) || record.Checksum != notificationChecksum(&record) {
 		return nil, fmt.Errorf("corrupt notification: identity/version mismatch")
 	}
 	return &record, nil
@@ -204,6 +243,9 @@ func (m *RunManager) validateNotification(ctx context.Context, retained *retaine
 			continue
 		}
 		if run.Branch == branchFromRef(p.Ref) {
+			if p.LaunchNonce == "" && run.SubmittedHeadSHA != nil && *run.SubmittedHeadSHA == p.New {
+				return fmt.Errorf("stale notification: submitted head already belongs to later branch work")
+			}
 			latest = run.ID
 			break
 		}
@@ -236,6 +278,10 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	if m.afterPushRetained != nil {
 		m.afterPushRetained()
 	}
+	return m.admitRetainedPush(ctx, retained)
+}
+
+func (m *RunManager) admitRetainedPush(ctx context.Context, retained *retainedPush) (string, error) {
 	admitted, _, err := m.db.PushNotificationRuns(retained.ID)
 	if err == nil && admitted != nil {
 		return admitted.ID, nil
@@ -243,7 +289,7 @@ func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushRec
 	if err == nil {
 		ctx = context.WithValue(ctx, pushNotificationKey{}, retained)
 		var id string
-		id, err = m.handleRetainedPush(ctx, params)
+		id, err = m.handleRetainedPush(ctx, &retained.Record.Params)
 		if err == nil {
 			return id, nil
 		}
@@ -270,7 +316,24 @@ func (m *RunManager) InspectPushNotification(id string) (*ipc.PushNotificationIn
 	return info, nil
 }
 
-func (m *RunManager) ListPushNotifications() ([]ipc.PushNotificationInfo, error) {
+const notificationListMaxRecords = 100
+const notificationListMaxBytes = 128 << 10
+
+func (m *RunManager) ListPushNotifications(requests ...ipc.PushNotificationParams) ([]ipc.PushNotificationInfo, error) {
+	request := ipc.PushNotificationParams{}
+	if len(requests) > 0 {
+		request = requests[0]
+	}
+	limit := request.Limit
+	if limit == 0 {
+		limit = notificationListMaxRecords
+	}
+	if limit < 1 || limit > notificationListMaxRecords {
+		return nil, fmt.Errorf("notification list limit must be between 1 and %d", notificationListMaxRecords)
+	}
+	if len(request.After) > 255 {
+		return nil, fmt.Errorf("invalid notification list cursor")
+	}
 	entries, err := os.ReadDir(filepath.Join(m.paths.Root(), "push-notifications"))
 	if os.IsNotExist(err) {
 		return []ipc.PushNotificationInfo{}, nil
@@ -279,17 +342,41 @@ func (m *RunManager) ListPushNotifications() ([]ipc.PushNotificationInfo, error)
 		return nil, err
 	}
 	result := []ipc.PushNotificationInfo{}
+	size := 2
 	for _, entry := range entries {
 		if !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
 		id := strings.TrimSuffix(entry.Name(), ".json")
-		info, err := m.InspectPushNotification(id)
-		if err != nil {
-			result = append(result, ipc.PushNotificationInfo{ID: id, Path: m.notificationPath(id), Pending: true, Error: err.Error()})
+		if request.After != "" && entry.Name() <= request.After {
 			continue
 		}
+		if len(result) == limit {
+			result[len(result)-1].NextCursor = result[len(result)-1].ID + ".json"
+			break
+		}
+		info, err := m.InspectPushNotification(id)
+		if err != nil {
+			message := []rune(err.Error())
+			if len(message) > 256 {
+				message = message[:256]
+			}
+			info = &ipc.PushNotificationInfo{ID: id, Path: m.notificationPath(id), Pending: true, Error: string(message)}
+		}
+		info.Params = nil
+		raw, err := json.Marshal(info)
+		if err != nil {
+			return nil, err
+		}
+		if size+len(raw)+1+2048 >= notificationListMaxBytes {
+			if len(result) == 0 {
+				return nil, fmt.Errorf("notification summary exceeds list byte budget")
+			}
+			result[len(result)-1].NextCursor = result[len(result)-1].ID + ".json"
+			break
+		}
 		result = append(result, *info)
+		size += len(raw) + 1
 	}
 	return result, nil
 }
@@ -303,5 +390,57 @@ func (m *RunManager) ReplayPushNotification(ctx context.Context, id string) (str
 	if err := m.validateNotification(ctx, retained); err != nil {
 		return "", err
 	}
-	return m.HandlePushReceived(ctx, &record.Params)
+	return m.admitRetainedPush(ctx, retained)
+}
+
+func cleanupPushNotificationTemps(p *paths.Paths) error {
+	dir := filepath.Join(p.Root(), "push-notifications")
+	info, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("clean push notification temporary files: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("clean push notification temporary files: journal is not an owned directory")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("clean push notification temporary files: %w", err)
+	}
+	changed := false
+	for _, entry := range entries {
+		suffix, ok := strings.CutPrefix(entry.Name(), ".notification-")
+		if !ok || len(suffix) == 0 || len(suffix) > 10 {
+			continue
+		}
+		numeric := true
+		for _, r := range suffix {
+			if r < '0' || r > '9' {
+				numeric = false
+				break
+			}
+		}
+		if !numeric {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("clean push notification temporary files: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+			return fmt.Errorf("clean push notification temporary files: %w", err)
+		}
+		changed = true
+	}
+	if changed {
+		if err := syncNotificationDir(dir); err != nil {
+			return fmt.Errorf("clean push notification temporary files: %w", err)
+		}
+	}
+	return nil
 }

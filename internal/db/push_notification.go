@@ -58,3 +58,20 @@ func (d *DB) BindPushNotification(id, runID string) error {
 	}
 	return nil
 }
+
+func (d *DB) PushNotificationsForRun(runID string) ([]string, error) {
+	rows, err := d.sql.Query("SELECT notification_id FROM push_notifications WHERE run_id=? OR diagnostic_run_id=? ORDER BY notification_id", runID, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
