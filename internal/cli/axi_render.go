@@ -376,7 +376,7 @@ func awaitingPersonFields(rv runView) []toon.Field {
 	}
 	fields = append(fields, toon.Field{Key: "awaiting_since", Value: rv.AwaitingAgentSince}, toon.Field{Key: "awaiting_seconds", Value: age}, toon.Field{Key: "awaiting_step", Value: gate.Name})
 	findings, _ := types.ParseFindingsJSON(gate.FindingsJSON)
-	question := truncate(findings.Summary, maxGateSummary)
+	question := findings.Summary
 	questions := make([]string, 0, len(findings.Items))
 	for _, f := range findings.Items {
 		if f.Description != "" {
@@ -386,6 +386,7 @@ func awaitingPersonFields(rv runView) []toon.Field {
 	if question == "" {
 		question = strings.Join(questions, "\n")
 	}
+	question = truncate(question, maxGateSummary)
 	return append(fields, toon.Field{Key: "gate_question", Value: question}, toon.Field{Key: "gate_questions", Value: questions})
 }
 
