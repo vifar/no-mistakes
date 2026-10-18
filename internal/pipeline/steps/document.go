@@ -112,6 +112,24 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if combinedLint {
 		sctx.Shared.ClearHousekeepingLint()
 	}
+	// Own only this invocation's changes, including commits the agent makes
+	// despite the prompt. The clean start makes rejected proposals reversible.
+	headBefore := sctx.Run.HeadSHA
+	status, err := stepGitRun(sctx, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
+	if err != nil {
+		return nil, err
+	}
+	if status != "" {
+		return nil, fmt.Errorf("Document requires a clean worktree so convergence can safely discard only its own edits")
+	}
+	observed, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return nil, err
+	}
+	if observed != headBefore {
+		return nil, fmt.Errorf("Document starting head does not match the recorded pipeline head")
+	}
+
 	history, err := readDocumentHistory(sctx)
 	if err != nil {
 		return nil, err
@@ -154,23 +172,6 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		purpose = "housekeeping"
 	}
 
-	// Own only this invocation's changes, including commits the agent makes
-	// despite the prompt. The clean start makes rejected proposals reversible.
-	headBefore := sctx.Run.HeadSHA
-	status, err := stepGitRun(sctx, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
-	if err != nil {
-		return nil, err
-	}
-	if status != "" {
-		return nil, fmt.Errorf("Document requires a clean worktree so convergence can safely discard only its own edits")
-	}
-	observed, err := git.HeadSHA(ctx, sctx.WorkDir)
-	if err != nil {
-		return nil, err
-	}
-	if observed != headBefore {
-		return nil, fmt.Errorf("Document starting head does not match the recorded pipeline head")
-	}
 	passID, err := sctx.DB.BeginDocumentPass(sctx.Run.ID, headBefore)
 	if err != nil {
 		return nil, err
@@ -245,6 +246,13 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		}
 		if capExceeded {
 			proposedDocs = documentCapFinding(proposedDocs)
+		}
+		if repeated && len(proposedDocs.Items) == 0 {
+			proposedDocs.Items = append(proposedDocs.Items, types.Finding{
+				Severity: "warning", Action: "ask-user", File: paths[0],
+				Description: "Document discarded a repeated repair of " + strings.Join(paths, ", ") +
+					"; the repair was not applied. Inspect the pending documentation gap before continuing.",
+			})
 		}
 		raw, _ := json.Marshal(proposedDocs)
 		if err := sctx.DB.CompleteDocumentPass(passID, headBefore, 0, string(raw)); err != nil {

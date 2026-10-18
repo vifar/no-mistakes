@@ -349,7 +349,8 @@ func TestDocumentStep_NoChanges_SkipsAgent(t *testing.T) {
 			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"noop"}`)}, nil
 		},
 	}
-	// Point head at base so there are no changed files.
+	// Keep the actual and recorded heads at base so there are no changed files.
+	gitCmd(t, dir, "checkout", "--detach", baseSHA)
 	sctx := newTestContext(t, ag, dir, baseSHA, baseSHA, config.Commands{})
 
 	step := &DocumentStep{}
