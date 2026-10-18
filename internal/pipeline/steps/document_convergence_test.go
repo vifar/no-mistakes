@@ -247,7 +247,7 @@ func TestDocumentConvergenceSuppressedCleanProposalRetainsGap(t *testing.T) {
 }
 
 func TestDocumentConvergenceCountsAgentCommitsAndFailsInterruptedPassClosed(t *testing.T) {
-	for _, scenario := range []string{"over budget", "interrupted", "dirty entry"} {
+	for _, scenario := range []string{"over budget", "interrupted", "dirty entry", "staged dirty entry"} {
 		t.Run(scenario, func(t *testing.T) {
 			dir, base, head := setupGitRepo(t)
 			calls := 0
@@ -264,11 +264,16 @@ func TestDocumentConvergenceCountsAgentCommitsAndFailsInterruptedPassClosed(t *t
 					t.Fatal(err)
 				}
 			}
-			if scenario == "dirty entry" {
+			dirtyEntry := scenario == "dirty entry" || scenario == "staged dirty entry"
+			if dirtyEntry {
 				if err := os.WriteFile(filepath.Join(dir, "existing.md"), []byte("owner work"), 0o644); err != nil {
 					t.Fatal(err)
 				}
+				if scenario == "staged dirty entry" {
+					gitCmd(t, dir, "add", "existing.md")
+				}
 			}
+			statusBefore := gitStatusPorcelain(t, dir)
 			out, err := (&DocumentStep{}).Execute(sc)
 			if scenario == "over budget" {
 				if err != nil || !out.NeedsApproval {
@@ -279,6 +284,19 @@ func TestDocumentConvergenceCountsAgentCommitsAndFailsInterruptedPassClosed(t *t
 				}
 			} else if err == nil || calls != 0 {
 				t.Fatalf("unsafe entry launched agent: %d calls, %v", calls, err)
+			}
+			// The clean-entry contract refuses both index and worktree changes;
+			// it must never discard pre-existing work to make Document runnable.
+			if dirtyEntry {
+				if !strings.Contains(err.Error(), "clean worktree") {
+					t.Fatalf("expected clean-entry refusal, got %v", err)
+				}
+				if got := gitStatusPorcelain(t, dir); got != statusBefore {
+					t.Fatalf("dirty entry changed staging: %q, want %q", got, statusBefore)
+				}
+				if got, err := os.ReadFile(filepath.Join(dir, "existing.md")); err != nil || string(got) != "owner work" {
+					t.Fatalf("dirty entry lost owner work: %q, %v", got, err)
+				}
 			}
 			if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != head {
 				t.Fatalf("over-budget/unsafe pass advanced head: %s", got)

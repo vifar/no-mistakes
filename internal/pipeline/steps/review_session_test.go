@@ -110,6 +110,7 @@ func reviewSessionHarness(t *testing.T, mock *sessionMockAgent, steps []pipeline
 		Agent:        types.AgentClaude,
 		AutoFix:      config.AutoFix{Review: 3},
 		SessionReuse: true,
+		Document:     config.Document{MaxCommitsPerRun: config.DefaultDocumentMaxCommitsPerRun},
 	}
 	for _, tweak := range tweaks {
 		tweak(cfg)
@@ -389,17 +390,26 @@ func TestReviewLoop_OtherStepsStaySessionIsolated(t *testing.T) {
 
 	steps := []pipeline.Step{&ReviewStep{}, &DocumentStep{}, &LintStep{}}
 	exec, _, run, repo, workDir := reviewSessionHarness(t, mock, steps)
-	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := exec.Execute(ctx, run, repo, workDir); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
+	housekeepingCalls := 0
 	for _, call := range mock.snapshot() {
+		if call.Purpose == "housekeeping" {
+			housekeepingCalls++
+		}
 		if call.Purpose == "review" || call.Purpose == "review-fix" {
 			continue
 		}
 		if call.Session != nil {
 			t.Fatalf("non-review invocation (purpose %q) must stay session-isolated, got session %+v", call.Purpose, call.Session)
 		}
+	}
+	if housekeepingCalls != 1 {
+		t.Fatalf("expected one combined document/lint invocation, got %d", housekeepingCalls)
 	}
 }
 

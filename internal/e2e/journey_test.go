@@ -54,12 +54,13 @@ func TestUserJourney(t *testing.T) {
 	}
 }
 
-func TestTestAgentNewTestFilePublishesWithForwardOnlySteps(t *testing.T) {
+func TestTestAgentNewTestFilesRefuseDirtyDocumentEntry(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t)})
 	if out, err := h.Run("init"); err != nil {
 		t.Fatalf("nm init: %v\n%s", err, out)
 	}
 	assertTestAgentNewTestFileRun(t, h)
+	assertTestAgentStagedNewTestFileRun(t, h)
 }
 
 func TestAXIControlByteFailureGateRemainsReadable(t *testing.T) {
@@ -1847,11 +1848,11 @@ func assertTestAgentNewTestFileRun(t *testing.T, h *Harness) {
 	t.Helper()
 	h.CommitChange("test-agent-new-test-file", "test-agent-new-test-file.txt", "test agent new test file\n", "add test agent new test file")
 	h.PushToGate("test-agent-new-test-file")
-	// The agent's new test file must reach the pushed head. The Test step keeps
-	// its informational note when later pipeline steps advance that head.
+	// Test may report a new test file without parking. Document's clean-entry
+	// contract then refuses the uncommitted edits before publication.
 	run := h.WaitForRun("test-agent-new-test-file", 60*time.Second)
-	if run.Status != types.RunCompleted {
-		t.Fatalf("test-agent-new-test-file run status = %s, want completed; error=%v", run.Status, deref(run.Error))
+	if run.Status != types.RunFailed || !strings.Contains(deref(run.Error), "Document requires a clean worktree") {
+		t.Fatalf("test-agent-new-test-file should fail Document's clean-entry check: status=%s error=%v", run.Status, deref(run.Error))
 	}
 	testStep, ok := findStep(run.Steps, types.StepTest)
 	if !ok {
@@ -1871,23 +1872,17 @@ func assertTestAgentNewTestFileRun(t *testing.T, h *Harness) {
 		findings.Items[0].Action != types.ActionNoOp {
 		t.Fatalf("Test lost its informational note about the added test: %+v", findings.Items)
 	}
-	assertPushedHead(t, run.HeadSHA, h.UpstreamBranchSHA("test-agent-new-test-file"))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	content, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/test-agent-new-test-file:agent_test.py")
-	if err != nil || string(content) != "def test_agent():\n    pass\n" {
-		t.Fatalf("pushed agent test = %q, %v", content, err)
-	}
+	assertDirtyDocumentEntryStopsPublication(t, h, run)
 }
 
 func assertTestAgentStagedNewTestFileRun(t *testing.T, h *Harness) {
 	t.Helper()
 	h.CommitChange("test-agent-staged-new-test-file", "test-agent-staged-new-test-file.txt", "test agent staged new test file\n", "add test agent staged new test file")
 	h.PushToGate("test-agent-staged-new-test-file")
-	// The staged test file must also reach the pushed, re-reviewed head.
+	// Staging the file does not satisfy Document's clean-entry contract.
 	run := h.WaitForRun("test-agent-staged-new-test-file", 60*time.Second)
-	if run.Status != types.RunCompleted {
-		t.Fatalf("test-agent-staged-new-test-file run status = %s, want completed; error=%v", run.Status, deref(run.Error))
+	if run.Status != types.RunFailed || !strings.Contains(deref(run.Error), "Document requires a clean worktree") {
+		t.Fatalf("test-agent-staged-new-test-file should fail Document's clean-entry check: status=%s error=%v", run.Status, deref(run.Error))
 	}
 	testStep, ok := findStep(run.Steps, types.StepTest)
 	if !ok {
@@ -1907,12 +1902,27 @@ func assertTestAgentStagedNewTestFileRun(t *testing.T, h *Harness) {
 		findings.Items[0].Action != types.ActionNoOp {
 		t.Fatalf("Test lost its informational note about the staged test: %+v", findings.Items)
 	}
-	assertPushedHead(t, run.HeadSHA, h.UpstreamBranchSHA("test-agent-staged-new-test-file"))
+	assertDirtyDocumentEntryStopsPublication(t, h, run)
+}
+
+func assertDirtyDocumentEntryStopsPublication(t *testing.T, h *Harness, run *ipc.RunInfo) {
+	t.Helper()
+	document, ok := findStep(run.Steps, types.StepDocument)
+	if !ok || document.Status != types.StepStatusFailed {
+		t.Fatalf("expected failed Document step, got %+v", document)
+	}
+	for _, name := range []types.StepName{types.StepLint, types.StepPush, types.StepPR, types.StepCI} {
+		step, ok := findStep(run.Steps, name)
+		if !ok || step.Status != types.StepStatusPending {
+			t.Fatalf("%s should remain pending after dirty Document entry, got %+v", name, step)
+		}
+	}
+	assertPromptsAbsent(t, h.AgentInvocations(), documentTurnMarker+strings.TrimPrefix(run.Branch, "refs/heads/"))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	content, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/test-agent-staged-new-test-file:agent_staged_test.go")
-	if err != nil || string(content) != "package main\n" {
-		t.Fatalf("pushed staged agent test = %q, %v", content, err)
+	out, err := h.runGit(ctx, h.UpstreamDir, "show-ref", "--verify", "--quiet", "refs/heads/"+strings.TrimPrefix(run.Branch, "refs/heads/"))
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		t.Fatalf("dirty Document entry must not publish the branch: %v %s", err, out)
 	}
 }
 
