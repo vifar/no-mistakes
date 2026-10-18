@@ -747,9 +747,12 @@ func NewErrorResponse(id int64, code int, message string) *Response {
 }
 
 type PushNotificationParams struct {
-	ID string `json:"id"`
+	After string `json:"after,omitempty"`
+	Limit int    `json:"limit,omitempty"`
+	ID    string `json:"id"`
 }
 type PushNotificationInfo struct {
+	NextCursor      string              `json:"next_cursor,omitempty"`
 	ID              string              `json:"id"`
 	Path            string              `json:"path"`
 	Pending         bool                `json:"pending"`
