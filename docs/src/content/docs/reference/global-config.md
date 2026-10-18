@@ -1404,7 +1404,7 @@ When enabled and no intent was supplied directly for the run, no-mistakes can re
 | `intent.require_owner` | `bool` | `false` | Refuse new runs without explicit launch ownership |
 | `intent.publish_intent`   | `bool`     | `true`  | Publish the generated Intent section on PR bodies by default |
 
-`intent.require_owner: true` is global-only. The daemon rejects ownerless new runs and reruns before cancelling an existing run or creating a replacement row. Its default is false, which accepts ownerless launches with a warning. It does not change existing runs or gate approval policy. See [launch owner](/no-mistakes/reference/cli/#launch-owner) for caller input and status fields.
+`intent.require_owner: true` is global-only. Before submitting a new run, `axi run` probes the daemon's policy even when no owner was supplied, so refusal leaves private-mirror refs unchanged and permits an immediate retry with `--owner`. The daemon rejects ownerless new runs and reruns before cancelling an existing run or creating a replacement row. Its default is false, which accepts ownerless launches with a warning. It does not change existing runs or gate approval policy; ordinary reattachment and matching ownerless receipt claims remain allowed. See [launch owner](/no-mistakes/reference/cli/#launch-owner) for caller input and status fields.
 
 Valid `disabled_readers` values are `claude`, `codex`, `opencode`, `rovodev`, `pi`, and `copilot`.
 

@@ -105,7 +105,9 @@ At the TOON output boundary, unsupported C0 control bytes are rendered as visibl
 If TOON encoding still fails, AXI prints a structured error instead of returning successful empty stdout.
 The calling agent drives AXI approval gates but does not replace the configured pipeline agent that performs validation.
 
-Observation commands (`status`, `runs`, `stats`, AXI home/status/logs, and the database check in `doctor`) open the existing state database read-only. They do not migrate it, including when the daemon is stopped. If its schema is too old, update and start the daemon to upgrade it before querying again. Schema upgrades preserve historical runs; subsequent opens at the current schema skip DDL and backfills.
+Observation commands (`status`, `runs`, `stats`, AXI home/status/logs, and the database check in `doctor`) open the existing state database read-only. The database reads for `eval capture`, `eval miss ingest`, and `eval relabel` use the same nonmigrating reader; those commands can still update the local evaluation corpus. Readers neither create application directories nor create or migrate the database, including when the daemon is stopped. If its schema is too old, update and start the daemon to upgrade it before querying again. Schema upgrades preserve historical runs; subsequent opens at the current schema skip DDL and backfills.
+
+`status`, `runs`, and implicit AXI home/status/logs queries resolve Git context before accessing `NM_HOME`, including before any database stat or open. Outside Git, they report `not in a git repository`; human `status` exits successfully, while `runs` and AXI queries exit nonzero. This also applies to `axi status --awaiting` and JSON status. Explicit `axi status --run` and `axi logs --run` work outside a repository, as does the durable-record check for `axi abort --run` with the daemon stopped. Global `stats`, evaluation commands, and `doctor` do not require a Git worktree.
 
 ```sh
 no-mistakes axi
@@ -670,6 +672,7 @@ use rerun to bypass a gate.
 
 | Flag | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
+| `--owner` | `string` | `NO_MISTAKES_OWNER` | [Launch owner](#launch-owner) for the new run |
 | `--intent` | `string` | (none) | Explicit intent overriding inherited intent or fresh inference |
 | `--no-publish-intent` | `bool` | `false` | Keep the generated `## Intent` section out of the PR body for this rerun (adds to the inherited decision; tighten-only) |
 | `--closes` | `string`, repeatable | (none) | Issue the PR fully resolves; adds to the [closing references](#closing-issues) inherited from the selected prior run |
