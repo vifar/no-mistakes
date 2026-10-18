@@ -110,7 +110,7 @@ That sweep is scoped by working directory: it never touches a worktree whose run
 
 On Linux, a step that exhausts memory fails only its own run.
 Configured commands, agent subprocesses, and managed agent servers raise their `oom_score_adj` so the kernel OOM killer picks them before the daemon.
-The generated systemd unit sets `OOMPolicy=continue`, so one killed step no longer stops the whole service and fails every other in-flight run with "daemon shutting down".
+The generated systemd unit sets `OOMPolicy=continue`, so one killed step no longer stops the whole service and interrupts other in-flight runs. [Crash recovery](#crash-recovery) owns how interrupted runs are handled.
 When a step process is killed and the daemon's cgroup records a new `oom_kill`, the step fails with "ran out of memory" appended to its original error text, and the step log keeps the command output printed before the kill.
 An existing unit picks up the policy when `no-mistakes daemon start` or `restart` refreshes the service definition.
 

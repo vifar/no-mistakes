@@ -1220,8 +1220,8 @@ func (d *DB) RecoverStaleRuns(errMsg string) (int, error) {
 	return d.RecoverStaleRunsExcept(errMsg, nil)
 }
 
-// RecoverStaleRunsExcept marks active runs as failed unless their IDs appear
-// in preserved. Callers use preserved only after independently proving a run
+// RecoverStaleRunsExcept applies RecoverStaleRuns recovery except to IDs in
+// preserved. Callers use preserved only after independently proving a run
 // can be reconstructed safely.
 func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}) (int, error) {
 	ts := now()
