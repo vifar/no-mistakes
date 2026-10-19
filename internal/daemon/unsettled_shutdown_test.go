@@ -147,7 +147,7 @@ func TestPlannedStop_UnsettledAdmissionDoesNotStopSupervisor(t *testing.T) {
 			}
 			defer reopened.Close()
 			stored, err = reopened.GetRun(run.ID)
-			if err != nil || stored.Status != types.RunFailed {
+			if err != nil || stored.Status != types.RunCancelled {
 				t.Errorf("setup failed to settle durably: %+v,%v", stored, err)
 			}
 			if _, err := os.Stat(*run.WorktreeDir); !os.IsNotExist(err) {

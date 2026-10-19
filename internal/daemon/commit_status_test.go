@@ -825,10 +825,7 @@ func TestRecoveredFailure_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 				t.Fatal(err)
 			}
 			if stored.Status == types.RunRunning {
-				mgr.mu.Lock()
-				_, owned := mgr.executors[run.ID]
-				mgr.mu.Unlock()
-				if !owned {
+				if !testRunOwned(mgr, run.ID) {
 					t.Error("recovered failure abandoned custody before settlement")
 				}
 			}
@@ -916,8 +913,11 @@ func TestRecoveredFailure_StorageErrorDoesNotClaimTerminalState(t *testing.T) {
 	mgr.resumeRecoveredRun(recoveredRunPlan{run: run, repo: repo, workDir: t.TempDir(), gateDir: t.TempDir(), cfg: config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{}), agent: recoveredRunTestAgent{}})
 	mgr.wg.Wait()
 	mgr.mu.Lock()
-	_, owned := mgr.executors[run.ID]
-	done := mgr.dones[run.ID]
+	var done chan struct{}
+	owned := mgr.runs[run.ID] != nil && mgr.runs[run.ID].executor != nil
+	if owned && mgr.runs[run.ID].handle != nil {
+		done = mgr.runs[run.ID].handle.done
+	}
 	mgr.mu.Unlock()
 	if !owned || done == nil {
 		t.Fatal("storage failure lost tracked custody")
@@ -1032,7 +1032,7 @@ func TestAdmissionFailure_SettlesBeforeReleasingCustody(t *testing.T) {
 	}
 	if stored.Status == types.RunPending {
 		mgr.mu.Lock()
-		_, owned := mgr.cancels[run.ID]
+		owned := mgr.runs[run.ID] != nil && mgr.runs[run.ID].handle != nil
 		mgr.mu.Unlock()
 		if !owned {
 			t.Error("unsettled admission lost cancellation custody")

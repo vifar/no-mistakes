@@ -318,6 +318,41 @@ func (d *DB) SupersedeUncommittedCancellations(runIDs []string, instance string)
 	return tx.Commit()
 }
 
+// HasStatusPreservationProof reports whether a run holds an acknowledged,
+// certified success that a planned cancellation may preserve. It is only a
+// routing hint: TerminalizeCertifiedWatcher re-verifies the certificate.
+func (d *DB) HasStatusPreservationProof(runID string) (bool, error) {
+	var held bool
+	err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM commit_status_publications WHERE run_id=? AND retired=0 AND strict_certificate IS NOT NULL AND last_state='success')`, runID).Scan(&held)
+	return held, err
+}
+
+// ReleaseShutdownForRecovery settles the shutdown record of a run that a
+// shutdown left non-terminal for the next start's recovery (parked at an
+// approval gate or monitoring CI). Its status proof is invalidated with it, so
+// the resumed run must earn any preservation again.
+func (d *DB) ReleaseShutdownForRecovery(runID string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var status types.RunStatus
+	if err := tx.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&status); err != nil {
+		return err
+	}
+	if status.Terminal() {
+		return tx.Commit()
+	}
+	if _, err := tx.Exec(`DELETE FROM controlled_shutdown_runs WHERE run_id=?`, runID); err != nil {
+		return err
+	}
+	if err := invalidateStatusValidation(context.Background(), tx, runID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (d *DB) ReconcileRecoveredRun(runID, instance string) (bool, error) {
 	tx, err := d.sql.Begin()
 	if err != nil {

@@ -240,13 +240,13 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 				executor := pipeline.NewExecutor(d, p, cfg, recoveredRunTestAgent{}, core, mgr.broadcast)
 				executor.SetRuntimeInstance(mgr.runtimeInstance)
 				executor.SetForgeContext(&forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"})
-				mgr.cancels[run.ID] = func(cause error) {
+				registerTestRunCancel(mgr, run.ID, func(cause error) {
 					cancel(cause)
 					if cause != nil && cause.Error() == "daemon shutting down" {
 						rawOnce.Do(func() { close(rawDispatched) })
 					}
-				}
-				mgr.executors[run.ID] = executor
+				})
+				mgr.runs[run.ID].executor = executor
 				mgr.wg.Add(1)
 				finished := make(chan error, 1)
 				go func() { defer mgr.wg.Done(); finished <- executor.Execute(ctx, run, repo, repo.WorkingPath) }()
@@ -446,10 +446,10 @@ func TestRawShutdown_SupersedesOnlyUncommittedCancellation(t *testing.T) {
 					t.Fatal(err)
 				}
 				expectedStatus := types.RunFailed
-				expectedStates := "[success failure]"
+				expectedStates := "[pending success failure]"
 				if first == "preservation" && !independentFailure {
 					expectedStatus = types.RunCancelled
-					expectedStates = "[success]"
+					expectedStates = "[pending success]"
 				}
 				if stored.Status != expectedStatus {
 					t.Errorf("terminal status=%s,want %s", stored.Status, expectedStatus)

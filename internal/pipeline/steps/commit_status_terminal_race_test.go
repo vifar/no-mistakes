@@ -60,8 +60,11 @@ func TestCommitStatus_OrdinaryFailureSerializesPausedSuccess(t *testing.T) {
 	releaseWrite := func() { writeOnce.Do(func() { close(writeRelease) }) }
 	defer releaseWrite()
 	function := "terminal_failure_" + strings.ToLower(sc.Run.ID)
+	// A terminal write can fire the trigger more than once (the target-rewind
+	// cleanup trigger updates the same row), so only the first entry signals.
+	var enteredOnce sync.Once
 	if err := sqlite.RegisterScalarFunction(function, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
-		close(writeEntered)
+		enteredOnce.Do(func() { close(writeEntered) })
 		<-writeRelease
 		return int64(1), nil
 	}); err != nil {

@@ -215,7 +215,7 @@ func TestWatcherStrictProofRequiresExecutedPass(t *testing.T) {
 					case <-time.After(20 * time.Second):
 						t.Fatal("gate did not park")
 					}
-					if err := executor.Respond(gated, types.ActionApprove, nil); err != nil {
+					if err := executor.Respond(gated, types.ActionApprove, nil, gateSnapshot(executor)); err != nil {
 						t.Fatal(err)
 					}
 				}

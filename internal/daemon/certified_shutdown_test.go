@@ -240,7 +240,7 @@ func TestControlledShutdown_ReasonIsDurableBeforeCancellationAndAcknowledgement(
 	mgr.runtimeStartedAt = time.Now().UTC()
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	mgr.cancels[run.ID] = cancel
+	registerTestRunCancel(mgr, run.ID, cancel)
 	mgr.wg.Add(1)
 	observed := make(chan string, 1)
 	go func() {
@@ -350,7 +350,7 @@ func TestControlledShutdown_ConcurrentRetriesShareTheOriginalLifecycle(t *testin
 	mgr.runtimeStartedAt = time.Now().UTC()
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	mgr.cancels[run.ID] = cancel
+	registerTestRunCancel(mgr, run.ID, cancel)
 	mgr.wg.Add(1)
 	observed := make(chan *pipeline.ControlledShutdownCause, 1)
 	release := make(chan struct{})

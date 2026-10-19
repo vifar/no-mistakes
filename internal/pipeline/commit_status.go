@@ -174,10 +174,16 @@ func WithCommitStatusLock(ctx context.Context, write func() error) error {
 
 // RecordRunFailure is shared by daemon panic and recovery fallbacks.
 func RecordRunFailure(ctx context.Context, d *db.DB, runID, message string, head *string) error {
-	err := WithCommitStatusLock(ctx, func() error { return d.RecordIneligibleTerminal(runID, message, types.RunFailed, head) })
+	return RecordRunTerminal(ctx, d, runID, message, types.RunFailed, head)
+}
+
+// RecordRunTerminal records a failed or cancelled fallback outcome through the
+// same settled, preservation-revoking write as RecordRunFailure.
+func RecordRunTerminal(ctx context.Context, d *db.DB, runID, message string, status types.RunStatus, head *string) error {
+	err := WithCommitStatusLock(ctx, func() error { return d.RecordIneligibleTerminal(runID, message, status, head) })
 	if err != nil {
 		slog.Warn("recording ineligible terminal fallback", "run", runID, "error", err)
-		if settlementErr := SettleIneligibleTerminal(d, runID, message, types.RunFailed); settlementErr != nil {
+		if settlementErr := SettleIneligibleTerminal(d, runID, message, status); settlementErr != nil {
 			return errors.Join(err, settlementErr)
 		}
 	}

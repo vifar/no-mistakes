@@ -616,3 +616,19 @@ func shutdownTestDaemonAndWaitForCleanup(t *testing.T, p *paths.Paths) {
 	}
 	t.Fatal("daemon did not finish cleanup within 15s")
 }
+
+// registerTestRunCancel registers a run whose cancel handle a test drives
+// directly, as a consumed handle whose goroutine the test counts in wg.
+func registerTestRunCancel(m *RunManager, runID string, cancel context.CancelCauseFunc) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.runs[runID] = &managedRun{state: ownershipClaimed, handle: &runHandle{cancel: cancel, done: make(chan struct{}), consumed: true}}
+}
+
+// testRunOwned reports whether the manager still owns a run's executor.
+func testRunOwned(m *RunManager, runID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	owned := m.runs[runID]
+	return owned != nil && owned.executor != nil
+}

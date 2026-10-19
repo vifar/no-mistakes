@@ -75,6 +75,26 @@ func TestCommitStatus_RepairEntryInvalidatesBeforeTools(t *testing.T) {
 	}
 }
 
+func TestCommitStatus_PlannedShutdownRecognizesProofBeforeCancellation(t *testing.T) {
+	d, run, p := certifiedStatusFixture(t)
+	// Acknowledged strict success must route planned shutdown to cancellation
+	// before TerminalizeCertifiedWatcher has made the preservation decision.
+	if p.PreserveSuccess != nil {
+		t.Fatal("fixture already contains a terminal preservation decision")
+	}
+	held, err := d.HasStatusPreservationProof(run.ID)
+	if err != nil || !held {
+		t.Fatalf("acknowledged certificate before cancellation = %v,%v", held, err)
+	}
+	if err := d.InvalidateStatusValidation(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	held, err = d.HasStatusPreservationProof(run.ID)
+	if err != nil || held {
+		t.Fatalf("revoked certificate still routes to preservation = %v,%v", held, err)
+	}
+}
+
 func TestCommitStatus_ResetInvalidatesEvenSameHead(t *testing.T) {
 	d, run, p := certifiedStatusFixture(t)
 	if err := d.ResetStepsFrom(run.ID, types.StepReview.Order()); err != nil {

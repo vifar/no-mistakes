@@ -71,7 +71,7 @@ func attachCommitStatusPublication(sctx *pipeline.StepContext) (*db.CommitStatus
 	if err := acquireCommitStatusLock(sctx.Ctx); err != nil {
 		return nil, err
 	}
-	defer func() { <-commitStatusLock }()
+	defer pipeline.ReleaseCommitStatusLock()
 	target := resolvePushURL(sctx)
 	if scm.ExtractHost(target) == "" {
 		return nil, nil

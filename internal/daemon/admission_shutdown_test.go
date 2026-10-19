@@ -168,7 +168,9 @@ func TestControlledShutdown_DrainsInflightAdmissionBeforeStopHandoff(t *testing.
 				}
 				defer reopened.Close()
 				run, err := reopened.GetRun(active.ID)
-				if err != nil || run.Status != types.RunFailed || run.Error == nil {
+				// Setup cut off by the planned shutdown ends through the
+				// setup-failure path, which records the cancellation cause.
+				if err != nil || (run.Status != types.RunFailed && run.Status != types.RunCancelled) || run.Error == nil {
 					t.Errorf("ACK left nonterminal setup: %+v,%v", run, err)
 				}
 			})
@@ -253,8 +255,9 @@ func TestControlledShutdown_PersistenceFailureCannotReopenRawAdmission(t *testin
 	}
 	cancelled := make(chan struct{})
 	mgr.mu.Lock()
-	original := mgr.cancels[run.ID]
-	mgr.cancels[run.ID] = func(cause error) { original(cause); close(cancelled) }
+	original := mgr.runs[run.ID].handle.cancel
+	var cancelledOnce sync.Once
+	mgr.runs[run.ID].handle.cancel = func(cause error) { original(cause); cancelledOnce.Do(func() { close(cancelled) }) }
 	mgr.mu.Unlock()
 	shutdownDone := make(chan struct{})
 	go func() { mgr.Shutdown(); close(shutdownDone) }()
@@ -275,10 +278,7 @@ func TestControlledShutdown_PersistenceFailureCannotReopenRawAdmission(t *testin
 	}
 	if mgr.shuttingDown.Load() {
 		mgr.resumeRecoveredRun(recoveredRunPlan{run: run, repo: repo, agent: recoveredRunTestAgent{}})
-		mgr.mu.Lock()
-		_, registered := mgr.executors[run.ID]
-		mgr.mu.Unlock()
-		if registered {
+		if testRunOwned(mgr, run.ID) {
 			t.Error("recovered admission escaped raw shutdown")
 		}
 	}
