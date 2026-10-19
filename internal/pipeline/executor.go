@@ -3020,12 +3020,10 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 	return reconciler.ReconcileApprovalGate(&copyCtx)
 }
 
-// ciMonitorInterruptedByShutdown reports whether a daemon shutdown stopped
-// this run while it was monitoring CI for an already-created PR. Such a run has
-// no verdict, so a clean stop leaves it active exactly as a crash would: it
-// records no failure and posts no failure status, and the next start's
-// recovery marks it ci_monitor_interrupted. The run's shape is read from the
-// same durable condition that recovery uses.
+// ciMonitorInterruptedByShutdown leaves a monitor without a final verdict for
+// startup recovery, which records ci_monitor_interrupted and reconciles its
+// status to failure. A bound planned shutdown of a certified watcher instead
+// reaches terminal cancellation. Independent failures never take this path.
 func (e *Executor) ciMonitorInterruptedByShutdown(runID string, err error, ctxs ...context.Context) bool {
 	if !shutdownCancellationOnly(err, ctxs...) {
 		return false
@@ -3068,10 +3066,12 @@ func (e *Executor) plannedShutdownOfCertifiedWatcher(runID string, ctxs ...conte
 	return false
 }
 
-// FailRun marks a run as failed and returns the error.
-// An optional context's cause replaces the run's error when more specific than
-// context.Canceled, except for typed SQLite contention: its canonical outcome
-// must survive cancellation so recovery preserves the published-head status.
+// FailRun settles a failure or cancellation, or leaves a shutdown-interrupted
+// gate or monitor for recovery. A context's cancellation cause replaces the
+// error only when the entire error chain comes from that cancellation, so a
+// racing shutdown cannot erase an independent failure.
+// Typed SQLite contention retains its canonical infrastructure outcome so
+// recovery preserves the published-head status.
 func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
 	if LeftForRecoveryAtShutdown(err) {
 		return err
