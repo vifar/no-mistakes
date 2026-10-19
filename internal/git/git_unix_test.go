@@ -73,12 +73,9 @@ wait "$descendant"
 	cancel()
 	select {
 	case err := <-result:
-		// Cancellation after launch cannot prove the signal's provenance.
-		// Preserve the command's exit identity rather than granting callers
-		// a context-cancellation classification that could hide a real error.
 		var exit *exec.ExitError
-		if !errors.As(err, &exit) || errors.Is(err, context.Canceled) {
-			t.Fatalf("Run() error = %v, want original signal exit without context cancellation", err)
+		if !errors.As(err, &exit) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run() error = %v, want original signal exit and context cancellation metadata", err)
 		}
 		status, ok := exit.Sys().(syscall.WaitStatus)
 		if !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {

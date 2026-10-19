@@ -30,24 +30,8 @@ func Uninstall(p *paths.Paths) (string, error) {
 		}
 		return "", fmt.Errorf("inspect managed service %s: %w", definition, err)
 	}
-	if err := stopPlannedDaemon(p); err != nil {
+	if err := stopPlannedDaemon(p, func() error { return removeLaunchAgent(p) }); err != nil {
 		return "", fmt.Errorf("stop daemon before removing managed service: %w", err)
-	}
-	// A successor may have appeared while the captured process was draining.
-	// Hold singleton ownership through removal so a starting replacement
-	// cannot lose its service before it has published a PID record either.
-	lock, err := acquireSingletonLock(p)
-	if err != nil {
-		return "", fmt.Errorf("verify daemon exit before removing managed service: %w", err)
-	}
-	defer lock.Release()
-	if _, err := os.Stat(p.PIDFile()); err == nil {
-		return "", fmt.Errorf("daemon PID record appeared after stop; retaining managed service")
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("inspect daemon identity after stop: %w", err)
-	}
-	if err := removeLaunchAgent(p); err != nil {
-		return "", fmt.Errorf("remove managed service %s: %w", definition, err)
 	}
 	return definition, nil
 }

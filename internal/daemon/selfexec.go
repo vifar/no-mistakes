@@ -260,7 +260,7 @@ func reinstallManagedServiceIfChanged(p *paths.Paths, beforeRestart func() error
 }
 
 func stopCurrentDaemonBeforeManagedRestart(p *paths.Paths) error {
-	return stopPlannedDaemon(p)
+	return stopPlannedDaemon(p, nil)
 }
 
 func stopManagedFallback(p *paths.Paths) error {
@@ -572,52 +572,33 @@ func daemonIsRunningViaIPC(p *paths.Paths, budget ...time.Duration) (bool, error
 }
 
 // Stop sends a shutdown request to the running daemon and waits for it to exit.
-func Stop(p *paths.Paths) error { return stopPlannedDaemon(p) }
+func Stop(p *paths.Paths) error { return stopPlannedDaemon(p, nil) }
 
-func stopDetachedDaemon(p *paths.Paths) error { return stopPlannedDaemon(p) }
+func stopDetachedDaemon(p *paths.Paths) error { return stopPlannedDaemon(p, nil) }
 
 // The same instance-bound preparation covers planned stop and managed refresh.
 // The supervisor is disabled only after IPC has drained the run decisions.
-func stopPlannedDaemon(p *paths.Paths) error {
+func stopPlannedDaemon(p *paths.Paths, cleanup func() error) error {
 	instance := captureRunningDaemon(p)
 	if instance.pid > 0 {
 		if exited, err := instance.exited(); err == nil && exited {
-			instance = daemonInstance{}
+			return stopCapturedSupervisor(p, instance, cleanup)
 		}
 	}
 	if instance.pid <= 0 || instance.startedAt.IsZero() {
-		// A live PID that failed capture is not a proven-dead daemon. Retain
-		// its artifacts and refuse both preservation and individual kills.
-		if instance.pid <= 0 {
-			if record, err := readDaemonPIDFile(p.PIDFile()); err == nil && record.PID > 0 {
-				running, inspectErr := daemonProcessRunning(record.PID)
-				if inspectErr != nil || running {
-					return errors.Join(fmt.Errorf("captured daemon identity is unavailable"), inspectErr)
-				}
+		record, err := readDaemonPIDFile(p.PIDFile())
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return stopCapturedSupervisor(p, daemonInstance{}, cleanup)
 			}
-		}
-		cleared, err := clearDeadDaemonArtifacts(p)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		if cleared {
-			_, serviceErr := stopManagedService(p)
-			return serviceErr
+		running, inspectErr := daemonProcessRunning(record.PID)
+		if inspectErr != nil || running {
+			return errors.Join(fmt.Errorf("captured daemon identity is unavailable"), inspectErr)
 		}
-		if errors.Is(err, os.ErrNotExist) {
-			if _, socketErr := os.Stat(p.Socket()); os.IsNotExist(socketErr) {
-				lock, lockErr := acquireSingletonLock(p)
-				if lockErr != nil {
-					return lockErr
-				}
-				defer lock.Release()
-				if _, pidErr := os.Stat(p.PIDFile()); os.IsNotExist(pidErr) {
-					_, serviceErr := stopManagedService(p)
-					return serviceErr
-				}
-			}
-		}
-		return fmt.Errorf("captured daemon identity is unavailable")
+		stale := daemonInstance{pid: record.PID, startedAt: record.StartedAt, instance: record.Instance}
+		return stopCapturedSupervisor(p, stale, cleanup)
 	}
 	client, dialErr := daemonDial(p.Socket())
 	var requestErr error
@@ -655,22 +636,49 @@ func stopPlannedDaemon(p *paths.Paths) error {
 		requestErr = fmt.Errorf("dial daemon shutdown: %w", dialErr)
 	}
 	if requestErr != nil {
-		if exited, inspectErr := instance.exited(); inspectErr == nil && exited {
-			if cleared, clearErr := clearDeadDaemonArtifacts(p); clearErr != nil && !errors.Is(clearErr, os.ErrNotExist) {
-				return errors.Join(requestErr, clearErr)
-			} else if cleared {
-				_, serviceErr := stopManagedService(p)
-				return errors.Join(requestErr, serviceErr)
-			}
-		}
 		return requestErr
 	}
 	if err := verifyCapturedDaemonRecord(p, instance); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	_, serviceErr := stopManagedService(p)
-	waitErr := waitForDaemonStop(p, instance)
-	return errors.Join(requestErr, serviceErr, waitErr)
+	if err := waitForDaemonStop(p, instance); err != nil {
+		return err
+	}
+	return stopCapturedSupervisor(p, instance, cleanup)
+}
+
+func stopCapturedSupervisor(p *paths.Paths, instance daemonInstance, cleanup func() error) error {
+	lock, err := acquireSingletonLock(p)
+	if err != nil {
+		return err
+	}
+	defer lock.Release()
+	verify := func() error {
+		err := verifyCapturedDaemonRecord(p, instance)
+		if err == nil || errors.Is(err, os.ErrNotExist) {
+			if instance.pid <= 0 {
+				if _, socketErr := os.Stat(p.Socket()); !os.IsNotExist(socketErr) {
+					return fmt.Errorf("uncaptured daemon socket remains: %v", socketErr)
+				}
+			}
+			return nil
+		}
+		return err
+	}
+	if err := verify(); err != nil {
+		return err
+	}
+	if _, err := stopManagedService(p); err != nil {
+		return err
+	}
+	if err := verify(); err != nil {
+		return err
+	}
+	cleanupDaemonArtifacts(p)
+	if cleanup != nil {
+		return cleanup()
+	}
+	return nil
 }
 
 // verifyCapturedDaemonRecord refuses to act on a successor's service or socket.

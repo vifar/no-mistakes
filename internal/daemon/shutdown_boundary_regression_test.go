@@ -132,13 +132,6 @@ func TestUninstallSettlesBeforeBootout(t *testing.T) {
 				if mode == "successor during bootout" {
 					writeDaemonPIDRecord(t, p.PIDFile(), daemonPIDFile{PID: 424243, StartedAt: started, Instance: "successor"})
 				}
-				if mode == "successor holds lock" {
-					lock, err := acquireSingletonLock(p)
-					if err != nil {
-						return nil, err
-					}
-					t.Cleanup(func() { lock.Release() })
-				}
 				return nil, nil
 			}
 			srv := ipc.NewServer()
@@ -157,6 +150,14 @@ func TestUninstallSettlesBeforeBootout(t *testing.T) {
 					writeDaemonPIDRecord(t, p.PIDFile(), daemonPIDFile{PID: 424243, StartedAt: started, Instance: "successor"})
 				}
 				settled.Store(true)
+				exited.Store(true)
+				if mode == "successor holds lock" {
+					lock, err := acquireSingletonLock(p)
+					if err != nil {
+						return nil, err
+					}
+					t.Cleanup(func() { lock.Release() })
+				}
 				return &ipc.ShutdownResult{OK: true, PID: record.PID, StartedAt: request.ExpectedStartedAt, Instance: record.Instance, Lifecycle: "settled"}, nil
 			})
 			if err := srv.Listen(p.Socket()); err != nil {
@@ -175,7 +176,7 @@ func TestUninstallSettlesBeforeBootout(t *testing.T) {
 				}
 			} else {
 				wantBootouts := int32(0)
-				if mode == "successor during bootout" || mode == "successor holds lock" {
+				if mode == "successor during bootout" {
 					wantBootouts = 1
 				}
 				if err == nil || got != "" || bootouts.Load() != wantBootouts {

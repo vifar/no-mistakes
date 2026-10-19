@@ -133,7 +133,7 @@ func TestUninstallPreservesCertifiedWatcher(t *testing.T) {
 		assertPreserved()
 		// Simulate launchd's signal after the planned handoff has settled.
 		mgr.Shutdown()
-		return nil, os.Remove(p.PIDFile())
+		return nil, nil
 	}
 	srv := ipc.NewServer()
 	srv.Handle(ipc.MethodShutdown, func(ctx context.Context, raw json.RawMessage) (interface{}, error) {
@@ -141,7 +141,11 @@ func TestUninstallPreservesCertifiedWatcher(t *testing.T) {
 		if err := json.Unmarshal(raw, &request); err != nil {
 			return nil, err
 		}
-		return mgr.prepareControlledShutdown(ctx, request)
+		ack, err := mgr.prepareControlledShutdown(ctx, request)
+		if err == nil {
+			err = os.Remove(p.PIDFile())
+		}
+		return ack, err
 	})
 	if err := srv.Listen(p.Socket()); err != nil {
 		t.Fatal(err)
