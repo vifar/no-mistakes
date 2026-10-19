@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
@@ -48,7 +49,14 @@ func (e *Executor) recordStorageFailure(run *db.Run, failure error) {
 }
 
 func writeStorageFailure(path string, record storageFailureRecord) error {
+	return writeStorageFailureWithSync(path, record, syncStorageFailureDirectory)
+}
+
+func writeStorageFailureWithSync(path string, record storageFailureRecord, syncDir func(string) error) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	if err := syncDir(filepath.Dir(filepath.Dir(path))); err != nil {
 		return err
 	}
 	data, err := json.Marshal(record)
@@ -73,7 +81,7 @@ func writeStorageFailure(path string, record storageFailureRecord) error {
 	if err := os.Rename(f.Name(), path); err != nil {
 		return err
 	}
-	return syncStorageFailureDirectory(filepath.Dir(path))
+	return syncDir(filepath.Dir(path))
 }
 
 func (e *Executor) storageFailure(run *db.Run) bool {
@@ -109,12 +117,18 @@ func (e *Executor) clearStorageFailure(runID string) error {
 }
 
 func syncStorageFailureDirectory(path string) error {
+	return syncStorageFailureDirectoryForPlatform(path, runtime.GOOS, (*os.File).Sync)
+}
+
+func syncStorageFailureDirectoryForPlatform(path, platform string, syncDir func(*os.File) error) error {
 	dir, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	defer dir.Close()
-	return dir.Sync()
+	if platform == "windows" {
+		return dir.Close()
+	}
+	return errors.Join(syncDir(dir), dir.Close())
 }
 
 func removeStorageFailure(path string, syncDir func(string) error) error {
