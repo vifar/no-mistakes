@@ -1,9 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
 
 const pushNotificationSchema = `CREATE TABLE IF NOT EXISTS push_notifications (
@@ -44,7 +47,7 @@ func (d *DB) PushNotificationRuns(id string) (admitted, diagnostic *Run, err err
 }
 
 func (d *DB) BindPushNotification(id, runID string) error {
-	_, err := d.sql.Exec(`INSERT INTO push_notifications(notification_id,run_id) VALUES (?,?)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "BindPushNotification", `INSERT INTO push_notifications(notification_id,run_id) VALUES (?,?)
  ON CONFLICT(notification_id) DO UPDATE SET run_id=excluded.run_id WHERE push_notifications.run_id IS NULL`, id, runID)
 	if err != nil {
 		return err
@@ -77,7 +80,7 @@ func (d *DB) PushNotificationsForRun(runID string) ([]string, error) {
 }
 
 func (d *DB) BindPushDiagnostic(id, runID string) error {
-	_, err := d.sql.Exec(`INSERT INTO push_notifications(notification_id,diagnostic_run_id) VALUES (?,?) ON CONFLICT(notification_id) DO UPDATE SET diagnostic_run_id=excluded.diagnostic_run_id WHERE push_notifications.diagnostic_run_id IS NULL AND push_notifications.run_id IS NULL`, id, runID)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "BindPushDiagnostic", `INSERT INTO push_notifications(notification_id,diagnostic_run_id) VALUES (?,?) ON CONFLICT(notification_id) DO UPDATE SET diagnostic_run_id=excluded.diagnostic_run_id WHERE push_notifications.diagnostic_run_id IS NULL AND push_notifications.run_id IS NULL`, id, runID)
 	if err != nil {
 		return err
 	}
