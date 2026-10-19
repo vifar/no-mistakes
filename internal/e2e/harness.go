@@ -91,7 +91,13 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 
 	nmBin, fakeBin := buildBinaries(t)
 
-	root, err := os.MkdirTemp("", "nm-e2e-*")
+	// A workspace-local tmp can approach the Unix socket path limit. Its
+	// containing tmp segment already satisfies the daemon reaper's safety gate.
+	prefix := "nm-e2e-*"
+	if filepath.Base(os.TempDir()) == "tmp" {
+		prefix = ""
+	}
+	root, err := os.MkdirTemp("", prefix)
 	if err != nil {
 		t.Fatalf("mkdir e2e root: %v", err)
 	}

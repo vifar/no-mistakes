@@ -14,12 +14,16 @@ import (
 )
 
 func TestReviewAfterBaseMergeRefreshesStaleRunHead(t *testing.T) {
-	for _, staleDatabase := range []bool{false, true} {
-		name := "durable post-merge head"
-		if staleDatabase {
-			name = "unproven post-merge head refuses before analyzer"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		staleDatabase     bool
+		finalizingAnswers bool
+	}{
+		{name: "durable post-merge head"},
+		{name: "unproven post-merge head refuses before analyzer", staleDatabase: true},
+		{name: "stale answered review cannot move to the proven merge head", finalizingAnswers: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			f := newMergeFixture(t, false)
 			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 				return &agent.Result{Output: json.RawMessage(`{"findings":[],"reviewed_paths":["feature.txt"],"risk_level":"low","risk_rationale":"clean fixture","risk_scope":"source-or-external"}`)}, nil
@@ -57,13 +61,14 @@ func TestReviewAfterBaseMergeRefreshesStaleRunHead(t *testing.T) {
 			// Reproduce the observed stale execution snapshot while Git and the
 			// persisted comparison already name the post-rebase merge.
 			c.Run = &before
-			if staleDatabase {
+			c.FinalizingAnswers = tc.finalizingAnswers
+			if tc.staleDatabase {
 				if err := c.DB.UpdateRunHeadSHA(c.Run.ID, before.HeadSHA); err != nil {
 					t.Fatal(err)
 				}
 			}
 			out, err = (&ReviewStep{}).Execute(c)
-			if staleDatabase {
+			if tc.staleDatabase || tc.finalizingAnswers {
 				var precondition *ReviewHeadPreconditionError
 				if !errors.As(err, &precondition) || len(ag.calls) != 0 || !strings.Contains(err.Error(), before.HeadSHA) || !strings.Contains(err.Error(), merged) {
 					t.Fatalf("mismatch must refuse before analyzer with both heads: out=%+v err=%v calls=%d", out, err, len(ag.calls))
