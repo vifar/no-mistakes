@@ -620,20 +620,17 @@ func (m *RunManager) bindLegacyRunAttachment(retained *retainedPush, runID strin
 }
 
 func (m *RunManager) runAdmissionError(run *db.Run) error {
-	if run == nil {
-		return fmt.Errorf("admission run missing")
-	}
-	if run.Status == types.RunFailed || run.Status == types.RunCancelled && (run.Error == nil || *run.Error != types.RunCancelReasonSuperseded) {
-		reason := ""
-		if run.Error != nil {
-			reason = *run.Error
-		}
-		return fmt.Errorf("run %s %s: %s; inspect no-mistakes axi status --run %s; after correcting the fault, start a new validation with no-mistakes rerun from the repository", run.ID, run.Status, reason, run.ID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.runAdmissionErrorLocked(run)
+}
+
+func (m *RunManager) runAdmissionErrorLocked(run *db.Run) error {
+	if err := run.AdmissionError(); err != nil {
+		return err
 	}
 	if run.Status == types.RunPending {
-		m.mu.Lock()
 		owned := m.runs[run.ID] != nil
-		m.mu.Unlock()
 		if !owned {
 			return fmt.Errorf("run %s pending without scheduler or manager ownership; inspect no-mistakes axi status --run %s before recovery", run.ID, run.ID)
 		}

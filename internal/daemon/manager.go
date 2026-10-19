@@ -1532,7 +1532,9 @@ func (m *RunManager) startFreshLaunchLocked(ctx context.Context, repo *db.Repo, 
 				receipt = replayed
 				return existing.ID, nil
 			}
-			claimedRun, claimed, err := m.db.ClaimLaunchReceiptWithAllOptions(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent, types.ShippingFromContext(ctx), externalCIOwner, types.RunOwnerFromContext(ctx), request)
+			m.mu.Lock()
+			claimedRun, claimed, err := m.db.ClaimLaunchReceiptWithAllOptions(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent, types.ShippingFromContext(ctx), externalCIOwner, types.RunOwnerFromContext(ctx), request, m.receiptEligibilityLocked)
+			m.mu.Unlock()
 			if err != nil {
 				return "", err
 			}
@@ -1543,10 +1545,7 @@ func (m *RunManager) startFreshLaunchLocked(ctx context.Context, repo *db.Repo, 
 				return "", conflictingLaunchPRBaseBranch(launchNonce)
 			}
 
-			receipt, err = m.receiptForRun(claimedRun, claimed)
-			if err != nil {
-				return "", err
-			}
+			receipt = launchReceiptForEligibleRun(claimedRun, claimed)
 			return existing.ID, nil
 		}
 
@@ -1599,7 +1598,9 @@ func (m *RunManager) startFreshLaunchLocked(ctx context.Context, repo *db.Repo, 
 				return "", err
 			}
 		} else {
-			claimedRun, claimed, err := m.db.ClaimLaunchReceiptWithAllOptions(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent, types.ShippingFromContext(ctx), externalCIOwner, types.RunOwnerFromContext(ctx), request)
+			m.mu.Lock()
+			claimedRun, claimed, err := m.db.ClaimLaunchReceiptWithAllOptions(repo.ID, branch, launchNonce, headSHA, validationGeneration, requestDigest, storedPRBaseBranch, omitIntent, types.ShippingFromContext(ctx), externalCIOwner, types.RunOwnerFromContext(ctx), request, m.receiptEligibilityLocked)
+			m.mu.Unlock()
 			if err != nil {
 				return "", err
 			}
@@ -1610,10 +1611,7 @@ func (m *RunManager) startFreshLaunchLocked(ctx context.Context, repo *db.Repo, 
 				return "", conflictingLaunchPRBaseBranch(launchNonce)
 			}
 
-			receipt, err = m.receiptForRun(claimedRun, claimed)
-			if err != nil {
-				return "", err
-			}
+			receipt = launchReceiptForEligibleRun(claimedRun, claimed)
 		}
 		return runID, nil
 	}()
@@ -1685,7 +1683,9 @@ func (m *RunManager) claimLaunchReceiptLocked(p *ipc.ClaimLaunchReceiptParams, p
 			return nil, err
 		}
 	}
-	run, claimed, err := m.db.ClaimLaunchReceiptWithAllOptions(p.RepoID, p.Branch, p.LaunchNonce, p.SubmittedHeadSHA, p.ValidationGeneration, p.IntentDigest, prBaseBranch, p.OmitIntent, p.Shipping, p.ExternalCIOwner, p.Owner, p.PiProfile)
+	m.mu.Lock()
+	run, claimed, err := m.db.ClaimLaunchReceiptWithAllOptions(p.RepoID, p.Branch, p.LaunchNonce, p.SubmittedHeadSHA, p.ValidationGeneration, p.IntentDigest, prBaseBranch, p.OmitIntent, p.Shipping, p.ExternalCIOwner, p.Owner, p.PiProfile, m.receiptEligibilityLocked)
+	m.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("claim launch receipt: %w", err)
 	}
@@ -1708,29 +1708,37 @@ func (m *RunManager) claimLaunchReceiptLocked(p *ipc.ClaimLaunchReceiptParams, p
 		return nil, fmt.Errorf("conflicting launch_nonce: external CI owner differs from run")
 	}
 
-	receipt, err := m.receiptForRun(run, claimed)
-	if err != nil {
-		return nil, err
-	}
+	receipt := launchReceiptForEligibleRun(run, claimed)
 	if receipt.SubmittedHeadSHA != p.SubmittedHeadSHA || receipt.ValidationGeneration != p.ValidationGeneration || receipt.IntentDigest != p.IntentDigest {
 		return nil, fmt.Errorf("conflicting launch_nonce is already bound to a different validation generation, submitted head, or intent")
 	}
 	return &ipc.ClaimLaunchReceiptResult{Receipt: &receipt}, nil
 }
 
-func (m *RunManager) receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
-	if run == nil {
-		return ipc.LaunchReceipt{}, fmt.Errorf("run is required")
-	}
-	if err := m.runAdmissionError(run); err != nil {
-		return ipc.LaunchReceipt{}, err
+func (m *RunManager) receiptEligibilityLocked(run *db.Run) error {
+	if err := m.runAdmissionErrorLocked(run); err != nil {
+		return err
 	}
 	if run.SubmittedHeadSHA == nil || *run.SubmittedHeadSHA == "" {
-		return ipc.LaunchReceipt{}, fmt.Errorf("run %s has no submitted head binding", run.ID)
+		return fmt.Errorf("run %s has no submitted head binding", run.ID)
 	}
 	if run.LaunchNonce == nil || run.LaunchValidationGeneration == nil || run.LaunchIntentDigest == nil {
-		return ipc.LaunchReceipt{}, fmt.Errorf("run %s has no launch binding", run.ID)
+		return fmt.Errorf("run %s has no launch binding", run.ID)
 	}
+	return nil
+}
+
+func (m *RunManager) receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
+	m.mu.Lock()
+	err := m.receiptEligibilityLocked(run)
+	m.mu.Unlock()
+	if err != nil {
+		return ipc.LaunchReceipt{}, err
+	}
+	return launchReceiptForEligibleRun(run, created), nil
+}
+
+func launchReceiptForEligibleRun(run *db.Run, created bool) ipc.LaunchReceipt {
 	disposition := "reused"
 	if created {
 		disposition = "created"
@@ -1746,7 +1754,7 @@ func (m *RunManager) receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt
 		HeadSHA:              *run.SubmittedHeadSHA,
 		SubmittedHeadSHA:     *run.SubmittedHeadSHA,
 		IntentDigest:         *run.LaunchIntentDigest,
-	}, nil
+	}
 }
 
 // HandleRerun creates a new run for the latest recoverable head on a branch:

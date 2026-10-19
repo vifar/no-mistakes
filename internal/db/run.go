@@ -506,6 +506,20 @@ func (d *DB) GetRunByLaunchNonce(repoID, branch, launchNonce string) (*Run, erro
 	return r, nil
 }
 
+func (r *Run) AdmissionError() error {
+	if r == nil {
+		return fmt.Errorf("admission run missing")
+	}
+	if r.Status == types.RunFailed || r.Status == types.RunCancelled && (r.Error == nil || *r.Error != types.RunCancelReasonSuperseded) {
+		reason := ""
+		if r.Error != nil {
+			reason = *r.Error
+		}
+		return fmt.Errorf("run %s %s: %s; inspect no-mistakes axi status --run %s; after correcting the fault, start a new validation with no-mistakes rerun from the repository", r.ID, r.Status, reason, r.ID)
+	}
+	return nil
+}
+
 // ClaimLaunchReceipt atomically returns the exact nonce-bound row and whether
 // this caller is its first observer. The expected immutable receipt binding,
 // including an explicit PR base branch, is part of the UPDATE predicate, so a
@@ -522,7 +536,7 @@ func (d *DB) ClaimLaunchReceiptWithExternalOwner(repoID, branch, launchNonce, su
 
 // ClaimLaunchReceiptWithAllOptions validates the complete immutable launch
 // binding before consuming its first-observer marker.
-func (d *DB) ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, shipping *types.ShippingOptions, externalCIOwner, owner string, request *agentcfg.PiProfile) (*Run, bool, error) {
+func (d *DB) ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch string, omitIntent bool, shipping *types.ShippingOptions, externalCIOwner, owner string, request *agentcfg.PiProfile, validators ...func(*Run) error) (*Run, bool, error) {
 	if err := types.ValidateRunOwner(owner); err != nil {
 		return nil, false, err
 	}
@@ -560,8 +574,12 @@ func (d *DB) ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submi
 	}
 	prBaseBranch = strings.TrimSpace(prBaseBranch)
 	for {
+		tx, err := d.sql.Begin()
+		if err != nil {
+			return nil, false, fmt.Errorf("begin launch receipt claim: %w", err)
+		}
 		r := &Run{}
-		err := scanRun(d.sql.QueryRow(
+		err = scanRun(tx.QueryRow(
 			`UPDATE runs SET launch_receipt_claimed_at = ?
 			 WHERE repo_id = ? AND branch = ? AND launch_nonce = ?
 			   AND submitted_head_sha = ? AND launch_validation_generation = ? AND launch_intent_digest = ?
@@ -578,8 +596,23 @@ func (d *DB) ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submi
 			now(), repoID, branch, launchNonce, submittedHeadSHA, validationGeneration, intentDigest, prBaseBranch, prBaseBranch, omitIntent, omitIntent, shippingMode, shippingMode, shippingDraft, shippingDraft, externalCIOwner, owner, model, model, effort, effort,
 		), r)
 		if err == nil {
+			err = r.AdmissionError()
+			for _, validate := range validators {
+				if err != nil {
+					break
+				}
+				err = validate(r)
+			}
+			if err != nil {
+				tx.Rollback()
+				return nil, false, err
+			}
+			if err := tx.Commit(); err != nil {
+				return nil, false, fmt.Errorf("commit launch receipt claim: %w", err)
+			}
 			return r, true, nil
 		}
+		tx.Rollback()
 		if !errors.Is(err, sql.ErrNoRows) {
 			return nil, false, fmt.Errorf("claim launch receipt: %w", err)
 		}
@@ -589,6 +622,16 @@ func (d *DB) ClaimLaunchReceiptWithAllOptions(repoID, branch, launchNonce, submi
 		}
 		if r != nil && r.Owner() != owner {
 			return nil, false, fmt.Errorf("conflicting launch_nonce: owner differs from run")
+		}
+		if r != nil {
+			if err := r.AdmissionError(); err != nil {
+				return nil, false, err
+			}
+			for _, validate := range validators {
+				if err := validate(r); err != nil {
+					return nil, false, err
+				}
+			}
 		}
 		if r == nil || !r.Shipping.Matches(shipping) || !r.PiProfile.Matches(request) || r.ExternalCIOwner != externalCIOwner || r.LaunchReceiptClaimedAt != nil ||
 			r.SubmittedHeadSHA == nil || *r.SubmittedHeadSHA != submittedHeadSHA ||

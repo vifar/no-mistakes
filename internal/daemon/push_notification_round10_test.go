@@ -275,3 +275,64 @@ func TestNotificationReceiptMismatchNeverConsumesCreated(t *testing.T) {
 		t.Fatalf("repeat claim not reused: %+v %v", again, err)
 	}
 }
+
+func TestReceiptFailureAfterLookupDoesNotConsumeCreated(t *testing.T) {
+	f := newPushRecoveryFixture(t, false)
+	f.params.LaunchNonce = "receipt-failure-race"
+	f.params.ValidationGeneration = "generation"
+	id, err := f.m.HandlePushReceived(context.Background(), f.params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.UpdateRunStatus(id, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	f.m.afterReceiptLookup = func(run *db.Run) {
+		if run == nil || run.Status != types.RunRunning {
+			t.Fatalf("lookup = %+v", run)
+		}
+		if err := f.d.UpdateRunError(id, "failure before claim"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claim := ipc.ClaimLaunchReceiptParams{RepoID: "recovery", Branch: "fresh", LaunchNonce: f.params.LaunchNonce, SubmittedHeadSHA: f.params.New, ValidationGeneration: f.params.ValidationGeneration, IntentDigest: digestIntent(f.params.Intent)}
+	result, err := f.m.claimLaunchReceiptLocked(&claim, "")
+	if err == nil || !strings.Contains(err.Error(), "failure before claim") || result != nil {
+		t.Fatalf("failed claim = %+v, %v", result, err)
+	}
+	saved, err := f.d.GetRun(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Status != types.RunFailed || saved.LaunchReceiptClaimedAt != nil {
+		t.Fatalf("failed claim consumed created: %+v", saved)
+	}
+}
+
+func TestReceiptOrphanPendingRunDoesNotConsumeCreated(t *testing.T) {
+	f := newPushRecoveryFixture(t, false)
+	f.params.LaunchNonce = "receipt-orphan"
+	f.params.ValidationGeneration = "generation"
+	id, err := f.m.HandlePushReceived(context.Background(), f.params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.d.UpdateRunStatus(id, types.RunPending); err != nil {
+		t.Fatal(err)
+	}
+	f.m.mu.Lock()
+	delete(f.m.runs, id)
+	f.m.mu.Unlock()
+	claim := ipc.ClaimLaunchReceiptParams{RepoID: "recovery", Branch: "fresh", LaunchNonce: f.params.LaunchNonce, SubmittedHeadSHA: f.params.New, ValidationGeneration: f.params.ValidationGeneration, IntentDigest: digestIntent(f.params.Intent)}
+	result, err := f.m.claimLaunchReceiptLocked(&claim, "")
+	if err == nil || !strings.Contains(err.Error(), "pending without scheduler or manager ownership") || result != nil {
+		t.Fatalf("orphan claim = %+v, %v", result, err)
+	}
+	saved, err := f.d.GetRun(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.LaunchReceiptClaimedAt != nil {
+		t.Fatal("orphan claim consumed created")
+	}
+}

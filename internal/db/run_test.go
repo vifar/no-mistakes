@@ -1855,3 +1855,84 @@ func TestRebindRunPushedHeadAppliesOnlyToTheVerifiedBinding(t *testing.T) {
 		t.Fatalf("rebind result: head %s pushed %s generation %d", got.HeadSHA, *got.LastPushedSHA, *got.PushGeneration)
 	}
 }
+
+func TestClaimLaunchReceiptRejectsIneligibleRunWithoutConsumingCreated(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		status  types.RunStatus
+		reason  string
+		allowed bool
+	}{
+		{"failed", types.RunFailed, "pipeline failed", false},
+		{"cancelled", types.RunCancelled, "operator cancelled", false},
+		{"superseded", types.RunCancelled, types.RunCancelReasonSuperseded, true},
+		{"running", types.RunRunning, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := openTestDB(t)
+			repo, err := d.InsertRepo("/home/user/project", "https://example.test/project.git", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "nonce", "generation", "digest", "", false, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunErrorStatus(run.ID, tc.reason, tc.status); err != nil {
+				t.Fatal(err)
+			}
+			got, claimed, err := d.ClaimLaunchReceipt(repo.ID, "feature", "nonce", "head", "generation", "digest", "", false, nil)
+			if tc.allowed {
+				if err != nil || !claimed || got == nil || got.ID != run.ID {
+					t.Fatalf("eligible claim = %+v, %v, %v", got, claimed, err)
+				}
+			} else if err == nil || claimed {
+				t.Fatalf("ineligible claim = %+v, %v, %v", got, claimed, err)
+			}
+			saved, err := d.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (saved.LaunchReceiptClaimedAt != nil) != tc.allowed {
+				t.Fatalf("claim marker = %v, eligibility = %v", saved.LaunchReceiptClaimedAt, tc.allowed)
+			}
+		})
+	}
+}
+
+func TestClaimLaunchReceiptValidationRejectsBeforeCommit(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/home/user/project", "https://example.test/project.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "nonce", "generation", "digest", "", false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejection := errors.New("receipt eligibility rejected")
+	called := false
+	got, claimed, err := d.ClaimLaunchReceiptWithAllOptions(repo.ID, "feature", "nonce", "head", "generation", "digest", "", false, nil, "", "", nil, func(snapshot *Run) error {
+		called = true
+		if snapshot.ID != run.ID || snapshot.LaunchReceiptClaimedAt == nil {
+			t.Errorf("transaction snapshot = %+v", snapshot)
+		}
+		return rejection
+	})
+	if !called || !errors.Is(err, rejection) || got != nil || claimed {
+		t.Fatalf("rejected claim = %+v, %v, %v; validator called = %v", got, claimed, err, called)
+	}
+	saved, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.LaunchReceiptClaimedAt != nil {
+		t.Fatal("rejected transaction consumed created")
+	}
+	for i := 0; i < 2; i++ {
+		got, claimed, err := d.ClaimLaunchReceipt(repo.ID, "feature", "nonce", "head", "generation", "digest", "", false, nil)
+		if err != nil || got == nil || got.ID != run.ID || claimed != (i == 0) {
+			t.Fatalf("claim %d = %+v, %v, %v", i, got, claimed, err)
+		}
+	}
+}
