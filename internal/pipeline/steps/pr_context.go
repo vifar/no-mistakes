@@ -508,8 +508,8 @@ func verifyPRMutationComparison(sctx *pipeline.StepContext, host scm.Host, pr *s
 	return nil
 }
 
-// verifyCurrentPRComparison is read-only: owner evidence and terminal CI must
-// validate the receipt, never replace it with the post-merge empty diff.
+// verifyCurrentPRComparison preserves the receipt instead of replacing it with
+// the post-merge empty diff. A permitted target advance is recorded separately.
 func verifyCurrentPRComparison(sctx *pipeline.StepContext, host scm.Host, selection pipeline.PRTargetSelection, receipt *db.PRContext, facts *scm.PRFacts) error {
 	if receipt == nil || receipt.PRURL == "" || selection.PRURL != receipt.PRURL ||
 		!scm.SameSourceRepository(resolvedProvider(sctx), selection.SourceRepo, receipt.SourceRepo) ||

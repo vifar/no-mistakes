@@ -20,16 +20,23 @@ import (
 // Only the external forge and agent are simulated; the binary, daemon,
 // readiness transitions, comparison persistence, and terminal guard are real.
 func TestTargetAdvanceTerminalMergeLiveJourney(t *testing.T) {
-	for _, mode := range []string{"exact target", "merge recovery", "squash", "rebase", "later target", "tampered result", "corrupt rebase", "missing observation"} {
-		t.Run(mode, func(t *testing.T) {
+	for _, name := range []string{"exact target", "merge recovery", "squash", "rebase", "later target", "tampered result", "corrupt rebase", "missing observation", "stacked merge recovery", "stacked squash", "stacked rebase", "stacked later target", "stacked tampered result", "stacked corrupt rebase", "stacked missing observation"} {
+		t.Run(name, func(t *testing.T) {
+			mode := strings.TrimPrefix(name, "stacked ")
+			stacked := mode != name
 			j := newScopeJourney(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t)})
 			j.setTrusted("commands:\n  test: 'true'\n  lint: 'true'\n")
 			healthy := forgeState{Protection: &forgeEndpoint{Body: []byte(`{"strict":false,"contexts":[],"checks":[]}`)}, Checks: []forgeCheck{greenCheck("build")}}
 			j.setForge(healthy)
 			j.init()
 			const branch = "feature/terminal-advance"
-			j.h.CommitChange(branch, "first.txt", "first reviewed change\n", "first feature commit")
+			first := j.h.CommitChange(branch, "first.txt", "first reviewed change\n", "first feature commit")
 			j.h.CommitChange(branch, "second.txt", "second reviewed change\n", "second feature commit")
+			if stacked && (mode == "rebase" || mode == "corrupt rebase") {
+				// Keep two unapplied commits so a corrupt first rebased commit
+				// cannot hide behind an otherwise correct final commit.
+				j.h.CommitChange(branch, "third.txt", "third reviewed change\n", "third feature commit")
+			}
 			j.h.PushToGate(branch)
 			run := j.expectReady(branch, 90*time.Second)
 			database, err := db.OpenReadOnly(filepath.Join(j.h.NMHome, "state.sqlite"))
@@ -53,6 +60,10 @@ func TestTargetAdvanceTerminalMergeLiveJourney(t *testing.T) {
 			}
 			target := original.TargetSHA
 			if mode != "exact target" {
+				if stacked {
+					gitIn(t, j.h, j.h.WorkDir, "checkout", "main")
+					gitIn(t, j.h, j.h.WorkDir, "merge", "--ff-only", first)
+				}
 				target = advanceMain(t, j.h, "target.txt", "advanced target\n", "advance target before merge")
 			}
 			waitUntil := func(label string, predicate func() bool) {
@@ -87,7 +98,11 @@ func TestTargetAdvanceTerminalMergeLiveJourney(t *testing.T) {
 				gitIn(t, j.h, j.h.WorkDir, "merge", "--squash", branch)
 				gitIn(t, j.h, j.h.WorkDir, "commit", "-m", "forge squash")
 			case "rebase", "corrupt rebase":
-				commits := strings.Fields(gitIn(t, j.h, j.h.WorkDir, "rev-list", "--reverse", original.MergeBaseSHA+".."+head))
+				rebaseBase := original.MergeBaseSHA
+				if stacked {
+					rebaseBase = first
+				}
+				commits := strings.Fields(gitIn(t, j.h, j.h.WorkDir, "rev-list", "--reverse", rebaseBase+".."+head))
 				for i, commit := range commits {
 					gitIn(t, j.h, j.h.WorkDir, "-c", "user.name=Disposable forge", "cherry-pick", commit)
 					if mode == "corrupt rebase" && i == 0 {
@@ -138,7 +153,7 @@ func TestTargetAdvanceTerminalMergeLiveJourney(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Logf("%s: head=%s original_target=%s verified_target=%s merge=%s status_writes_before=%d\n%s", mode, head, original.TargetSHA, target, merged, statusWrites, out)
+			t.Logf("%s: head=%s original_target=%s verified_target=%s merge=%s status_writes_before=%d\n%s", name, head, original.TargetSHA, target, merged, statusWrites, out)
 			t.Logf("receipt unchanged at generation %d; terminal outcome=%s error=%s", current.Generation, terminal.Status, deref(terminal.Error))
 		})
 	}
