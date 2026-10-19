@@ -85,9 +85,9 @@ func inspect(ctx context.Context, d *db.DB, p *paths.Paths, repo *db.Repo) ([]Is
 	return issues, nil
 }
 
-// notificationEnvelope mirrors #66's on-disk versions, not its admission code.
-// Raw params preserve the checksum and future owner/options fields verbatim;
-// decoding into this branch's older IPC type would silently erase those fields.
+// notificationEnvelope mirrors the retained-notification envelope without
+// importing admission behavior. Raw params preserve checksummed owner/options
+// fields and their encoding rather than reserializing them through an IPC type.
 type notificationEnvelope struct {
 	Version       int             `json:"version"`
 	RepoID        string          `json:"repo_id"`
@@ -109,7 +109,7 @@ func digest(record notificationEnvelope) string {
 func notificationEvidence(p *paths.Paths, repo *db.Repo, covered map[string]bool) []Issue {
 	dir, err := os.Open(filepath.Join(p.Root(), "push-notifications"))
 	if os.IsNotExist(err) {
-		return nil // This base predates #66; absence is not evidence of a receive.
+		return nil // A missing journal cannot prove that no receive occurred.
 	}
 	failure := func(detail string) Issue { return Issue{Code: Failed, RepoID: repo.ID, Detail: detail} }
 	if err != nil {
