@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -52,26 +54,51 @@ func TestForcedRestartWithRealProcessExitDuringPIDInspection(t *testing.T) {
 		t.Fatal(err)
 	}
 	probeDir := t.TempDir()
-	countPath := filepath.Join(probeDir, "count")
+	inspectionPath := filepath.Join(probeDir, "inspecting")
 	resultPath := filepath.Join(probeDir, "result")
-	// Stop captures the running instance twice before shutdown; the third
-	// lstart lookup is the timeout fallback's inspection of the draining PID.
+	// An idle, registered connection keeps the real server draining until the
+	// post-shutdown start-time query begins. Without it, the daemon can exit
+	// before processRunning even reaches that query.
+	keeper, err := ipc.Dial(paths.WithRoot(h.NMHome).Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer keeper.Close()
+	var health ipc.HealthResult
+	if err := keeper.CallWithTimeout(ipc.MethodHealth, &ipc.HealthParams{}, &health, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan error, 1)
+	go func() {
+		defer keeper.Close()
+		deadline := time.NewTimer(10 * time.Second)
+		defer deadline.Stop()
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-deadline.C:
+				released <- fmt.Errorf("post-shutdown PID inspection never began")
+				return
+			case <-ticker.C:
+				if _, err := os.Stat(inspectionPath); err == nil {
+					released <- nil
+					return
+				}
+			}
+		}
+	}()
 	script := fmt.Sprintf(`#!/bin/sh
-if [ "$1" = '-p' ] && [ "$2" = '%d' ] && [ "$4" = 'lstart=' ]; then
-  n=0
-  if [ -f %s ]; then read n < %s; fi
-  n=$((n + 1))
-  echo "$n" > %s
-  if [ "$n" -eq 3 ]; then
-    sleep 2
-    %s "$@"
-    rc=$?
-    echo "real ps for old daemon pid %d exited $rc after delayed inspection" > %s
-    exit "$rc"
-  fi
+if [ "$1" = '-p' ] && [ "$2" = '%d' ] && [ "$4" = 'lstart=' ] && [ ! -S %s ]; then
+  touch %s
+  sleep 2
+  %s "$@"
+  rc=$?
+  echo "real ps for old daemon pid %d exited $rc after delayed inspection" > %s
+  exit "$rc"
 fi
 exec %s "$@"
-`, previous, shellQuote(countPath), shellQuote(countPath), shellQuote(countPath), shellQuote(realPS), previous, shellQuote(resultPath), shellQuote(realPS))
+`, previous, shellQuote(paths.WithRoot(h.NMHome).Socket()), shellQuote(inspectionPath), shellQuote(realPS), previous, shellQuote(resultPath), shellQuote(realPS))
 	if err := os.WriteFile(filepath.Join(probeDir, "ps"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -80,6 +107,9 @@ exec %s "$@"
 		"NM_TEST_DAEMON_STOP_TIMEOUT": "1ns",
 	}, "daemon", "restart", "--force")
 	t.Logf("restart output: %s", strings.TrimSpace(out))
+	if releaseErr := <-released; releaseErr != nil {
+		t.Fatal(releaseErr)
+	}
 	if err != nil {
 		t.Fatalf("restart: %v\n%s", err, out)
 	}

@@ -189,11 +189,11 @@ func TestPlannedStop_RequiresCapturedIdentityAndMatchingAcknowledgement(t *testi
 				if err == nil {
 					t.Fatal("unverified preparation/acknowledgement reported success")
 				}
-				missing := strings.HasPrefix(mode, "missing")
-				if missing && calls.Load() != 0 {
-					t.Fatalf("missing capture sent preserving RPC (%d)", calls.Load())
+				preflightRefusal := strings.HasPrefix(mode, "missing") || mode == "replacement before dial"
+				if preflightRefusal && calls.Load() != 0 {
+					t.Fatalf("unverified capture sent preserving RPC (%d)", calls.Load())
 				}
-				if !missing && calls.Load() != 1 {
+				if !preflightRefusal && calls.Load() != 1 {
 					t.Fatalf("captured identity was not prepared: %d", calls.Load())
 				}
 				if mode != "lost ack" && supervisorStops.Load() != 0 {

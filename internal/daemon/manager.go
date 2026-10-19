@@ -1074,7 +1074,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
 				status := types.RunFailed
-				if runCtx.Err() != nil {
+				if registerErr == nil && runCtx.Err() != nil {
 					status = types.RunCancelled
 				}
 				if dbErr := pipeline.RecordRunTerminal(context.Background(), m.db, plan.run.ID, errMsg, status, nil); dbErr != nil {

@@ -585,7 +585,7 @@ func stopPlannedDaemon(p *paths.Paths) error {
 			instance = daemonInstance{}
 		}
 	}
-	if instance.pid <= 0 || instance.startedAt.IsZero() || instance.instance == "" {
+	if instance.pid <= 0 || instance.startedAt.IsZero() {
 		// A live PID that failed capture is not a proven-dead daemon. Retain
 		// its artifacts and refuse both preservation and individual kills.
 		if instance.pid <= 0 {
@@ -622,12 +622,34 @@ func stopPlannedDaemon(p *paths.Paths) error {
 	client, dialErr := daemonDial(p.Socket())
 	var requestErr error
 	if dialErr == nil {
+		// Recheck after dial so replacing the root's socket/PID record cannot
+		// redirect an unbound legacy request to a successor.
+		if err := verifyCapturedDaemonRecord(p, instance); err != nil {
+			_ = client.Close()
+			return err
+		}
 		expected := ipc.ShutdownParams{ExpectedPID: instance.pid, ExpectedStartedAt: instance.startedAt.UTC().Format(time.RFC3339Nano), ExpectedInstance: instance.instance}
+		legacy := instance.instance == ""
+		if legacy {
+			if err := verifyLegacyDaemon(p, instance); err != nil {
+				_ = client.Close()
+				return err
+			}
+			// Older daemons have no preservation protocol. An empty request
+			// asks only for their ordinary, non-preserving shutdown.
+			expected = ipc.ShutdownParams{}
+		}
 		var result ipc.ShutdownResult
 		requestErr = client.CallWithTimeout(ipc.MethodShutdown, &expected, &result, 35*time.Second)
 		_ = client.Close()
-		if requestErr == nil && (!result.OK || result.PID != expected.ExpectedPID || result.StartedAt != expected.ExpectedStartedAt || result.Instance != expected.ExpectedInstance || result.Lifecycle == "") {
-			requestErr = fmt.Errorf("daemon shutdown acknowledgement identity is incomplete or changed")
+		if requestErr == nil {
+			if legacy {
+				if !result.OK || result.PID != 0 || result.StartedAt != "" || result.Instance != "" || result.Lifecycle != "" {
+					requestErr = fmt.Errorf("unexpected legacy daemon shutdown acknowledgement")
+				}
+			} else if !result.OK || result.PID != expected.ExpectedPID || result.StartedAt != expected.ExpectedStartedAt || result.Instance != expected.ExpectedInstance || result.Lifecycle == "" {
+				requestErr = fmt.Errorf("daemon shutdown acknowledgement identity is incomplete or changed")
+			}
 		}
 	} else {
 		requestErr = fmt.Errorf("dial daemon shutdown: %w", dialErr)
@@ -643,14 +665,53 @@ func stopPlannedDaemon(p *paths.Paths) error {
 		}
 		return requestErr
 	}
+	if err := verifyCapturedDaemonRecord(p, instance); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	_, serviceErr := stopManagedService(p)
 	waitErr := waitForDaemonStop(p, instance)
 	return errors.Join(requestErr, serviceErr, waitErr)
 }
 
+// verifyCapturedDaemonRecord refuses to act on a successor's service or socket.
+func verifyCapturedDaemonRecord(p *paths.Paths, instance daemonInstance) error {
+	record, err := readDaemonPIDFile(p.PIDFile())
+	if err != nil {
+		return err
+	}
+	if record.PID != instance.pid || !record.StartedAt.Equal(instance.startedAt) || record.Instance != instance.instance {
+		return fmt.Errorf("captured daemon identity changed")
+	}
+	return nil
+}
+
+// A pre-instance runtime cannot acknowledge certified preservation. Its legacy
+// RPC is allowed only with independent OS proof of the PID, start and root;
+// current runtimes still require the complete identity-bound handshake.
+func verifyLegacyDaemon(p *paths.Paths, instance daemonInstance) error {
+	startedAt, err := daemonProcessStartTime(instance.pid)
+	if err != nil {
+		return fmt.Errorf("inspect legacy daemon: %w", err)
+	}
+	if diff := startedAt.Sub(instance.startedAt); diff < -orphanStartTimeTolerance || diff > orphanStartTimeTolerance {
+		return fmt.Errorf("legacy daemon start time changed")
+	}
+	processes, err := daemonListDaemonProcesses()
+	if err != nil {
+		return fmt.Errorf("inspect legacy daemon root: %w", err)
+	}
+	for _, process := range processes {
+		if process.PID == instance.pid && canonicalRoot(process.Root) == canonicalRoot(p.Root()) {
+			return nil
+		}
+	}
+	return fmt.Errorf("legacy daemon PID does not own the captured root")
+}
+
 // daemonInstance names the exact daemon process a stop is responsible for.
-// Planned shutdown refuses incomplete identity unless singleton-held checks
-// prove stale artifacts can be cleared; IPC health alone cannot authorize it.
+// Current runtimes require the complete planned-shutdown tuple. Pre-instance
+// runtimes require independent PID/start/root verification for a legacy stop;
+// IPC health alone cannot authorize either path.
 type daemonInstance struct {
 	instance  string
 	pid       int
@@ -681,7 +742,7 @@ func captureRunningDaemon(p *paths.Paths) daemonInstance {
 	if !matches {
 		return daemonInstance{}
 	}
-	return daemonInstance{pid: record.PID, startedAt: startedAt, instance: record.Instance}
+	return daemonInstance{pid: record.PID, startedAt: record.StartedAt.UTC(), instance: record.Instance}
 }
 
 // exited reports whether this instance is gone. A PID now owned by a different
