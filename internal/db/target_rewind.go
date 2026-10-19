@@ -101,13 +101,16 @@ func targetRewindRun(q rewindQuery, runID string, step types.StepName) (*Run, er
 	if err := scanRun(q.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id=?`, runID), r); err != nil {
 		return nil, err
 	}
-	var prohibited bool
-	if err := q.QueryRow(`SELECT retarget_attempted IS NOT 0 OR
- EXISTS (SELECT 1 FROM commit_status_attempts WHERE run_id=?) OR
- EXISTS (SELECT 1 FROM commit_status_publications WHERE run_id=? AND adopted_only IS NOT 1) OR
- EXISTS (SELECT 1 FROM step_results WHERE run_id=? AND step_name='pr' AND status='completed') OR
- EXISTS (SELECT 1 FROM step_results WHERE run_id=? AND step_name='rebase' AND status='skipped')
- FROM runs WHERE id=?`, runID, runID, runID, runID, runID).Scan(&prohibited); err != nil {
+	var prohibitedReason string
+	if err := q.QueryRow(`SELECT CASE
+ WHEN retarget_attempted IS NULL THEN 'PR retarget provenance is unknown'
+ WHEN retarget_attempted != 0 THEN 'PR retarget was attempted'
+ WHEN EXISTS (SELECT 1 FROM commit_status_attempts WHERE run_id=?) THEN 'commit-status attempt is recorded'
+ WHEN EXISTS (SELECT 1 FROM commit_status_publications WHERE run_id=? AND adopted_only IS NOT 1) THEN 'commit-status publication is recorded without adoption-only provenance'
+ WHEN EXISTS (SELECT 1 FROM step_results WHERE run_id=? AND step_name='pr' AND status='completed') THEN 'PR step already completed'
+ WHEN EXISTS (SELECT 1 FROM step_results WHERE run_id=? AND step_name='rebase' AND status='skipped') THEN 'Rebase was skipped'
+ ELSE '' END
+ FROM runs WHERE id=?`, runID, runID, runID, runID, runID).Scan(&prohibitedReason); err != nil {
 		return nil, err
 	}
 	refuse := func(reason string) (*Run, error) {
@@ -119,8 +122,8 @@ func targetRewindRun(q rewindQuery, runID string, step types.StepName) (*Run, er
 	if r.LastPushedSHA != nil || r.PushGeneration != nil && *r.PushGeneration != 0 {
 		return refuse("head already published")
 	}
-	if prohibited {
-		return refuse("publication, skipped Rebase, or attempted/unknown PR retarget provenance")
+	if prohibitedReason != "" {
+		return refuse(prohibitedReason)
 	}
 	if step.Order() < types.StepRebase.Order() || step.Order() > types.StepLint.Order() {
 		return refuse("boundary outside unpublished validation: " + string(step))

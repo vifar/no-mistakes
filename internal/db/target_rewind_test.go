@@ -2,6 +2,7 @@ package db
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -100,7 +101,19 @@ func TestTargetRewindTransactionChargesOnlyCommittedFastForward(t *testing.T) {
 }
 
 func TestTargetRewindTransactionRechecksEligibilityAndGeneration(t *testing.T) {
-	for _, kind := range []string{"last pushed", "push generation", "status attempt", "legacy publication", "PR completed", "retarget attempted", "strict", "skipped rebase", "push step", "stale generation", "wrong local head", "cap"} {
+	reasons := map[string]string{
+		"last pushed":        "head already published",
+		"push generation":    "head already published",
+		"status attempt":     "commit-status attempt is recorded",
+		"legacy publication": "commit-status publication is recorded without adoption-only provenance",
+		"PR completed":       "PR step already completed",
+		"retarget attempted": "PR retarget was attempted",
+		"retarget unknown":   "PR retarget provenance is unknown",
+		"strict":             "strict shipping run",
+		"skipped rebase":     "Rebase was skipped",
+		"push step":          "boundary outside unpublished validation: push",
+	}
+	for _, kind := range []string{"last pushed", "push generation", "status attempt", "legacy publication", "PR completed", "retarget attempted", "retarget unknown", "strict", "skipped rebase", "push step", "stale generation", "wrong local head", "cap"} {
 		t.Run(kind, func(t *testing.T) {
 			d, id, c, req := targetRewindDBFixture(t)
 			var err error
@@ -124,6 +137,8 @@ func TestTargetRewindTransactionRechecksEligibilityAndGeneration(t *testing.T) {
 				if err == nil {
 					err = d.ConsumePRBaseBranchRequest(id)
 				}
+			case "retarget unknown":
+				_, err = d.sql.Exec(`UPDATE runs SET retarget_attempted=NULL WHERE id=?`, id)
 			case "strict":
 				_, err = d.sql.Exec(`UPDATE runs SET shipping_options='{"mode":"full"}' WHERE id=?`, id)
 			case "skipped rebase":
@@ -140,8 +155,22 @@ func TestTargetRewindTransactionRechecksEligibilityAndGeneration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if reason, ok := reasons[kind]; ok {
+				if allowed, err := d.CanRewindTarget(id, req.Step); err != nil || allowed {
+					t.Fatalf("ineligible preflight: allowed=%t error=%v", allowed, err)
+				}
+				err := d.TargetRewindRefusal(id, req.Step)
+				if !errors.Is(err, ErrTargetAdvanceIneligible) || err.Error() != ErrTargetAdvanceIneligible.Error()+": "+reason {
+					t.Fatalf("preflight refusal=%v; want specific cause %q", err, reason)
+				}
+			}
 			if _, err = d.RewindRunPRContext(id, c, req); err == nil {
 				t.Fatal("ineligible transaction committed")
+			}
+			if reason, ok := reasons[kind]; ok {
+				if !errors.Is(err, ErrTargetAdvanceIneligible) || err.Error() != ErrTargetAdvanceIneligible.Error()+": "+reason {
+					t.Fatalf("transaction refusal=%v; want specific cause %q", err, reason)
+				}
 			}
 			assertRewindCharge(t, d, id, 0, false)
 			receipt, err := d.GetRunPRContext(id)
