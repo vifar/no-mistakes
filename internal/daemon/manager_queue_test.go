@@ -201,6 +201,12 @@ func (f *schedFixture) dial() {
 // RPC took.
 func (f *schedFixture) push(branch string) (string, time.Duration) {
 	f.t.Helper()
+	// This fixture reports branch creation (Old=zero), including deliberate
+	// recreation on a second push. Model the accepted Git change before the
+	// post-receive RPC so live-tip validation sees the ref it describes.
+	ref := "refs/heads/" + branch
+	gitCmd(f.t, f.p.RepoDir(f.repoID), "update-ref", "-d", ref)
+	gitCmd(f.t, f.p.RepoDir(f.repoID), "update-ref", ref, f.head)
 	begin := time.Now()
 	var result ipc.PushReceivedResult
 	err := f.client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{

@@ -345,6 +345,9 @@ func TestPushReceivedAllowsDifferentBranchRunsConcurrently(t *testing.T) {
 	})
 
 	_, headSHA := setupTestGitRepo(t, p, d, "concurrent-branch-repo")
+	for _, branch := range []string{"feature/one", "feature/two"} {
+		gitCmd(t, p.RepoDir("concurrent-branch-repo"), "update-ref", "refs/heads/"+branch, headSHA)
+	}
 
 	client, err := ipc.Dial(p.Socket())
 	if err != nil {
@@ -713,6 +716,9 @@ func TestPushReceivedConcurrentDifferentBranchRunsAvoidSharedConfigLock(t *testi
 	}
 
 	branches := []string{"feature/one", "feature/two"}
+	for _, branch := range branches {
+		gitCmd(t, p.RepoDir(repoID), "update-ref", "refs/heads/"+branch, headSHA)
+	}
 	errs := make([]error, len(branches))
 	var wg sync.WaitGroup
 	for i, br := range branches {
@@ -1557,12 +1563,17 @@ func TestProofLaunchFallbackReturnsReusedWhenObserverClaimsDuringSetup(t *testin
 	defer client.Close()
 	const intent = "claim while the fallback initializes"
 	var fresh ipc.StartFreshRunResult
+	var pushed ipc.PushReceivedResult
 	done := make(chan error, 1)
 	go func() {
-		done <- client.Call(ipc.MethodStartFreshRun, &ipc.StartFreshRunParams{
-			RepoID: repo.ID, Branch: "main", HeadSHA: head, Intent: intent,
+		// A CLI fallback follows the hook's accepted receive. A fresh RPC
+		// itself claims under the admission lock, so it cannot leave an
+		// unclaimed receipt for an observer while its factory is paused.
+		done <- client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+			Gate: p.RepoDir(repo.ID), Ref: "refs/heads/main", New: head,
+			Old: strings.Repeat("0", 40), Intent: intent,
 			LaunchNonce: "setup-nonce", ValidationGeneration: "generation",
-		}, &fresh)
+		}, &pushed)
 	}()
 	select {
 	case <-entered:
@@ -1577,18 +1588,42 @@ func TestProofLaunchFallbackReturnsReusedWhenObserverClaimsDuringSetup(t *testin
 	}
 	defer observer.Close()
 	var first ipc.ClaimLaunchReceiptResult
-	if err := observer.Call(ipc.MethodClaimLaunchReceipt, &ipc.ClaimLaunchReceiptParams{
-		RepoID: repo.ID, Branch: "main", SubmittedHeadSHA: head,
-		LaunchNonce: "setup-nonce", ValidationGeneration: "generation", IntentDigest: digestIntent(intent),
-	}, &first); err != nil {
+	claimStarted := make(chan struct{})
+	claimDone := make(chan error, 1)
+	go func() {
+		close(claimStarted)
+		claimDone <- observer.Call(ipc.MethodClaimLaunchReceipt, &ipc.ClaimLaunchReceiptParams{
+			RepoID: repo.ID, Branch: "main", SubmittedHeadSHA: head,
+			LaunchNonce: "setup-nonce", ValidationGeneration: "generation", IntentDigest: digestIntent(intent),
+		}, &first)
+	}()
+	<-claimStarted
+	// Admission must settle before a claim can return. Never hold its setup
+	// barrier while synchronously waiting for that claim (the old deadlock).
+	unblock()
+	select {
+	case err := <-claimDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("observer did not finish after admission was released")
+	}
+	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
 	if first.Receipt == nil || first.Receipt.Disposition != "created" {
 		t.Fatalf("first observer = %+v", first)
 	}
 	unblock()
-	if err := <-done; err != nil {
+	if err := client.Call(ipc.MethodStartFreshRun, &ipc.StartFreshRunParams{
+		RepoID: repo.ID, Branch: "main", HeadSHA: head, Intent: intent,
+		LaunchNonce: "setup-nonce", ValidationGeneration: "generation",
+	}, &fresh); err != nil {
 		t.Fatal(err)
+	}
+	if pushed.RunID != first.Receipt.RunID {
+		t.Fatalf("observer did not attach the admitted push: %+v %+v", pushed, first)
 	}
 	if fresh.Receipt.RunID != first.Receipt.RunID || fresh.Receipt.Disposition != "reused" {
 		t.Fatalf("fallback receipt = %+v, first = %+v", fresh.Receipt, first.Receipt)

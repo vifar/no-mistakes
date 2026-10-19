@@ -64,6 +64,11 @@ func newFaultFixture(t *testing.T, maxRuns string) *faultFixture {
 
 func (f *faultFixture) push(branch string) string {
 	f.t.Helper()
+	// Report a real accepted creation/recreation before injecting scheduler
+	// faults; otherwise the live-ref guard rejects the fixture first.
+	ref := "refs/heads/" + branch
+	gitCmd(f.t, f.p.RepoDir("fault-repo"), "update-ref", "-d", ref)
+	gitCmd(f.t, f.p.RepoDir("fault-repo"), "update-ref", ref, f.head)
 	id, err := f.mgr.HandlePushReceived(context.Background(), &ipc.PushReceivedParams{
 		Gate: f.p.RepoDir("fault-repo"),
 		Ref:  "refs/heads/" + branch,
@@ -297,7 +302,9 @@ func TestQueueCancellationWriteFailurePreservesOwnership(t *testing.T) {
 			case "abort", "claim-retry":
 				err = f.mgr.HandleCancel(first)
 			case "supersede":
-				_, err = f.mgr.HandlePushReceived(context.Background(), &ipc.PushReceivedParams{Gate: f.p.RepoDir("fault-repo"), Ref: "refs/heads/first", New: f.head})
+				gitCmd(t, f.p.RepoDir("fault-repo"), "update-ref", "-d", "refs/heads/first")
+				gitCmd(t, f.p.RepoDir("fault-repo"), "update-ref", "refs/heads/first", f.head)
+				_, err = f.mgr.HandlePushReceived(context.Background(), &ipc.PushReceivedParams{Gate: f.p.RepoDir("fault-repo"), Ref: "refs/heads/first", Old: strings.Repeat("0", 40), New: f.head})
 
 			}
 			if err == nil || !strings.Contains(err.Error(), "injected cancellation write failure") {

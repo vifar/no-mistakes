@@ -52,6 +52,9 @@ func TestTrustedConfigConcurrentStartupLive(t *testing.T) {
 				t.Fatal(err)
 			}
 			branches := []string{"feature/one", "feature/two"}
+			for _, branch := range branches {
+				gitCmd(t, bare, "update-ref", "refs/heads/"+branch, head)
+			}
 			errs := make([]error, len(branches))
 			var wg sync.WaitGroup
 			for i, branch := range branches {
@@ -234,6 +237,7 @@ func TestTrustedConfigStartupRefusalLive(t *testing.T) {
 			}
 			isPi := strings.HasPrefix(mode, "pi-")
 			params := &ipc.PushReceivedParams{Gate: bare, Ref: "refs/heads/feature/new", Old: strings.Repeat("0", 40), New: head}
+			gitCmd(t, bare, "update-ref", params.Ref, head)
 			var active *db.Run
 			if isPi {
 				if err := os.WriteFile(p.ConfigFile(), []byte("agent: pi\n"), 0600); err != nil {
