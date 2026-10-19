@@ -1,16 +1,6 @@
 package db
 
-const schemaSQL = `
-CREATE TABLE IF NOT EXISTS document_passes (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    from_head_sha TEXT NOT NULL,
-    to_head_sha TEXT,
-    commit_count INTEGER NOT NULL DEFAULT 0,
-    findings_json TEXT,
-    carried_review_from TEXT
-);
-CREATE UNIQUE INDEX IF NOT EXISTS document_pass_pending ON document_passes(run_id) WHERE to_head_sha IS NULL;
+const statusValidationSchema = `
 CREATE TABLE IF NOT EXISTS status_validation_epochs (
  run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
  epoch INTEGER NOT NULL DEFAULT 0
@@ -23,6 +13,19 @@ CREATE TABLE IF NOT EXISTS controlled_shutdown_runs (
  run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
  instance TEXT NOT NULL, lifecycle TEXT NOT NULL, reason TEXT NOT NULL
 );
+`
+
+const schemaSQL = statusValidationSchema + `
+CREATE TABLE IF NOT EXISTS document_passes (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    from_head_sha TEXT NOT NULL,
+    to_head_sha TEXT,
+    commit_count INTEGER NOT NULL DEFAULT 0,
+    findings_json TEXT,
+    carried_review_from TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS document_pass_pending ON document_passes(run_id) WHERE to_head_sha IS NULL;
 CREATE TABLE IF NOT EXISTS pipeline_commit_heads (
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     head_sha TEXT NOT NULL,
@@ -307,10 +310,15 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
 );
 `
 
+var statusValidationMigrationStatements = []string{
+	`ALTER TABLE commit_status_publications ADD COLUMN strict_certificate TEXT`,
+	`ALTER TABLE commit_status_publications ADD COLUMN preserve_success INTEGER`,
+}
+
 // migrationStatements hold additive schema changes applied to databases that
 // were created before the referenced columns existed. Each statement must be
 // idempotent via its error being tolerated when the column already exists.
-var migrationStatements = []string{
+var migrationStatements = append([]string{
 	`CREATE TABLE IF NOT EXISTS run_pr_contexts (
 		run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
 		pr_url TEXT, source_repo TEXT, source_branch TEXT, forge_head_sha TEXT,
@@ -547,6 +555,4 @@ var migrationStatements = []string{
         AND r.review_approved_head_sha=local_head_sha)`,
 	// Separate observation: never replace the original qualification comparison.
 	`ALTER TABLE run_pr_contexts ADD COLUMN retained_target_sha TEXT`,
-	`ALTER TABLE commit_status_publications ADD COLUMN strict_certificate TEXT`,
-	`ALTER TABLE commit_status_publications ADD COLUMN preserve_success INTEGER`,
-}
+}, statusValidationMigrationStatements...)

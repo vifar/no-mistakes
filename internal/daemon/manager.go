@@ -405,28 +405,38 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 // started must become true once worktree creation succeeds: only failures before
 // that boundary can release custody without inspecting a managed worktree head.
 func (m *RunManager) failRunSetup(ctx context.Context, runID string, started bool, reason string) {
-	m.mu.Lock()
-	status := types.RunFailed
-	cause := context.Cause(ctx)
-	if owned := m.runs[runID]; owned != nil && owned.handle != nil {
-		if original := context.Cause(owned.handle.runCtx); original != nil {
-			cause = original
+	err := pipeline.WithCommitStatusLock(context.Background(), func() error {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		status := types.RunFailed
+		cause := context.Cause(ctx)
+		if owned := m.runs[runID]; owned != nil && owned.handle != nil {
+			if original := context.Cause(owned.handle.runCtx); original != nil {
+				cause = original
+			}
 		}
-	}
-	if cause != nil {
-		status, reason = types.RunCancelled, cause.Error()
-		var planned *pipeline.ControlledShutdownCause
-		if errors.Is(cause, pipeline.ErrDaemonShutdown) && !errors.As(cause, &planned) {
-			status = types.RunFailed
+		if cause != nil {
+			status, reason = types.RunCancelled, cause.Error()
+			var planned *pipeline.ControlledShutdownCause
+			if errors.Is(cause, pipeline.ErrDaemonShutdown) && !errors.As(cause, &planned) {
+				status = types.RunFailed
+			}
 		}
-	}
-	terminate := m.db.TerminateActiveRun
-	if !started {
-		terminate = m.db.TerminateUnstartedRun
-	}
-	_, err := terminate(runID, reason, status)
+		revoked, err := m.db.RawShutdownSuperseded(runID)
+		if err != nil {
+			return err
+		}
+		if revoked {
+			status, reason = types.RunFailed, db.RawShutdownReason
+		}
+		terminate := m.db.TerminateActiveRun
+		if !started {
+			terminate = m.db.TerminateUnstartedRun
+		}
+		_, err = terminate(runID, reason, status)
+		return err
+	})
 	run, readErr := m.db.GetRun(runID)
-	m.mu.Unlock()
 	if err != nil {
 		slog.Warn("failed to persist run setup failure", "run_id", runID, "error", err)
 	}

@@ -24,7 +24,7 @@ var (
 // Bump whenever schemaSQL or migrationStatements changes. Version zero is the
 // historical, unversioned schema; its complete upgrade runs once before the
 // stamp is committed. Current opens execute no DDL or backfill DML.
-const schemaVersion = 3
+const schemaVersion = 4
 
 // DB wraps a SQLite database connection.
 type DB struct {
@@ -86,6 +86,14 @@ func migrateWriteAttempt(sqlDB *sql.DB) error {
 		}
 		if _, err := tx.Exec(pushNotificationSchema); err != nil {
 			return fmt.Errorf("migrate db (push_notifications): %w", err)
+		}
+		if _, err := tx.Exec(statusValidationSchema); err != nil {
+			return fmt.Errorf("migrate db (status validation): %w", err)
+		}
+		for _, stmt := range statusValidationMigrationStatements {
+			if _, err := tx.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
+				return fmt.Errorf("migrate db (%s): %w", stmt, err)
+			}
 		}
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
 			return err

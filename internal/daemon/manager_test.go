@@ -1084,7 +1084,7 @@ func TestBadGlobalConfigStillCreatesFailedRunRow(t *testing.T) {
 	if len(runs) != 1 {
 		t.Fatalf("runs = %d, want 1 failed row", len(runs))
 	}
-	if runs[0].Status != types.RunFailed || runs[0].Error == nil || !strings.Contains(*runs[0].Error, "load global config:") {
+	if runs[0].Status != types.RunFailed || runs[0].Error == nil || !strings.Contains(*runs[0].Error, "load config:") {
 		t.Fatalf("run = %+v, want failed row with load config error", runs[0])
 	}
 }

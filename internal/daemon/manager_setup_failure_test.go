@@ -12,7 +12,10 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -194,5 +197,61 @@ func TestStartedSetupFailureRetainsBranchCustody(t *testing.T) {
 	}
 	if stored.Status != types.RunFailed || stored.TerminalHeadVerifiedAt != nil {
 		t.Fatalf("started failure incorrectly released custody: %+v", stored)
+	}
+}
+
+func TestSetupFailureHonorsRawShutdownFence(t *testing.T) {
+	for _, started := range []bool{false, true} {
+		for _, outcome := range []string{"planned", "raw", "terminal"} {
+			t.Run(fmt.Sprintf("started=%v/%s", started, outcome), func(t *testing.T) {
+				p := paths.WithRoot(t.TempDir())
+				if err := p.EnsureDirs(); err != nil {
+					t.Fatal(err)
+				}
+				d, err := db.Open(p.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer d.Close()
+				repo, err := d.InsertRepo("fixture", "https://example.com/repo", "main")
+				if err != nil {
+					t.Fatal(err)
+				}
+				run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+				if err != nil {
+					t.Fatal(err)
+				}
+				mgr := NewRunManager(d, p, nil)
+				cause := &pipeline.ControlledShutdownCause{Instance: mgr.runtimeInstance, Lifecycle: "planned"}
+				ctx, cancel := context.WithCancelCause(context.Background())
+				cancel(cause)
+				if err := d.PrepareControlledShutdown([]string{run.ID}, cause.Instance, cause.Lifecycle, cause.Error()); err != nil {
+					t.Fatal(err)
+				}
+				if outcome != "planned" {
+					if err := pipeline.RecordRawShutdown(context.Background(), d, []string{run.ID}, mgr.runtimeInstance, func() { cancel(pipeline.ErrDaemonShutdown) }); err != nil {
+						t.Fatal(err)
+					}
+				}
+				wantStatus, wantReason := types.RunCancelled, cause.Error()
+				if outcome == "raw" {
+					wantStatus, wantReason = types.RunFailed, db.RawShutdownReason
+				}
+				if outcome == "terminal" {
+					wantStatus, wantReason = types.RunFailed, "prior failure"
+					if _, err := d.TerminateActiveRun(run.ID, wantReason, wantStatus); err != nil {
+						t.Fatal(err)
+					}
+				}
+				mgr.failRunSetup(ctx, run.ID, started, "setup interrupted")
+				if context.Cause(ctx) != cause {
+					t.Fatal("first cancellation cause changed")
+				}
+				stored, err := d.GetRun(run.ID)
+				if err != nil || stored == nil || stored.Status != wantStatus || stored.Error == nil || *stored.Error != wantReason {
+					t.Fatalf("setup outcome: %+v, %v; want %s %q", stored, err, wantStatus, wantReason)
+				}
+			})
+		}
 	}
 }

@@ -957,9 +957,6 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if durable.Status.Terminal() {
 		return fmt.Errorf("recovered run already terminal")
 	}
-	if err := ValidateRecoveredRun(e.db, run, e.steps); err != nil {
-		return err
-	}
 	var obsolete bool
 	if err := WithCommitStatusLock(context.Background(), func() error {
 		var err error

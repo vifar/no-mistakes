@@ -248,7 +248,8 @@ func TestPipelineAttachCommitStatus(t *testing.T) {
 				if err = sc.DB.SetRunAwaitingAgent(run.ID); err != nil {
 					t.Fatal(err)
 				}
-				stored, err := sc.DB.GetRun(run.ID)
+				var stored *db.Run
+				stored, err = sc.DB.GetRun(run.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -263,6 +264,9 @@ func TestPipelineAttachCommitStatus(t *testing.T) {
 					t.Fatal(err)
 				}
 				err = executor.Resume(context.Background(), run, sc.Repo, dir)
+				if err != nil {
+					t.Fatalf("resume: %v", err)
+				}
 			} else {
 				err = executor.Execute(context.Background(), run, sc.Repo, dir)
 			}

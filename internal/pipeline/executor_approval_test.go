@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -474,5 +475,37 @@ func TestExecutor_TracksAutoFixTelemetry(t *testing.T) {
 	}
 	if got := fixEvent.fields["attempt"]; fmt.Sprint(got) != "1" {
 		t.Fatalf("fix attempt = %v, want 1", got)
+	}
+}
+
+func TestExecutor_ResumeRejectsUnregisteredRunningGate(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	step, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exec := NewExecutor(database, p, nil, nil, []Step{newPassStep(types.StepReview)}, nil)
+	if err := exec.Resume(context.Background(), run, repo, t.TempDir()); err == nil || !strings.Contains(err.Error(), "running before approval gate") {
+		t.Fatalf("fresh recovery must reject a running step without a durable approval gate: %v", err)
+	}
+	if gate := exec.CurrentGate(); gate.Nonce != "" {
+		t.Fatal("invalid recovery registered a gate")
+	}
+	stored, err := database.GetStepResult(step.ID)
+	if err != nil || stored.Status != types.StepStatusRunning {
+		t.Fatalf("invalid recovery mutated step: %+v, %v", stored, err)
 	}
 }

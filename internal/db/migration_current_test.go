@@ -1,7 +1,9 @@
 package db
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -77,5 +79,72 @@ func TestMigrationErrorNamesSQL(t *testing.T) {
 	_, err := Open(filepath.Join(t.TempDir(), "broken.sqlite"))
 	if err == nil || !strings.Contains(err.Error(), broken) {
 		t.Fatalf("migration error must name constant SQL: %v", err)
+	}
+}
+
+func TestWatcherStatusUpgrade(t *testing.T) {
+	for version := 0; version <= 3; version++ {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.sqlite")
+			d, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo, err := d.InsertRepo("fixture", "https://example.com/repo", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+			if err != nil {
+				t.Fatal(err)
+			}
+			publication := CommitStatusPublication{SHA: "head", Host: "example.com", Repo: "repo", LastState: "success"}
+			if err := d.PutCommitStatusPublication(run.ID, publication); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.sql.Exec(fmt.Sprintf(`DROP TABLE status_validation_steps;
+DROP TABLE status_validation_epochs;
+DROP TABLE controlled_shutdown_runs;
+ALTER TABLE commit_status_publications DROP COLUMN strict_certificate;
+ALTER TABLE commit_status_publications DROP COLUMN preserve_success;
+PRAGMA user_version=%d`, version)); err != nil {
+				t.Fatal(err)
+			}
+			d.Close()
+			d, err = Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			got, err := d.GetRun(run.ID)
+			if err != nil || got == nil || got.HeadSHA != "head" {
+				t.Fatalf("history: %+v, %v", got, err)
+			}
+			pub, err := d.GetCommitStatusPublication(context.Background(), run.ID, publication)
+			if err != nil || pub == nil || pub.LastState != "success" || pub.StrictCertificate != nil || pub.PreserveSuccess != nil {
+				t.Fatalf("publication: %+v, %v", pub, err)
+			}
+			if err := d.InvalidateStatusValidation(run.ID); err != nil {
+				t.Fatal(err)
+			}
+			epoch, err := d.StatusValidationEpoch(run.ID)
+			if err != nil || epoch != 1 {
+				t.Fatalf("epoch = %d, %v", epoch, err)
+			}
+			step, err := d.InsertStepResult(run.ID, "review")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.RecordStatusValidationStep(step.ID, run.ID, "head", "config", epoch); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.PrepareControlledShutdown([]string{run.ID}, "instance", "lifecycle", "planned"); err != nil {
+				t.Fatal(err)
+			}
+			matches, err := d.ControlledShutdownMatches(run.ID, "instance", "lifecycle", "planned")
+			if err != nil || !matches {
+				t.Fatalf("shutdown binding: %v, %v", matches, err)
+			}
+		})
 	}
 }
