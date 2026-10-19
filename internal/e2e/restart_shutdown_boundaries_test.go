@@ -14,9 +14,10 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// The shutdown exception belongs to CI monitoring, not to an interrupted agent.
-// Drive the real review subprocess so widening that exception loses a failure.
-func TestForcedRestartStillFailsAnInterruptedReview(t *testing.T) {
+// Planned shutdown cancels an executing review with its durable shutdown reason.
+// Drive the real review subprocess so leaving it active for recovery, as a parked
+// gate or uncertified CI monitor would be, cannot pass this check.
+func TestForcedRestartCancelsAnInterruptedReview(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: silentAgentScenario(t)})
 	if out, err := h.Run("init"); err != nil {
 		t.Fatalf("init: %v\n%s", err, out)
@@ -31,8 +32,8 @@ func TestForcedRestartStillFailsAnInterruptedReview(t *testing.T) {
 		t.Logf("restart output: %s", strings.TrimSpace(out))
 	}
 	got := h.RunInfo(run.ID)
-	if got.Status != types.RunFailed || deref(got.Error) != "daemon shutting down" {
-		t.Fatalf("interrupted review = %s (%q), want failed with daemon shutting down", got.Status, deref(got.Error))
+	if got.Status != types.RunCancelled || deref(got.Error) != "cancelled: planned daemon shutdown" {
+		t.Fatalf("interrupted review = %s (%q), want cancelled with the planned shutdown reason", got.Status, deref(got.Error))
 	}
 	t.Logf("run %s after restart: status=%s error=%q", got.ID, got.Status, deref(got.Error))
 }

@@ -10,9 +10,9 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// A forced restart while a run monitors CI for its open PR must not fail the
-// run or post a failure status to the PR head. The next daemon records the run
-// as ci_monitor_interrupted, exactly as it does after a crash mid-monitor.
+// An uncertified CI monitor keeps its interrupted display state across a forced
+// restart, but recovery must reconcile its published status to failure. Only an
+// unchanged, certified watcher earns the planned-shutdown preservation exception.
 func TestForcedRestartKeepsCIMonitorRunInterrupted(t *testing.T) {
 	j := newScopeJourney(t, SetupOpts{Agent: "claude"})
 	j.setForge(forgeState{Protection: protectionJSON("build@15368"), Checks: []forgeCheck{runningCheck("build")}})
@@ -45,8 +45,13 @@ func TestForcedRestartKeepsCIMonitorRunInterrupted(t *testing.T) {
 	if ci.Status != types.StepStatusSkipped || deref(ci.Error) != types.RunCIMonitorInterruptedReason {
 		t.Fatalf("CI step after forced restart = %s (%q), want skipped as interrupted", ci.Status, deref(ci.Error))
 	}
-	if got := j.ghCalls("/statuses/", "state=failure"); got != failuresBefore {
-		t.Fatalf("forced restart posted %d failure statuses to the PR head", got-failuresBefore)
+	// Status reconciliation runs in the background after IPC readiness.
+	deadline = time.Now().Add(30 * time.Second)
+	for j.ghCalls("/statuses/", "state=failure") == failuresBefore && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
 	}
-	t.Logf("run %s kept as %s across the forced restart; no failure status posted", run.ID, info.Status)
+	if got := j.ghCalls("/statuses/", "state=failure"); got != failuresBefore+1 {
+		t.Fatalf("forced restart posted %d failure statuses to the PR head, want one for the uncertified monitor", got-failuresBefore)
+	}
+	t.Logf("run %s kept as %s across the forced restart; uncertified status reconciled to failure", run.ID, info.Status)
 }
