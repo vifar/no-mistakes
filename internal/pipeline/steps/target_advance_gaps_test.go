@@ -170,7 +170,7 @@ func TestTargetAdvanceReviewFixConflictParksAndPreservesHead(t *testing.T) {
 }
 
 func TestQualifiedPublishedHeadTargetAdvanceDoesNotMoveHead(t *testing.T) {
-	for _, kind := range []string{"strict false", "accepted test gap", "strict true", "conflict", "unknown", "unreadable protection", "ruleset strict", "unqualified"} {
+	for _, kind := range []string{"strict false", "accepted test gap", "accepted test gap after transient failure", "strict true", "conflict", "unknown", "unreadable protection", "ruleset strict", "unqualified"} {
 		t.Run(kind, func(t *testing.T) {
 			c, _ := rewindFixture(t)
 			remote := c.Repo.UpstreamURL
@@ -191,7 +191,7 @@ func TestQualifiedPublishedHeadTargetAdvanceDoesNotMoveHead(t *testing.T) {
 				if err := c.DB.SetStepFindings(step.ID, fmt.Sprintf(`{"findings":[],"tested_head_sha":%q}`, head)); err != nil {
 					t.Fatal(err)
 				}
-				if kind == "accepted test gap" && name == types.StepTest {
+				if strings.HasPrefix(kind, "accepted test gap") && name == types.StepTest {
 					if err := c.DB.UpdateStepStatus(step.ID, types.StepStatusRunning); err != nil {
 						t.Fatal(err)
 					}
@@ -211,7 +211,7 @@ func TestQualifiedPublishedHeadTargetAdvanceDoesNotMoveHead(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if kind == "accepted test gap" && localValidationPassed(c, head) {
+			if strings.HasPrefix(kind, "accepted test gap") && localValidationPassed(c, head) {
 				t.Fatal("fixture must contain a recorded Test exception")
 			}
 			if err := c.DB.UpdateRunPushBinding(c.Run.ID, db.PushBinding{HeadSHA: head}); err != nil {
@@ -245,8 +245,21 @@ func TestQualifiedPublishedHeadTargetAdvanceDoesNotMoveHead(t *testing.T) {
 			bin := fakeCLIBinDir(t)
 			linkTestBinary(t, bin, "gh")
 			c.Env = fakeCLIEnv(bin, map[string]string{"FAKE_CLI_MODE": "ci-gh", "FAKE_CLI_PROTECTION_JSON": protection, "FAKE_CLI_RULES_JSON": rules, "FAKE_CLI_MERGEABLE": mergeable})
+			if kind == "accepted test gap after transient failure" {
+				healthyEnv := c.Env
+				c.Env = fakeCLIEnv(bin, map[string]string{"FAKE_CLI_MODE": "ci-gh", "FAKE_CLI_PROTECTION_JSON": `{}`, "FAKE_CLI_RULES_JSON": rules, "FAKE_CLI_MERGEABLE": mergeable})
+				if _, err := guardPRContextWithSelection(c, types.StepCI, selection, false); err == nil {
+					t.Fatal("unreadable protection was accepted")
+				}
+				clearCIMonitorReady(c)
+				stored, err := c.DB.GetRun(c.Run.ID)
+				if err != nil || stored.CIReadyAt != nil {
+					t.Fatalf("transient failure did not clear readiness: %+v %v", stored, err)
+				}
+				c.Env = healthyEnv
+			}
 			decision, err := guardPRContextWithSelection(c, types.StepCI, selection, false)
-			if kind == "strict false" || kind == "accepted test gap" {
+			if kind == "strict false" || strings.HasPrefix(kind, "accepted test gap") {
 				if err != nil || decision.RestartFrom != "" {
 					t.Fatalf("qualified head revalidated: %+v %v", decision, err)
 				}

@@ -358,7 +358,9 @@ func TestTargetRewindLiveExecutionPreservesOperatorSkips(t *testing.T) {
 					}
 					return decision, nil
 				})
-				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				// This includes both executor passes and the operator gate. Match
+				// waitForStepStatus's budget so loaded race builds can finish.
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
 				done := make(chan error, 1)
 				finished := make(chan struct{})

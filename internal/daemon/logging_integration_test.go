@@ -218,7 +218,9 @@ func shutdownIsolatedDaemon(t *testing.T, p *paths.Paths, pid int) {
 		_ = client.Call(ipc.MethodShutdown, &ipc.ShutdownParams{}, nil)
 		_ = client.Close()
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	// Allow the daemon's bounded graceful shutdown to complete before killing
+	// the child, including its log sink and race-runtime exit processing.
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		running, err := daemonProcessRunning(pid)
 		if err == nil && !running {
@@ -227,6 +229,7 @@ func shutdownIsolatedDaemon(t *testing.T, p *paths.Paths, pid int) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if running, _ := daemonProcessRunning(pid); running {
+		t.Logf("shutdown diagnostics:\n%s", detachedDaemonStartupDiagnostics(p))
 		_ = daemonKillPID(pid)
 		t.Fatalf("isolated daemon pid %d did not exit", pid)
 	}

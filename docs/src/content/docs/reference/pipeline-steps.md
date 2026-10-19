@@ -115,6 +115,8 @@ A pending rewind ends only after successful Rebase integration and its compariso
 
 An ordinary run keeps its published, qualified head and original validation comparison when the same target branch advances, protection explicitly permits a branch that is behind, and the forge confirms that the PR is mergeable. This avoids an unnecessary merge commit and preserves the statuses and approvals at that head. Both classic protection and applicable rulesets must be readable; strict up-to-date requirements, unknown mergeability, conflicts, retargets, and changed heads do not receive this exception. Strict shipping keeps its existing rules.
 
+Qualification remains bound to that exact comparison if a temporary provider-read failure clears current CI readiness, including when Test has an explicitly accepted gap. The monitor must still verify live protection and mergeability before restoring readiness. Rebinding a changed comparison clears the prior qualification.
+
 ## Review
 
 AI code review of your diff. This is probabilistic evidence, not a security or compliance certification, and does not replace deterministic repository-owned authorization and privacy tests, static analysis, threat modeling, or human security review.

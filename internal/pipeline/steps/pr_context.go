@@ -338,7 +338,7 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 	forward = forward || pipelineOwnedPublicationAdvance
 	if targetChanged && !eligible && !freshRetarget && step.Order() > types.StepRebase.Order() {
 		if reason := sctx.DB.TargetRewindRefusal(sctx.Run.ID, step); reason != nil {
-			return pipeline.PRContextDecision{}, fmt.Errorf("PR target advanced; start a new run for the current target and head: %w", reason)
+			return pipeline.PRContextDecision{}, fmt.Errorf("PR comparison changed after rebase; start a new run for the current target and head: %w", reason)
 		}
 	}
 	if previous != nil && previous.PRContextCandidate != candidate && !forward && !freshRetarget &&

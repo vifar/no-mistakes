@@ -34,6 +34,9 @@ type PRContext struct {
 	PRContextCandidate
 	ObservedAt int64
 	Generation int64
+	// CIQualified survives transient readiness failures only for this exact
+	// comparison. Rebinding a changed comparison clears it.
+	CIQualified bool
 }
 
 type PRContextBindResult struct {
@@ -48,10 +51,10 @@ func (d *DB) GetRunPRContext(runID string) (*PRContext, error) {
 	var prURL, sourceRepo, sourceBranch, forgeHead sql.NullString
 	err := d.sql.QueryRow(`SELECT pr_url, source_repo, source_branch, forge_head_sha,
 		local_head_sha, target_branch, target_sha, merge_base_sha, diff_digest,
-		observed_at, generation FROM run_pr_contexts WHERE run_id = ?`, runID).Scan(
+		observed_at, generation, ci_qualified FROM run_pr_contexts WHERE run_id = ?`, runID).Scan(
 		&prURL, &sourceRepo, &sourceBranch, &forgeHead,
 		&context.LocalHeadSHA, &context.TargetBranch, &context.TargetSHA,
-		&context.MergeBaseSHA, &context.DiffDigest, &context.ObservedAt, &context.Generation)
+		&context.MergeBaseSHA, &context.DiffDigest, &context.ObservedAt, &context.Generation, &context.CIQualified)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -243,7 +246,7 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 		local_head_sha=excluded.local_head_sha, target_branch=excluded.target_branch,
 		target_sha=excluded.target_sha, merge_base_sha=excluded.merge_base_sha,
 		diff_digest=excluded.diff_digest, observed_at=excluded.observed_at,
-		generation=excluded.generation`,
+		generation=excluded.generation, ci_qualified=0`,
 		runID, optionalPRField(candidate.PRURL), optionalPRField(candidate.SourceRepo),
 		optionalPRField(candidate.SourceBranch), optionalPRField(candidate.ForgeHeadSHA),
 		candidate.LocalHeadSHA, candidate.TargetBranch, candidate.TargetSHA,

@@ -56,6 +56,62 @@ func TestRunPRContextInitialAndIdempotentBind(t *testing.T) {
 	}
 }
 
+func TestRunPRContextQualificationSurvivesReadinessLossButNotRebinding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	id := testPRContextRun(t, d)
+	candidate := testPRContextCandidate()
+	candidate.PRURL = "https://example.com/acme/repo/pull/42"
+	candidate.ForgeHeadSHA = candidate.LocalHeadSHA
+	if _, err := d.BindRunPRContext(id, candidate, types.StepRebase); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunHeadSHA(id, candidate.LocalHeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunPushBinding(id, PushBinding{HeadSHA: candidate.LocalHeadSHA}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunReviewApprovedHeadSHA(id, candidate.LocalHeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	for _, ready := range []bool{true, false} {
+		if err := d.SetRunCIReady(id, ready); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := d.GetRunPRContext(id)
+	if err != nil || before == nil || !before.CIQualified {
+		t.Fatalf("qualification lost across readiness loss and reopen: %+v %v", before, err)
+	}
+	if _, err := d.BindRunPRContext(id, candidate, types.StepRebase); err != nil {
+		t.Fatal(err)
+	}
+	unchanged, err := d.GetRunPRContext(id)
+	if err != nil || *unchanged != *before {
+		t.Fatalf("idempotent bind lost qualification: %+v %v", unchanged, err)
+	}
+	candidate.TargetSHA = strings.Repeat("e", 40)
+	if _, err := d.BindRunPRContext(id, candidate, types.StepRebase); err != nil {
+		t.Fatal(err)
+	}
+	after, err := d.GetRunPRContext(id)
+	if err != nil || after == nil || after.CIQualified || after.Generation != before.Generation+1 {
+		t.Fatalf("changed comparison retained qualification: %+v %v", after, err)
+	}
+}
+
 func TestRunPRContextChangedReceiptInvalidatesFromChosenBoundaryIncludingSkipped(t *testing.T) {
 	d := openTestDB(t)
 	runID := testPRContextRun(t, d)

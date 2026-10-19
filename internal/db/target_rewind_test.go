@@ -490,6 +490,34 @@ func TestTargetRewindTransactionPinsInitiallyUnattachedPR(t *testing.T) {
 	}
 }
 
+func TestTargetRewindPRObservationURLPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		url string
+		ok  bool
+	}{
+		{"https://forge.example/test/repo/pulls/42", true},
+		{"http://forge.example/test/repo/pulls/42", true},
+		{"ssh://forge.example/test/repo/pulls/42", false},
+		{"http:///test/repo/pulls/42", false},
+		{"https://operator@forge.example/test/repo/pulls/42", false},
+	} {
+		t.Run(tc.url, func(t *testing.T) {
+			d, id, c, _ := targetRewindDBFixture(t)
+			err := d.PinTargetRewindPRObservation(id, tc.url, c.LocalHeadSHA)
+			if (err == nil) != tc.ok {
+				t.Fatalf("pin observation: %v, want accepted=%t", err, tc.ok)
+			}
+			stored, err := d.GetTargetRewindPRObservation(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.ok && (stored == nil || stored.PRURL != tc.url || stored.HeadSHA != c.LocalHeadSHA) || !tc.ok && stored != nil {
+				t.Fatalf("unexpected persisted observation: %+v", stored)
+			}
+		})
+	}
+}
+
 func TestTargetRewindAdoptionProvenance(t *testing.T) {
 	for _, kind := range []string{"adopted", "push replaces adoption", "legacy cannot become adoption", "actual attempt cannot become adoption", "uncertain adoption attempt"} {
 		t.Run(kind, func(t *testing.T) {

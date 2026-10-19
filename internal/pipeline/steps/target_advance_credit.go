@@ -25,7 +25,7 @@ func retainPublishedComparison(c *pipeline.StepContext, host scm.Host, previous 
 	if current == nil || current.HeadSHA != candidate.LocalHeadSHA || current.LastPushedSHA == nil || *current.LastPushedSHA != candidate.LocalHeadSHA || current.ReviewApprovedHeadSHA == nil || *current.ReviewApprovedHeadSHA != candidate.LocalHeadSHA {
 		return false, nil
 	}
-	qualified := current.CIReadyAt != nil
+	qualified := previous.CIQualified || current.CIReadyAt != nil
 	if !qualified {
 		publications, err := c.DB.GetCommitStatusPublications(c.Ctx, c.Run.ID)
 		if err != nil {
