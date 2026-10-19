@@ -248,7 +248,7 @@ func discardDocumentCandidate(sctx *pipeline.StepContext, from string, paths, un
 		}
 	}
 	if len(restore) > 0 {
-		args := append([]string{"--literal-pathspecs", "restore", "--source=" + from, "--staged", "--worktree", "--"}, restore...)
+		args := append([]string{"--literal-pathspecs", "restore", "--no-recurse-submodules", "--source=" + from, "--staged", "--worktree", "--"}, restore...)
 		if _, err := stepGitRun(sctx, args...); err != nil {
 			return fmt.Errorf("restore converged Document proposal paths: %w", err)
 		}

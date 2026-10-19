@@ -117,3 +117,98 @@ func TestDocumentSubmoduleStatusVisibility(t *testing.T) {
 		}
 	}
 }
+
+func TestDocumentRollbackPreservesRecursiveSubmoduleWork(t *testing.T) {
+	for _, reason := range []string{"over-budget", "repeated"} {
+		for _, state := range []string{"dirty", "clean"} {
+			t.Run(reason+"/"+state, func(t *testing.T) {
+				source, childBase, _ := setupGitRepo(t)
+				dir, base, _ := setupGitRepo(t)
+				gitCmd(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", source, "dependency")
+				gitCmd(t, dir, "commit", "-qam", "add dependency")
+				head := gitCmd(t, dir, "rev-parse", "HEAD")
+				gitCmd(t, dir, "config", "submodule.recurse", "true")
+				child := filepath.Join(dir, "dependency")
+				calls := 0
+				var childHead, childIndex, childDiff string
+				ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					calls++
+					if reason == "repeated" && calls == 1 {
+						gitCmd(t, child, "checkout", "--detach", childBase)
+						if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("accepted guide\n"), 0o644); err != nil {
+							t.Fatal(err)
+						}
+						gitCmd(t, dir, "add", "README.md", "dependency")
+						gitCmd(t, dir, "commit", "-qm", "update guide and dependency")
+						return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"gap remains","action":"ask-user"}],"summary":"update guide and dependency"}`)}, nil
+					}
+					if state == "dirty" {
+						if err := os.WriteFile(filepath.Join(child, "base.txt"), []byte("staged submodule work\n"), 0o644); err != nil {
+							t.Fatal(err)
+						}
+						gitCmd(t, child, "add", "base.txt")
+						if err := os.WriteFile(filepath.Join(child, "base.txt"), []byte("unstaged submodule work\n"), 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					childHead = gitCmd(t, child, "rev-parse", "HEAD")
+					childIndex = gitCmd(t, child, "write-tree")
+					childDiff = gitCmd(t, child, "diff", "--binary")
+					if reason == "over-budget" {
+						writeAndCommit("guide-a.md", "proposal A\n")(t, dir)
+						writeAndCommit("guide-b.md", "proposal B\n")(t, dir)
+					} else {
+						writeAndCommit("README.md", "repeated guide\n")(t, dir)
+					}
+					return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"proposed repair"}`)}, nil
+				}}
+				sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+				sc.Config.Document.MaxCommitsPerRun = 1
+				priorPasses := 0
+				if reason == "repeated" {
+					sc.Config.Document.MaxCommitsPerRun = 3
+					if out, err := (&DocumentStep{}).Execute(sc); err != nil || !out.NeedsApproval {
+						t.Fatalf("initial accepted repair: %+v, %v", out, err)
+					}
+					priorPasses = 1
+				}
+				accepted := sc.Run.HeadSHA
+				out, err := (&DocumentStep{}).Execute(sc)
+				if state == "dirty" {
+					if err == nil || !strings.Contains(err.Error(), "remain in the worktree") {
+						t.Errorf("rollback failed to refuse dirty submodule: outcome=%+v err=%v", out, err)
+					}
+					if got, readErr := os.ReadFile(filepath.Join(child, "base.txt")); readErr != nil || string(got) != "unstaged submodule work\n" {
+						t.Errorf("rollback lost submodule worktree bytes: %q, %v", got, readErr)
+					}
+				} else if err != nil || !out.NeedsApproval {
+					t.Errorf("clean rollback failed: %+v, %v", out, err)
+				}
+				if got := gitCmd(t, child, "rev-parse", "HEAD"); got != childHead {
+					t.Errorf("rollback changed submodule HEAD: %s != %s", got, childHead)
+				}
+				if got := gitCmd(t, child, "write-tree"); got != childIndex {
+					t.Errorf("rollback changed submodule index: %s != %s", got, childIndex)
+				}
+				if got := gitCmd(t, child, "diff", "--binary"); got != childDiff {
+					t.Errorf("rollback changed submodule unstaged diff: %q != %q", got, childDiff)
+				}
+				if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != accepted {
+					t.Errorf("rollback did not restore accepted parent HEAD: %s != %s", got, accepted)
+				}
+				passes, readErr := sc.DB.GetDocumentPasses(sc.Run.ID)
+				if readErr != nil || len(passes) != priorPasses+1 {
+					t.Fatalf("pass records: %+v, %v", passes, readErr)
+				}
+				last := passes[len(passes)-1]
+				if state == "dirty" {
+					if last.ToHeadSHA != nil || last.FindingsJSON != nil || last.CommitCount != 0 {
+						t.Errorf("dirty rollback completed its interrupted pass: %+v", last)
+					}
+				} else if last.ToHeadSHA == nil || *last.ToHeadSHA != accepted || last.CommitCount != 0 || gitStatusPorcelain(t, dir) != "" {
+					t.Errorf("clean rollback did not complete at clean accepted head: %+v", last)
+				}
+			})
+		}
+	}
+}
