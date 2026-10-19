@@ -952,7 +952,7 @@ func TestExecutorTargetRewindArchivesJustProducedReviewVerdict(t *testing.T) {
 	workDir := completionFixture(t, database, run)
 	reviewCalls := 0
 	outcome := &StepOutcome{Findings: `{"findings":[],"summary":"clean before target moved"}`, ReviewApprovedHeadSHA: run.HeadSHA}
-	wantFindings, wantHead := outcome.Findings, outcome.ReviewApprovedHeadSHA
+	wantHead := outcome.ReviewApprovedHeadSHA
 	steps := []Step{newPassStep(types.StepRebase), &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) { reviewCalls++; return outcome, nil }}, newPassStep(types.StepTest)}
 	executor := NewExecutor(database, p, nil, nil, steps, nil)
 	rewound := false
@@ -996,7 +996,8 @@ func TestExecutorTargetRewindArchivesJustProducedReviewVerdict(t *testing.T) {
 	if err := json.Unmarshal([]byte(*history[0].BoundaryJSON), &saved); err != nil {
 		t.Fatal(err)
 	}
-	if saved.Findings != wantFindings || saved.ReviewApprovedHeadSHA != wantHead {
+	findings, err := types.ParseFindingsJSON(saved.Findings)
+	if err != nil || len(findings.Items) != 0 || findings.Summary != "clean before target moved" || saved.ReviewApprovedHeadSHA != wantHead || !saved.ReviewCarryResolved || saved.NeedsApproval {
 		t.Fatalf("lost verdict: %+v", saved)
 	}
 	if reviewCalls != 2 {
