@@ -148,6 +148,9 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	t.Setenv("PATH", h.BinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("HOME", h.HomeDir)
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(h.HomeDir, "gitconfig-isolated"))
+	// Non-repository fixtures must stay outside Git even when TMPDIR is
+	// nested inside the checkout that is running this suite.
+	t.Setenv("GIT_CEILING_DIRECTORIES", os.TempDir())
 	t.Setenv("NM_HOME", h.NMHome)
 	t.Setenv("FAKEAGENT_LOG", h.AgentLog)
 	t.Setenv("FAKEAGENT_PR_UPSTREAM", h.UpstreamDir)
