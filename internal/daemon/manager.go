@@ -1366,9 +1366,6 @@ func assertTrustedConfigReadable(ctx context.Context, wtDir, defaultBranch, trus
 	return nil
 }
 
-// HandlePushReceived processes a push notification from the post-receive hook.
-// A proof-mode push creates an unclaimed row: the first matching observer
-// receives the sole `created` disposition by atomically claiming it.
 type ownerAdmissionIssueKey struct{}
 
 func (m *RunManager) handleRetainedPushLocked(ctx context.Context, params *ipc.PushReceivedParams) (string, error) {

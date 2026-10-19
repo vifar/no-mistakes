@@ -276,7 +276,7 @@ A long-running background process that manages pipeline runs. It:
 - Listens on a Unix socket at `~/.no-mistakes/socket`
 - Writes its identity record to `~/.no-mistakes/daemon.pid`
 - Holds an exclusive OS lock on `~/.no-mistakes/daemon.lock` for its whole lifetime, so only one live daemon can own an `NM_HOME` at a time
-- Serializes concurrent pushes to the same branch (new push cancels the in-progress run)
+- Coordinates same-branch pushes under the [daemon's replacement and admission rules](/no-mistakes/concepts/daemon/#concurrent-push-handling)
 - Creates and cleans up worktrees
 - Scopes configured commands and one-shot agent subprocesses to the step lifetime by terminating remaining child processes on completion, failure, or cancellation
 - Persists state to SQLite

@@ -14,7 +14,7 @@ The daemon exists so `git push no-mistakes` stays fast and the gate can keep
 working after your shell command returns.
 
 - Git hands the push to the local gate repo.
-- The hook notifies the daemon and exits immediately.
+- The hook notifies the daemon and returns after the admission response.
 - The daemon owns the long-running work: worktrees, pipeline execution, TUI
   events, state, cleanup, and crash recovery.
 
@@ -119,11 +119,14 @@ An existing unit picks up the policy when `no-mistakes daemon start` or `restart
 
 ## Concurrent push handling
 
-If you push to the same branch while a run is already active, the daemon:
+When a push requires a new validation on a branch with active work, the daemon:
 
-1. Cancels the in-progress run (reason: "cancelled: superseded by new push")
-2. Waits for it to finish
-3. Submits a new run with the latest push for admission
+1. Validates the receive and launch options, capturing the branch's predecessors
+2. Commits the replacement run, any owner-admission event, and its notification binding together
+3. Cancels only the captured predecessors (reason: "cancelled: superseded by new push") and waits for their workloads to stop
+4. Submits the replacement for slot admission
+
+Pre-commit validation, configuration, or insertion failures preserve the active predecessors. If cancellation or admission fails after the commit, the replacement is settled through setup-failure handling and the error names the failed operation. Receive retention, predecessor capture, and admission share the repository/branch lock. Receipt lookup, admission validation, and claim take that same lock, so a concurrent claim cannot consume `created` or report a healthy transient pending row as orphaned before admission finishes. Failed or mismatched claims leave `created` unconsumed. See [retained-notification recovery](/no-mistakes/reference/cli/#launch-owner) for replay and failed-setup handling.
 
 Pushes to different branches share execution slots. A newer push to a branch whose run is still queued supersedes it without starting it. The control plane (`status`, `respond`, `abort`, `gate_context`, launch) never waits on a slot. An IPC `respond` request with `action: abort` needs no gate identity. At a parked, waiting gate it fails the run with the gate's existing `aborted by user` error and failure reporting. If a response is already accepted and waiting for capacity, or recovery has not dispatched the run, it uses the same cancellation path as `axi abort --run`. Once cancellation stops the workload, the run is `cancelled`, its saved pending response is cleared, and its slot or reservation is released. A restart cannot replay that response.
 
@@ -148,6 +151,8 @@ reason about in one long-lived process than inside independent hook invocations.
 ## Crash recovery
 
 A clean stop (`SIGTERM`, `daemon stop`, `daemon restart`) leaves a run that is fully recorded as waiting at an approval gate exactly as a crash would, so the next start resumes it at that gate. This also preserves a recovered gate interrupted before dispatch, including during slot admission, comparison checks, or pending reconciliation retries: its parked state, any accepted response, and worktree remain available for the next restart. A clean stop also leaves a run that is monitoring CI for an already-created PR as a crash would, so the next start records it as `ci_monitor_interrupted` (see below). The stop posts no failure status for it. A clean stop still fails any other run that is in the middle of executing a step.
+
+Startup captures one cutoff before taking the exclusive root lock. While holding that lock and before serving requests, it removes only regular `.notification-<digits>` journal temporary files with mtime strictly older than the cutoff; equal/newer files, symlinks, directories, and final notification files (including corrupt records) are preserved. An invalid journal directory or a filesystem failure stops startup with a named cleanup error.
 
 On startup, the daemon checks for interrupted `pending` or `running` runs and restores the durable queue:
 

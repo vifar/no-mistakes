@@ -250,7 +250,9 @@ func (d *DB) UpdateRepoWorkingPath(id, workingPath string) (*Repo, error) {
 	return d.GetRepo(id)
 }
 
-// DeleteRepo deletes a repo by ID (cascade deletes runs and steps).
+// DeleteRepo removes a repository and its dependent database records atomically.
+// Both admitted and diagnostic notification bindings must be removed before the
+// run cascade, or their foreign keys would prevent repository deletion.
 func (d *DB) DeleteRepo(id string) error {
 	tx, err := d.sql.Begin()
 	if err != nil {

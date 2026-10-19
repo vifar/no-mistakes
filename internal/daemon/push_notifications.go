@@ -270,6 +270,9 @@ func (m *RunManager) validateNotification(ctx context.Context, retained *retaine
 	return nil
 }
 
+// HandlePushReceived processes a push notification from the post-receive hook.
+// A proof-mode push creates an unclaimed row: the first matching observer
+// receives the sole `created` disposition by atomically claiming it.
 func (m *RunManager) HandlePushReceived(ctx context.Context, params *ipc.PushReceivedParams) (string, error) {
 	if git.IsZeroSHA(params.New) {
 		return "", fmt.Errorf("ref deletion push, no pipeline to run")
