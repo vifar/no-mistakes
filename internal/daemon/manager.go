@@ -1057,7 +1057,10 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		m.mu.Lock()
 		m.runs[plan.run.ID].state = ownershipClaimed
 		m.mu.Unlock()
-		resumeErr := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
+		resumeErr := registerErr
+		if resumeErr == nil {
+			resumeErr = executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
+		}
 		// Mark finishing before releasing: Release dispatches queued runs
 		// synchronously, and a push landing in that window must not treat
 		// this already-decided run as a claimed one to cancel and wait on.
