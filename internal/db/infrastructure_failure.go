@@ -19,9 +19,13 @@ func (d *DB) FailRunInfrastructure(runID, message, verifiedHead string) error {
 	return sqlitewrite.Transaction(context.Background(), d.sql, "settle infrastructure failure", func(ctx context.Context, tx *sql.Tx) error {
 		ts := now()
 		if _, err := tx.ExecContext(ctx, `UPDATE runs SET error=?, status=?, push_active=0,
+   parked_ms=COALESCE(parked_ms, 0) + CASE
+     WHEN awaiting_agent_since IS NOT NULL AND ? > awaiting_agent_since
+     THEN (? - awaiting_agent_since) * 1000 ELSE 0 END,
+   awaiting_agent_since=NULL,
    head_sha=CASE WHEN ?='' THEN head_sha ELSE ? END,
    terminal_head_verified_at=CASE WHEN ?='' THEN NULL ELSE ? END, updated_at=? WHERE id=?`,
-			message, types.RunFailed, verifiedHead, verifiedHead, verifiedHead, ts, ts, runID); err != nil {
+			message, types.RunFailed, ts, ts, verifiedHead, verifiedHead, verifiedHead, ts, ts, runID); err != nil {
 			return err
 		}
 		_, err := tx.ExecContext(ctx, `UPDATE step_results SET status=?, error=?, completed_at=?,
