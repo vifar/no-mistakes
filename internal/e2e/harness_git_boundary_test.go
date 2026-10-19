@@ -13,6 +13,9 @@ import (
 // A temporary directory with no .git must not inherit the checkout above
 // TMPDIR. In particular, init must refuse instead of changing its remote.
 func TestHarnessNonRepositoryTempDirStaysOutsideCheckout(t *testing.T) {
+	// Shared binaries must outlive this test's nested temporary directory;
+	// later journeys reuse them through buildOnce after this test cleans up.
+	buildBinaries(t)
 	parent := t.TempDir()
 	tmp := filepath.Join(parent, "tmp")
 	if err := os.Mkdir(tmp, 0o755); err != nil {

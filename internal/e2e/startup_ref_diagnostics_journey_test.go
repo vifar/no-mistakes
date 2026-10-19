@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -48,6 +49,33 @@ func TestStartupRefDiagnosticsOnRealCLI(t *testing.T) {
 			t.Logf("%v with notification %q:\n%s", args, payload, out)
 		}
 	}
+	statusCommand(t, h, h.WorkDir, "daemon", "stop", "--force")
+	statusCommand(t, h, h.WorkDir, "daemon", "start")
+	events := filepath.Join(h.NMHome, "logs", "ref-reconciliation.jsonl")
+	history, err := os.ReadFile(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawOrphan, sawInvalid bool
+	for _, line := range strings.Split(strings.TrimSpace(string(history)), "\n") {
+		var event struct {
+			Code string `json:"code"`
+			Ref  string `json:"ref"`
+			Head string `json:"head"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatalf("invalid startup event: %v\n%s", err, line)
+		}
+		sawOrphan = sawOrphan || event.Code == "STARTUP_ORPHANED_REF" && event.Ref == "refs/heads/unrecorded" && event.Head == head
+		sawInvalid = sawInvalid || event.Code == "STARTUP_RECONCILIATION_FAILED"
+	}
+	if !sawOrphan || !sawInvalid {
+		t.Fatalf("restart lost exact orphan or invalid-evidence diagnostics:\n%s", history)
+	}
+	if out, err := h.runGit(t.Context(), h.WorkDir, "--git-dir="+gate, "rev-parse", "refs/heads/unrecorded"); err != nil || strings.TrimSpace(string(out)) != head {
+		t.Fatalf("diagnostic restart changed the orphan ref: %v\n%s", err, out)
+	}
+	t.Logf("real startup retained exact-head diagnostics without changing the ref:\n%s", history)
 	if runs := h.Runs(); len(runs) != 0 {
 		t.Fatalf("diagnostics invented run admission: %+v", runs)
 	}
@@ -62,11 +90,13 @@ func TestStartupRefDiagnosticsOnRealCLI(t *testing.T) {
 		t.Fatalf("status retained resolved diagnostics:\n%s", out)
 	}
 	t.Logf("status re-read current evidence without restart:\n%s", out)
+	if retained, err := os.ReadFile(events); err != nil || string(retained) != string(history) {
+		t.Fatalf("resolved status erased startup history: %v\n%s", err, retained)
+	}
 	if out, err := h.runGit(t.Context(), h.WorkDir, "--git-dir="+gate, "update-ref", "refs/heads/unrecorded", head); err != nil {
 		t.Fatalf("restore orphan that requires a startup event: %v\n%s", err, out)
 	}
 	statusCommand(t, h, h.WorkDir, "daemon", "stop", "--force")
-	events := filepath.Join(h.NMHome, "logs", "ref-reconciliation.jsonl")
 	if err := os.Remove(events); err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
