@@ -942,21 +942,34 @@ func (d *DB) SetRunCIReady(id string, ready bool) error {
 }
 
 func (d *DB) SetRunCIReadyWithReason(id string, ready, declaredNoCI bool) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("set run CI ready: %w", err)
+	}
+	defer tx.Rollback()
 	readyValue := 0
 	declaredValue := 0
 	var readyAt any
 	if ready {
+		// Preserve verified qualification on this receipt when a later poll
+		// clears readiness. Never carry it across a changed comparison.
+		if _, err := tx.Exec(`UPDATE run_pr_contexts SET ci_qualified=1
+            WHERE run_id=? AND pr_url IS NOT NULL AND pr_url!='' AND forge_head_sha=local_head_sha
+            AND EXISTS (SELECT 1 FROM runs r WHERE r.id=run_id AND r.head_sha=local_head_sha
+              AND r.last_pushed_sha=local_head_sha AND r.review_approved_head_sha=local_head_sha)`, id); err != nil {
+			return fmt.Errorf("set run CI qualification: %w", err)
+		}
 		readyValue = 1
 		readyAt = now()
 		if declaredNoCI {
 			declaredValue = 1
 		}
 	}
-	_, err := d.sql.Exec(`UPDATE runs SET ci_ready_at = ?, ci_ready_no_ci = ?, updated_at = ? WHERE id = ? AND ((ci_ready_at IS NULL AND ? = 1) OR (ci_ready_at IS NOT NULL AND ? = 0) OR (COALESCE(ci_ready_no_ci, 0) != ?))`, readyAt, declaredValue, now(), id, readyValue, readyValue, declaredValue)
+	_, err = tx.Exec(`UPDATE runs SET ci_ready_at = ?, ci_ready_no_ci = ?, updated_at = ? WHERE id = ? AND ((ci_ready_at IS NULL AND ? = 1) OR (ci_ready_at IS NOT NULL AND ? = 0) OR (COALESCE(ci_ready_no_ci, 0) != ?))`, readyAt, declaredValue, now(), id, readyValue, readyValue, declaredValue)
 	if err != nil {
 		return fmt.Errorf("set run CI ready: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // UpdateRunReviewApprovedHeadSHA replaces the run's review authority with the

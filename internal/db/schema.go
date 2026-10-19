@@ -525,4 +525,12 @@ var migrationStatements = []string{
     )`,
 	`ALTER TABLE commit_status_attempts ADD COLUMN adopted_only INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE commit_status_publications ADD COLUMN adopted_only INTEGER NOT NULL DEFAULT 0`,
+	// Historical qualification belongs to an exact comparison, independently
+	// of current CI readiness. Changed comparisons clear it when rebound.
+	`ALTER TABLE run_pr_contexts ADD COLUMN ci_qualified INTEGER NOT NULL DEFAULT 0`,
+	`UPDATE run_pr_contexts SET ci_qualified=1 WHERE ci_qualified=0
+      AND pr_url IS NOT NULL AND pr_url!='' AND forge_head_sha=local_head_sha
+      AND EXISTS (SELECT 1 FROM runs r WHERE r.id=run_id AND r.ci_ready_at IS NOT NULL
+        AND r.head_sha=local_head_sha AND r.last_pushed_sha=local_head_sha
+        AND r.review_approved_head_sha=local_head_sha)`,
 }

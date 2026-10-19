@@ -31,7 +31,7 @@ func (d *DB) GetTargetRewindPRObservation(runID string) (*TargetRewindPRObservat
 // later discovery must never be turned into the initial observation.
 func (d *DB) PinTargetRewindPRObservation(runID, prURL, headSHA string) error {
 	parsed, err := url.Parse(prURL)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || !validGitSHA(headSHA) {
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || !validGitSHA(headSHA) {
 		return fmt.Errorf("invalid initial PR observation")
 	}
 	result, err := d.sql.Exec(`INSERT INTO run_rewind_pr_observations(run_id,pr_url,head_sha)
