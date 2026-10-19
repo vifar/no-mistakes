@@ -64,7 +64,9 @@ func TestRunOwnerReceiptJourney(t *testing.T) {
 			if result, err := call(claim); err != nil || result.Receipt != nil {
 				t.Fatalf("absent receipt: %+v %v", result, err)
 			}
-			encode := func(key, value string) string { return "no-mistakes." + key + "=" + base64.StdEncoding.EncodeToString([]byte(value)) }
+			encode := func(key, value string) string {
+				return "no-mistakes." + key + "=" + base64.StdEncoding.EncodeToString([]byte(value))
+			}
 			args := []string{"push", "no-mistakes", branch}
 			for _, option := range []string{encode("owner", claim.Owner), encode("launch-nonce", claim.LaunchNonce), encode("validation-generation", claim.ValidationGeneration), encode("intent", "receipt intent")} {
 				args = append(args, "--push-option", option)
@@ -365,7 +367,9 @@ func TestRunOwnerReceiveJourney(t *testing.T) {
 				t.Fatal(err)
 			}
 			statusCommand(t, h, h.WorkDir, "init")
-			encode := func(owner string) string { return "no-mistakes.owner=" + base64.StdEncoding.EncodeToString([]byte(owner)) }
+			encode := func(owner string) string {
+				return "no-mistakes.owner=" + base64.StdEncoding.EncodeToString([]byte(owner))
+			}
 			for _, tc := range []struct {
 				name    string
 				options []string
