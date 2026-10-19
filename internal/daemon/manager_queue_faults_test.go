@@ -222,6 +222,9 @@ func TestQueueShutdownRacingQueuedLaunchNeverStartsIt(t *testing.T) {
 
 	reached := make(chan struct{})
 	resume := make(chan struct{})
+	var resumeOnce sync.Once
+	unblock := func() { resumeOnce.Do(func() { close(resume) }) }
+	defer unblock()
 	var once sync.Once
 	f.mgr.beforeQueuedRegister = func() {
 		once.Do(func() {
@@ -232,15 +235,25 @@ func TestQueueShutdownRacingQueuedLaunchNeverStartsIt(t *testing.T) {
 
 	// Freeing the slot dispatches s1 into the paused launch.
 	f.step.release(running)
-	<-reached
+	select {
+	case <-reached:
+	case <-time.After(5 * time.Second):
+		t.Fatal("queued launch did not reach admission barrier")
+	}
 
 	shutdownDone := make(chan struct{})
 	go func() {
 		f.mgr.Shutdown()
 		close(shutdownDone)
 	}()
-	f.waitFor("shutdown to begin", func() bool { return f.mgr.shuttingDown.Load() })
-	close(resume)
+	fenceDeadline := time.Now().Add(time.Second)
+	for f.mgr.shutdownState.Load() == shutdownIdle && time.Now().Before(fenceDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if f.mgr.shutdownState.Load() == shutdownIdle {
+		t.Fatal("shutdown did not fence the paused queue admission")
+	}
+	unblock()
 	select {
 	case <-shutdownDone:
 	case <-time.After(45 * time.Second):

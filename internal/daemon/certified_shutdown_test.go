@@ -318,8 +318,8 @@ func TestControlledShutdown_RejectsIncompleteOrChangedRuntimeIdentity(t *testing
 				request.ExpectedInstance = newShutdownToken()
 			}
 			result, err := mgr.prepareControlledShutdown(context.Background(), request)
-			if err == nil || result != nil || mgr.shuttingDown.Load() {
-				t.Fatalf("unverified identity prepared shutdown: result=%+v,err=%v,shutdown=%v", result, err, mgr.shuttingDown.Load())
+			if err == nil || result != nil || mgr.shutdownState.Load() != shutdownIdle {
+				t.Fatalf("unverified identity prepared shutdown: result=%+v,err=%v,shutdown=%v", result, err, mgr.shutdownState.Load() != shutdownIdle)
 			}
 		})
 	}
@@ -425,7 +425,7 @@ func TestControlledShutdown_ConcurrentRetriesShareTheOriginalLifecycle(t *testin
 	if err != nil || !matches {
 		t.Errorf("durable lifecycle changed: %v,%v", matches, err)
 	}
-	if !mgr.shuttingDown.Load() {
+	if mgr.shutdownState.Load() == shutdownIdle {
 		t.Error("retry reopened admission")
 	}
 }

@@ -153,7 +153,7 @@ func TestPlannedStop_UnsettledAdmissionDoesNotStopSupervisor(t *testing.T) {
 			if _, err := os.Stat(*run.WorktreeDir); !os.IsNotExist(err) {
 				t.Errorf("setup resources remain after settlement: %v", err)
 			}
-			if !mgr.shuttingDown.Load() {
+			if mgr.shutdownState.Load() == shutdownIdle {
 				t.Error("failed preparation reopened admission")
 			}
 			if id, err := mgr.startRun(context.Background(), repo, "other", head, head, "test", nil, "intent", "", false, "", "", nil); err == nil || id != "" {

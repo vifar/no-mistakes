@@ -13,6 +13,12 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+const (
+	shutdownIdle int32 = iota
+	shutdownPlanned
+	shutdownRaw
+)
+
 func newShutdownToken() string {
 	var token [32]byte
 	if _, err := rand.Read(token[:]); err != nil {
@@ -44,22 +50,21 @@ func (m *RunManager) prepareControlledShutdown(ctx context.Context, expected ipc
 		return nil, fmt.Errorf("daemon runtime identity is unavailable")
 	}
 	m.mu.Lock()
-	if m.rawShutdown {
+	if m.shutdownState.Load() == shutdownRaw {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("raw daemon shutdown already started")
 	}
 	preparation := m.shutdownPreparation
 	if preparation == nil {
-		if m.shuttingDown.Load() {
-			m.mu.Unlock()
-			return nil, fmt.Errorf("daemon shutdown already started")
-		}
 		lifecycle := newShutdownToken()
 		if lifecycle == "" {
 			m.mu.Unlock()
 			return nil, fmt.Errorf("shutdown lifecycle identity is unavailable")
 		}
-		m.shuttingDown.Store(true)
+		if !m.shutdownState.CompareAndSwap(shutdownIdle, shutdownPlanned) {
+			m.mu.Unlock()
+			return nil, fmt.Errorf("daemon shutdown already started")
+		}
 		cancels := m.runCancelsLocked()
 		ids := make([]string, 0, len(cancels))
 		dones := make([]chan struct{}, 0, len(cancels))
@@ -82,16 +87,14 @@ func (m *RunManager) prepareControlledShutdown(ctx context.Context, expected ipc
 			preparation.err = fmt.Errorf("record planned shutdown: %w", err)
 			m.mu.Lock()
 			m.shutdownPreparation = nil
-			if !m.rawShutdown {
-				m.shuttingDown.Store(false)
-			}
+			m.shutdownState.CompareAndSwap(shutdownPlanned, shutdownIdle)
 			m.mu.Unlock()
 			close(preparation.done)
 			return nil, preparation.err
 		}
 		m.stopLimitWatcher()
 		m.mu.Lock()
-		if !m.rawShutdown {
+		if m.shutdownState.Load() != shutdownRaw {
 			for _, cancel := range cancels {
 				cancel(preparation.cause)
 			}
@@ -122,7 +125,6 @@ func (m *RunManager) prepareControlledShutdown(ctx context.Context, expected ipc
 		for id := range m.leftForRecovery {
 			left[id] = true
 		}
-		raw := m.rawShutdown
 		m.mu.Unlock()
 		for _, id := range preparation.ids {
 			run, err := m.db.GetRun(id)
@@ -139,7 +141,7 @@ func (m *RunManager) prepareControlledShutdown(ctx context.Context, expected ipc
 				return nil, fmt.Errorf("planned shutdown has unsettled run %s", run.ID)
 			}
 		}
-		if raw {
+		if m.shutdownState.Load() == shutdownRaw {
 			return nil, fmt.Errorf("raw daemon shutdown already started")
 		}
 		return &ipc.ShutdownResult{PID: os.Getpid(), StartedAt: m.runtimeStartedAt.UTC().Format(time.RFC3339Nano), OK: true, Instance: preparation.cause.Instance, Lifecycle: preparation.cause.Lifecycle}, nil

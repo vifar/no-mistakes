@@ -1018,10 +1018,10 @@ func TestAdmissionFailure_SettlesBeforeReleasingCustody(t *testing.T) {
 	rawDone := make(chan struct{})
 	go func() { mgr.Shutdown(); close(rawDone) }()
 	until := time.Now().Add(time.Second)
-	for !mgr.shuttingDown.Load() && time.Now().Before(until) {
+	for mgr.shutdownState.Load() == shutdownIdle && time.Now().Before(until) {
 		time.Sleep(time.Millisecond)
 	}
-	if !mgr.shuttingDown.Load() {
+	if mgr.shutdownState.Load() == shutdownIdle {
 		t.Fatal("raw shutdown did not fence admission")
 	}
 	close(factoryRelease)
@@ -1079,7 +1079,7 @@ func TestAdmissionFailure_SettlesBeforeReleasingCustody(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if fmt.Sprint(states) != "[success failure]" {
+	if fmt.Sprint(states) != "[success]" {
 		t.Fatalf("admission HTTP ordering: %v", states)
 	}
 }

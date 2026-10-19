@@ -57,15 +57,13 @@ type RunManager struct {
 	mu               sync.Mutex
 	runs             map[string]*managedRun
 	wg               sync.WaitGroup // tracks background run goroutines
-	shuttingDown     atomic.Bool    // prevents new runs during shutdown
+	shutdownState    atomic.Int32   // prevents new runs during shutdown
 	db               *db.DB
 	paths            *paths.Paths
 	steps            StepFactory
 
-	// shutdownPreparation is the in-flight instance-bound planned shutdown;
-	// rawShutdown records that Shutdown ran without one (signal or fatal path).
+	// shutdownPreparation is the in-flight instance-bound planned shutdown.
 	shutdownPreparation *controlledShutdownPreparation
-	rawShutdown         bool
 	// leftForRecovery names runs a shutdown deliberately left non-terminal
 	// (parked at a gate or monitoring CI) for the next start's recovery.
 	leftForRecovery map[string]bool
@@ -295,13 +293,13 @@ func (m *RunManager) SlotUsage() ipc.SlotsResult {
 }
 
 func (m *RunManager) startQueuedRun(runID string, slot *runSlot) (func(), bool) {
-	if m.shuttingDown.Load() {
+	if m.shutdownState.Load() != shutdownIdle {
 		return slot.Release, true
 	}
 	if m.beforeQueuedRegister != nil {
 		m.beforeQueuedRegister()
 	}
-	if m.shuttingDown.Load() {
+	if m.shutdownState.Load() != shutdownIdle {
 		return slot.Release, true
 	}
 	claimed, err := m.claimQueued(runID)
@@ -958,7 +956,7 @@ func hasRebaseCoreStep(plan []pipeline.Step) bool {
 }
 
 func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
-	if m.shuttingDown.Load() {
+	if m.shutdownState.Load() != shutdownIdle {
 		_ = plan.agent.Close()
 		return
 	}
@@ -997,7 +995,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	// Shutdown admission is fenced under m.mu: once shutdown began, a parked
 	// run that has not been registered stays parked for the next start, and
 	// one that has is counted in wg before shutdown can wait on it.
-	if m.shuttingDown.Load() {
+	if m.shutdownState.Load() != shutdownIdle {
 		m.mu.Unlock()
 		cancel(pipeline.ErrDaemonShutdown)
 		_ = plan.agent.Close()
@@ -2191,7 +2189,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		})
 	}
 
-	if m.shuttingDown.Load() {
+	if m.shutdownState.Load() != shutdownIdle {
 		trackStartFailure("daemon_shutdown")
 		return "", fmt.Errorf("daemon is shutting down")
 	}
@@ -2734,7 +2732,7 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	// Shutdown admission is fenced under m.mu: a run whose setup raced a
 	// shutdown ends through the setup-failure path instead of starting an
 	// executor the shutdown can no longer wait for.
-	if m.shuttingDown.Load() {
+	if m.shutdownState.Load() != shutdownIdle {
 		m.mu.Unlock()
 		handle.cancel(pipeline.ErrDaemonShutdown)
 		trackStartFailure("daemon_shutdown")
@@ -3366,10 +3364,7 @@ func (m *RunManager) HandleAnswerReviewQuestion(runID, questionID, answer, answe
 // Shutdown cancels all active runs. Called during daemon shutdown to prevent
 // orphaned goroutines from continuing agent calls and git operations.
 func (m *RunManager) Shutdown() {
-	m.mu.Lock()
-	m.rawShutdown = true
-	m.shuttingDown.Store(true)
-	m.mu.Unlock()
+	m.shutdownState.Store(shutdownRaw)
 	m.stopLimitWatcher() // no watcher may start after shutdown begins
 
 	m.mu.Lock()
@@ -3431,7 +3426,7 @@ func (m *RunManager) terminalRunSettled(runID string) bool {
 // Such a run is resumed exactly as after a crash, so its shutdown record must
 // not make the next start treat it as an unsettled, obsolete shutdown.
 func (m *RunManager) releaseShutdownForRecovery(runID string) bool {
-	if err := pipeline.WithCommitStatusLock(context.Background(), func() error {
+	if err := pipeline.SettleTerminalWrite(m.db, func() error {
 		return m.db.ReleaseShutdownForRecovery(runID)
 	}); err != nil {
 		slog.Error("failed to settle shutdown intent for a run left for recovery", "run_id", runID, "error", err)

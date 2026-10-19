@@ -123,7 +123,7 @@ func TestControlledShutdown_DrainsInflightAdmissionBeforeStopHandoff(t *testing.
 				stopped := make(chan error, 1)
 				go func() { stopped <- stop.call(p) }()
 				deadline := time.After(10 * time.Second)
-				for !mgr.shuttingDown.Load() {
+				for mgr.shutdownState.Load() == shutdownIdle {
 					select {
 					case <-deadline:
 						t.Fatal("shutdown did not prepare")
@@ -258,9 +258,17 @@ func TestControlledShutdown_PersistenceFailureCannotReopenRawAdmission(t *testin
 	original := mgr.runs[run.ID].handle.cancel
 	var cancelledOnce sync.Once
 	mgr.runs[run.ID].handle.cancel = func(cause error) { original(cause); cancelledOnce.Do(func() { close(cancelled) }) }
-	mgr.mu.Unlock()
 	shutdownDone := make(chan struct{})
 	go func() { mgr.Shutdown(); close(shutdownDone) }()
+	fenceDeadline := time.Now().Add(time.Second)
+	for mgr.shutdownState.Load() != shutdownRaw && time.Now().Before(fenceDeadline) {
+		time.Sleep(time.Millisecond)
+	}
+	requested := mgr.shutdownState.Load() == shutdownRaw
+	mgr.mu.Unlock()
+	if !requested {
+		t.Fatal("raw shutdown did not publish its request before acquiring manager ownership")
+	}
 	select {
 	case <-cancelled:
 	case <-time.After(10 * time.Second):
@@ -270,13 +278,13 @@ func TestControlledShutdown_PersistenceFailureCannotReopenRawAdmission(t *testin
 	if err := <-prepareDone; err == nil {
 		t.Fatal("failed preparation acknowledged")
 	}
-	if !mgr.shuttingDown.Load() {
+	if mgr.shutdownState.Load() != shutdownRaw {
 		t.Error("failed persistence cleared raw shutdown fence")
 	}
 	if _, err := mgr.startRun(context.Background(), repo, "queued", head, head, "test", nil, "intent", "", false, "", "", nil); err == nil {
 		t.Error("queued admission escaped raw shutdown")
 	}
-	if mgr.shuttingDown.Load() {
+	if mgr.shutdownState.Load() != shutdownIdle {
 		mgr.resumeRecoveredRun(recoveredRunPlan{run: run, repo: repo, agent: recoveredRunTestAgent{}})
 		if testRunOwned(mgr, run.ID) {
 			t.Error("recovered admission escaped raw shutdown")
