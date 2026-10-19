@@ -916,6 +916,13 @@ func waitForDaemonStop(p *paths.Paths, instance daemonInstance) error {
 		case exitErr != nil:
 			return fmt.Errorf("daemon did not stop within timeout: inspect daemon instance: %w", exitErr)
 		case exited:
+			// The daemon can remove its PID file and exit after the last
+			// poll. Confirm IPC is down too, just as on the graceful path.
+			if alive, healthErr := daemonHealthCheck(p); healthErr == nil && !alive {
+				cleanupDaemonArtifacts(p)
+				slog.Info("daemon stopped gracefully")
+				return nil
+			}
 			return fmt.Errorf("daemon did not stop within timeout")
 		default:
 			pid = instance.pid
