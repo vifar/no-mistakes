@@ -163,15 +163,17 @@ func (s *fakeOpencodeServer) handleEvents(w http.ResponseWriter, r *http.Request
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+	// Receiving the headers lets the client post its prompt immediately.
+	// Register first so even that prompt's earliest events have a subscriber.
+	ch := make(chan []byte, 32)
+	s.subscribe(ch)
+	defer s.unsubscribe(ch)
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
-
-	ch := make(chan []byte, 32)
-	s.subscribe(ch)
-	defer s.unsubscribe(ch)
 
 	ctx := r.Context()
 	for {

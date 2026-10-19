@@ -1,16 +1,108 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+// The SSE handshake promises that a prompt posted after the headers arrive
+// can deliver its completion events. Pause that handshake at the transport
+// boundary to reject registering the subscriber only after flushing headers.
+func TestFakeOpencodeStreamReadyBeforeHeaders(t *testing.T) {
+	for _, recorded := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recorded=%t", recorded), func(t *testing.T) {
+			t.Setenv("FAKEAGENT_FIXTURE", "")
+			srv := newFakeOpencodeServer(defaultScenario())
+			if recorded {
+				fx, err := loadOpencodeFixture(filepath.Join("..", "..", "internal", "e2e", "fixtures", "opencode"), "structured")
+				if err != nil {
+					t.Fatal(err)
+				}
+				srv.fixture = fx
+			}
+			release := make(chan struct{})
+			routes := srv.routes()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/global/event" {
+					w = &pausedOpencodeFlush{ResponseWriter: w, release: release}
+				}
+				routes.ServeHTTP(w, r)
+			}))
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			defer close(release) // also unblock the server on an early failure
+			post := func(path, body string) []byte {
+				t.Helper()
+				req, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+path, strings.NewReader(body))
+				if err != nil {
+					t.Fatal(err)
+				}
+				resp, err := server.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer resp.Body.Close()
+				raw, err := io.ReadAll(resp.Body)
+				if err != nil || resp.StatusCode != http.StatusOK {
+					t.Fatalf("POST %s: status=%d body=%s err=%v", path, resp.StatusCode, raw, err)
+				}
+				return raw
+			}
+			var session struct{ ID string }
+			if err := json.Unmarshal(post("/session", fmt.Sprintf(`{"directory":%q}`, t.TempDir())), &session); err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/global/event", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			stream, err := server.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer stream.Body.Close()
+			post("/session/"+session.ID+"/message", `{"parts":[{"type":"text","text":"review"}]}`)
+			release <- struct{}{}
+			scanner := bufio.NewScanner(stream.Body)
+			for scanner.Scan() {
+				line := strings.TrimPrefix(scanner.Text(), "data: ")
+				var event struct {
+					Payload struct{ Type string } `json:"payload"`
+				}
+				if json.Unmarshal([]byte(line), &event) == nil && event.Payload.Type == "session.idle" {
+					return
+				}
+			}
+			t.Fatalf("completion event lost after successful stream handshake: %v", scanner.Err())
+		})
+	}
+}
+
+type pausedOpencodeFlush struct {
+	http.ResponseWriter
+	release <-chan struct{}
+	paused  bool
+}
+
+func (w *pausedOpencodeFlush) Flush() {
+	w.ResponseWriter.(http.Flusher).Flush()
+	if !w.paused {
+		w.paused = true
+		<-w.release
+	}
+}
 
 func TestFakeOpencodeServerUnsubscribeLeavesCopiedSubscriberSafe(t *testing.T) {
 	srv := newFakeOpencodeServer(defaultScenario())
