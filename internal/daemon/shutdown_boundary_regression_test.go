@@ -117,7 +117,10 @@ func TestUninstallSettlesBeforeBootout(t *testing.T) {
 			var settled, exited atomic.Bool
 			daemonProcessRunning = func(int) (bool, error) { return !exited.Load(), nil }
 			daemonProcessStartTime = func(int) (time.Time, error) { return started.Add(-500 * time.Millisecond), nil }
-			daemonKillPID = func(int) error { t.Error("uninstall must not kill before settlement"); return errors.New("unexpected kill") }
+			daemonKillPID = func(int) error {
+				t.Error("uninstall must not kill before settlement")
+				return errors.New("unexpected kill")
+			}
 			daemonHealthCheck = func(*paths.Paths, ...time.Duration) (bool, error) { return !exited.Load(), nil }
 			var bootouts atomic.Int32
 			serviceCommandRunner = func(string, ...string) ([]byte, error) {
@@ -214,7 +217,10 @@ func TestStopVerifiedLegacyDaemon(t *testing.T) {
 				}
 				return started, nil
 			}
-			daemonKillPID = func(int) error { t.Error("unverified legacy fallback killed a process"); return errors.New("unexpected kill") }
+			daemonKillPID = func(int) error {
+				t.Error("unverified legacy fallback killed a process")
+				return errors.New("unexpected kill")
+			}
 			daemonListDaemonProcesses = func() ([]daemonProcessInfo, error) {
 				processRoot := root
 				if mode == "wrong root" {
