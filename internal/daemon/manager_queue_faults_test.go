@@ -987,6 +987,7 @@ func TestAdmissionQueueWriteFailureEndsTheRunAndFreesTheBranch(t *testing.T) {
 	f.mgr.markQueued = func(string, string) (int64, error) {
 		return 0, errors.New("injected queue write failure")
 	}
+	gitCmd(t, f.p.RepoDir("fault-repo"), "update-ref", "refs/heads/victim", f.head)
 	_, err := f.mgr.HandlePushReceived(context.Background(), &ipc.PushReceivedParams{
 		Gate: f.p.RepoDir("fault-repo"),
 		Ref:  "refs/heads/victim",

@@ -29,7 +29,9 @@ func TestOwnerReceiptOnRealBinary(t *testing.T) {
 				var mu sync.Mutex
 				claimed := false
 				var gateDir, head string
+				ready := make(chan struct{})
 				present := func() bool {
+					<-ready
 					out, err := exec.Command("git", "--git-dir", gateDir, "rev-parse", "--verify", "refs/heads/feature/omit").Output()
 					return err == nil && strings.TrimSpace(string(out)) == head
 				}
@@ -42,6 +44,7 @@ func TestOwnerReceiptOnRealBinary(t *testing.T) {
 						return nil, &ipc.RPCError{Code: ipc.ErrMethodNotFound, Message: "method not found: probe_run_owner"}
 					})
 					s.Handle(ipc.MethodClaimLaunchReceipt, func(_ context.Context, raw json.RawMessage) (interface{}, error) {
+						<-ready
 						if polling && !present() {
 							return &ipc.ClaimLaunchReceiptResult{}, nil
 						}
@@ -83,6 +86,7 @@ func TestOwnerReceiptOnRealBinary(t *testing.T) {
 				cliGit(t, gateDir, "config", "receive.advertisePushOptions", "true")
 				cliGit(t, local, "remote", "add", gate.RemoteName, gateDir)
 				head = cliGit(t, local, "rev-parse", "HEAD")
+				close(ready)
 				ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 				defer cancel()
 				out, err := exec.CommandContext(ctx, bin, "axi", "run", "--intent", "legacy intent", "--owner="+owner, "--launch-nonce", "legacy-nonce", "--validation-generation", "generation").CombinedOutput()

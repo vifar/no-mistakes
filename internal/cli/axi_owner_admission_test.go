@@ -33,6 +33,7 @@ func testCLIOwnerAdmission(t *testing.T, legacy bool) {
 	var mu sync.Mutex
 	var admitted bool
 	var gateDir, head string
+	ready := make(chan struct{})
 	var created *ipc.RunInfo
 	olderDaemonFixture(t, nil, func(s *ipc.Server) {
 		if !legacy {
@@ -51,6 +52,7 @@ func testCLIOwnerAdmission(t *testing.T, legacy bool) {
 			})
 		}
 		s.Handle(ipc.MethodGetRunsForHead, func(ctx context.Context, _ json.RawMessage) (interface{}, error) {
+			<-ready
 			mu.Lock()
 			defer mu.Unlock()
 			if admitted || legacy {
@@ -103,6 +105,7 @@ func testCLIOwnerAdmission(t *testing.T, legacy bool) {
 	cliGit(t, gateDir, "config", "receive.advertisePushOptions", "true")
 	cliGit(t, local, "remote", "add", gate.RemoteName, gateDir)
 	head = cliGit(t, local, "rev-parse", "HEAD")
+	close(ready)
 	before := cliGit(t, gateDir, "show-ref")
 	invoke := func(owner string) (string, error) {
 		ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
