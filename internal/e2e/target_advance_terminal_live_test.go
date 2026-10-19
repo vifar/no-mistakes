@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -66,11 +67,13 @@ func TestTargetAdvanceTerminalMergeLiveJourney(t *testing.T) {
 				}
 				target = advanceMain(t, j.h, "target.txt", "advanced target\n", "advance target before merge")
 			}
-			waitUntil := func(label string, predicate func() bool) {
+			waitUntil := func(label string, predicate func(context.Context) bool) {
 				t.Helper()
 				deadline := pollDeadline(t, 90*time.Second)
+				ctx, cancel := context.WithDeadline(t.Context(), deadline)
+				defer cancel()
 				for time.Now().Before(deadline) {
-					if predicate() {
+					if predicate(ctx) {
 						return
 					}
 					time.Sleep(200 * time.Millisecond)
@@ -79,18 +82,28 @@ func TestTargetAdvanceTerminalMergeLiveJourney(t *testing.T) {
 				t.Fatalf("timed out waiting for %s (run %s):\n%s", label, run.ID, j.ciLog(run.ID))
 			}
 			if mode != "missing observation" && mode != "exact target" {
-				waitUntil("verified advanced target", func() bool {
+				waitUntil("verified advanced target", func(ctx context.Context) bool {
 					got, err := database.GetRetainedPRTarget(run.ID, original)
-					return err == nil && got == target && j.h.RunInfo(run.ID).CIReady
+					if err != nil || got != target {
+						return false
+					}
+					info, err := j.h.runInfoWithContext(ctx, run.ID)
+					return err == nil && info.CIReady
 				})
 			}
 			if mode == "merge recovery" {
 				broken := healthy
 				broken.Protection = &forgeEndpoint{Status: 503, Message: "disposable protection outage"}
 				j.setForge(broken)
-				waitUntil("readiness cleared", func() bool { return !j.h.RunInfo(run.ID).CIReady })
+				waitUntil("readiness cleared", func(ctx context.Context) bool {
+					info, err := j.h.runInfoWithContext(ctx, run.ID)
+					return err == nil && !info.CIReady
+				})
 				j.setForge(healthy)
-				waitUntil("readiness recovered", func() bool { return j.h.RunInfo(run.ID).CIReady })
+				waitUntil("readiness recovered", func(ctx context.Context) bool {
+					info, err := j.h.runInfoWithContext(ctx, run.ID)
+					return err == nil && info.CIReady
+				})
 			}
 			gitIn(t, j.h, j.h.WorkDir, "checkout", "main")
 			switch mode {
