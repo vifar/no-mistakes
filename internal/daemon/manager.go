@@ -344,7 +344,7 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		// executor exists; any earlier exit must unregister it here.
 		if r := recover(); r != nil {
 			slog.Error("panic launching queued run", "run_id", runID, "panic", r)
-			m.failRunSetup(handle.runCtx, runID, false, fmt.Sprintf("internal panic: %v", r))
+			m.failRunSetup(handle.runCtx, runID, false, fmt.Errorf("internal panic: %v", r))
 		}
 		if !handle.consumed {
 			if !m.terminalRunSettled(runID) {
@@ -362,61 +362,67 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		}
 	}()
 	if cause := context.Cause(handle.runCtx); cause != nil {
-		m.failRunSetup(handle.runCtx, runID, false, cause.Error())
+		m.failRunSetup(handle.runCtx, runID, false, cause)
 		return
 	}
 	run, err := m.db.GetRun(runID)
 	if err != nil || run == nil {
 		slog.Error("queued run is unreadable", "run_id", runID, "error", err)
-		m.failRunSetup(handle.runCtx, runID, false, "queued run is unreadable")
+		if err == nil {
+			err = fmt.Errorf("run is missing")
+		}
+		m.failRunSetup(handle.runCtx, runID, false, fmt.Errorf("queued run is unreadable: %w", err))
 		return
 	}
-	fail := func(msg string) {
-		slog.Error("queued run cannot start", "run_id", runID, "error", msg)
-		m.failRunSetup(handle.runCtx, runID, false, msg)
+	fail := func(err error) {
+		slog.Error("queued run cannot start", "run_id", runID, "error", err)
+		m.failRunSetup(handle.runCtx, runID, false, err)
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil || repo == nil {
-		fail("queued run repository is missing")
+		if err == nil {
+			err = fmt.Errorf("repository is missing")
+		}
+		fail(fmt.Errorf("queued run repository is missing: %w", err))
 		return
 	}
 	var spec queueSpec
 	raw, err := m.db.GetRunQueueSpec(runID)
 	if err != nil {
-		fail(fmt.Sprintf("read queued run spec: %s", err))
+		fail(fmt.Errorf("read queued run spec: %w", err))
 		return
 	}
 	if raw != "" {
 		if err := json.Unmarshal([]byte(raw), &spec); err != nil {
-			fail(fmt.Sprintf("decode queued run spec: %s", err))
+			fail(fmt.Errorf("decode queued run spec: %w", err))
 			return
 		}
 	}
 	globalCfg, err := config.LoadGlobal(m.paths.ConfigFile())
 	if err != nil {
-		fail(fmt.Sprintf("load config: %s", err))
+		fail(fmt.Errorf("load config: %w", err))
 		return
 	}
 	_, _ = m.launchRun(handle.runCtx, repo, run, globalCfg, spec.Trigger, spec.SkipSteps, slot, handle)
 }
 
-// failRunSetup preserves cancellation over the error from interrupted setup.
 // Its conditional write leaves terminal outcomes alone, and subscribers see
 // the saved verdict rather than a competing local failure reason.
 // started must become true once worktree creation succeeds: only failures before
 // that boundary can release custody without inspecting a managed worktree head.
-func (m *RunManager) failRunSetup(ctx context.Context, runID string, started bool, reason string) error {
+func (m *RunManager) failRunSetup(ctx context.Context, runID string, started bool, setupErr error) error {
 	err := pipeline.SettleTerminalWrite(m.db, func() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		status, message := types.RunFailed, reason
+		status, message := types.RunFailed, setupErr.Error()
 		cause := context.Cause(ctx)
 		if owned := m.runs[runID]; owned != nil && owned.handle != nil {
 			if original := context.Cause(owned.handle.runCtx); original != nil {
 				cause = original
 			}
 		}
-		if cause != nil {
+		cancelled := pipeline.CancellationOnly(setupErr, cause)
+		if cancelled {
 			status, message = types.RunCancelled, cause.Error()
 			var planned *pipeline.ControlledShutdownCause
 			if errors.Is(cause, pipeline.ErrDaemonShutdown) && !errors.As(cause, &planned) {
@@ -427,7 +433,7 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 		if err != nil {
 			return err
 		}
-		if revoked {
+		if revoked && cancelled {
 			status, message = types.RunFailed, db.RawShutdownReason
 		}
 		terminate := m.db.TerminateActiveRun
@@ -450,7 +456,7 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 	if run == nil || !run.Status.Terminal() {
 		return fmt.Errorf("setup terminal outcome unavailable for run %s", runID)
 	}
-	reason = ""
+	reason := ""
 	if run.Error != nil {
 		reason = *run.Error
 	}
@@ -458,11 +464,11 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 	return nil
 }
 
-func (m *RunManager) failUnadmittedRunSetup(ctx context.Context, run *db.Run, reason string) error {
+func (m *RunManager) failUnadmittedRunSetup(ctx context.Context, run *db.Run, setupErr error) error {
 	m.mu.Lock()
 	m.runs[run.ID] = &managedRun{run: run, state: ownershipFinishing}
 	m.mu.Unlock()
-	if err := m.failRunSetup(ctx, run.ID, false, reason); err != nil {
+	if err := m.failRunSetup(ctx, run.ID, false, setupErr); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -2391,7 +2397,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", fmt.Errorf("create run: %w", err)
 	}
 	if err := m.cancelRunIDs(predecessors); err != nil {
-		settlementErr := m.failUnadmittedRunSetup(ctx, run, fmt.Sprintf("supersede predecessor: %s", err))
+		settlementErr := m.failUnadmittedRunSetup(ctx, run, fmt.Errorf("supersede predecessor: %w", err))
 		trackStartFailure("supersede_predecessor")
 		return "", fmt.Errorf("supersede predecessor for replacement run %s: %w; inspect no-mistakes axi status --run %s and correct the fault before no-mistakes rerun", run.ID, errors.Join(err, settlementErr), run.ID)
 	}
@@ -2406,7 +2412,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		// The row exists but is neither queued nor owned: end it through the
 		// shared setup-failure path (conditional, and it tells subscribers), so no
 		// orphan is left to block the branch's active-run lookup.
-		settlementErr := m.failUnadmittedRunSetup(ctx, run, fmt.Sprintf("queue run: %s", err))
+		settlementErr := m.failUnadmittedRunSetup(ctx, run, fmt.Errorf("queue run: %w", err))
 		trackStartFailure("queue_run")
 		return "", fmt.Errorf("queue run: %w", errors.Join(err, settlementErr))
 	}
@@ -2531,7 +2537,7 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				err = fmt.Errorf("internal panic: %v", r)
 			}
 			if err != nil {
-				err = errors.Join(err, m.failRunSetup(setupCtx, run.ID, started, err.Error()))
+				err = errors.Join(err, m.failRunSetup(setupCtx, run.ID, started, err))
 			}
 			if !m.terminalRunSettled(run.ID) {
 				return
@@ -2729,7 +2735,7 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		m.mu.Unlock()
 		handle.cancel(pipeline.ErrDaemonShutdown)
 		trackStartFailure("daemon_shutdown")
-		return "", fmt.Errorf("daemon shutting down")
+		return "", context.Cause(runCtx)
 	}
 	if cause := context.Cause(runCtx); cause != nil {
 		m.mu.Unlock()

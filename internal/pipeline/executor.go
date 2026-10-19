@@ -3093,7 +3093,7 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		if infrastructure {
 			break
 		}
-		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled && cancellationOnly(err, cause) {
+		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled && CancellationOnly(err, cause) {
 			errMsg = cause.Error()
 			explicitCancellation = cause.Error() == types.RunCancelReasonAbortedByUser
 			if planned, ok := cause.(*ControlledShutdownCause); ok && planned.Instance != "" && planned.Instance == e.runtimeInstance {
@@ -3131,7 +3131,7 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		}
 		if revoked {
 			for _, ctx := range ctxs {
-				if cancellationOnly(executionErr, context.Cause(ctx)) {
+				if CancellationOnly(executionErr, context.Cause(ctx)) {
 					errMsg = db.RawShutdownReason
 					runStatus = types.RunFailed
 					explicitCancellation = false

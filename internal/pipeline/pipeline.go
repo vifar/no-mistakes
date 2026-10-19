@@ -47,8 +47,8 @@ var ErrCIMonitorInterruptedAtShutdown = errors.New("run left monitoring CI by da
 // the run's durable record for the next start's recovery, so callers must not
 // terminalize the run, report a failure for it, or remove its worktree.
 func LeftForRecoveryAtShutdown(err error) bool {
-	return errors.Is(err, ErrParkedAtShutdown) && cancellationOnly(err, ErrParkedAtShutdown) ||
-		errors.Is(err, ErrCIMonitorInterruptedAtShutdown) && cancellationOnly(err, ErrCIMonitorInterruptedAtShutdown)
+	return errors.Is(err, ErrParkedAtShutdown) && CancellationOnly(err, ErrParkedAtShutdown) ||
+		errors.Is(err, ErrCIMonitorInterruptedAtShutdown) && CancellationOnly(err, ErrCIMonitorInterruptedAtShutdown)
 }
 
 // StepContext provides shared resources to pipeline steps during execution.

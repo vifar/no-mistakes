@@ -115,7 +115,7 @@ END`, function))
 				go func() {
 					switch {
 					case mode == "unadmitted":
-						done <- mgr.failUnadmittedRunSetup(ctx, run, "queue run: injected failure")
+						done <- mgr.failUnadmittedRunSetup(ctx, run, errors.New("queue run: injected failure"))
 					case strings.HasPrefix(mode, "queued"):
 						mgr.launchQueuedRun(run.ID, slot, handle)
 						done <- nil
@@ -194,6 +194,7 @@ END`, function))
 						t.Fatalf("worktree removed before settlement: %v", err)
 					}
 				}
+				cancel(&pipeline.ControlledShutdownCause{Instance: mgr.runtimeInstance, Lifecycle: "planned-during-settlement"})
 				healthy.Store(true)
 				select {
 				case err := <-done:
@@ -207,8 +208,19 @@ END`, function))
 					t.Fatal("healthy storage did not finish without a second request")
 				}
 				stored, err := d.GetRun(run.ID)
-				if err != nil || stored.Status != types.RunFailed || stored.Error == nil || *stored.Error != db.RawShutdownReason {
-					t.Fatalf("raw setup outcome: %+v, %v", stored, err)
+				wantReason := db.RawShutdownReason
+				switch mode {
+				case "queued-config":
+					wantReason = "load config:"
+				case "queued-panic", "direct-started":
+					wantReason = "internal panic: injected setup panic"
+				case "unadmitted":
+					wantReason = "queue run: injected failure"
+				case "direct-unstarted":
+					wantReason = "invalid-head"
+				}
+				if err != nil || stored.Status != types.RunFailed || stored.Error == nil || !strings.Contains(*stored.Error, wantReason) {
+					t.Fatalf("raw setup outcome: %+v, %v; want original %q", stored, err, wantReason)
 				}
 				mgr.mu.Lock()
 				remaining := mgr.runs[run.ID]
@@ -273,7 +285,7 @@ func TestSetupSettlementClosedDatabaseRetainsOwnership(t *testing.T) {
 			case "direct":
 				_, err = mgr.launchRun(ctx, repo, run, config.DefaultGlobalConfig(), "test", nil, slot, nil)
 			case "unadmitted":
-				err = mgr.failUnadmittedRunSetup(ctx, run, "injected setup failure")
+				err = mgr.failUnadmittedRunSetup(ctx, run, errors.New("injected setup failure"))
 			}
 			if mode != "queued" && (err == nil || !strings.Contains(err.Error(), "closed")) {
 				t.Fatalf("closed database not explicit: %v", err)

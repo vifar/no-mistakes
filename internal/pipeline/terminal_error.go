@@ -36,7 +36,7 @@ func (e *stepExecutionError) Error() string {
 }
 func (e *stepExecutionError) Unwrap() error { return e.cause }
 
-func cancellationOnly(err, cause error) bool {
+func CancellationOnly(err, cause error) bool {
 	if err == nil || cause == nil {
 		return false
 	}
@@ -46,28 +46,28 @@ func cancellationOnly(err, cause error) bool {
 			return false
 		}
 		for _, child := range children {
-			if !cancellationOnly(child, cause) {
+			if !CancellationOnly(child, cause) {
 				return false
 			}
 		}
 		return true
 	}
 	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		return cancellationOnly(wrapped.Unwrap(), cause)
+		return CancellationOnly(wrapped.Unwrap(), cause)
 	}
 	return err == context.Canceled || err == cause
 }
 
 func shutdownCancellationOnly(err error, ctxs ...context.Context) bool {
 	for _, cause := range []error{ErrDaemonShutdown, ErrParkedAtShutdown} {
-		if errors.Is(err, cause) && cancellationOnly(err, cause) {
+		if errors.Is(err, cause) && CancellationOnly(err, cause) {
 			return true
 		}
 	}
 	for _, ctx := range ctxs {
 		if ctx != nil {
 			cause := context.Cause(ctx)
-			if errors.Is(cause, ErrDaemonShutdown) && cancellationOnly(err, cause) {
+			if errors.Is(cause, ErrDaemonShutdown) && CancellationOnly(err, cause) {
 				return true
 			}
 		}

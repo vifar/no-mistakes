@@ -25,7 +25,7 @@ func TestSetupFailurePreservesCancellation(t *testing.T) {
 		t.Skip("fixture uses a POSIX git shim")
 	}
 	for _, mode := range []string{"queued", "inline"} {
-		for _, action := range []string{"abort", "supersede", "error"} {
+		for _, action := range []string{"abort", "supersede", "error", "signal"} {
 			t.Run(mode+"/"+action, func(t *testing.T) {
 				f := newFaultFixture(t, "1")
 				var id string
@@ -81,11 +81,15 @@ func TestSetupFailurePreservesCancellation(t *testing.T) {
 				}
 				bin := t.TempDir()
 				marker := filepath.Join(bin, "worktree-started")
-				operation := "exec sleep 60"
+				operation := "while :; do sleep 1; done"
+				trap := "trap 'exit 0' TERM\n"
+				if action == "signal" {
+					trap, operation = "", "exec sleep 60"
+				}
 				if action == "error" {
 					operation = "echo 'injected worktree failure' >&2; exit 1"
 				}
-				script := fmt.Sprintf("#!/bin/sh\nprevious=''\nfor arg in \"$@\"; do\n if [ \"$previous\" = worktree ] && [ \"$arg\" = add ]; then\n  touch '%s'\n  %s\n fi\n previous=\"$arg\"\ndone\nexec '%s' \"$@\"\n", marker, operation, realGit)
+				script := fmt.Sprintf("#!/bin/sh\n%sprevious=''\nfor arg in \"$@\"; do\n if [ \"$previous\" = worktree ] && [ \"$arg\" = add ]; then\n  touch '%s'\n  %s\n fi\n previous=\"$arg\"\ndone\nexec '%s' \"$@\"\n", trap, marker, operation, realGit)
 				if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
 					t.Fatal(err)
 				}
@@ -96,6 +100,9 @@ func TestSetupFailurePreservesCancellation(t *testing.T) {
 				wantReason := types.RunCancelReasonAbortedByUser
 				switch action {
 				case "abort":
+					err = f.mgr.HandleCancel(id)
+				case "signal":
+					wantStatus, wantReason = types.RunFailed, "signal:"
 					err = f.mgr.HandleCancel(id)
 				case "supersede":
 					wantReason = types.RunCancelReasonSuperseded
@@ -190,7 +197,7 @@ func TestStartedSetupFailureRetainsBranchCustody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.mgr.failRunSetup(context.Background(), run.ID, true, "failure after worktree creation")
+	f.mgr.failRunSetup(context.Background(), run.ID, true, fmt.Errorf("failure after worktree creation"))
 	stored, err := f.d.GetRun(run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -243,7 +250,7 @@ func TestSetupFailureHonorsRawShutdownFence(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				mgr.failRunSetup(ctx, run.ID, started, "setup interrupted")
+				mgr.failRunSetup(ctx, run.ID, started, fmt.Errorf("setup interrupted: %w", ctx.Err()))
 				if context.Cause(ctx) != cause {
 					t.Fatal("first cancellation cause changed")
 				}
