@@ -299,16 +299,9 @@ func TestTargetAdvanceAcceptedGapRecoversLiveJourney(t *testing.T) {
 	j.setForge(broken)
 	waitReady := func(want bool) {
 		t.Helper()
-		deadline := time.Now().Add(75 * time.Second)
-		for time.Now().Before(deadline) {
-			info := j.h.RunInfo(parked.ID)
-			if info.CIReady == want {
-				return
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-		t.Fatalf("readiness never became %t:\n%s", want, j.ciLog(parked.ID))
+		j.h.WaitForCIReady(parked.ID, want, 75*time.Second)
 	}
+
 	assertBound := func() {
 		t.Helper()
 		current, err := database.GetRunPRContext(run.ID)
@@ -422,15 +415,9 @@ func TestTargetAdvancePublishedGuardsLiveJourney(t *testing.T) {
 			}
 			waitReady := func(want bool, timeout time.Duration) {
 				t.Helper()
-				deadline := time.Now().Add(timeout)
-				for time.Now().Before(deadline) {
-					if j.h.RunInfo(run.ID).CIReady == want {
-						return
-					}
-					time.Sleep(200 * time.Millisecond)
-				}
-				t.Fatalf("readiness never became %t:\n%s", want, j.ciLog(run.ID))
+				j.h.WaitForCIReady(run.ID, want, timeout)
 			}
+
 			assertBound := func() {
 				t.Helper()
 				current, err := database.GetRunPRContext(run.ID)

@@ -1998,10 +1998,15 @@ func assertReviewWarningRun(t *testing.T, h *Harness) {
 
 func waitForRunIDStatus(t *testing.T, h *Harness, runID string, status types.RunStatus, timeout time.Duration) *ipc.RunInfo {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := pollDeadline(t, timeout)
+	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	defer cancel()
 	var lastRun *ipc.RunInfo
 	for time.Now().Before(deadline) {
-		runs := h.Runs()
+		runs, err := h.runsWithContext(ctx)
+		if err != nil {
+			break
+		}
 		for i := range runs {
 			run := runs[i]
 			if run.ID != runID {
@@ -2025,10 +2030,15 @@ func waitForRunIDStatus(t *testing.T, h *Harness, runID string, status types.Run
 
 func waitForStepStatus(t *testing.T, h *Harness, branch string, stepName types.StepName, status types.StepStatus, timeout time.Duration) *ipc.RunInfo {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := pollDeadline(t, timeout)
+	ctx, cancel := context.WithDeadline(t.Context(), deadline)
+	defer cancel()
 	var lastRun *ipc.RunInfo
 	for time.Now().Before(deadline) {
-		runs := h.Runs()
+		runs, err := h.runsWithContext(ctx)
+		if err != nil {
+			break
+		}
 		for i := range runs {
 			run := runs[i]
 			if run.Branch != branch {

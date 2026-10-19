@@ -69,15 +69,9 @@ func TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney(t *testing.T) {
 	})
 	waitReady := func(want bool) {
 		t.Helper()
-		deadline := time.Now().Add(75 * time.Second)
-		for time.Now().Before(deadline) {
-			if j.h.RunInfo(run.ID).CIReady == want {
-				return
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-		t.Fatalf("readiness never became %t:\n%s", want, j.ciLog(run.ID))
+		j.h.WaitForCIReady(run.ID, want, 75*time.Second)
 	}
+
 	assertComparison := func() {
 		t.Helper()
 		current, err := database.GetRunPRContext(run.ID)
@@ -98,7 +92,7 @@ func TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney(t *testing.T) {
 	// Restoring the comparison read alone must not restore readiness from a
 	// cached mergeability result. Wait for the real monitor to observe that
 	// mergeability is unresolved (the adapter normalizes UNKNOWN to PENDING).
-	deadline := time.Now().Add(75 * time.Second)
+	deadline := pollDeadline(t, 75*time.Second)
 	for !strings.Contains(j.ciLog(run.ID), "mergeable state still pending:") && time.Now().Before(deadline) {
 		time.Sleep(200 * time.Millisecond)
 	}

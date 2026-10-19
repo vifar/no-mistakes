@@ -491,17 +491,50 @@ func (h *Harness) WaitForRunRunning(branch string, timeout time.Duration) *ipc.R
 
 func (h *Harness) Runs() []ipc.RunInfo {
 	h.t.Helper()
-	p := paths.WithRoot(h.NMHome)
-	client, err := ipc.Dial(p.Socket())
+	ctx, cancel := context.WithDeadline(h.t.Context(), pollDeadline(h.t, 30*time.Second))
+	defer cancel()
+	runs, err := h.runsWithContext(ctx)
 	if err != nil {
-		h.t.Fatalf("dial daemon: %v", err)
+		h.t.Fatalf("get runs: %v", err)
+	}
+	return runs
+}
+
+func (h *Harness) runsWithContext(ctx context.Context) ([]ipc.RunInfo, error) {
+	p := paths.WithRoot(h.NMHome)
+	deadline, _ := ctx.Deadline()
+	client, err := ipc.DialWithDeadline(p.Socket(), deadline)
+	if err != nil {
+		return nil, err
 	}
 	defer client.Close()
 	var result ipc.GetRunsResult
-	if err := client.Call(ipc.MethodGetRuns, &ipc.GetRunsParams{RepoID: h.repoID()}, &result); err != nil {
-		h.t.Fatalf("get runs: %v", err)
+	if err := client.CallWithContext(ctx, ipc.MethodGetRuns, &ipc.GetRunsParams{RepoID: h.repoID()}, &result, 0); err != nil {
+		return nil, err
 	}
-	return result.Runs
+	return result.Runs, nil
+}
+
+// WaitForCIReady waits for a live run's readiness observation.
+func (h *Harness) WaitForCIReady(runID string, want bool, timeout time.Duration) {
+	h.t.Helper()
+	deadline := pollDeadline(h.t, timeout)
+	ctx, cancel := context.WithDeadline(h.t.Context(), deadline)
+	defer cancel()
+	var lastErr error
+	for time.Now().Before(deadline) {
+		info, err := h.runInfoWithContext(ctx, runID)
+		lastErr = err
+		if err == nil && info != nil && info.CIReady == want {
+			return
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	h.dumpDebugState()
+	h.t.Fatalf("readiness for run %s never became %t within %v (last RPC error=%v)", runID, want, timeout, lastErr)
 }
 
 func (h *Harness) RunInfo(runID string) *ipc.RunInfo {
