@@ -3437,8 +3437,8 @@ func (m *RunManager) HandleCancel(runID string) error {
 // cancelActiveRuns cancels any in-progress runs for the given repo+branch
 // and waits for their goroutines to finish before returning, preventing
 // concurrent pushes to upstream.
-// The cancellation cause is propagated to the executor via context.Cause,
-// which uses it as the run's error message in the DB.
+// The cancellation cause is propagated via context.Cause; Executor.FailRun
+// keeps an independent execution failure rather than replacing it with that cause.
 func (m *RunManager) cancelActiveRuns(repoID, branch string) error {
 	return m.cancelRunIDs(m.activeRunIDs(repoID, branch))
 }

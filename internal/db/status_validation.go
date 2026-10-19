@@ -185,10 +185,10 @@ func (d *DB) RevokeStatusCertificate(ctx context.Context, runID string, p Commit
 	return err
 }
 
-// TerminalizeCertifiedWatcher atomically binds the cancelled outcome and eligibility.
-// A missing/stale certificate is an ordinary cancelled failure, never inferred proof.
 type ControlledShutdownBinding struct{ Instance, Lifecycle, Reason string }
 
+// TerminalizeCertifiedWatcher atomically binds the cancelled outcome and eligibility.
+// A missing/stale certificate is an ordinary cancelled failure, never inferred proof.
 func (d *DB) TerminalizeCertifiedWatcher(runID, message, head, configDigest string, status types.RunStatus, bindings ...*ControlledShutdownBinding) error {
 	tx, err := d.sql.Begin()
 	if err != nil {
