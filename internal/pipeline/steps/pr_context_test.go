@@ -430,7 +430,7 @@ func TestPRContextGuardProvesMergedComparison(t *testing.T) {
 		name, mode                                                                   string
 		advance, changedResult, targetMoved, missingMerge, detachedMerge, beforeStep bool
 		qualified, strict, shipping                                                  bool
-		omitObservation, earlyChange                                                 bool
+		omitObservation, earlyChange, stacked                                        bool
 		wantError                                                                    bool
 	}
 	cases := []mergedCase{
@@ -453,17 +453,36 @@ func TestPRContextGuardProvesMergedComparison(t *testing.T) {
 		{name: "qualified advanced target without observation", mode: "merge", targetMoved: true, qualified: true, omitObservation: true, wantError: true},
 		{name: "qualified advanced target strict protection", mode: "merge", targetMoved: true, qualified: true, strict: true, wantError: true},
 		{name: "qualified advanced target strict shipping", mode: "merge", targetMoved: true, qualified: true, shipping: true, wantError: true},
+		{name: "qualified stacked target merge", mode: "merge", targetMoved: true, qualified: true, stacked: true},
+		{name: "qualified stacked target squash", mode: "squash", targetMoved: true, qualified: true, stacked: true},
+		{name: "qualified stacked target rebase", mode: "rebase", targetMoved: true, qualified: true, stacked: true},
+		{name: "qualified stacked target at CI entry", mode: "merge", targetMoved: true, qualified: true, stacked: true, beforeStep: true},
+		{name: "qualified stacked target with later advance", mode: "merge", targetMoved: true, qualified: true, stacked: true, advance: true},
+		{name: "qualified stacked target changed result", mode: "merge", targetMoved: true, qualified: true, stacked: true, changedResult: true, wantError: true},
+		{name: "qualified stacked target corrupt rebased prefix", mode: "rebase", targetMoved: true, qualified: true, stacked: true, earlyChange: true, wantError: true},
+		{name: "qualified stacked target without observation", mode: "merge", targetMoved: true, qualified: true, stacked: true, omitObservation: true, wantError: true},
+		{name: "qualified stacked target strict protection", mode: "merge", targetMoved: true, qualified: true, stacked: true, strict: true, wantError: true},
+		{name: "qualified stacked target strict shipping", mode: "merge", targetMoved: true, qualified: true, stacked: true, shipping: true, wantError: true},
 		{name: "missing merge evidence", mode: "merge", missingMerge: true, wantError: true},
 		{name: "merge absent from target", mode: "merge", detachedMerge: true, wantError: true},
 	}
 	run := func(t *testing.T, tc mergedCase) {
 		dir, base, head := setupGitRepo(t)
-		if tc.mode == "rebase" {
+		stackedPrefix := head
+		if tc.mode == "rebase" || tc.stacked {
 			if err := os.WriteFile(filepath.Join(dir, "second.txt"), []byte("second change\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			gitCmd(t, dir, "add", "second.txt")
 			gitCmd(t, dir, "commit", "-m", "second change")
+			head = gitCmd(t, dir, "rev-parse", "HEAD")
+		}
+		if tc.stacked && tc.mode == "rebase" {
+			if err := os.WriteFile(filepath.Join(dir, "third.txt"), []byte("third change\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", "third.txt")
+			gitCmd(t, dir, "commit", "-m", "third change")
 			head = gitCmd(t, dir, "rev-parse", "HEAD")
 		}
 		sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
@@ -496,6 +515,9 @@ func TestPRContextGuardProvesMergedComparison(t *testing.T) {
 		}
 		gitCmd(t, dir, "checkout", "main")
 		if tc.targetMoved {
+			if tc.stacked {
+				gitCmd(t, dir, "merge", "--ff-only", stackedPrefix)
+			}
 			if err := os.WriteFile(filepath.Join(dir, "unreviewed.txt"), []byte("unreviewed\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -508,6 +530,10 @@ func TestPRContextGuardProvesMergedComparison(t *testing.T) {
 				sctx.Env = fakeCLIEnv(bin, map[string]string{"FAKE_CLI_MODE": "ci-gh", "FAKE_CLI_PROTECTION_JSON": `{"strict":false}`, "FAKE_CLI_RULES_JSON": `[]`, "FAKE_CLI_MERGEABLE": "MERGEABLE"})
 				if decision, err := guardPRContextWithSelection(sctx, types.StepCI, selection, false); err != nil || decision.RestartFrom != "" {
 					t.Fatalf("retain qualified comparison before merge: %+v %v", decision, err)
+				}
+				retained, err := sctx.DB.GetRun(sctx.Run.ID)
+				if err != nil || retained.CIReadyAt == nil {
+					t.Fatalf("qualified readiness not retained: %+v %v", retained, err)
 				}
 				clearCIMonitorReady(sctx)
 				if decision, err := guardPRContextWithSelection(sctx, types.StepCI, selection, false); err != nil || decision.RestartFrom != "" {
@@ -526,7 +552,11 @@ func TestPRContextGuardProvesMergedComparison(t *testing.T) {
 		case "rebase":
 			// Cherry-pick each commit onto the target, as a provider rebase merge
 			// does. A different committer forces new commit IDs.
-			commits := strings.Fields(gitCmd(t, dir, "rev-list", "--reverse", base+".."+head))
+			rebaseBase := base
+			if tc.stacked && tc.targetMoved {
+				rebaseBase = stackedPrefix
+			}
+			commits := strings.Fields(gitCmd(t, dir, "rev-list", "--reverse", rebaseBase+".."+head))
 			for i, commit := range commits {
 				gitCmd(t, dir, "-c", "user.name=Merge bot", "cherry-pick", commit)
 				if tc.earlyChange && i == 0 {

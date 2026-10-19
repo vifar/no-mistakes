@@ -107,13 +107,6 @@ func qualifiedAdvancedMergeTree(c *pipeline.StepContext, host scm.Host, receipt 
 	if _, err := git.Run(c.Ctx, c.WorkDir, "merge-base", "--is-ancestor", target, mergeSHA); err != nil {
 		return "", fmt.Errorf("merged result does not contain the verified advanced target: %w", err)
 	}
-	comparison, err := prComparisonAtTarget(c, receipt.TargetBranch, target, receipt.LocalHeadSHA)
-	if err != nil {
-		return "", err
-	}
-	if comparison.MergeBaseSHA != receipt.MergeBaseSHA || comparison.DiffDigest != receipt.DiffDigest {
-		return "", fmt.Errorf("advanced merge parent changes the reviewed PR comparison")
-	}
 	tree, err := git.Run(c.Ctx, c.WorkDir, "merge-tree", "--write-tree", target, receipt.LocalHeadSHA)
 	if err != nil {
 		return "", fmt.Errorf("cannot prove advanced target merge result: %w", err)
