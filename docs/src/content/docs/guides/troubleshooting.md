@@ -163,8 +163,7 @@ Testing prompts ask agents to remove transient working-tree artifacts they creat
 
 Symptom: a run stops with a failed step.
 
-Check the per-step log at `~/.no-mistakes/logs/<runID>/<step>.log`.
-Fatal step errors are appended to that log, so failures such as rejected pushes include the returned error output there instead of only appearing in `daemon.log`.
+See [daemon logging](/no-mistakes/concepts/daemon/#logging) for per-step logs and where to find database infrastructure-failure diagnostics.
 
 ### Push fails with `refusing to force-push`
 
