@@ -1,10 +1,13 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"net/url"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
 
 // TargetRewindPRObservation pins discovery only; it never attaches the PR to
@@ -34,7 +37,7 @@ func (d *DB) PinTargetRewindPRObservation(runID, prURL, headSHA string) error {
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || !validGitSHA(headSHA) {
 		return fmt.Errorf("invalid initial PR observation")
 	}
-	result, err := d.sql.Exec(`INSERT INTO run_rewind_pr_observations(run_id,pr_url,head_sha)
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "PinTargetRewindPRObservation", `INSERT INTO run_rewind_pr_observations(run_id,pr_url,head_sha)
  SELECT run_id,?,? FROM run_pr_contexts WHERE run_id=? AND generation=1 AND pr_url IS NULL
  ON CONFLICT(run_id) DO NOTHING`, prURL, headSHA, runID)
 	if err != nil {

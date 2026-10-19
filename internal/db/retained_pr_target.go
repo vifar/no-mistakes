@@ -1,9 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
 
 // RecordRetainedPRTarget records the live target verified for a qualified
@@ -12,7 +15,7 @@ func (d *DB) RecordRetainedPRTarget(runID string, receipt *PRContext, previousTa
 	if receipt == nil || !validGitSHA(target) || previousTarget != "" && !validGitSHA(previousTarget) {
 		return fmt.Errorf("retain qualified PR target: invalid observation")
 	}
-	result, err := d.sql.Exec(`UPDATE run_pr_contexts SET retained_target_sha=?
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "RecordRetainedPRTarget", `UPDATE run_pr_contexts SET retained_target_sha=?
 		WHERE run_id=? AND generation=? AND local_head_sha=? AND target_sha=? AND COALESCE(retained_target_sha, '')=?
 		AND EXISTS (SELECT 1 FROM runs r WHERE r.id=run_id
 		 AND r.head_sha=local_head_sha AND r.last_pushed_sha=local_head_sha

@@ -1,9 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
 
 // TargetRewindHistory keeps superseded evidence and gate decisions separately
@@ -100,7 +103,7 @@ func (d *DB) GetTargetRewindHistory(runID string) ([]TargetRewindHistory, error)
 // RecordTargetRewindBoundary preserves a result produced just before the
 // post-step guard rewound it. It is diagnostic until Git proves reuse safe.
 func (d *DB) RecordTargetRewindBoundary(runID string, generation int64, step string, outcome string) error {
-	result, err := d.sql.Exec(`UPDATE target_rewind_history SET boundary_step=?,boundary_json=? WHERE rewind_id IN (SELECT id FROM run_target_rewinds WHERE run_id=? AND generation=(SELECT MAX(generation) FROM run_target_rewinds WHERE run_id=?)) AND (SELECT target_advance_rewinds FROM runs WHERE id=?)=?`, step, outcome, runID, runID, runID, generation)
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "RecordTargetRewindBoundary", `UPDATE target_rewind_history SET boundary_step=?,boundary_json=? WHERE rewind_id IN (SELECT id FROM run_target_rewinds WHERE run_id=? AND generation=(SELECT MAX(generation) FROM run_target_rewinds WHERE run_id=?)) AND (SELECT target_advance_rewinds FROM runs WHERE id=?)=?`, step, outcome, runID, runID, runID, generation)
 	if err != nil {
 		return err
 	}
