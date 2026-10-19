@@ -721,7 +721,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		if restartFrom != "" {
 			restartIndex, err := e.prepareRestart(run, repo, restartFrom, i)
 			if err != nil {
-				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", step.Name(), restartFrom), ctx)
+				return e.failRun(run, repo, fmt.Errorf("restart step %s from %s: %w", step.Name(), restartFrom, err), ctx)
 			}
 			revalidating = true
 			restartedBy = step.Name()
@@ -1242,7 +1242,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		if restartFrom != "" {
 			restartIndex, indexErr := e.prepareRestart(run, repo, restartFrom, gate.index)
 			if indexErr != nil {
-				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", gate.step.Name(), restartFrom), ctx)
+				return e.failRun(run, repo, fmt.Errorf("restart step %s from %s: %w", gate.step.Name(), restartFrom, indexErr), ctx)
 			}
 			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, gate.step.Name())
 		}
@@ -1388,7 +1388,7 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 		if restartFrom != "" {
 			restartIndex, indexErr := e.prepareRestart(run, repo, restartFrom, index)
 			if indexErr != nil {
-				return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", e.steps[index].Name(), restartFrom), ctx)
+				return e.failRun(run, repo, fmt.Errorf("restart step %s from %s: %w", e.steps[index].Name(), restartFrom, indexErr), ctx)
 			}
 			revalidating = true
 			restartedBy = e.steps[index].Name()
