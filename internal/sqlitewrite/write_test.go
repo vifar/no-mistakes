@@ -297,3 +297,64 @@ func TestRetryCancellationClassificationControls(t *testing.T) {
 		}
 	})
 }
+
+func TestFirstAttemptAutomaticRollbackClassification(t *testing.T) {
+	for _, cancelParent := range []bool{false, true} {
+		for _, wrapped := range []bool{false, true} {
+			t.Run(fmt.Sprintf("cancel=%v/wrapped=%v", cancelParent, wrapped), func(t *testing.T) {
+				t.Parallel()
+				database, release := exclusiveFixture(t, time.Millisecond)
+				release()
+				parent, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				attempts := 0
+				var commitErr error
+				err := retry(parent, "first attempt rollback", 100*time.Millisecond, func(ctx context.Context) error {
+					attempts++
+					tx, err := database.BeginTx(ctx, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer tx.Rollback()
+					if _, err := tx.ExecContext(ctx, `INSERT INTO writes VALUES(1)`); err != nil {
+						t.Fatal(err)
+					}
+					if cancelParent {
+						cancel()
+					}
+					<-ctx.Done()
+					conn, err := database.Conn(context.Background())
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := conn.Close(); err != nil {
+						t.Fatal(err)
+					}
+					commitErr = tx.Commit()
+					if !errors.Is(commitErr, sql.ErrTxDone) {
+						t.Fatalf("expected automatic rollback before Commit: %v", commitErr)
+					}
+					if wrapped {
+						commitErr = fmt.Errorf("commit interrupted: %w", commitErr)
+					}
+					return commitErr
+				})
+				if attempts != 1 || !errors.Is(err, commitErr) {
+					t.Fatalf("lost first-attempt commit error: attempts=%d err=%T %v", attempts, err, err)
+				}
+				var contention *ContentionError
+				if cancelParent {
+					if IsContention(err) {
+						t.Fatalf("caller cancellation became contention: %v", err)
+					}
+				} else if !errors.As(err, &contention) || contention.Attempts != 1 || contention.Operation != "first attempt rollback" {
+					t.Fatalf("deadline rollback became a code failure: %T %v", err, err)
+				}
+				var count int
+				if err := database.QueryRow(`SELECT count(*) FROM writes`).Scan(&count); err != nil || count != 0 {
+					t.Fatalf("rolled-back write persisted: count=%d err=%v", count, err)
+				}
+			})
+		}
+	}
+}
