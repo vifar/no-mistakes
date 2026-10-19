@@ -24,10 +24,10 @@ import (
 // agent/forge boundaries are fixtures. No executed proof or certificate is seeded.
 func TestWatcherCertificateBoundaryJourneys(t *testing.T) {
 	for _, tc := range []struct {
-		name, mode                              string
+		name, mode                               string
 		recovered, uncertain, dirty, changedHead bool
-		repair                                  bool
-		eligible                                bool
+		repair                                   bool
+		eligible                                 bool
 	}{
 		{name: "clean", mode: "legacy", eligible: true},
 		{name: "approved-warning", mode: "warning", eligible: true},
