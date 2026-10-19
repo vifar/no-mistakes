@@ -332,6 +332,8 @@ The CI step deliberately keeps watching the PR after checks pass, so
 blocking on the human merge. Never poll or re-run waiting for the merge yourself.
 Never treat "no CI checks reported" alone as green.
 
+A published qualified head and original comparison are retained only when live protection permits being behind and the forge confirms mergeability. The following stale-comparison fallback applies otherwise.
+
 For ordinary runs, when the live target commit advances with green checks and no merge conflict, CI clears readiness and keeps monitoring, withholding checks-passed.
 It may wait until ci_timeout, or indefinitely when unlimited.
 When CI returns, including with findings, the boundary guard rejects the changed comparison and terminates the run.

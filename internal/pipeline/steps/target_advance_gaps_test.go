@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -278,21 +279,55 @@ func TestQualifiedPublishedHeadTargetAdvanceDoesNotMoveHead(t *testing.T) {
 }
 
 func TestTargetAdvancePostReviewRetainsBoundaryVerdict(t *testing.T) {
-	c, selected := rewindFixture(t)
-	head := c.Run.HeadSHA
-	advanceRewindTarget(t, c)
-	c.PRContextAfterStep = true
-	if _, err := guardPRContextWithSelection(c, types.StepReview, selected, false); err != nil {
-		t.Fatal(err)
-	}
-	outcome := fmt.Sprintf(`{"Findings":%q,"ReviewApprovedHeadSHA":%q,"ReviewedPaths":["feature.txt"],"ReviewablePaths":["feature.txt"]}`, `{"findings":[],"reviewed_paths":["feature.txt"]}`, head)
-	if err := c.DB.RecordTargetRewindBoundary(c.Run.ID, 1, "review", outcome); err != nil {
-		t.Fatal(err)
-	}
-	integrateTargetRewind(t, c, selected)
-	credit, err := (&ReviewStep{}).Execute(c)
-	if err != nil || credit == nil || credit.ReviewApprovedHeadSHA != c.Run.HeadSHA {
-		t.Fatalf("post-review boundary lost clean verdict: %+v %v", credit, err)
+	for _, tc := range []struct {
+		name                                             string
+		resolved, needsApproval, hasFindings, wantCredit bool
+	}{
+		{name: "resolved clean", resolved: true, wantCredit: true},
+		{name: "legacy raw verdict"},
+		{name: "outstanding approval", resolved: true, needsApproval: true},
+		{name: "outstanding finding", resolved: true, hasFindings: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, selected := rewindFixture(t)
+			head := c.Run.HeadSHA
+			// An older completed review must not override a newer unresolved
+			// boundary, including a legacy boundary without resolution proof.
+			step, err := c.DB.InsertStepResult(c.Run.ID, types.StepReview)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.DB.SetStepFindings(step.ID, `{"findings":[],"reviewed_paths":["feature.txt"]}`); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.DB.CompleteReviewStep(step.ID, c.Run.ID, head, 0, 1, "review.log"); err != nil {
+				t.Fatal(err)
+			}
+			advanceRewindTarget(t, c)
+			c.PRContextAfterStep = true
+			if _, err := guardPRContextWithSelection(c, types.StepReview, selected, false); err != nil {
+				t.Fatal(err)
+			}
+			findings := `{"findings":[],"reviewed_paths":["feature.txt"]}`
+			if tc.hasFindings {
+				findings = `{"findings":[{"id":"b","severity":"warning","file":"feature.txt","description":"operator decision remains open","action":"ask-user"}]}`
+			}
+			outcome, err := json.Marshal(pipeline.StepOutcome{Findings: findings, ReviewCarryResolved: tc.resolved, NeedsApproval: tc.needsApproval, ReviewApprovedHeadSHA: head, ReviewedPaths: []string{"feature.txt"}, ReviewablePaths: []string{"feature.txt"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.DB.RecordTargetRewindBoundary(c.Run.ID, 1, "review", string(outcome)); err != nil {
+				t.Fatal(err)
+			}
+			integrateTargetRewind(t, c, selected)
+			credit, err := reusableRewindReview(c)
+			if err != nil || (credit != nil) != tc.wantCredit {
+				t.Fatalf("credit=%+v want=%t error=%v", credit, tc.wantCredit, err)
+			}
+			if credit != nil && credit.ReviewApprovedHeadSHA != c.Run.HeadSHA {
+				t.Fatalf("credit at wrong head: %+v", credit)
+			}
+		})
 	}
 }
 

@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -8,6 +9,39 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/shipping"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+// resolveReviewRoundFindings is shared by the effective gate and the archived
+// rewind boundary. A round's raw output is not a verdict on its carried set.
+func resolveReviewRoundFindings(sctx *StepContext, outstanding string, pending, selected []string, outcome *StepOutcome, current string) (effective, remaining string, answered, scoped []types.WithdrawnFinding) {
+	verification := dropReviewQuestionFindingsJSON(current)
+	outstanding = dropReviewQuestionFindingsJSON(outstanding)
+	if sctx.FinalizingAnswers {
+		var retractable []types.WithdrawnFinding
+		for _, w := range outcome.WithdrawnFindings {
+			if !slices.Contains(selected, w.ID) {
+				retractable = append(retractable, w)
+			}
+		}
+		outstanding, answered = dropWithdrawnFindingsJSON(outstanding, retractable)
+	}
+	outstanding, scoped = resolveReviewCarry(sctx, outstanding, pending, outcome, verification)
+	remaining = mergeOutstandingFindingsJSON(outstanding, current, outcome.ReviewedPaths)
+	withdrawn := append(append([]types.WithdrawnFinding(nil), answered...), scoped...)
+	return recordWithdrawnFindingsJSON(remaining, withdrawn), remaining, answered, scoped
+}
+
+func resolvedReviewBoundary(sctx *StepContext, outcome *StepOutcome, outstanding string, pending, selected []string) *StepOutcome {
+	boundary := *outcome
+	current := normalizeFindingsJSON(outcome.Findings, string(types.StepReview))
+	boundary.Findings, _, _, _ = resolveReviewRoundFindings(sctx, outstanding, pending, selected, outcome, current)
+	boundary.ReviewCarryResolved = true
+	findings, err := types.ParseFindingsJSON(boundary.Findings)
+	if err != nil || len(findings.Items) != 0 {
+		boundary.NeedsApproval = true
+		boundary.ReviewApprovedHeadSHA = ""
+	}
+	return &boundary
+}
 
 func resolveReviewCarry(sctx *StepContext, raw string, pending []string, outcome *StepOutcome, current string) (string, []types.WithdrawnFinding) {
 	if raw == "" {

@@ -229,7 +229,10 @@ type StepOutcome struct {
 	// ReviewApprovedHeadSHA is set only by a successfully executed full review
 	// round. The executor durably records it only when the review step actually
 	// completes, never while that outcome is parked or after a failed round.
-	ReviewApprovedHeadSHA      string
+	ReviewApprovedHeadSHA string
+	// Set only by the executor after applying outstanding-finding resolution.
+	// Legacy raw boundary outcomes cannot prove a clean effective gate.
+	ReviewCarryResolved        bool
 	ReviewComparisonGeneration int64
 	// MergedHeadSHA is set only after exact CI forge merge verification.
 	MergedHeadSHA string
