@@ -57,6 +57,9 @@ func TestCustomGateStep_ZeroExitRefusalsCannotCertifyOrPreserve(t *testing.T) {
 			if err := sc.DB.CompleteStep(sr.ID, outcome.ExitCode, 1, ""); err != nil {
 				t.Fatal(err)
 			}
+			if err := sc.DB.RecordStatusValidationStep(sr.ID, sc.Run.ID, sc.Run.HeadSHA, pipeline.StatusConfigDigest(sc.Config), 0); err != nil {
+				t.Fatal(err)
+			}
 			certificate, err = sc.DB.BuildStatusCertificate(sc.Run.ID, sc.Run.HeadSHA, pipeline.StatusConfigDigest(sc.Config))
 			if err != nil {
 				t.Fatal(err)

@@ -116,7 +116,7 @@ func TestExecutor_CustomGateApprovalDoesNotCertifyUnresolvedErrors(t *testing.T)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if (certificate != nil) != (severity == "warning") {
+				if (certificate != nil) != (severity == "warning" && !recovered) {
 					t.Fatalf("approved %s gate certification=%v", severity, certificate != nil)
 				}
 			})

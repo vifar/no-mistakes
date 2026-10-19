@@ -1864,7 +1864,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var statusProofHead, statusProofConfig string
 	var statusProofEpoch int64
 	var executionPassed bool
-	statusProofCore := stepName == types.StepReview || stepName == types.StepTest || stepName == types.StepDocument || stepName == types.StepLint
+	statusProofRequired := stepName == types.StepReview || stepName == types.StepTest || stepName == types.StepDocument || stepName == types.StepLint || stepName.IsCustomGate()
 
 	// Every comparison restart discards its selections. A charged rewind also
 	// starts a fresh repair budget, round history, and execution accounting.
@@ -1891,7 +1891,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// Execute with possible fix loop
 rounds:
 	for {
-		if statusProofCore {
+		if statusProofRequired {
 			statusProofHead, _ = git.HeadSHA(ctx, workDir)
 			statusProofConfig = StatusConfigDigest(e.config)
 			var proofErr error
@@ -2465,7 +2465,7 @@ done:
 	} else if err := e.db.CompleteStepWithStatus(sr.ID, status, finalExitCode, durationMS, logPath); err != nil {
 		return false, "", fmt.Errorf("complete step %s: %w", stepName, err)
 	}
-	if statusProofCore && executionPassed && status == types.StepStatusCompleted && finalExitCode == 0 && statusProofHead != "" && statusProofConfig == StatusConfigDigest(e.config) {
+	if statusProofRequired && (executionPassed || stepName.IsCustomGate()) && status == types.StepStatusCompleted && finalExitCode == 0 && statusProofHead != "" && statusProofConfig == StatusConfigDigest(e.config) {
 		observed, err := git.HeadSHA(ctx, workDir)
 		if err == nil && observed == statusProofHead {
 			if err := e.db.RecordStatusValidationStep(sr.ID, run.ID, observed, statusProofConfig, statusProofEpoch); err != nil {
@@ -2487,8 +2487,9 @@ done:
 // full contract. For ordinary runs, an admitted ActionApprove proceeds and a
 // verification error is recorded as an unresolved condition rather than
 // silently treated as clear. Strict shipping refuses an unresolved condition.
-// A step without the interface needs no override verification; strict admission
-// still applies through db.StepResult.StrictApprovalRefusal.
+// A step without the interface needs no override verification; certification
+// still requires current execution proof, and strict admission still applies
+// through db.StepResult.StrictApprovalRefusal.
 //
 // Persisting that override marker is itself fail-closed: downstream consumers
 // derive each step's override status from its durable override/approval reasons,

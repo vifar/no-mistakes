@@ -326,6 +326,9 @@ func TestCommitStatus_CustomGateUnresolvedFindingsCannotCertifyOrPreserve(t *tes
 				if err := d.CompleteStep(step.ID, 0, 1, ""); err != nil {
 					t.Fatal(err)
 				}
+				if err := d.RecordStatusValidationStep(step.ID, run.ID, "head", "config", 0); err != nil {
+					t.Fatal(err)
+				}
 				certificate, err := d.BuildStatusCertificate(run.ID, "head", "config")
 				if err != nil {
 					t.Fatal(err)
@@ -359,5 +362,109 @@ func TestCommitStatus_CustomGateUnresolvedFindingsCannotCertifyOrPreserve(t *tes
 				}
 			})
 		}
+	}
+}
+
+func TestCommitStatus_CustomGateRequiresCurrentExecutionBinding(t *testing.T) {
+	for _, binding := range []string{"missing", "head", "epoch", "config", "current"} {
+		t.Run(binding, func(t *testing.T) {
+			d, run, p := certifiedStatusFixture(t)
+			sr, err := d.InsertStepResult(run.ID, types.CustomGateStepName(types.StepRebase, "budget"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.CompleteStep(sr.ID, 0, 1, ""); err != nil {
+				t.Fatal(err)
+			}
+			head, digest, epoch := "head", "config", int64(0)
+			switch binding {
+			case "head":
+				head = "previous-head"
+			case "epoch":
+				epoch = -1
+			case "config":
+				digest = "previous-config"
+			}
+			if binding != "missing" {
+				if err := d.RecordStatusValidationStep(sr.ID, run.ID, head, digest, 0); err != nil {
+					t.Fatal(err)
+				}
+				if binding == "epoch" {
+					if _, err := d.sql.Exec(`UPDATE status_validation_steps SET epoch=? WHERE step_id=?`, epoch, sr.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			certificate, err := d.BuildStatusCertificate(run.ID, "head", "config")
+			if err != nil {
+				t.Fatal(err)
+			}
+			eligible := binding == "current"
+			if (certificate != nil) != eligible {
+				t.Errorf("binding %s certificate=%v", binding, certificate != nil)
+			}
+			if certificate != nil {
+				p.StrictCertificate = certificate
+				if err := d.PutCommitStatusPublication(run.ID, p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := d.TerminalizeCertifiedWatcher(run.ID, types.RunCancelReasonAbortedByUser, "head", "config", types.RunCancelled); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := d.GetCommitStatusPublication(context.Background(), run.ID, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (stored.PreserveSuccess != nil && *stored.PreserveSuccess) != eligible {
+				t.Fatalf("binding %s preserved success: %+v", binding, stored)
+			}
+			if !eligible && stored.StrictCertificate != nil {
+				t.Fatal("invalid execution binding retained certificate")
+			}
+		})
+	}
+}
+
+func TestCommitStatus_CustomGateProofDriftRevokesAcknowledgedCertificate(t *testing.T) {
+	for _, drift := range []string{"head_sha", "epoch", "config_digest"} {
+		t.Run(drift, func(t *testing.T) {
+			d, run, p := certifiedStatusFixture(t)
+			sr, err := d.InsertStepResult(run.ID, types.CustomGateStepName(types.StepRebase, "budget"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.CompleteStep(sr.ID, 0, 1, ""); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.RecordStatusValidationStep(sr.ID, run.ID, "head", "config", 0); err != nil {
+				t.Fatal(err)
+			}
+			certificate, err := d.BuildStatusCertificate(run.ID, "head", "config")
+			if err != nil || certificate == nil {
+				t.Fatalf("current gate cannot certify: %v", err)
+			}
+			p.StrictCertificate = certificate
+			if err := d.PutCommitStatusPublication(run.ID, p); err != nil {
+				t.Fatal(err)
+			}
+			var stale any = "stale"
+			if drift == "epoch" {
+				stale = int64(-1)
+			}
+			if _, err := d.sql.Exec("UPDATE status_validation_steps SET "+drift+"=? WHERE step_id=?", stale, sr.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.TerminalizeCertifiedWatcher(run.ID, types.RunCancelReasonAbortedByUser, "head", "config", types.RunCancelled); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := d.GetCommitStatusPublication(context.Background(), run.ID, p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.StrictCertificate != nil || stored.PreserveSuccess != nil {
+				t.Fatalf("%s drift preserved acknowledged success: %+v", drift, stored)
+			}
+		})
 	}
 }

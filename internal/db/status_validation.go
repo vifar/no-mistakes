@@ -139,8 +139,11 @@ func buildStatusCertificate(q statusQuery, runID, head, configDigest string) (*s
 				}
 			}
 		}
+		if executedHead == nil || *executedHead != head || stepEpoch == nil || *stepEpoch != epoch || digest == nil || *digest != configDigest {
+			return nil, nil
+		}
 		if core {
-			if seen[p.Name] || executedHead == nil || *executedHead != head || stepEpoch == nil || *stepEpoch != epoch || digest == nil || *digest != configDigest {
+			if seen[p.Name] {
 				return nil, nil
 			}
 			seen[p.Name] = true
@@ -188,7 +191,7 @@ func (d *DB) RevokeStatusCertificate(ctx context.Context, runID string, p Commit
 type ControlledShutdownBinding struct{ Instance, Lifecycle, Reason string }
 
 // TerminalizeCertifiedWatcher atomically binds the cancelled outcome and eligibility.
-// A missing/stale certificate is an ordinary cancelled failure, never inferred proof.
+// Missing or stale execution proof or certificates cannot preserve success.
 func (d *DB) TerminalizeCertifiedWatcher(runID, message, head, configDigest string, status types.RunStatus, bindings ...*ControlledShutdownBinding) error {
 	tx, err := d.sql.Begin()
 	if err != nil {
