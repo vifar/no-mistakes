@@ -429,6 +429,8 @@ func TestPRContextGuardProvesMergedComparison(t *testing.T) {
 	type mergedCase struct {
 		name, mode                                                                   string
 		advance, changedResult, targetMoved, missingMerge, detachedMerge, beforeStep bool
+		qualified, strict, shipping                                                  bool
+		omitObservation, earlyChange                                                 bool
 		wantError                                                                    bool
 	}
 	cases := []mergedCase{
@@ -441,6 +443,16 @@ func TestPRContextGuardProvesMergedComparison(t *testing.T) {
 		{name: "target advances after merge", mode: "merge", advance: true},
 		{name: "merge changes result", mode: "merge", changedResult: true, wantError: true},
 		{name: "target changed before merge", mode: "merge", targetMoved: true, wantError: true},
+		{name: "qualified advanced target merge", mode: "merge", targetMoved: true, qualified: true},
+		{name: "qualified advanced target squash", mode: "squash", targetMoved: true, qualified: true},
+		{name: "qualified advanced target rebase", mode: "rebase", targetMoved: true, qualified: true},
+		{name: "qualified advanced target merge at CI entry", mode: "merge", targetMoved: true, qualified: true, beforeStep: true},
+		{name: "qualified advanced target with later advance", mode: "merge", targetMoved: true, qualified: true, advance: true},
+		{name: "qualified advanced target changed result", mode: "merge", targetMoved: true, qualified: true, changedResult: true, wantError: true},
+		{name: "qualified advanced target corrupt rebased prefix", mode: "rebase", targetMoved: true, qualified: true, earlyChange: true, wantError: true},
+		{name: "qualified advanced target without observation", mode: "merge", targetMoved: true, qualified: true, omitObservation: true, wantError: true},
+		{name: "qualified advanced target strict protection", mode: "merge", targetMoved: true, qualified: true, strict: true, wantError: true},
+		{name: "qualified advanced target strict shipping", mode: "merge", targetMoved: true, qualified: true, shipping: true, wantError: true},
 		{name: "missing merge evidence", mode: "merge", missingMerge: true, wantError: true},
 		{name: "merge absent from target", mode: "merge", detachedMerge: true, wantError: true},
 	}
@@ -460,6 +472,24 @@ func TestPRContextGuardProvesMergedComparison(t *testing.T) {
 		if _, err := guardPRContextWithSelection(sctx, types.StepPR, selection, false); err != nil {
 			t.Fatal(err)
 		}
+		if tc.qualified {
+			review, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sctx.DB.CompleteReviewStep(review.ID, sctx.Run.ID, head, 0, 1, "review.log"); err != nil {
+				t.Fatal(err)
+			}
+			if err := sctx.DB.UpdateRunPushBinding(sctx.Run.ID, db.PushBinding{HeadSHA: head}); err != nil {
+				t.Fatal(err)
+			}
+			if err := sctx.DB.SetRunCIReady(sctx.Run.ID, true); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if tc.shipping {
+			sctx.Run.Shipping = &types.ShippingOptions{Mode: types.ShippingFull}
+		}
 		before, err := sctx.DB.GetRunPRContext(sctx.Run.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -471,6 +501,23 @@ func TestPRContextGuardProvesMergedComparison(t *testing.T) {
 			}
 			gitCmd(t, dir, "add", "unreviewed.txt")
 			gitCmd(t, dir, "commit", "-m", "target moved")
+			if tc.qualified && !tc.strict && !tc.shipping && !tc.omitObservation {
+				gitCmd(t, dir, "checkout", "feature")
+				bin := fakeCLIBinDir(t)
+				linkTestBinary(t, bin, "gh")
+				sctx.Env = fakeCLIEnv(bin, map[string]string{"FAKE_CLI_MODE": "ci-gh", "FAKE_CLI_PROTECTION_JSON": `{"strict":false}`, "FAKE_CLI_RULES_JSON": `[]`, "FAKE_CLI_MERGEABLE": "MERGEABLE"})
+				if decision, err := guardPRContextWithSelection(sctx, types.StepCI, selection, false); err != nil || decision.RestartFrom != "" {
+					t.Fatalf("retain qualified comparison before merge: %+v %v", decision, err)
+				}
+				clearCIMonitorReady(sctx)
+				if decision, err := guardPRContextWithSelection(sctx, types.StepCI, selection, false); err != nil || decision.RestartFrom != "" {
+					t.Fatalf("recover readiness before merge: %+v %v", decision, err)
+				}
+				if err := sctx.DB.SetRunCIReady(sctx.Run.ID, true); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, dir, "checkout", "main")
+			}
 		}
 		switch tc.mode {
 		case "squash":
@@ -480,8 +527,15 @@ func TestPRContextGuardProvesMergedComparison(t *testing.T) {
 			// Cherry-pick each commit onto the target, as a provider rebase merge
 			// does. A different committer forces new commit IDs.
 			commits := strings.Fields(gitCmd(t, dir, "rev-list", "--reverse", base+".."+head))
-			for _, commit := range commits {
+			for i, commit := range commits {
 				gitCmd(t, dir, "-c", "user.name=Merge bot", "cherry-pick", commit)
+				if tc.earlyChange && i == 0 {
+					if err := os.WriteFile(filepath.Join(dir, "unexpected.txt"), []byte("corrupt rebased prefix\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					gitCmd(t, dir, "add", "unexpected.txt")
+					gitCmd(t, dir, "commit", "--amend", "--no-edit")
+				}
 			}
 		default:
 			gitCmd(t, dir, "merge", "--no-ff", "feature", "-m", "merge reviewed head")
@@ -511,7 +565,7 @@ func TestPRContextGuardProvesMergedComparison(t *testing.T) {
 		facts := fmt.Sprintf(`{"number":42,"html_url":%q,"state":"closed","merged":true,"merge_commit_sha":%q,"head":{"ref":"feature","sha":%q,"repo":{"full_name":"test/repo"}},"base":{"ref":"main"}}`, prURL, mergedSHA, head)
 		binDir := fakeCLIBinDir(t)
 		linkTestBinary(t, binDir, "gh")
-		sctx.Env = fakeCLIEnv(binDir, map[string]string{"FAKE_CLI_MODE": "ci-gh-reconcile", "FAKE_CLI_PR_FACTS_JSON": facts})
+		sctx.Env = fakeCLIEnv(binDir, map[string]string{"FAKE_CLI_MODE": "ci-gh-reconcile", "FAKE_CLI_PR_FACTS_JSON": facts, "FAKE_CLI_PROTECTION_JSON": fmt.Sprintf(`{"strict":%t}`, tc.strict), "FAKE_CLI_RULES_JSON": `[]`})
 		sctx.PRContextAfterStep = !tc.beforeStep
 		decision, err := GuardPRContext(sctx, types.StepCI)
 		if tc.missingMerge && err != nil && !strings.Contains(err.Error(), "lacks a full merge commit SHA") {
@@ -530,6 +584,8 @@ func TestPRContextGuardProvesMergedComparison(t *testing.T) {
 			if tc.wantError {
 				baseline := tc
 				baseline.changedResult, baseline.targetMoved, baseline.missingMerge, baseline.detachedMerge, baseline.wantError = false, false, false, false, false
+				baseline.strict, baseline.shipping = false, false
+				baseline.earlyChange = false
 				run(t, baseline)
 			}
 			run(t, tc)

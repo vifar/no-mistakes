@@ -592,7 +592,17 @@ func verifyCurrentPRComparison(sctx *pipeline.StepContext, host scm.Host, select
 		return fmt.Errorf("cannot prove the reviewed merge result: %w", err)
 	}
 	actualTree, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", mergeSHA+"^{tree}")
-	if err != nil || mergeTree != actualTree {
+	if err != nil {
+		return fmt.Errorf("read merged PR result tree: %w", err)
+	}
+	if mergeTree != actualTree {
+		advancedTree, err := qualifiedAdvancedMergeTree(sctx, host, receipt, mergeSHA)
+		if err != nil {
+			return err
+		}
+		if advancedTree != "" && advancedTree == actualTree {
+			return nil
+		}
 		return fmt.Errorf("merged PR tree differs from the reviewed comparison result")
 	}
 	return nil

@@ -246,7 +246,7 @@ func (d *DB) bindRunPRContextOnce(runID string, candidate PRContextCandidate, re
 		local_head_sha=excluded.local_head_sha, target_branch=excluded.target_branch,
 		target_sha=excluded.target_sha, merge_base_sha=excluded.merge_base_sha,
 		diff_digest=excluded.diff_digest, observed_at=excluded.observed_at,
-		generation=excluded.generation, ci_qualified=0`,
+		generation=excluded.generation, ci_qualified=0, retained_target_sha=NULL`,
 		runID, optionalPRField(candidate.PRURL), optionalPRField(candidate.SourceRepo),
 		optionalPRField(candidate.SourceBranch), optionalPRField(candidate.ForgeHeadSHA),
 		candidate.LocalHeadSHA, candidate.TargetBranch, candidate.TargetSHA,
