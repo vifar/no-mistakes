@@ -18,7 +18,9 @@ import (
 // accepted socket with no reply must not outlive the poll's diagnostic budget.
 func TestHarnessUnresponsiveRPCReportsBeforePackageTimeout(t *testing.T) {
 	if mode := os.Getenv("NM_E2E_UNRESPONSIVE_CHILD"); mode != "" {
-		root, err := os.MkdirTemp("", "nm-wait-")
+		// Leave room for the socket name under a workspace-local TMPDIR on
+		// macOS, whose Unix-domain socket paths are limited to 104 bytes.
+		root, err := os.MkdirTemp("", "nm-w-")
 		if err != nil {
 			t.Fatal(err)
 		}
