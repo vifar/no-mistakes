@@ -349,6 +349,9 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 			m.failRunSetup(handle.runCtx, runID, false, fmt.Sprintf("internal panic: %v", r))
 		}
 		if !handle.consumed {
+			if !m.terminalRunSettled(runID) {
+				return
+			}
 			m.mu.Lock()
 			if owned := m.runs[runID]; owned != nil && owned.handle == handle {
 				delete(m.runs, runID)
@@ -404,11 +407,11 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 // the saved verdict rather than a competing local failure reason.
 // started must become true once worktree creation succeeds: only failures before
 // that boundary can release custody without inspecting a managed worktree head.
-func (m *RunManager) failRunSetup(ctx context.Context, runID string, started bool, reason string) {
-	err := pipeline.WithCommitStatusLock(context.Background(), func() error {
+func (m *RunManager) failRunSetup(ctx context.Context, runID string, started bool, reason string) error {
+	err := pipeline.SettleTerminalWrite(m.db, func() error {
 		m.mu.Lock()
 		defer m.mu.Unlock()
-		status := types.RunFailed
+		status, message := types.RunFailed, reason
 		cause := context.Cause(ctx)
 		if owned := m.runs[runID]; owned != nil && owned.handle != nil {
 			if original := context.Cause(owned.handle.runCtx); original != nil {
@@ -416,7 +419,7 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 			}
 		}
 		if cause != nil {
-			status, reason = types.RunCancelled, cause.Error()
+			status, message = types.RunCancelled, cause.Error()
 			var planned *pipeline.ControlledShutdownCause
 			if errors.Is(cause, pipeline.ErrDaemonShutdown) && !errors.As(cause, &planned) {
 				status = types.RunFailed
@@ -427,30 +430,47 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 			return err
 		}
 		if revoked {
-			status, reason = types.RunFailed, db.RawShutdownReason
+			status, message = types.RunFailed, db.RawShutdownReason
 		}
 		terminate := m.db.TerminateActiveRun
 		if !started {
 			terminate = m.db.TerminateUnstartedRun
 		}
-		_, err = terminate(runID, reason, status)
-		return err
-	})
-	run, readErr := m.db.GetRun(runID)
-	if err != nil {
-		slog.Warn("failed to persist run setup failure", "run_id", runID, "error", err)
-	}
-	if readErr != nil {
-		slog.Warn("failed to read run setup outcome", "run_id", runID, "error", readErr)
-		return
-	}
-	if run != nil && !run.Status.Active() {
-		reason = ""
-		if run.Error != nil {
-			reason = *run.Error
+		if _, err := terminate(runID, message, status); err != nil {
+			return err
 		}
-		m.broadcastTerminal(run, run.Status, reason)
+		return nil
+	})
+	if err != nil {
+		slog.Error("setup terminal outcome unsettled; retaining run custody", "run_id", runID, "error", err)
+		return err
 	}
+	run, err := pipeline.ReadSettledRun(m.db, runID)
+	if err != nil {
+		return fmt.Errorf("read setup terminal outcome for run %s: %w", runID, err)
+	}
+	if run == nil || !run.Status.Terminal() {
+		return fmt.Errorf("setup terminal outcome unavailable for run %s", runID)
+	}
+	reason = ""
+	if run.Error != nil {
+		reason = *run.Error
+	}
+	m.broadcastTerminal(run, run.Status, reason)
+	return nil
+}
+
+func (m *RunManager) failUnadmittedRunSetup(ctx context.Context, run *db.Run, reason string) error {
+	m.mu.Lock()
+	m.runs[run.ID] = &managedRun{run: run, state: ownershipFinishing}
+	m.mu.Unlock()
+	if err := m.failRunSetup(ctx, run.ID, false, reason); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	delete(m.runs, run.ID)
+	m.mu.Unlock()
+	return nil
 }
 
 // claimRetryDelay spaces retries of a queued run whose claim failed, so a
@@ -2380,9 +2400,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", fmt.Errorf("create run: %w", err)
 	}
 	if err := m.cancelRunIDs(predecessors); err != nil {
-		m.failRunSetup(ctx, run.ID, false, fmt.Sprintf("supersede predecessor: %s", err))
+		settlementErr := m.failUnadmittedRunSetup(ctx, run, fmt.Sprintf("supersede predecessor: %s", err))
 		trackStartFailure("supersede_predecessor")
-		return "", fmt.Errorf("supersede predecessor for replacement run %s: %w; inspect no-mistakes axi status --run %s and correct the fault before no-mistakes rerun", run.ID, err, run.ID)
+		return "", fmt.Errorf("supersede predecessor for replacement run %s: %w; inspect no-mistakes axi status --run %s and correct the fault before no-mistakes rerun", run.ID, errors.Join(err, settlementErr), run.ID)
 	}
 
 	// Admission. The run row is durable from here on. A run that fits under
@@ -2395,9 +2415,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		// The row exists but is neither queued nor owned: end it through the
 		// shared setup-failure path (conditional, and it tells subscribers), so no
 		// orphan is left to block the branch's active-run lookup.
-		m.failRunSetup(ctx, run.ID, false, fmt.Sprintf("queue run: %s", err))
+		settlementErr := m.failUnadmittedRunSetup(ctx, run, fmt.Sprintf("queue run: %s", err))
 		trackStartFailure("queue_run")
-		return "", fmt.Errorf("queue run: %w", err)
+		return "", fmt.Errorf("queue run: %w", errors.Join(err, settlementErr))
 	}
 	if m.afterPushCommitted != nil && retained != nil {
 		m.afterPushCommitted()
@@ -2482,6 +2502,9 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		m.mu.Unlock()
 		defer func() {
 			if !handle.consumed {
+				if !m.terminalRunSettled(run.ID) {
+					return
+				}
 				m.mu.Lock()
 				delete(m.runs, run.ID)
 				m.mu.Unlock()
@@ -2510,13 +2533,20 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	}
 	bgOwnsSlot := false
 	started := false
+	var cleanupWorktree func()
 	defer func() {
 		if !bgOwnsSlot {
 			if r := recover(); r != nil {
 				err = fmt.Errorf("internal panic: %v", r)
 			}
 			if err != nil {
-				m.failRunSetup(setupCtx, run.ID, started, err.Error())
+				err = errors.Join(err, m.failRunSetup(setupCtx, run.ID, started, err.Error()))
+			}
+			if !m.terminalRunSettled(run.ID) {
+				return
+			}
+			if cleanupWorktree != nil {
+				cleanupWorktree()
 			}
 			slot.Release()
 		}
@@ -2551,17 +2581,9 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 
 	started = true
 
-	// The worktree exists from here on, so cleanup ownership is armed from here
-	// on: every later setup failure returns through this defer, and the
-	// background goroutine takes ownership only once it is running. Arming it any
-	// later would leave the directory behind - in the operator's own worktree
-	// root, unswept - for whichever failures happen in between.
-	bgOwnsWorktree := false
-	defer func() {
-		if !bgOwnsWorktree {
-			m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_setup_failed")
-		}
-	}()
+	cleanupWorktree = func() {
+		m.removeRunWorktree(repo.ID, run.ID, gateDir, wtDir, "run_setup_failed")
+	}
 
 	if err := git.CopyLocalUserIdentity(ctx, repo.WorkingPath, wtDir); err != nil {
 		trackStartFailure("configure_worktree_identity")
@@ -2728,7 +2750,6 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	m.mu.Unlock()
 
 	// Background goroutine now owns worktree cleanup and the run's slot.
-	bgOwnsWorktree = true
 	bgOwnsSlot = true
 
 	// Launch pipeline in background.

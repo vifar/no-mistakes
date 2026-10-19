@@ -64,6 +64,15 @@ func startPublicationRecoveryLocked() {
 func drainPublicationSettlements() error {
 	for {
 		terminalSettlementMu.Lock()
+		for i := 0; i < len(terminalSettlements); {
+			pending := terminalSettlements[i]
+			if !pending.unavailable() {
+				i++
+				continue
+			}
+			terminalSettlements = append(terminalSettlements[:i], terminalSettlements[i+1:]...)
+			pending.done <- fmt.Errorf("database closed before terminal settlement")
+		}
 		if len(rawPublicationSettlements) > 0 {
 			pending := rawPublicationSettlements[0]
 			terminalSettlementMu.Unlock()
@@ -126,10 +135,13 @@ func ReleaseCommitStatusLock() {
 }
 
 func SettleIneligibleTerminal(d *db.DB, runID, message string, status types.RunStatus) error {
-	return settleTerminalWrite(d, func() error { return d.RecordIneligibleTerminal(runID, message, status, nil) })
+	return SettleTerminalWrite(d, func() error { return d.RecordIneligibleTerminal(runID, message, status, nil) })
 }
 
-func settleTerminalWrite(d *db.DB, write func() error) error {
+func SettleTerminalWrite(d *db.DB, write func() error) error {
+	if d.Closed() {
+		return fmt.Errorf("database closed before terminal settlement")
+	}
 	done := make(chan error, 1)
 	terminalSettlementMu.Lock()
 	terminalSettlements = append(terminalSettlements, &publicationSettlement{write: write, done: done, unavailable: d.Closed})
@@ -347,7 +359,7 @@ func RecordRawShutdown(ctx context.Context, d *db.DB, runIDs []string, instance 
 func ReadSettledRun(d *db.DB, runID string) (*db.Run, error) {
 	durable, err := d.GetRun(runID)
 	if err != nil {
-		err = settleTerminalWrite(d, func() error {
+		err = SettleTerminalWrite(d, func() error {
 			var readErr error
 			durable, readErr = d.GetRun(runID)
 			return readErr

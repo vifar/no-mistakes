@@ -417,3 +417,79 @@ func TestTerminalSettlement_CommittedReadbackRecoversWithoutRewriting(t *testing
 		t.Fatalf("readback changed terminal reason: %+v,%v", stored, err)
 	}
 }
+
+func TestTerminalSettlement_ClosedOwnerFailsBehindRawStorageFault(t *testing.T) {
+	rawDB, p, run, _ := setupTest(t)
+	var healthy atomic.Bool
+	function := "closed_owner_raw_" + run.ID
+	if err := sqlite.RegisterScalarFunction(function, 0, func(*sqlite.FunctionContext, []driver.Value) (driver.Value, error) {
+		if !healthy.Load() {
+			return nil, errors.New("raw storage unavailable")
+		}
+		return int64(1), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rawDB.Close()
+	var err error
+	rawDB, err = db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rawDB.Close()
+	defer healthy.Store(true)
+	control, err := sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER closed_owner_raw BEFORE INSERT ON controlled_shutdown_runs BEGIN SELECT %s(); END`, function)); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecordRawShutdown(context.Background(), rawDB, []string{run.ID}, "runtime", func() {}); err == nil {
+		t.Fatal("raw fault not injected")
+	}
+	ownerDB, _, _, _ := setupTest(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- SettleTerminalWrite(ownerDB, func() error { t.Error("closed owner callback ran past raw fault"); return nil })
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		terminalSettlementMu.Lock()
+		queued := len(terminalSettlements) > 0
+		terminalSettlementMu.Unlock()
+		if queued {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("terminal continuation not registered")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err := ownerDB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("closed owner reported success")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("closed owner hung behind raw storage fault")
+	}
+	healthy.Store(true)
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		terminalSettlementMu.Lock()
+		pending := len(rawPublicationSettlements) > 0
+		terminalSettlementMu.Unlock()
+		if !pending {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("raw storage did not recover without a second request")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
