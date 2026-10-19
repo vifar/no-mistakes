@@ -2960,8 +2960,9 @@ func (e *Executor) ciMonitorInterruptedByShutdown(runID string, err error, ctxs 
 }
 
 // failRun marks a run as failed and returns the error.
-// It accepts an optional context; if the context was cancelled with a cause,
-// the cause message is used as the run's error (more informative than "context canceled").
+// An optional context's cause replaces the run's error when more specific than
+// context.Canceled, except for typed SQLite contention: its canonical outcome
+// must survive cancellation so recovery preserves the published-head status.
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
 	if LeftForRecoveryAtShutdown(err) {
 		return err
