@@ -100,6 +100,12 @@ exec %s "$@"
 			if err != nil || before.ReviewApprovedHeadSHA != nil {
 				t.Fatalf("fixture acquired approval before Review: %+v %v", before, err)
 			}
+			// Inspect the merge while the shim holds the run open; terminal
+			// cleanup may remove the worktree as soon as we release it.
+			ps := parentsOf(t, h, *run.WorktreeDir, merged)
+			if len(ps) != 2 || ps[0] != submitted || ps[1] != mainSHA {
+				t.Fatalf("real merge parents=%v, want [%s %s]", ps, submitted, mainSHA)
+			}
 			if err := os.WriteFile(release, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -111,10 +117,6 @@ exec %s "$@"
 			pin, err := database.GetRunPRContext(run.ID)
 			if err != nil || pin == nil || pin.Generation != 2 || pin.LocalHeadSHA != merged {
 				t.Fatalf("generation-two merge pin: %+v %v", pin, err)
-			}
-			ps := parentsOf(t, h, *stored.WorktreeDir, merged)
-			if len(ps) != 2 || ps[0] != submitted || ps[1] != mainSHA {
-				t.Fatalf("real merge parents=%v, want [%s %s]", ps, submitted, mainSHA)
 			}
 			reviews := 0
 			for _, invocation := range h.AgentInvocations() {
