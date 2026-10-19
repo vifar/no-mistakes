@@ -93,7 +93,8 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 
 	// A workspace-local tmp can approach the Unix socket path limit. Its
 	// containing tmp segment already satisfies the daemon reaper's safety gate.
-	prefix := "nm-e2e-*"
+	// Otherwise nmh-* keeps the root short and is recognized by the reaper.
+	prefix := "nmh-*"
 	if filepath.Base(os.TempDir()) == "tmp" {
 		prefix = ""
 	}
@@ -107,7 +108,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 		NMBin:             nmBin,
 		FakeAgent:         fakeBin,
 		BinDir:            filepath.Join(root, "bin"),
-		NMHome:            filepath.Join(root, "nmhome"),
+		NMHome:            filepath.Join(root, "h"),
 		HomeDir:           filepath.Join(root, "home"),
 		UpstreamDir:       filepath.Join(root, "upstream.git"),
 		WorkDir:           filepath.Join(root, "work"),

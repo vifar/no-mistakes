@@ -15,7 +15,8 @@ var (
 
 // TargetAdvanceRewind is diagnostic history. SourceSHA is the ORIGINAL source
 // observation for the pending integration; nil means confirmed remote absence.
-// ForgeHeadSHA pins the attached PR head; nil pins continued PR absence.
+// ForgeHeadSHA pins the attached PR head; nil means no PR is attached, so
+// TargetRewindPRObservation distinguishes pinned discovery from PR absence.
 // Runs point at the latest row only while that integration remains pending.
 type TargetAdvanceRewind struct {
 	ID, RunID, OldTargetSHA, TargetSHA, LocalHeadSHA string
