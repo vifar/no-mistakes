@@ -123,7 +123,10 @@ func TestTargetAdvanceReviewCarryLiveJourney(t *testing.T) {
 				}
 				return
 			}
-			completed := h.WaitForRun(branch, 120*time.Second)
+			// This control includes integration plus another validation pass.
+			// Leave bounded room for those subprocesses on a loaded host;
+			// the exact review-count and publication assertions remain below.
+			completed := h.WaitForRun(branch, 3*time.Minute)
 			if completed.Status != types.RunCompleted {
 				t.Fatalf("clean control did not complete: %s %s", completed.Status, deref(completed.Error))
 			}

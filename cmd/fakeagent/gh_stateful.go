@@ -16,13 +16,14 @@ import (
 // its head branch. The body is exactly what the pipeline last wrote, so a
 // later `gh pr view --json body` reads it back the way a real forge would.
 type ghStatefulPR struct {
-	Number int    `json:"number"`
-	URL    string `json:"url"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	Base   string `json:"base"`
-	Head   string `json:"head"`
-	State  string `json:"state"`
+	Number         int    `json:"number"`
+	URL            string `json:"url"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
+	Base           string `json:"base"`
+	Head           string `json:"head"`
+	State          string `json:"state"`
+	MergeCommitSHA string `json:"merge_commit_sha,omitempty"`
 }
 
 type ghStatefulAPIRef struct {
@@ -34,13 +35,14 @@ type ghStatefulAPIRef struct {
 }
 
 type ghStatefulAPI struct {
-	Number int              `json:"number"`
-	URL    string           `json:"html_url"`
-	State  string           `json:"state"`
-	Draft  bool             `json:"draft"`
-	Merged bool             `json:"merged"`
-	Head   ghStatefulAPIRef `json:"head"`
-	Base   ghStatefulAPIRef `json:"base"`
+	Number         int              `json:"number"`
+	URL            string           `json:"html_url"`
+	State          string           `json:"state"`
+	Draft          bool             `json:"draft"`
+	Merged         bool             `json:"merged"`
+	MergeCommitSHA string           `json:"merge_commit_sha,omitempty"`
+	Head           ghStatefulAPIRef `json:"head"`
+	Base           ghStatefulAPIRef `json:"base"`
 }
 
 type ghStatefulState struct {
@@ -291,6 +293,9 @@ func ghStatefulFacts(repo string, pr *ghStatefulPR) ghStatefulAPI {
 	targetOwner := strings.Split(repo, "/")[0]
 	repoName := strings.Split(repo, "/")[1]
 	facts := ghStatefulAPI{Number: pr.Number, URL: pr.URL, State: strings.ToLower(pr.State)}
+	if pr.State == "MERGED" {
+		facts.State, facts.Merged, facts.MergeCommitSHA = "closed", true, pr.MergeCommitSHA
+	}
 	facts.Head.Ref, facts.Head.SHA, facts.Head.Repo.FullName = pr.Head, ghStatefulHeadOID(repo, pr.Head), repo
 	facts.Base.Ref, facts.Base.SHA, facts.Base.Repo.FullName = pr.Base, ghStatefulHeadOID(repo, pr.Base), targetOwner+"/"+repoName
 	return facts

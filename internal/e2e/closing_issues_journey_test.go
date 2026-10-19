@@ -19,13 +19,14 @@ import (
 )
 
 type statefulGHPR struct {
-	Number int    `json:"number"`
-	URL    string `json:"url"`
-	Title  string `json:"title"`
-	Body   string `json:"body"`
-	Base   string `json:"base"`
-	Head   string `json:"head"`
-	State  string `json:"state"`
+	Number         int    `json:"number"`
+	URL            string `json:"url"`
+	Title          string `json:"title"`
+	Body           string `json:"body"`
+	Base           string `json:"base"`
+	Head           string `json:"head"`
+	State          string `json:"state"`
+	MergeCommitSHA string `json:"merge_commit_sha,omitempty"`
 }
 
 type statefulGHState struct {
