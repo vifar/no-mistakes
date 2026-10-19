@@ -11,8 +11,128 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
+
+func TestDocumentOverBudgetDiscardPersistsAlongsideGaps(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	calls := 0
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		calls++
+		if calls == 1 {
+			writeAndCommit("README.md", "accepted guide\n")(t, dir)
+			return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"first gap","action":"ask-user"},{"severity":"warning","description":"second gap","action":"ask-user"}],"summary":"repair README"}`)}, nil
+		}
+		writeAndCommit("guide-a.md", "proposal A\n")(t, dir)
+		writeAndCommit("guide-b.md", "proposal B\n")(t, dir)
+		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"add guides"}`)}, nil
+	}}
+	sc := newTestContext(t, ag, dir, base, head, config.Commands{Lint: "true"})
+	dbPath := filepath.Join(t.TempDir(), "document.sqlite")
+	database, err := db.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	sc.DB = database
+	sc.Repo, err = database.InsertRepo(dir, "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.Run, err = database.InsertRun(sc.Repo.ID, "refs/heads/feature", head, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.Config.Document.MaxCommitsPerRun = 2
+	if out, err := (&DocumentStep{}).Execute(sc); err != nil || !out.NeedsApproval {
+		t.Fatalf("initial accepted repair: %+v, %v", out, err)
+	}
+	accepted := gitCmd(t, dir, "rev-parse", "HEAD")
+	assertFindings := func(raw string) {
+		t.Helper()
+		var findings Findings
+		if err := json.Unmarshal([]byte(raw), &findings); err != nil {
+			t.Fatal(err)
+		}
+		gaps := map[string]int{}
+		discards := 0
+		for _, finding := range findings.Items {
+			gaps[finding.Description]++
+			text := strings.ToLower(finding.Description)
+			if finding.Action == "ask-user" && strings.Contains(text, "discard") && strings.Contains(text, "budget") {
+				discards++
+			}
+		}
+		if gaps["first gap"] != 1 || gaps["second gap"] != 1 {
+			t.Errorf("earlier gaps lost or duplicated: %s", raw)
+		}
+		if discards != 1 {
+			t.Errorf("want exactly one ask-user over-budget discard notice, got %d: %s", discards, raw)
+		}
+		if len(findings.Items) != 3 {
+			t.Errorf("want two gaps and one discard notice: %s", raw)
+		}
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		out, err := (&DocumentStep{}).Execute(sc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !out.NeedsApproval || gitCmd(t, dir, "rev-parse", "HEAD") != accepted || sc.Run.HeadSHA != accepted || gitStatusPorcelain(t, dir) != "" {
+			t.Fatalf("discard did not park at the exact accepted clean head: %+v", out)
+		}
+		assertFindings(out.Findings)
+		checkPasses := func() {
+			t.Helper()
+			passes, err := sc.DB.GetDocumentPasses(sc.Run.ID)
+			if err != nil || len(passes) != attempt+2 {
+				t.Fatalf("pass records: %+v, %v", passes, err)
+			}
+			commits := 0
+			for _, pass := range passes {
+				commits += pass.CommitCount
+			}
+			last := passes[len(passes)-1]
+			if commits != 1 || last.CommitCount != 0 || last.ToHeadSHA == nil || *last.ToHeadSHA != accepted || last.FindingsJSON == nil {
+				t.Fatalf("discard changed accepted budget or failed to complete: %+v", passes)
+			}
+			assertFindings(*last.FindingsJSON)
+		}
+		checkPasses()
+		if err := database.Close(); err != nil {
+			t.Fatal(err)
+		}
+		database, err = db.Open(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sc.DB = database
+		sc.Shared = &pipeline.RunShared{}
+		checkPasses()
+	}
+	if calls != 3 {
+		t.Fatalf("expected initial repair and two discarded proposals, got %d", calls)
+	}
+}
+
+func TestDocumentExhaustedBudgetDoesNotClaimDiscard(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	ag := &mockAgent{name: "test"}
+	sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+	sc.Config.Document.MaxCommitsPerRun = 0
+	out, err := (&DocumentStep{}).Execute(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.NeedsApproval || strings.Contains(strings.ToLower(out.Findings), "discard") || len(ag.calls) != 0 {
+		t.Fatalf("exhausted admission misreported a discarded proposal: %+v", out)
+	}
+	passes, err := sc.DB.GetDocumentPasses(sc.Run.ID)
+	if err != nil || len(passes) != 0 {
+		t.Fatalf("exhausted admission created a pass: %+v, %v", passes, err)
+	}
+}
 
 // A different commit with identical input content is still a repeat. Discarding
 // it must park rather than report the reverted README repair as clean.

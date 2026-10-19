@@ -158,7 +158,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		return &pipeline.StepOutcome{}, nil
 	}
 	if history.commits >= limit {
-		return stoppedDocumentOutcome(sctx, documentCapFinding(previous), "Document commit limit reached; stopping further commits"), nil
+		return stoppedDocumentOutcome(sctx, documentCapFinding(previous, false), "Document commit limit reached; stopping further commits"), nil
 	}
 
 	if combinedLint {
@@ -248,7 +248,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 			}
 		}
 		if capExceeded {
-			proposedDocs = documentCapFinding(proposedDocs)
+			proposedDocs = documentCapFinding(proposedDocs, true)
 		}
 		if repeated {
 			discarded := types.Finding{

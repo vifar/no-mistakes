@@ -57,13 +57,22 @@ func stoppedDocumentOutcome(sctx *pipeline.StepContext, findings Findings, reaso
 	return &pipeline.StepOutcome{NeedsApproval: len(findings.Items) > 0, Findings: string(raw), FixSummary: NoChangesAppliedSummary}
 }
 
-func documentCapFinding(findings Findings) Findings {
-	if len(findings.Items) == 0 {
-		findings.Items = append(findings.Items, types.Finding{
-			Severity: "warning", Action: "ask-user",
-			Description: "Document commit limit reached; further documentation edits require a new run or an owner decision.",
-		})
+func documentCapFinding(findings Findings, discarded bool) Findings {
+	if !discarded && len(findings.Items) > 0 {
+		return findings
 	}
+	description := "Document commit limit reached; further documentation edits require a new run or an owner decision."
+	if discarded {
+		description = "Document discarded an over-budget proposal; the repair was not applied. Inspect the pending documentation gaps and commit budget before continuing."
+	}
+	for _, finding := range findings.Items {
+		if finding.Action == "ask-user" && finding.Description == description {
+			return findings
+		}
+	}
+	findings.Items = append(findings.Items, types.Finding{
+		Severity: "warning", Action: "ask-user", Description: description,
+	})
 	return findings
 }
 
