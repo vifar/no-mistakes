@@ -22,6 +22,20 @@ type contentionStep struct {
 func (s *contentionStep) Execute(ctx *StepContext) (*StepOutcome, error) { return s.execute(ctx) }
 
 func TestExecutorPRStateLockIsInfrastructureNotCodeFailure(t *testing.T) {
+	testExecutorWriterLock(t, "UpdateRunPRState")
+}
+
+func TestExecutorDocumentLockIsInfrastructureNotCodeFailure(t *testing.T) {
+	for _, operation := range []string{"BeginDocumentPass", "CompleteDocumentPass", "CarryValidationOverDocOnlyCommits"} {
+		t.Run(operation, func(t *testing.T) {
+			t.Parallel()
+			testExecutorWriterLock(t, operation)
+		})
+	}
+}
+
+func testExecutorWriterLock(t *testing.T, operation string) {
+	t.Helper()
 	for _, releaseEarly := range []bool{true, false} {
 		name := "past_budget"
 		if releaseEarly {
@@ -30,7 +44,42 @@ func TestExecutorPRStateLockIsInfrastructureNotCodeFailure(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			database, p, run, repo := setupTest(t)
 			workdir := completionFixture(t, database, run)
-			step := &contentionStep{shutdownBlockingStep: newShutdownBlockingStep(types.StepCI)}
+			stepName := types.StepCI
+			if operation != "UpdateRunPRState" {
+				stepName = types.StepDocument
+			}
+			from, to := strings.Repeat("a", 40), run.HeadSHA
+			var passID string
+			if operation == "CompleteDocumentPass" || operation == "CarryValidationOverDocOnlyCommits" {
+				var err error
+				passID, err = database.BeginDocumentPass(run.ID, from)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if operation == "CarryValidationOverDocOnlyCommits" {
+				if err := database.CompleteDocumentPass(passID, to, 1, `{}`); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.UpdateRunReviewApprovedHeadSHA(run.ID, from); err != nil {
+					t.Fatal(err)
+				}
+				tested, err := database.InsertStepResult(run.ID, types.StepTest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw, err := types.MarshalFindingsJSON(types.Findings{Summary: "validated", TestedHeadSHA: from})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.SetStepFindings(tested.ID, raw); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.CompleteStepWithStatus(tested.ID, types.StepStatusCompleted, 0, 1, ""); err != nil {
+					t.Fatal(err)
+				}
+			}
+			step := &contentionStep{shutdownBlockingStep: newShutdownBlockingStep(stepName)}
 			step.execute = func(sctx *StepContext) (*StepOutcome, error) {
 				holder, err := sql.Open("sqlite", p.DB())
 				if err != nil {
@@ -38,19 +87,36 @@ func TestExecutorPRStateLockIsInfrastructureNotCodeFailure(t *testing.T) {
 				}
 				defer holder.Close()
 				holder.SetMaxOpenConns(1)
-				if _, err := holder.Exec(`BEGIN EXCLUSIVE`); err != nil {
+				tx, err := holder.Begin()
+				if err != nil {
+					return nil, err
+				}
+				defer tx.Rollback()
+				if _, err := tx.Exec(`UPDATE runs SET closing_issue_refs=? WHERE id=?`, "test/repo#92", run.ID); err != nil {
 					return nil, err
 				}
 				released := make(chan error, 1)
 				if releaseEarly {
 					go func() {
 						time.Sleep(sqlitewrite.BusyTimeout + time.Second)
-						_, err := holder.Exec(`ROLLBACK`)
-						released <- err
+						released <- tx.Commit()
 					}()
 				}
 				start := time.Now()
-				err = sctx.DB.UpdateRunPRState(sctx.Run.ID, "open")
+				switch operation {
+				case "UpdateRunPRState":
+					err = sctx.DB.UpdateRunPRState(sctx.Run.ID, "open")
+				case "BeginDocumentPass":
+					_, err = sctx.DB.BeginDocumentPass(sctx.Run.ID, from)
+				case "CompleteDocumentPass":
+					err = sctx.DB.CompleteDocumentPass(passID, to, 1, `{}`)
+				case "CarryValidationOverDocOnlyCommits":
+					var carried bool
+					carried, err = sctx.DB.CarryValidationOverDocOnlyCommits(sctx.Run.ID, from, to)
+					if err == nil && !carried {
+						t.Error("validation was not carried")
+					}
+				}
 				if releaseEarly {
 					if releaseErr := <-released; releaseErr != nil {
 						t.Error(releaseErr)
@@ -60,7 +126,7 @@ func TestExecutorPRStateLockIsInfrastructureNotCodeFailure(t *testing.T) {
 					}
 				} else {
 					// Let terminal outcome persistence succeed so recovery can check it too.
-					if _, releaseErr := holder.Exec(`ROLLBACK`); releaseErr != nil {
+					if releaseErr := tx.Commit(); releaseErr != nil {
 						t.Error(releaseErr)
 					}
 					if !sqlitewrite.IsContention(err) {
@@ -94,8 +160,21 @@ func TestExecutorPRStateLockIsInfrastructureNotCodeFailure(t *testing.T) {
 					t.Fatalf("lost durable infrastructure error: %+v", stored)
 				}
 				steps, stepErr := database.GetStepsByRun(run.ID)
-				if stepErr != nil || len(steps) != 1 || steps[0].Status != types.StepStatusFailed || steps[0].Error == nil || !sqlitewrite.RecordedContention(*steps[0].Error) {
-					t.Fatalf("infrastructure failure stranded an active step: steps=%+v err=%v", steps, stepErr)
+				if stepErr != nil {
+					t.Fatal(stepErr)
+				}
+				found := false
+				for _, storedStep := range steps {
+					if storedStep.StepName != stepName {
+						continue
+					}
+					found = true
+					if storedStep.Status != types.StepStatusFailed || storedStep.Error == nil || !sqlitewrite.RecordedContention(*storedStep.Error) {
+						t.Fatalf("infrastructure failure stranded an active step: %+v", storedStep)
+					}
+				}
+				if !found {
+					t.Fatal("infrastructure failure lost its step")
 				}
 				// Both manager cleanup and a fresh recovery executor must preserve status.
 				executor.ReportPublishedHeadFailure(context.Background(), run, repo)
@@ -103,8 +182,8 @@ func TestExecutorPRStateLockIsInfrastructureNotCodeFailure(t *testing.T) {
 				recovered.ReportRecoveredPublishedHeadStatus(context.Background(), stored, repo)
 			}
 			for _, status := range step.reported() {
-				if status == "failure" {
-					t.Fatalf("good source received failure status: %v", step.reported())
+				if !releaseEarly || status == "failure" {
+					t.Fatalf("storage outcome published a fabricated source verdict: %v", step.reported())
 				}
 			}
 		})

@@ -1,6 +1,11 @@
 package db
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
+)
 
 // DocumentPass survives step resets. A missing ToHeadSHA means an invocation
 // was interrupted; recovery must not silently give it another commit budget.
@@ -35,7 +40,7 @@ func (d *DB) BeginDocumentPass(runID, from string) (string, error) {
 		return "", fmt.Errorf("invalid Document starting head")
 	}
 	id := newID()
-	_, err := d.sql.Exec(`INSERT INTO document_passes(id,run_id,from_head_sha) VALUES(?,?,?)`, id, runID, from)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "BeginDocumentPass", `INSERT INTO document_passes(id,run_id,from_head_sha) VALUES(?,?,?)`, id, runID, from)
 	if err != nil {
 		return "", fmt.Errorf("begin document pass: %w", err)
 	}
@@ -46,7 +51,7 @@ func (d *DB) CompleteDocumentPass(id, to string, commits int, findings string) e
 	if !validGitSHA(to) || commits < 0 {
 		return fmt.Errorf("invalid document pass result")
 	}
-	result, err := d.sql.Exec(`UPDATE document_passes SET to_head_sha=?,commit_count=?,findings_json=? WHERE id=? AND to_head_sha IS NULL`, to, commits, findings, id)
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "CompleteDocumentPass", `UPDATE document_passes SET to_head_sha=?,commit_count=?,findings_json=? WHERE id=? AND to_head_sha IS NULL`, to, commits, findings, id)
 	if err != nil {
 		return fmt.Errorf("complete document pass: %w", err)
 	}
