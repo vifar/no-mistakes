@@ -24,9 +24,9 @@ type ControlledShutdownCause struct {
 
 func (*ControlledShutdownCause) Error() string { return "cancelled: planned daemon shutdown" }
 
-// Is makes a planned shutdown a daemon shutdown for the runs a shutdown leaves
-// for recovery: a run parked at an approval gate or monitoring CI keeps its
-// non-terminal record under either shutdown form.
+// Is lets planned shutdown reuse the daemon-shutdown recovery paths for parked
+// gates and CI monitors. Certified watchers are routed separately to terminal
+// cancellation before the CI-monitor recovery path is chosen.
 func (*ControlledShutdownCause) Is(target error) bool { return target == ErrDaemonShutdown }
 
 func (e *Executor) SetRuntimeInstance(instance string) { e.runtimeInstance = instance }

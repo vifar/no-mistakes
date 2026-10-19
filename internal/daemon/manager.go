@@ -3426,7 +3426,7 @@ func (m *RunManager) terminalRunSettled(runID string) bool {
 
 // releaseShutdownForRecovery settles the shutdown intent of a run the
 // shutdown deliberately left non-terminal (parked at a gate or monitoring CI).
-// Such a run is resumed exactly as after a crash, so its shutdown record must
+// Such a run follows startup recovery, so its shutdown record must
 // not make the next start treat it as an unsettled, obsolete shutdown.
 func (m *RunManager) releaseShutdownForRecovery(runID string) bool {
 	if err := pipeline.SettleTerminalWrite(m.db, func() error {

@@ -11,10 +11,66 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+// A shutdown may cancel the executing review, but must leave a capacity-blocked
+// run queued. A new daemon must admit that same run rather than lose or replace it.
+func TestForcedRestartAdmitsTheSameQueuedRun(t *testing.T) {
+	h := NewHarness(t, SetupOpts{
+		Agent:             "claude",
+		Scenario:          silentAgentScenario(t),
+		GlobalConfigExtra: "daemon:\n  max_concurrent_runs: 1\n",
+	})
+	if out, err := h.Run("init"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	const runningBranch = "feature/shutdown-slot-holder"
+	h.CommitChange(runningBranch, "holder.txt", "hold execution slot\n", "hold slot")
+	h.PushToGate(runningBranch)
+	running := waitForStepStatus(t, h, runningBranch, types.StepReview, types.StepStatusRunning, 90*time.Second)
+	const queuedBranch = "feature/shutdown-queued"
+	h.CommitChange(queuedBranch, "queued.txt", "queued for recovery\n", "queue second run")
+	h.PushToGate(queuedBranch)
+	deadline := time.Now().Add(15 * time.Second)
+	queued := h.ActiveRun(queuedBranch)
+	for (queued == nil || queued.Status != types.RunQueued) && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+		queued = h.ActiveRun(queuedBranch)
+	}
+	if queued == nil || queued.Status != types.RunQueued {
+		t.Fatalf("second run never queued: %+v", queued)
+	}
+	if out, err := h.Run("daemon", "stop", "--force"); err != nil {
+		t.Fatalf("stop: %v\n%s", err, out)
+	} else {
+		t.Logf("stop output: %s", strings.TrimSpace(out))
+	}
+	database, err := db.OpenReadOnly(paths.WithRoot(h.NMHome).DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	stored, err := database.GetRun(queued.ID)
+	if err != nil || stored.Status != types.RunQueued || stored.WorktreeDir != nil {
+		t.Fatalf("shutdown launched or lost queued run: %+v %v", stored, err)
+	}
+	first, err := database.GetRun(running.ID)
+	if err != nil || first.Status != types.RunCancelled {
+		t.Fatalf("slot holder not cancelled: %+v %v", first, err)
+	}
+	if out, err := h.Run("daemon", "start"); err != nil {
+		t.Fatalf("start: %v\n%s", err, out)
+	}
+	resumed := waitForStepStatus(t, h, queuedBranch, types.StepReview, types.StepStatusRunning, 90*time.Second)
+	if resumed.ID != queued.ID || resumed.HeadSHA != queued.HeadSHA {
+		t.Fatalf("restart replaced queued run: before=%+v after=%+v", queued, resumed)
+	}
+	t.Logf("RESULT: executing run %s cancelled; queued run %s retained without worktree and admitted at the same head %s after restart", running.ID, queued.ID, queued.HeadSHA)
+}
 
 // Planned shutdown cancels an executing review with its durable shutdown reason.
 // Drive the real review subprocess so leaving it active for recovery, as a parked

@@ -4,13 +4,17 @@ package e2e
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -32,7 +36,14 @@ import (
 // remain visible and cannot issue another POST, even after reopening/recovery.
 // Only external agent and forge responses are fixtures; no DB proof is seeded.
 func TestCertifiedWatcherProductionLifecycle(t *testing.T) {
-	for _, action := range []string{"operator", "planned-stop"} {
+	actions := []string{"operator", "planned-stop"}
+	if runtime.GOOS != "windows" {
+		actions = append(actions, "raw-stop", "raw-stop-storage-recovery")
+	}
+	if runtime.GOOS == "darwin" {
+		actions = append(actions, "uninstall")
+	}
+	for _, action := range actions {
 		t.Run(action, func(t *testing.T) {
 			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: certifiedWatcherScenario(t)})
 			const repoURL = "https://github.com/example/repo.git"
@@ -178,6 +189,102 @@ func TestCertifiedWatcherProductionLifecycle(t *testing.T) {
 			if !reflect.DeepEqual(before, []string{"pending", "success"}) {
 				t.Fatalf("status HTTP receipts = %v, want pending then success", before)
 			}
+			if strings.HasPrefix(action, "raw-stop") {
+				control, err := sql.Open("sqlite", paths.WithRoot(h.NMHome).DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer control.Close()
+				if action == "raw-stop-storage-recovery" {
+					if _, err := control.Exec(`CREATE TRIGGER block_raw_fence BEFORE INSERT ON controlled_shutdown_runs BEGIN SELECT RAISE(FAIL,'temporary raw fence storage outage'); END`); err != nil {
+						t.Fatal(err)
+					}
+					defer control.Exec(`DROP TRIGGER IF EXISTS block_raw_fence`)
+				}
+				pid := daemonPIDForRoot(t, h)
+				process, err := os.FindProcess(pid)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := process.Signal(os.Interrupt); err != nil {
+					t.Fatal(err)
+				}
+				if action == "raw-stop-storage-recovery" {
+					deadline := time.Now().Add(10 * time.Second)
+					for {
+						log, err := os.ReadFile(paths.WithRoot(h.NMHome).DaemonLog())
+						if err != nil {
+							t.Fatal(err)
+						}
+						if strings.Contains(string(log), "temporary raw fence storage outage") {
+							break
+						}
+						if time.Now().After(deadline) {
+							t.Fatal("daemon never observed the injected storage outage")
+						}
+						time.Sleep(20 * time.Millisecond)
+					}
+					alive, err := e2edaemon.ProcessAlive(pid)
+					if err != nil || !alive {
+						t.Fatalf("storage failure released daemon custody: alive=%t %v", alive, err)
+					}
+					stored, err := database.GetRun(run.ID)
+					if err != nil || stored.Status != types.RunRunning {
+						t.Fatalf("storage failure fabricated terminal outcome: %+v %v", stored, err)
+					}
+					if _, err := control.Exec(`DROP TRIGGER block_raw_fence`); err != nil {
+						t.Fatal(err)
+					}
+					t.Log("RESULT: failed raw-fence persistence retained live daemon and nonterminal run; restored storage without a second shutdown request")
+				}
+				deadline := time.Now().Add(15 * time.Second)
+				for {
+					alive, err := e2edaemon.ProcessAlive(pid)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !alive {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatal("raw shutdown did not release the captured process")
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+				assertNoDaemonProcessesForRoot(t, h, "after raw signal")
+				for _, stage := range []string{"before recovery", "after recovery"} {
+					expectedStatus := types.RunRunning
+					expectedState := "success"
+					if stage == "after recovery" {
+						if out, err := h.Run("daemon", "start"); err != nil {
+							t.Fatalf("raw recovery: %v\n%s", err, out)
+						}
+						expectedStatus = types.RunCIMonitorInterrupted
+						expectedState = "failure"
+					}
+					stored, err := database.GetRun(run.ID)
+					if err != nil || stored.Status != expectedStatus || (stage == "after recovery" && (stored.Error == nil || *stored.Error != types.RunCIMonitorInterruptedReason)) {
+						t.Fatalf("%s raw outcome: %+v %v", stage, stored, err)
+					}
+					publications, err := database.GetCommitStatusPublications(t.Context(), run.ID)
+					deadline := time.Now().Add(10 * time.Second)
+					for err == nil && len(publications) == 1 && publications[0].LastState != expectedState && time.Now().Before(deadline) {
+						time.Sleep(50 * time.Millisecond)
+						publications, err = database.GetCommitStatusPublications(t.Context(), run.ID)
+					}
+					if err != nil || len(publications) != 1 || publications[0].LastState != expectedState || publications[0].StrictCertificate != nil || (publications[0].PreserveSuccess != nil && *publications[0].PreserveSuccess) {
+						t.Fatalf("%s raw publication: %+v %v", stage, publications, err)
+					}
+				}
+				mu.Lock()
+				receipts := append([]string(nil), posted...)
+				mu.Unlock()
+				if !reflect.DeepEqual(receipts, []string{"pending", "success", "failure"}) {
+					t.Fatalf("raw shutdown HTTP receipts: %v", receipts)
+				}
+				t.Logf("RESULT: raw signal revoked certification and left monitor for recovery; restart recorded %s and HTTP states %v", types.RunCIMonitorInterrupted, receipts)
+				return
+			}
 			events, closeEvents, err := ipc.Subscribe(paths.WithRoot(h.NMHome).Socket(), &ipc.SubscribeParams{RunID: run.ID})
 			if err != nil {
 				t.Fatal(err)
@@ -187,6 +294,38 @@ func TestCertifiedWatcherProductionLifecycle(t *testing.T) {
 			if action == "planned-stop" {
 				reason = "cancelled: planned daemon shutdown"
 				stopCertifiedWatcherDaemon(t, h, run.ID, reason)
+			} else if action == "uninstall" {
+				reason = "cancelled: planned daemon shutdown"
+				root, err := filepath.EvalSymlinks(h.NMHome)
+				if err != nil {
+					t.Fatal(err)
+				}
+				digest := sha256.Sum256([]byte(root))
+				definition := filepath.Join(h.HomeDir, "Library", "LaunchAgents", "com.kunchenguid.no-mistakes.daemon."+hex.EncodeToString(digest[:4])+".plist")
+				if err := os.MkdirAll(filepath.Dir(definition), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(definition, []byte("isolated service fixture"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				// Only the service-manager boundary is simulated. Its bootout
+				// sends a real raw signal to the actual fixture daemon, so an
+				// uninstall that bootouts before its planned handoff loses proof.
+				script := "#!/bin/sh\n[ \"$1\" = bootout ] || exit 70\nprintf '%s\\n' \"$*\" >> \"$NM_HOME/bootout-receipt\"\nkill -TERM " + strconv.Itoa(daemonPIDForRoot(t, h)) + " 2>/dev/null || true\n"
+				if err := os.WriteFile(filepath.Join(h.BinDir, "launchctl"), []byte(script), 0700); err != nil {
+					t.Fatal(err)
+				}
+				out, err := h.RunInDirWithEnv(h.WorkDir, map[string]string{"NM_TEST_START_DAEMON": "0"}, "daemon", "uninstall", "--force")
+				if err != nil {
+					t.Fatalf("uninstall: %v\n%s", err, out)
+				}
+				if _, err := os.Stat(definition); !os.IsNotExist(err) {
+					t.Fatalf("uninstall retained service definition: %v", err)
+				}
+				if _, err := os.Stat(filepath.Join(h.NMHome, "bootout-receipt")); err != nil {
+					t.Fatalf("uninstall bypassed service manager: %v", err)
+				}
+				t.Logf("uninstall CLI RESULT (isolated launchctl fixture): %s", strings.TrimSpace(out))
 			} else if out, err := h.Run("axi", "abort"); err != nil {
 				t.Fatalf("abort: %v\n%s", err, out)
 			} else {
@@ -311,6 +450,26 @@ func stopCertifiedWatcherDaemon(t *testing.T, h *Harness, runID, reason string) 
 		t.Fatal(err)
 	}
 	request := ipc.ShutdownParams{ExpectedPID: identity.PID, ExpectedInstance: identity.Instance, ExpectedStartedAt: identity.StartedAt.UTC().Format(time.RFC3339Nano)}
+	for _, field := range []string{"pid", "instance", "started_at"} {
+		wrong := request
+		switch field {
+		case "pid":
+			wrong.ExpectedPID++
+		case "instance":
+			wrong.ExpectedInstance += "-wrong"
+		case "started_at":
+			wrong.ExpectedStartedAt = identity.StartedAt.Add(-500 * time.Millisecond).UTC().Format(time.RFC3339Nano)
+		}
+		var refused ipc.ShutdownResult
+		if err := client.CallWithTimeout(ipc.MethodShutdown, &wrong, &refused, 5*time.Second); err == nil || refused.OK {
+			t.Fatalf("shutdown accepted mismatched %s: %+v %v", field, refused, err)
+		}
+		var health ipc.HealthResult
+		if err := client.CallWithTimeout(ipc.MethodHealth, &ipc.HealthParams{}, &health, 5*time.Second); err != nil || health.Status != "ok" {
+			t.Fatalf("mismatched %s shut down the live daemon: %+v %v", field, health, err)
+		}
+	}
+	t.Log("shutdown IPC RESULT: mismatched PID, instance and exact timestamp refused; daemon remained healthy")
 	var ack ipc.ShutdownResult
 	err = client.CallWithTimeout(ipc.MethodShutdown, &request, &ack, 35*time.Second)
 	_ = client.Close() // The server drains this connection before exiting.
