@@ -310,9 +310,9 @@ Both head fields contain the full, immutable submitted commit SHA; `intent_diges
 Raw intent is not included in receipts, and generic run/status output does not expose the nonce binding or intent digest.
 
 The nonce is scoped to the repository and branch.
-The first successful receipt claim returns `created`; subsequent matching claims return `reused` for that same run, including after the gate or pipeline head advances.
+For an eligible run, the first successful receipt claim returns `created`; subsequent matching claims return `reused` for that same run, including after the gate or pipeline head advances. Failed runs, cancellations other than supersession, and pending runs without scheduler or manager ownership are refused. Eligibility and first-claim consumption are [validated atomically](/no-mistakes/concepts/daemon/#concurrent-push-handling), so rejection leaves an unclaimed `created` disposition unconsumed.
 A conflicting submitted head, validation generation, intent, [pinned Pi profile](/no-mistakes/reference/global-config/#per-run-pi-profiles), or explicit [shipping mode/draft pin](#strict-shipping-and-review-receipts) is refused.
-The [launch owner](#launch-owner) must also match exactly on strict-launch replay; omitting it does not match a run created with an owner. The daemon validates ownership before consuming the first `created` disposition, so a rejected claim leaves it available to a matching caller.
+The [launch owner](#launch-owner) must also match exactly on strict-launch replay; omitting it does not match a run created with an owner.
 A different nonce creates a distinct run rather than reattaching to a same-head run; both post-receive creation and the up-to-date-push fallback follow this contract.
 The up-to-date-push fallback preserves the latest same-head run's PR URL unless its recorded PR state is closed or merged, including when an explicit `--base-branch` retargets that PR.
 An explicit `--base-branch` is persisted on creation and must match the stored per-run base on replay; omitting it on replay preserves the stored base.
