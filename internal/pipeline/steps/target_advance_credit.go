@@ -15,15 +15,26 @@ import (
 // its original comparison. It never restamps old evidence against a new base.
 func retainPublishedComparison(c *pipeline.StepContext, host scm.Host, previous *db.PRContext, candidate db.PRContextCandidate) (bool, error) {
 	if c.Run.Shipping != nil || previous == nil || !sameRewindIdentity(previous, candidate) || previous.PRURL == "" ||
-		previous.LocalHeadSHA != candidate.LocalHeadSHA || candidate.ForgeHeadSHA != candidate.LocalHeadSHA || previous.TargetSHA == candidate.TargetSHA {
+		previous.LocalHeadSHA != candidate.LocalHeadSHA || candidate.ForgeHeadSHA != candidate.LocalHeadSHA {
 		return false, nil
+	}
+	retained, err := c.DB.GetRetainedPRTarget(c.Run.ID, previous)
+	if err != nil {
+		return false, err
+	}
+	if retained == "" && previous.TargetSHA == candidate.TargetSHA {
+		return false, nil
+	}
+	anchor := previous.TargetSHA
+	if retained != "" {
+		anchor = retained
+	}
+	if _, err := git.Run(c.Ctx, c.WorkDir, "merge-base", "--is-ancestor", anchor, candidate.TargetSHA); err != nil {
+		return false, fmt.Errorf("published target did not fast-forward: %w", err)
 	}
 	qualified, err := qualifiedPublishedComparison(c, previous)
 	if err != nil || !qualified {
 		return false, err
-	}
-	if _, err := git.Run(c.Ctx, c.WorkDir, "merge-base", "--is-ancestor", previous.TargetSHA, candidate.TargetSHA); err != nil {
-		return false, fmt.Errorf("published target did not fast-forward: %w", err)
 	}
 	allowed, err := publishedTargetAllowsBehind(c, host, previous)
 	if err != nil || !allowed {
@@ -39,7 +50,7 @@ func retainPublishedComparison(c *pipeline.StepContext, host scm.Host, previous 
 	if state != scm.MergeableOK {
 		return false, fmt.Errorf("qualified head mergeability is %s after target advance", state)
 	}
-	if err := c.DB.RecordRetainedPRTarget(c.Run.ID, previous, candidate.TargetSHA); err != nil {
+	if err := c.DB.RecordRetainedPRTarget(c.Run.ID, previous, retained, candidate.TargetSHA); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -86,20 +97,26 @@ func publishedTargetAllowsBehind(c *pipeline.StepContext, host scm.Host, previou
 // the PR was open, never an inferred merge parent or the latest target (which
 // may have advanced again). The original qualified comparison stays unchanged.
 func qualifiedAdvancedMergeTree(c *pipeline.StepContext, host scm.Host, receipt *db.PRContext, mergeSHA string) (string, error) {
-	qualified, err := qualifiedPublishedComparison(c, receipt)
-	if err != nil || !qualified {
-		return "", err
-	}
-	allowed, err := publishedTargetAllowsBehind(c, host, receipt)
-	if err != nil || !allowed {
-		return "", err
-	}
 	target, err := c.DB.GetRetainedPRTarget(c.Run.ID, receipt)
 	if err != nil {
 		return "", err
 	}
 	if target == "" {
 		return "", nil
+	}
+	qualified, err := qualifiedPublishedComparison(c, receipt)
+	if err != nil {
+		return "", err
+	}
+	if !qualified {
+		return "", fmt.Errorf("retained target lacks a qualified published comparison")
+	}
+	allowed, err := publishedTargetAllowsBehind(c, host, receipt)
+	if err != nil {
+		return "", err
+	}
+	if !allowed {
+		return "", fmt.Errorf("retained target protection no longer permits the qualified head")
 	}
 	if _, err := git.Run(c.Ctx, c.WorkDir, "merge-base", "--is-ancestor", receipt.TargetSHA, target); err != nil {
 		return "", fmt.Errorf("merged target did not fast-forward: %w", err)

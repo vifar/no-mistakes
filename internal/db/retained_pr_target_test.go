@@ -37,9 +37,23 @@ func TestRetainedPRTargetSurvivesReopenAndRejectsStaleBinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := strings.Repeat("e", 40)
-	if err := d.RecordRetainedPRTarget(id, receipt, target); err != nil {
+	if err := d.RecordRetainedPRTarget(id, receipt, "", target); err != nil {
 		t.Fatal(err)
 	}
+	if err := d.RecordRetainedPRTarget(id, receipt, "", strings.Repeat("1", 40)); err == nil {
+		t.Fatal("stale target observation overwrote a verified target")
+	}
+	if got, err := d.GetRetainedPRTarget(id, receipt); err != nil || got != target {
+		t.Fatalf("stale writer changed target: %q %v", got, err)
+	}
+	nextTarget := strings.Repeat("3", 40)
+	if err := d.RecordRetainedPRTarget(id, receipt, target, nextTarget); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RecordRetainedPRTarget(id, receipt, target, strings.Repeat("4", 40)); err == nil {
+		t.Fatal("stale writer replaced the latest retained target")
+	}
+	target = nextTarget
 	if err := d.SetRunCIReady(id, false); err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +73,7 @@ func TestRetainedPRTargetSurvivesReopenAndRejectsStaleBinding(t *testing.T) {
 	if err := d.UpdateRunReviewApprovedHeadSHA(id, strings.Repeat("f", 40)); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.RecordRetainedPRTarget(id, receipt, strings.Repeat("1", 40)); err == nil {
+	if err := d.RecordRetainedPRTarget(id, receipt, target, strings.Repeat("1", 40)); err == nil {
 		t.Fatal("changed review authority accepted an observation")
 	}
 	if got, err := d.GetRetainedPRTarget(id, receipt); err != nil || got != target {
@@ -69,7 +83,7 @@ func TestRetainedPRTargetSurvivesReopenAndRejectsStaleBinding(t *testing.T) {
 	if _, err := d.BindRunPRContext(id, candidate, types.StepRebase); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.RecordRetainedPRTarget(id, receipt, target); err == nil {
+	if err := d.RecordRetainedPRTarget(id, receipt, "", target); err == nil {
 		t.Fatal("stale comparison generation accepted an observation")
 	}
 	fresh, err := d.GetRunPRContext(id)

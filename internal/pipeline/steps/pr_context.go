@@ -219,16 +219,18 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 	}
 	var observedSource *string
 	targetChanged := previous != nil && (previous.TargetBranch != candidate.TargetBranch || previous.TargetSHA != candidate.TargetSHA)
-	if targetChanged && !eligible && previous != nil {
+	retainedTarget, err := sctx.DB.GetRetainedPRTarget(sctx.Run.ID, previous)
+	if err != nil {
+		return pipeline.PRContextDecision{}, err
+	}
+	if (targetChanged || retainedTarget != "") && !eligible && previous != nil {
 		host, _ := buildHost(sctx, resolvedProvider(sctx))
-		if host != nil {
-			keep, err := retainPublishedComparison(sctx, host, previous, candidate)
-			if err != nil {
-				return pipeline.PRContextDecision{}, err
-			}
-			if keep {
-				return pipeline.PRContextDecision{Target: selection}, nil
-			}
+		keep, err := retainPublishedComparison(sctx, host, previous, candidate)
+		if err != nil {
+			return pipeline.PRContextDecision{}, err
+		}
+		if keep {
+			return pipeline.PRContextDecision{Target: selection}, nil
 		}
 	}
 	if pending != nil || targetChanged && !(freshRetarget && previous.TargetBranch != candidate.TargetBranch) && eligible {
@@ -527,7 +529,11 @@ func verifyCurrentPRComparison(sctx *pipeline.StepContext, host scm.Host, select
 	expected := receipt.PRContextCandidate
 	expected.PRURL, expected.SourceRepo, expected.SourceBranch, expected.ForgeHeadSHA = "", "", "", ""
 	if selection.State != scm.PRStateMerged {
-		if current != expected {
+		retainedTarget, err := sctx.DB.GetRetainedPRTarget(sctx.Run.ID, receipt)
+		if err != nil {
+			return err
+		}
+		if current != expected || retainedTarget != "" {
 			candidate := current
 			candidate.PRURL, candidate.SourceRepo, candidate.SourceBranch, candidate.ForgeHeadSHA = receipt.PRURL, receipt.SourceRepo, receipt.SourceBranch, receipt.ForgeHeadSHA
 			if keep, err := retainPublishedComparison(sctx, host, receipt, candidate); err != nil {
@@ -587,22 +593,21 @@ func verifyCurrentPRComparison(sctx *pipeline.StepContext, host scm.Host, select
 	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", receipt.TargetSHA, mergeSHA); err != nil {
 		return fmt.Errorf("merged PR result does not contain the reviewed target: %w", err)
 	}
-	mergeTree, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-tree", "--write-tree", receipt.TargetSHA, receipt.LocalHeadSHA)
+	mergeTree, err := qualifiedAdvancedMergeTree(sctx, host, receipt, mergeSHA)
 	if err != nil {
-		return fmt.Errorf("cannot prove the reviewed merge result: %w", err)
+		return err
+	}
+	if mergeTree == "" {
+		mergeTree, err = git.Run(sctx.Ctx, sctx.WorkDir, "merge-tree", "--write-tree", receipt.TargetSHA, receipt.LocalHeadSHA)
+		if err != nil {
+			return fmt.Errorf("cannot prove the reviewed merge result: %w", err)
+		}
 	}
 	actualTree, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-parse", mergeSHA+"^{tree}")
 	if err != nil {
 		return fmt.Errorf("read merged PR result tree: %w", err)
 	}
 	if mergeTree != actualTree {
-		advancedTree, err := qualifiedAdvancedMergeTree(sctx, host, receipt, mergeSHA)
-		if err != nil {
-			return err
-		}
-		if advancedTree != "" && advancedTree == actualTree {
-			return nil
-		}
 		return fmt.Errorf("merged PR tree differs from the reviewed comparison result")
 	}
 	return nil
