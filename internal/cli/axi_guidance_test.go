@@ -19,6 +19,8 @@ import (
 )
 
 var canonicalStaleMonitorPhrases = []string{
+	"A published qualified head and original comparison are retained only when live protection permits being behind and the forge confirms mergeability",
+	"The following stale-comparison fallback applies otherwise",
 	"with green checks and no merge conflict",
 	"CI clears readiness and keeps monitoring, withholding checks-passed",
 	"It may wait until ci_timeout, or indefinitely when unlimited",

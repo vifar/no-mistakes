@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,10 +10,86 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestTargetRewindBoundaryResolvesOutstandingReviewFindings(t *testing.T) {
+	for _, unselected := range []bool{false, true} {
+		t.Run(map[bool]string{false: "verified clean", true: "unselected finding"}[unselected], func(t *testing.T) {
+			d, p, run, repo := setupTest(t)
+			dir := completionFixture(t, d, run)
+			calls := 0
+			review := &adaptiveCallStep{name: types.StepReview, fn: func(c *StepContext) (*StepOutcome, error) {
+				calls++
+				out := &StepOutcome{Findings: `{"findings":[]}`, ReviewedPaths: []string{"service.go", "cache.go"}, ReviewablePaths: []string{"service.go", "cache.go"}, ReviewApprovedHeadSHA: c.Run.HeadSHA}
+				if calls == 1 {
+					out.NeedsApproval, out.AutoFixable = true, true
+					out.Findings = `{"findings":[{"id":"a","severity":"error","file":"service.go","description":"repair service","action":"auto-fix"}`
+					if unselected {
+						out.Findings += `,{"id":"b","severity":"warning","file":"cache.go","description":"operator decision remains open","action":"ask-user"}`
+					}
+					out.Findings += `]}`
+				}
+				return out, nil
+			}}
+			e := NewExecutor(d, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, []Step{newPassStep(types.StepRebase), review}, nil)
+			rewound := false
+			e.SetPRContextGuard(func(c *StepContext, step types.StepName) (PRContextDecision, error) {
+				decision := PRContextDecision{Target: PRTargetSelection{TargetBranch: "main"}}
+				previous, err := d.GetRunPRContext(run.ID)
+				if err != nil {
+					return decision, err
+				}
+				if !rewound && step == types.StepReview && c.PRContextAfterStep && calls == 2 {
+					candidate := previous.PRContextCandidate
+					candidate.TargetSHA = strings.Repeat("c", 40)
+					if _, err := d.RewindRunPRContext(run.ID, candidate, db.TargetAdvanceRewindRequest{ExpectedGeneration: previous.Generation, Step: step, MaxRewinds: 3}); err != nil {
+						return decision, err
+					}
+					rewound = true
+					decision.RestartFrom = types.StepRebase
+				} else if rewound && step == types.StepRebase && c.PRContextRebaseCompleted {
+					if _, err := d.CompleteRebasePRContext(run.ID, previous.PRContextCandidate, previous.Generation); err != nil {
+						return decision, err
+					}
+				}
+				return decision, nil
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := e.Execute(ctx, run, repo, dir); err != nil {
+				t.Fatal(err)
+			}
+			history, err := d.GetTargetRewindHistory(run.ID)
+			if err != nil || len(history) != 1 || history[0].BoundaryJSON == nil {
+				t.Fatalf("missing boundary evidence: %+v %v", history, err)
+			}
+			var saved struct {
+				Findings              string
+				NeedsApproval         bool
+				ReviewApprovedHeadSHA string
+				ReviewCarryResolved   bool
+			}
+			if err := json.Unmarshal([]byte(*history[0].BoundaryJSON), &saved); err != nil {
+				t.Fatal(err)
+			}
+			findings, err := types.ParseFindingsJSON(saved.Findings)
+			if err != nil || !saved.ReviewCarryResolved {
+				t.Fatalf("boundary lacks resolved gate evidence: %+v %v", saved, err)
+			}
+			if unselected {
+				if len(findings.Items) != 1 || findings.Items[0].ID != "b" || !saved.NeedsApproval || saved.ReviewApprovedHeadSHA != "" {
+					t.Fatalf("outstanding operator decision gained clean credit: %+v", saved)
+				}
+			} else if len(findings.Items) != 0 || saved.NeedsApproval || saved.ReviewApprovedHeadSHA == "" {
+				t.Fatalf("verified clean review lost credit: %+v", saved)
+			}
+		})
+	}
+}
 
 func pendingRewindExecutor(t *testing.T) (*Executor, *db.Run, string) {
 	t.Helper()

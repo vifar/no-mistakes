@@ -100,11 +100,15 @@ func reusableRewindReview(c *pipeline.StepContext) (*pipeline.StepOutcome, error
 		h = history[i-1]
 	}
 	var boundary *pipeline.StepOutcome
-	if h.BoundaryStep != nil && *h.BoundaryStep == string(types.StepReview) && h.BoundaryJSON != nil {
-		var out pipeline.StepOutcome
-		if json.Unmarshal([]byte(*h.BoundaryJSON), &out) == nil && !out.NeedsApproval && !out.Skipped && !out.SkipRemaining && out.RestartFrom == "" && out.ReviewApprovedHeadSHA == h.Comparison.LocalHeadSHA && reviewedPathsCoverReviewable(out.ReviewedPaths, out.ReviewablePaths) {
-			boundary = &out
+	if h.BoundaryStep != nil && *h.BoundaryStep == string(types.StepReview) {
+		if h.BoundaryJSON == nil {
+			return nil, nil
 		}
+		var out pipeline.StepOutcome
+		if json.Unmarshal([]byte(*h.BoundaryJSON), &out) != nil || !out.ReviewCarryResolved || out.NeedsApproval || out.Skipped || out.SkipRemaining || out.RestartFrom != "" || out.ReviewApprovedHeadSHA != h.Comparison.LocalHeadSHA || !reviewedPathsCoverReviewable(out.ReviewedPaths, out.ReviewablePaths) {
+			return nil, nil
+		}
+		boundary = &out
 	}
 	if boundary == nil && (h.ReviewHeadSHA == nil || *h.ReviewHeadSHA != h.Comparison.LocalHeadSHA) {
 		return nil, nil
