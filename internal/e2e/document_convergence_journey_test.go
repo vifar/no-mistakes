@@ -587,7 +587,7 @@ func TestDocumentJourneyCarryStopsAndPublishesHistoricalEvidence(t *testing.T) {
 		t.Fatal("published attestation is unterminated")
 	}
 	var attestation struct {
-		HeadSHA string `json:"head_sha"`
+		HeadSHA        string          `json:"head_sha"`
 		LiveValidation json.RawMessage `json:"live_validation"`
 	}
 	if err := json.Unmarshal([]byte(payload), &attestation); err != nil {
@@ -642,7 +642,7 @@ func TestDocumentJourneyUnsafeAndStrictRestart(t *testing.T) {
 				old := h.UpstreamBranchSHA("main")
 				new := h.CommitChange("main", "module.txt", "new module\n", "new module commit")
 				gitIn(t, h, h.WorkDir, "push", "origin", "main")
-				action["git"] = [][]string{{"config", "diff.ignoreSubmodules", "all"}, {"update-index", "--add", "--cacheinfo", "160000,"+new+",module"}, {"commit", "-m", "update hidden gitlink"}}
+				action["git"] = [][]string{{"config", "diff.ignoreSubmodules", "all"}, {"update-index", "--add", "--cacheinfo", "160000," + new + ",module"}, {"commit", "-m", "update hidden gitlink"}}
 				// The submitted branch starts with the older gitlink.
 				gitIn(t, h, h.WorkDir, "update-index", "--add", "--cacheinfo", "160000,"+old+",module")
 				gitIn(t, h, h.WorkDir, "commit", "-m", "seed hidden gitlink")
@@ -716,10 +716,10 @@ func TestDocumentJourneyDiscardKeepsCombinedLintDuty(t *testing.T) {
 	}
 	lint := map[string]any{
 		"match": "Detect the linting and formatting tools for this project",
-		"git": [][]string{{"diff", "--exit-code", accepted, "--", "README.md"}},
+		"git":   [][]string{{"diff", "--exit-code", accepted, "--", "README.md"}},
 		"structured": map[string]any{
 			"findings": []map[string]any{{"id": "restored-formatting", "severity": "warning", "file": "README.md", "action": "ask-user", "description": "BAD spacing remains after the discarded repair"}},
-			"summary": "formatting still needs attention",
+			"summary":  "formatting still needs attention",
 		},
 	}
 	fixture.Actions = append([]map[string]any{lint}, fixture.Actions...)
