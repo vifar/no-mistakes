@@ -19,7 +19,7 @@ func TestStartupReconciliationReportsRefMovedBeforeNotificationRename(t *testing
 	if runtime.GOOS == "windows" {
 		t.Skip("crash fixture uses POSIX shell; ref evidence matrix is platform independent")
 	}
-	root, err := os.MkdirTemp("", "nm-orphan-")
+	root, err := os.MkdirTemp("", "nmh-")
 	if err != nil {
 		t.Fatal(err)
 	}
