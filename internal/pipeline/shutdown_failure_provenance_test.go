@@ -109,7 +109,7 @@ func TestShutdownRecoveryRequiresCancellationOnly(t *testing.T) {
 						result = executor.Resume(ctx, run, repo, dir)
 					case "terminal":
 						cancel(cause)
-						result = executor.failRun(run, repo, executionErr, ctx)
+						result = executor.FailRun(run, repo, executionErr, ctx)
 					}
 					if result == nil {
 						t.Fatal("shutdown race returned success")

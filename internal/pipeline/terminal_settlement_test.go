@@ -80,7 +80,7 @@ func TestTerminalSettlement_StorageErrorDoesNotEmitCommittedEvent(t *testing.T) 
 		}
 	})
 	failure := errors.New("independent failure")
-	err := executor.failRun(run, repo, failure)
+	err := executor.FailRun(run, repo, failure)
 	if !errors.Is(err, failure) || err == failure {
 		t.Errorf("storage failure not propagated with original identity: %v", err)
 	}
@@ -280,7 +280,7 @@ func TestTerminalSettlement_TerminalStorageRecoversWithoutNudge(t *testing.T) {
 	})
 	failure := errors.New("independent provider failure")
 	done := make(chan error, 1)
-	go func() { done <- executor.failRun(run, repo, failure) }()
+	go func() { done <- executor.FailRun(run, repo, failure) }()
 	for range 2 {
 		select {
 		case <-attempts:

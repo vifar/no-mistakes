@@ -116,7 +116,7 @@ func TestExecutorCompletionRawShutdownPreservesPreparationError(t *testing.T) {
 	if prepErr == nil || !strings.Contains(prepErr.Error(), "read worktree head before completion") {
 		t.Fatalf("raw supersession swallowed Git preparation: %v", prepErr)
 	}
-	result := executor.failRun(run, repo, prepErr)
+	result := executor.FailRun(run, repo, prepErr)
 	if !errors.Is(result, prepErr) {
 		t.Fatalf("original preparation error identity lost: %v", result)
 	}

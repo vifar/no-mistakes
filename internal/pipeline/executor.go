@@ -633,7 +633,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return startErr
 	}
 	if startErr != nil {
-		return e.failRun(run, repo, startErr, ctx)
+		return e.FailRun(run, repo, startErr, ctx)
 	}
 	if err := e.clearStorageFailure(run.ID); err != nil {
 		return e.failRun(run, repo, err)
@@ -644,11 +644,11 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	// Create log directory for this run
 	logDir := e.paths.RunLogDir(run.ID)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
+		return e.FailRun(run, repo, fmt.Errorf("create log dir: %w", err))
 	}
 
 	if err := recordCommandConfiguration(logDir, "start", e.config); err != nil {
-		return e.failRun(run, repo, err)
+		return e.FailRun(run, repo, err)
 	}
 	e.initializeRunScopes(run.ID)
 	e.attachPublishedHeadStatus(ctx, run, repo)
@@ -660,15 +660,15 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	for _, step := range e.steps {
 		sr, err := e.db.InsertStepResult(run.ID, step.Name())
 		if err != nil {
-			return e.failRun(run, repo, fmt.Errorf("insert step result: %w", err))
+			return e.FailRun(run, repo, fmt.Errorf("insert step result: %w", err))
 		}
 		stepRecords[step.Name()] = sr
 		if e.skips[step.Name()] {
 			if err := e.refuseSkippedPRWithClosingIssues(run, repo, step.Name(), sr.ID); err != nil {
-				return e.failRun(run, repo, err, ctx)
+				return e.FailRun(run, repo, err, ctx)
 			}
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
-				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
+				return e.FailRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
 			}
 		}
 	}
@@ -680,11 +680,11 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	for i := 0; i < len(e.steps); i++ {
 		step := e.steps[i]
 		if ctx.Err() != nil {
-			return e.failRun(run, repo, context.Cause(ctx), ctx)
+			return e.FailRun(run, repo, context.Cause(ctx), ctx)
 		}
 		restartIndex, err := e.checkPRContext(ctx, run, repo, workDir, step.Name(), i, false)
 		if err != nil {
-			return e.failRun(run, repo, err, ctx)
+			return e.FailRun(run, repo, err, ctx)
 		}
 		if restartIndex >= 0 {
 			revalidating = true
@@ -694,29 +694,29 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 
 		sr, err := e.db.GetStepResult(stepRecords[step.Name()].ID)
 		if err != nil {
-			return e.failRun(run, repo, fmt.Errorf("get step %s: %w", step.Name(), err), ctx)
+			return e.FailRun(run, repo, fmt.Errorf("get step %s: %w", step.Name(), err), ctx)
 		}
 		if e.skips[step.Name()] || sr.Status == types.StepStatusSkipped {
 			if err := e.refuseSkippedPRWithClosingIssues(run, repo, step.Name(), sr.ID); err != nil {
-				return e.failRun(run, repo, err, ctx)
+				return e.FailRun(run, repo, err, ctx)
 			}
 			if run.Shipping != nil {
-				return e.failRun(run, repo, fmt.Errorf("strict shipping forbids skipped steps"), ctx)
+				return e.FailRun(run, repo, fmt.Errorf("strict shipping forbids skipped steps"), ctx)
 			}
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
-				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
+				return e.FailRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, step.Name(), string(types.StepStatusSkipped), "", "", nil)
 			if step.Name() == types.StepTest {
 				if err := e.validateReviewSupportOwners(run.ID, types.StepTest); err != nil {
-					return e.failRun(run, repo, err, ctx)
+					return e.FailRun(run, repo, err, ctx)
 				}
 			}
 			continue
 		}
 		state, err := e.durableExecutionState(sr.ID)
 		if err != nil {
-			return e.failRun(run, repo, fmt.Errorf("restore step %s execution state: %w", step.Name(), err), ctx)
+			return e.FailRun(run, repo, fmt.Errorf("restore step %s execution state: %w", step.Name(), err), ctx)
 		}
 		if revalidating && step.Name() == types.StepReview && restartedBy != types.StepReview {
 			state.outstandingFindings = ""
@@ -724,11 +724,11 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		}
 		skipRemaining, restartFrom, err := e.executeStep(ctx, step, sr, run, repo, workDir, logDir, state)
 		if err != nil {
-			return e.failRun(run, repo, err, ctx)
+			return e.FailRun(run, repo, err, ctx)
 		}
 		if step.Name() == types.StepTest && restartFrom == "" {
 			if err := e.validateReviewSupportOwners(run.ID, types.StepTest); err != nil {
-				return e.failRun(run, repo, err, ctx)
+				return e.FailRun(run, repo, err, ctx)
 			}
 		}
 		if skipRemaining {
@@ -736,7 +736,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 			for _, remaining := range e.steps[i+1:] {
 				rsr := stepRecords[remaining.Name()]
 				if err := e.refuseSkippedPRWithClosingIssues(run, repo, remaining.Name(), rsr.ID); err != nil {
-					return e.failRun(run, repo, err, ctx)
+					return e.FailRun(run, repo, err, ctx)
 				}
 				if dbErr := e.db.CompleteStepWithStatus(rsr.ID, types.StepStatusSkipped, 0, 0, ""); dbErr != nil {
 					slog.Warn("failed to finalize skipped step", "step", remaining.Name(), "error", dbErr)
@@ -748,7 +748,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		if restartFrom != "" {
 			restartIndex, err := e.prepareRestart(run, repo, restartFrom, i)
 			if err != nil {
-				return e.failRun(run, repo, fmt.Errorf("restart step %s from %s: %w", step.Name(), restartFrom, err), ctx)
+				return e.FailRun(run, repo, fmt.Errorf("restart step %s from %s: %w", step.Name(), restartFrom, err), ctx)
 			}
 			revalidating = true
 			restartedBy = step.Name()
@@ -759,16 +759,16 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	// Mark run as completed. A failure here must emit a terminal failure rather
 	// than leaving a silent running row after every step has finished.
 	if err := e.refreshReviewTestSupport(ctx, run, repo, workDir); err != nil {
-		return e.failRun(run, repo, err, ctx)
+		return e.FailRun(run, repo, err, ctx)
 	}
 	if err := e.validateReviewSupportOwners(run.ID, types.StepCI); err != nil {
-		return e.failRun(run, repo, err, ctx)
+		return e.FailRun(run, repo, err, ctx)
 	}
 	if err := e.completeRun(ctx, run, repo); err != nil {
 		if run.Status.Terminal() {
 			return err
 		}
-		return e.failRun(run, repo, fmt.Errorf("update run status: %w", err))
+		return e.FailRun(run, repo, fmt.Errorf("update run status: %w", err))
 	}
 	return nil
 }
@@ -1004,7 +1004,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			slog.Warn("failed to mark recovered step as failed in db", "step", gate.step.Name(), "error", dbErr)
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", err.Error(), &duration)
-		return e.failRun(run, repo, err, ctx)
+		return e.FailRun(run, repo, err, ctx)
 	}
 	if ctx.Err() != nil {
 		select {
@@ -1202,12 +1202,12 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		if gate.step.Name() == types.StepCI {
 			pending, err := e.db.RunTestRestartPending(run.ID)
 			if err != nil {
-				return e.failRun(run, repo, err, ctx)
+				return e.FailRun(run, repo, err, ctx)
 			}
 			if pending {
 				restartIndex, err := e.prepareRestart(run, repo, types.StepTest, gate.index)
 				if err != nil {
-					return e.failRun(run, repo, fmt.Errorf("restart recovered run from %s: %w", types.StepTest, err), ctx)
+					return e.FailRun(run, repo, fmt.Errorf("restart recovered run from %s: %w", types.StepTest, err), ctx)
 				}
 				return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, gate.step.Name())
 			}
@@ -1289,7 +1289,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		}
 		skipRemaining, restartFrom, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, state)
 		if err != nil {
-			return e.failRun(run, repo, err, ctx)
+			return e.FailRun(run, repo, err, ctx)
 		}
 		if skipRemaining {
 			return e.skipRecoveredRemainder(ctx, run, repo, workDir, gate.index+1)
@@ -1297,13 +1297,13 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		if restartFrom != "" {
 			restartIndex, indexErr := e.prepareRestart(run, repo, restartFrom, gate.index)
 			if indexErr != nil {
-				return e.failRun(run, repo, fmt.Errorf("restart step %s from %s: %w", gate.step.Name(), restartFrom, indexErr), ctx)
+				return e.FailRun(run, repo, fmt.Errorf("restart step %s from %s: %w", gate.step.Name(), restartFrom, indexErr), ctx)
 			}
 			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, gate.step.Name())
 		}
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, "")
 	default:
-		return e.failRun(run, repo, fmt.Errorf("step %s: unsupported approval action %q", gate.step.Name(), response.action), ctx)
+		return e.FailRun(run, repo, fmt.Errorf("step %s: unsupported approval action %q", gate.step.Name(), response.action), ctx)
 	}
 }
 
@@ -1389,16 +1389,16 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 	revalidating := restartedBy != ""
 	for index := start; index < len(e.steps); index++ {
 		if ctx.Err() != nil {
-			return e.failRun(run, repo, context.Cause(ctx), ctx)
+			return e.FailRun(run, repo, context.Cause(ctx), ctx)
 		}
 		if index > 0 && e.steps[index-1].Name() == types.StepTest {
 			if err := e.validateReviewSupportOwners(run.ID, types.StepTest); err != nil {
-				return e.failRun(run, repo, err, ctx)
+				return e.FailRun(run, repo, err, ctx)
 			}
 		}
 		restartIndex, contextErr := e.checkPRContext(ctx, run, repo, workDir, e.steps[index].Name(), index, false)
 		if contextErr != nil {
-			return e.failRun(run, repo, contextErr, ctx)
+			return e.FailRun(run, repo, contextErr, ctx)
 		}
 		if restartIndex >= 0 {
 			revalidating = true
@@ -1407,22 +1407,22 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 		}
 		results, err := e.db.GetStepsByRun(run.ID)
 		if err != nil {
-			return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err), ctx)
+			return e.FailRun(run, repo, fmt.Errorf("get recovered steps: %w", err), ctx)
 		}
 		if index >= len(results) || results[index].StepName != e.steps[index].Name() || (!revalidating && results[index].Status != types.StepStatusPending && results[index].Status != types.StepStatusSkipped) {
-			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index), ctx)
+			return e.FailRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index), ctx)
 		}
 		if results[index].Status == types.StepStatusSkipped {
 			if e.steps[index].Name() == types.StepTest {
 				if err := e.validateReviewSupportOwners(run.ID, types.StepTest); err != nil {
-					return e.failRun(run, repo, err, ctx)
+					return e.FailRun(run, repo, err, ctx)
 				}
 			}
 			continue
 		}
 		state, stateErr := e.durableExecutionState(results[index].ID)
 		if stateErr != nil {
-			return e.failRun(run, repo, fmt.Errorf("restore step %s execution state: %w", e.steps[index].Name(), stateErr), ctx)
+			return e.FailRun(run, repo, fmt.Errorf("restore step %s execution state: %w", e.steps[index].Name(), stateErr), ctx)
 		}
 		if revalidating && e.steps[index].Name() == types.StepReview && restartedBy != types.StepReview {
 			state.outstandingFindings = ""
@@ -1430,11 +1430,11 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 		}
 		skipRemaining, restartFrom, err := e.executeStep(ctx, e.steps[index], results[index], run, repo, workDir, logDir, state)
 		if err != nil {
-			return e.failRun(run, repo, err, ctx)
+			return e.FailRun(run, repo, err, ctx)
 		}
 		if e.steps[index].Name() == types.StepTest && restartFrom == "" {
 			if err := e.validateReviewSupportOwners(run.ID, types.StepTest); err != nil {
-				return e.failRun(run, repo, err, ctx)
+				return e.FailRun(run, repo, err, ctx)
 			}
 		}
 		if skipRemaining {
@@ -1443,7 +1443,7 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 		if restartFrom != "" {
 			restartIndex, indexErr := e.prepareRestart(run, repo, restartFrom, index)
 			if indexErr != nil {
-				return e.failRun(run, repo, fmt.Errorf("restart step %s from %s: %w", e.steps[index].Name(), restartFrom, indexErr), ctx)
+				return e.FailRun(run, repo, fmt.Errorf("restart step %s from %s: %w", e.steps[index].Name(), restartFrom, indexErr), ctx)
 			}
 			revalidating = true
 			restartedBy = e.steps[index].Name()
@@ -1451,16 +1451,16 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 		}
 	}
 	if err := e.refreshReviewTestSupport(ctx, run, repo, workDir); err != nil {
-		return e.failRun(run, repo, err, ctx)
+		return e.FailRun(run, repo, err, ctx)
 	}
 	if err := e.validateReviewSupportOwners(run.ID, types.StepCI); err != nil {
-		return e.failRun(run, repo, err, ctx)
+		return e.FailRun(run, repo, err, ctx)
 	}
 	if err := e.completeRun(ctx, run, repo); err != nil {
 		if run.Status.Terminal() {
 			return err
 		}
-		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err), ctx)
+		return e.FailRun(run, repo, fmt.Errorf("complete recovered run: %w", err), ctx)
 	}
 	return nil
 }
@@ -1468,34 +1468,34 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 func (e *Executor) skipRecoveredRemainder(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, start int) error {
 	results, err := e.db.GetStepsByRun(run.ID)
 	if err != nil {
-		return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err))
+		return e.FailRun(run, repo, fmt.Errorf("get recovered steps: %w", err))
 	}
 	for index := start; index < len(e.steps); index++ {
 		if index >= len(results) || results[index].StepName != e.steps[index].Name() || (results[index].Status != types.StepStatusPending && results[index].Status != types.StepStatusSkipped) {
-			return e.failRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index))
+			return e.FailRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index))
 		}
 		if results[index].Status == types.StepStatusSkipped {
 			continue
 		}
 		if err := e.refuseSkippedPRWithClosingIssues(run, repo, e.steps[index].Name(), results[index].ID); err != nil {
-			return e.failRun(run, repo, err)
+			return e.FailRun(run, repo, err)
 		}
 		if err := e.db.CompleteStepWithStatus(results[index].ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
-			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", e.steps[index].Name(), err))
+			return e.FailRun(run, repo, fmt.Errorf("skip recovered step %s: %w", e.steps[index].Name(), err))
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, e.steps[index].Name(), string(types.StepStatusSkipped), "", "", nil)
 	}
 	if err := e.refreshReviewTestSupport(ctx, run, repo, workDir); err != nil {
-		return e.failRun(run, repo, err, ctx)
+		return e.FailRun(run, repo, err, ctx)
 	}
 	if err := e.validateReviewSupportOwners(run.ID, types.StepCI); err != nil {
-		return e.failRun(run, repo, err)
+		return e.FailRun(run, repo, err)
 	}
 	if err := e.completeRun(ctx, run, repo); err != nil {
 		if run.Status.Terminal() {
 			return err
 		}
-		return e.failRun(run, repo, fmt.Errorf("complete recovered run: %w", err))
+		return e.FailRun(run, repo, fmt.Errorf("complete recovered run: %w", err))
 	}
 	return nil
 }
@@ -3068,11 +3068,11 @@ func (e *Executor) plannedShutdownOfCertifiedWatcher(runID string, ctxs ...conte
 	return false
 }
 
-// failRun marks a run as failed and returns the error.
+// FailRun marks a run as failed and returns the error.
 // An optional context's cause replaces the run's error when more specific than
 // context.Canceled, except for typed SQLite contention: its canonical outcome
 // must survive cancellation so recovery preserves the published-head status.
-func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
+func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
 	if LeftForRecoveryAtShutdown(err) {
 		return err
 	}

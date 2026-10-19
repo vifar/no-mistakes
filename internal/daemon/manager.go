@@ -1072,19 +1072,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			return
 		} else if err := resumeErr; err != nil {
 			if plan.run.Status == types.RunRunning {
-				errMsg := err.Error()
-				status := types.RunFailed
-				if registerErr == nil && runCtx.Err() != nil {
-					status = types.RunCancelled
-				}
-				if dbErr := pipeline.RecordRunTerminal(context.Background(), m.db, plan.run.ID, errMsg, status, nil); dbErr != nil {
-					slog.Error("failed to mark recovered run failed", "run_id", plan.run.ID, "error", dbErr)
-				} else {
-					plan.run.Status = status
-					plan.run.Error = &errMsg
-					if err := executor.ReportSettledRunFailure(context.Background(), plan.run, plan.repo); err != nil {
-						slog.Error("recovered terminal notification failed", "run_id", plan.run.ID, "error", err)
-					}
+				if failureErr := executor.FailRun(plan.run, plan.repo, err, runCtx); pipeline.LeftForRecoveryAtShutdown(failureErr) {
+					parkedAtShutdown = true
+					return
 				}
 			}
 			if sqlitewrite.IsContention(err) {
