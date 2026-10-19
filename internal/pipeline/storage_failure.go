@@ -73,12 +73,7 @@ func writeStorageFailure(path string, record storageFailureRecord) error {
 	if err := os.Rename(f.Name(), path); err != nil {
 		return err
 	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return syncStorageFailureDirectory(filepath.Dir(path))
 }
 
 func (e *Executor) storageFailure(run *db.Run) bool {
@@ -110,8 +105,24 @@ func (e *Executor) clearStorageFailure(runID string) error {
 	if path == "" {
 		return nil
 	}
+	return removeStorageFailure(path, syncStorageFailureDirectory)
+}
+
+func syncStorageFailureDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
+}
+
+func removeStorageFailure(path string, syncDir func(string) error) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("clear SQLite infrastructure outcome: %w", err)
+	}
+	if err := syncDir(filepath.Dir(path)); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("sync cleared SQLite infrastructure outcome: %w", err)
 	}
 	return nil
 }

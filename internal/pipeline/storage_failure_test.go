@@ -254,8 +254,15 @@ func TestCodeFailureMentioningContentionStillReportsFailure(t *testing.T) {
 	}
 	executor := NewExecutor(database, p, nil, nil, []Step{step}, nil)
 	executor.SetForgeContext(&forgecontext.Context{})
+	executor.recordStorageFailure(run, &sqlitewrite.ContentionError{Operation: "previous execution", Attempts: 2, Cause: errors.New("locked")})
+	if _, err := os.Stat(executor.storageFailurePath(run.ID)); err != nil {
+		t.Fatal(err)
+	}
 	if err := executor.Execute(context.Background(), run, repo, workdir); err == nil {
 		t.Fatal("expected code failure")
+	}
+	if _, err := os.Stat(executor.storageFailurePath(run.ID)); !os.IsNotExist(err) {
+		t.Fatalf("fresh execution retained old infrastructure outcome: %v", err)
 	}
 	if sqlitewrite.RecordedContention(*run.Error) {
 		t.Fatalf("code error adopted infrastructure identity: %s", *run.Error)

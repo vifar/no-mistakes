@@ -87,7 +87,8 @@ func retry(ctx context.Context, operation string, budget time.Duration, write fu
 		if !busy(err) {
 			// A deadline can interrupt a retry inside the driver, replacing BUSY
 			// with context.DeadlineExceeded. Retain the actual lock cause.
-			if ctx.Err() == nil || !errors.Is(err, ctx.Err()) {
+			cancelledTx := last != nil && errors.Is(err, sql.ErrTxDone)
+			if ctx.Err() == nil || (!errors.Is(err, ctx.Err()) && !cancelledTx) {
 				return err
 			}
 			if last == nil {

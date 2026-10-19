@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -167,4 +168,132 @@ func TestConnectionWaitDeadlineIsInfrastructureFailure(t *testing.T) {
 	if !IsContention(err) {
 		t.Fatalf("pool timeout must not become code failure: %T %v", err, err)
 	}
+}
+
+func TestDeadlineRollbackPreservesContention(t *testing.T) {
+	for _, cancelParent := range []bool{false, true} {
+		for _, wrapped := range []bool{false, true} {
+			t.Run(fmt.Sprintf("cancel=%v/wrapped=%v", cancelParent, wrapped), func(t *testing.T) {
+				t.Parallel()
+				database, release := exclusiveFixture(t, time.Millisecond)
+				parent, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				attempts := 0
+				var lockCause error
+				err := retry(parent, "deadline rollback", 300*time.Millisecond, func(ctx context.Context) error {
+					attempts++
+					tx, err := database.BeginTx(ctx, nil)
+					if err != nil {
+						return err
+					}
+					defer tx.Rollback()
+					_, err = tx.ExecContext(ctx, `INSERT INTO writes VALUES(1)`)
+					if attempts == 1 {
+						if !busy(err) {
+							t.Fatalf("expected actual SQLite contention: %v", err)
+						}
+						lockCause = err
+						release()
+						return err
+					}
+					if err != nil {
+						return err
+					}
+					if cancelParent {
+						cancel()
+					}
+					<-ctx.Done()
+					conn, err := database.Conn(context.Background())
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := conn.Close(); err != nil {
+						t.Fatal(err)
+					}
+					err = tx.Commit()
+					if !errors.Is(err, sql.ErrTxDone) {
+						t.Fatalf("expected cancellation rollback before Commit, got %v", err)
+					}
+					if wrapped {
+						return fmt.Errorf("commit interrupted: %w", err)
+					}
+					return err
+				})
+				var contention *ContentionError
+				if !errors.As(err, &contention) || !errors.Is(err, lockCause) || contention.Attempts != 2 || contention.Operation != "deadline rollback" {
+					t.Fatalf("lost prior SQLite cause after automatic rollback: attempts=%d error=%T %v", attempts, err, err)
+				}
+				var count int
+				if err := database.QueryRow(`SELECT count(*) FROM writes`).Scan(&count); err != nil || count != 0 {
+					t.Fatalf("cancelled transaction committed: count=%d err=%v", count, err)
+				}
+			})
+		}
+	}
+}
+
+func TestRetryCancellationClassificationControls(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		priorBusy      bool
+		cancel         bool
+		result         error
+		wantContention bool
+	}{
+		{name: "ordinary transaction done", result: sql.ErrTxDone},
+		{name: "transaction done after busy without cancellation", priorBusy: true, result: fmt.Errorf("commit: %w", sql.ErrTxDone)},
+		{name: "transaction done without prior busy", cancel: true, result: sql.ErrTxDone},
+		{name: "source failure after busy and cancellation", priorBusy: true, cancel: true, result: errors.New("source failure")},
+		{name: "wrapped cancellation without prior busy", cancel: true, result: fmt.Errorf("cancelled: %w", context.Canceled)},
+		{name: "wrapped cancellation after busy", priorBusy: true, cancel: true, result: fmt.Errorf("cancelled: %w", context.Canceled), wantContention: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database, release := exclusiveFixture(t, time.Millisecond)
+			if !tc.priorBusy {
+				release()
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			attempts := 0
+			var lockCause error
+			err := Do(ctx, "classification control", func(ctx context.Context) error {
+				attempts++
+				if tc.priorBusy && attempts == 1 {
+					_, err := database.ExecContext(ctx, `INSERT INTO writes VALUES(1)`)
+					if !busy(err) {
+						t.Fatalf("expected actual contention: %v", err)
+					}
+					lockCause = err
+					release()
+					return err
+				}
+				if tc.cancel {
+					cancel()
+				}
+				return tc.result
+			})
+			wantAttempts := 1
+			if tc.priorBusy {
+				wantAttempts++
+			}
+			if attempts != wantAttempts || IsContention(err) != tc.wantContention {
+				t.Fatalf("attempts=%d err=%T %v", attempts, err, err)
+			}
+			if tc.wantContention {
+				if !errors.Is(err, lockCause) {
+					t.Fatalf("lost lock cause: %v", err)
+				}
+			} else if !errors.Is(err, tc.result) {
+				t.Fatalf("reclassified non-contention: %v", err)
+			}
+		})
+	}
+	t.Run("cancelled before first attempt", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		err := Do(ctx, "already cancelled", func(context.Context) error { t.Fatal("started cancelled operation"); return nil })
+		if !errors.Is(err, context.Canceled) || IsContention(err) {
+			t.Fatalf("misclassified cancellation: %v", err)
+		}
+	})
 }
