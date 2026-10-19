@@ -35,7 +35,7 @@ func TestUpdateRunPRStateRetriesConcurrentClosingIssueWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE runs SET closing_issue_refs = ? WHERE id = ?`, `["example/repo#92"]`, run.ID); err != nil {
+	if _, err := tx.Exec(`UPDATE runs SET closing_issue_refs = ? WHERE id = ?`, `example/repo#92`, run.ID); err != nil {
 		t.Fatal(err)
 	}
 	released := make(chan error, 1)
@@ -44,6 +44,7 @@ func TestUpdateRunPRStateRetriesConcurrentClosingIssueWriter(t *testing.T) {
 		time.Sleep(6 * time.Second)
 		released <- tx.Commit()
 	}()
+	start := time.Now()
 	writeErr := d.UpdateRunPRState(run.ID, "open")
 	if err := <-released; err != nil {
 		t.Fatal(err)
@@ -55,7 +56,12 @@ func TestUpdateRunPRStateRetriesConcurrentClosingIssueWriter(t *testing.T) {
 	if err := d.sql.QueryRow(`SELECT pr_state, closing_issue_refs FROM runs WHERE id = ?`, run.ID).Scan(&state, &refs); err != nil {
 		t.Fatal(err)
 	}
-	if state != "open" || refs != `["example/repo#92"]` {
+	if state != "open" || refs != `example/repo#92` {
 		t.Fatalf("lost concurrent write or PR observation: state=%q refs=%q", state, refs)
 	}
+	stored, err := d.GetRun(run.ID)
+	if err != nil || len(stored.ClosingIssueRefs) != 1 || stored.ClosingIssueRefs[0] != "example/repo#92" {
+		t.Fatalf("concurrent write is not readable through the run interface: %+v %v", stored, err)
+	}
+	t.Logf("closing-issue transaction held 6s; PR-state write succeeded after %v; pr_state=%q closing_issue_refs=%s", time.Since(start), state, refs)
 }
