@@ -3379,16 +3379,7 @@ func (m *RunManager) Shutdown() {
 		slog.Error("raw shutdown terminal outcome unsettled", "error", err)
 	}
 
-	done := make(chan struct{})
-	go func() {
-		m.wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(30 * time.Second):
-		slog.Warn("timed out waiting for runs to finish during shutdown")
-	}
+	m.wg.Wait()
 }
 
 // runCancelsLocked snapshots the cancel handle of every run that has one.

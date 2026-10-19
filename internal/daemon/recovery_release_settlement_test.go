@@ -246,7 +246,17 @@ func TestRecoveryReleaseSettlesBeforeRelinquishingCustody(t *testing.T) {
 					t.Cleanup(func() { close(handle.done) })
 					return
 				}
+				var shutdownDone <-chan struct{}
+				if mode == "live-gate" && fault == "delete" {
+					shutdownDone = holdShutdownPastDrainDeadline(t, mgr, d)
+					if !testRunOwned(mgr, run.ID) {
+						t.Fatal("shutdown drain deadline relinquished recovery-release custody")
+					}
+				}
 				healthy.Store(true)
+				if shutdownDone != nil {
+					awaitSettlementShutdown(t, shutdownDone)
+				}
 				select {
 				case <-handle.done:
 				case <-time.After(10 * time.Second):
@@ -268,13 +278,21 @@ func TestRecoveryReleaseSettlesBeforeRelinquishingCustody(t *testing.T) {
 					t.Fatalf("shutdown record remains: %d, %v", shutdownRecords, err)
 				}
 				after, err := d.StatusValidationEpoch(run.ID)
-				if err != nil || after != epoch+1 {
+				increments := int64(1)
+				if shutdownDone != nil {
+					increments++
+				}
+				if err != nil || after != epoch+increments {
 					t.Fatalf("release did not atomically invalidate proof: epoch %d -> %d, %v", epoch, after, err)
 				}
 				retryCtx, retryCancel := context.WithTimeout(context.Background(), time.Second)
 				defer retryCancel()
 				ack, err = mgr.prepareControlledShutdown(retryCtx, request)
-				if err != nil || ack == nil || !ack.OK {
+				if shutdownDone != nil {
+					if err == nil || ack != nil {
+						t.Fatal("raw shutdown permitted a planned acknowledgement")
+					}
+				} else if err != nil || ack == nil || !ack.OK {
 					t.Fatalf("matching shutdown retry rejected settled release: %+v, %v", ack, err)
 				}
 				preserved := make(map[string]struct{})

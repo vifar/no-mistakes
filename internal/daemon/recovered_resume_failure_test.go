@@ -199,7 +199,17 @@ END`, resumeFunction)); err != nil {
 				if err := control.QueryRow("SELECT status FROM "+table+" WHERE id=?", run.ID).Scan(&status); err != nil || status != types.RunRunning {
 					t.Fatalf("failed storage fabricated terminal status: %s, %v", status, err)
 				}
+				var shutdownDone <-chan struct{}
+				if stage == "run read" && cancellation == "raw" {
+					shutdownDone = holdShutdownPastDrainDeadline(t, mgr, d)
+					if !testRunOwned(mgr, run.ID) {
+						t.Fatal("shutdown drain deadline relinquished recovered custody")
+					}
+				}
 				healthy.Store(true)
+				if shutdownDone != nil {
+					awaitSettlementShutdown(t, shutdownDone)
+				}
 				select {
 				case <-owned.handle.done:
 				case <-time.After(10 * time.Second):
