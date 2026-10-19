@@ -103,6 +103,52 @@ func TestReapWorktreesHonorsRetentionAndSparesActiveRuns(t *testing.T) {
 	}
 }
 
+// A Document refusal must preserve owner work even after the retention window;
+// ordinary terminal leftovers must remain eligible for cleanup.
+func TestReapWorktreesPreservesFailedDocument(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		step types.StepName
+		fail bool
+		keep bool
+	}{
+		{"failed document", types.StepDocument, true, true},
+		{"completed document", types.StepDocument, false, false},
+		{"failed lint", types.StepLint, true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newWorktreeReapFixture(t)
+			runID := f.seed("feature", types.RunFailed, 30*24*time.Hour)
+			step, err := f.db.InsertStepResult(runID, test.step)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.fail {
+				err = f.db.FailStep(step.ID, "cannot safely discard work", 0)
+			} else {
+				err = f.db.CompleteStep(step.ID, 0, 0, "")
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(f.p.WorktreeDir(f.repo.ID, runID), "owner.txt")
+			const ownerBytes = "uncommitted owner work\n"
+			if err := os.WriteFile(file, []byte(ownerBytes), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			reapWorktrees(f.db, f.p, worktreeReapPolicy{Retention: time.Hour}, time.Now().Add(24*time.Hour))
+			if test.keep {
+				got, err := os.ReadFile(file)
+				if err != nil || string(got) != ownerBytes {
+					t.Fatalf("Document refusal lost owner work during reaping: %q, %v", got, err)
+				}
+			} else if f.exists(runID) {
+				t.Fatal("ordinary expired worktree survived reaping")
+			}
+		})
+	}
+}
+
 // TestReapWorktreesTrimsToTheRunCeilingOldestFirst covers the second bound: a
 // burst of leftovers that all land inside the retention window still cannot
 // grow the tree without limit.

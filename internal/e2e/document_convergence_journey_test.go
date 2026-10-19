@@ -273,6 +273,12 @@ func documentJourneyFailed(t *testing.T, h *Harness, branch, cause string) *ipc.
 		t.Fatalf("want Document refusal %q: run=%s error=%s step=%+v", cause, run.Status, deref(run.Error), step)
 	}
 	documentJourneyStatus(t, h, run.ID)
+	// Terminal status precedes deferred worktree cleanup. Join the owned
+	// daemon before inspecting preservation, then exercise startup cleanup
+	// too: a successful early read must not race ahead of later deletion.
+	gateJourneyDaemon(t, h, "stop")
+	gateJourneyDaemon(t, h, "start")
+	gateJourneyDaemon(t, h, "stop")
 	return run
 }
 

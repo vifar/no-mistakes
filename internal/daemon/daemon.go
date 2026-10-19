@@ -991,7 +991,7 @@ func removableOrphanWorktree(d *db.DB, wt orphanWorktree) bool {
 		slog.Warn("preserving run worktree: cannot read run", "run_id", wt.runID, "error", err)
 		return false
 	}
-	if reason := protectedPathCleanupReason(d, run); reason != "" {
+	if reason := worktreeRefusalCleanupReason(d, run); reason != "" {
 		slog.Info("skipping worktree cleanup", "path", wt.dir, "reason", reason)
 		return false
 	}
@@ -1065,17 +1065,24 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 	return false, ""
 }
 
-// protectedPathCleanupReason protects only the index and working files. It must
+// worktreeRefusalCleanupReason protects only the index and working files. It must
 // not be used as a process-liveness or test-evidence retention predicate.
-func protectedPathCleanupReason(d *db.DB, run *db.Run) string {
+func worktreeRefusalCleanupReason(d *db.DB, run *db.Run) string {
 	if run == nil || (run.Status == types.RunCancelled && run.Error != nil && *run.Error == types.RunCancelReasonAbortedByUser) {
 		return ""
 	}
 	results, err := d.GetStepsByRun(run.ID)
 	if err != nil {
-		return fmt.Sprintf("cannot read protected-path refusals for run %s: %v", run.ID, err)
+		return fmt.Sprintf("cannot read worktree refusals for run %s: %v", run.ID, err)
 	}
 	for _, step := range results {
+		// Document fails closed when entry or rollback cannot prove that
+		// work is safe to discard. A failed pass therefore cannot authorize
+		// forced cleanup, even without a protected-path finding. Keep this
+		// decision durable across terminal cleanup, reaping, and restart.
+		if step.StepName == types.StepDocument && step.Status == types.StepStatusFailed {
+			return fmt.Sprintf("run %s has a failed Document step; preserving index and worktree", run.ID)
+		}
 		if step.FindingsJSON == nil || !pipeline.HasProtectedPathRefusal(*step.FindingsJSON) || step.Status == types.StepStatusCompleted {
 			continue
 		}
