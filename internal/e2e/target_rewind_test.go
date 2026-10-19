@@ -218,7 +218,7 @@ func TestTargetAdvanceExistingPRJourney(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				script := "#!/bin/sh\ncase \"$PWD\" in\n*/worktrees/*)\n" +
+				script := "#!/bin/sh\ncase \"$PWD\" in\n" + shellQuote(filepath.Join(h.NMHome, "worktrees")) + "/*)\n" +
 					"if [ \"$1\" = ls-remote ] && [ \"${3-}\" = refs/heads/" + branch + " ] && [ ! -f " + shellQuote(attachFailure) + " ]; then\n" +
 					"  : > " + shellQuote(attachFailure) + "; echo 'attach observation unavailable' >&2; exit 1\nfi;;\nesac\nexec " + shellQuote(realGit) + " \"$@\"\n"
 				if err := os.WriteFile(filepath.Join(h.BinDir, "git"), []byte(script), 0700); err != nil {

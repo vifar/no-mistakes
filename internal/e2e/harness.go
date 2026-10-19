@@ -91,7 +91,9 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 
 	nmBin, fakeBin := buildBinaries(t)
 
-	root, err := os.MkdirTemp("", "nm-e2e-*")
+	// Keep the root short enough for Unix sockets when TMPDIR is a long
+	// isolated worktree path. nmh-* is recognized by the daemon reaper.
+	root, err := os.MkdirTemp("", "nmh-*")
 	if err != nil {
 		t.Fatalf("mkdir e2e root: %v", err)
 	}
@@ -101,7 +103,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 		NMBin:             nmBin,
 		FakeAgent:         fakeBin,
 		BinDir:            filepath.Join(root, "bin"),
-		NMHome:            filepath.Join(root, "nmhome"),
+		NMHome:            filepath.Join(root, "h"),
 		HomeDir:           filepath.Join(root, "home"),
 		UpstreamDir:       filepath.Join(root, "upstream.git"),
 		WorkDir:           filepath.Join(root, "work"),

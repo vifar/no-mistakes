@@ -220,7 +220,8 @@ func TestTargetAdvanceInitialObservationURLLiveJourney(t *testing.T) {
 // readiness, and only fresh permissive protection plus mergeability restores
 // it. The exact original receipt, review binding, Test output, and remote head
 // are the independent persisted contracts checked across every poll.
-func TestTargetAdvanceAcceptedGapRecoversLiveJourney(t *testing.T) {
+func acceptedTestGapScenario(t *testing.T) string {
+	t.Helper()
 	scenario := cleanReviewScenario(t)
 	old, err := os.ReadFile(scenario)
 	if err != nil {
@@ -241,7 +242,11 @@ func TestTargetAdvanceAcceptedGapRecoversLiveJourney(t *testing.T) {
 	if err := os.WriteFile(scenario, []byte(strings.Replace(string(old), "actions:\n", action, 1)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	j := newScopeJourney(t, SetupOpts{Agent: "claude", Scenario: scenario})
+	return scenario
+}
+
+func TestTargetAdvanceAcceptedGapRecoversLiveJourney(t *testing.T) {
+	j := newScopeJourney(t, SetupOpts{Agent: "claude", Scenario: acceptedTestGapScenario(t)})
 	j.setTrusted("commands:\n  test: 'true'\n  lint: 'true'\n")
 	healthy := forgeState{Protection: &forgeEndpoint{Body: []byte(`{"strict":false,"contexts":[],"checks":[]}`)}, Checks: []forgeCheck{greenCheck("build")}}
 	j.setForge(healthy)
