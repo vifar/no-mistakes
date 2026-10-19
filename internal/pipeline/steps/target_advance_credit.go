@@ -18,39 +18,16 @@ func retainPublishedComparison(c *pipeline.StepContext, host scm.Host, previous 
 		previous.LocalHeadSHA != candidate.LocalHeadSHA || candidate.ForgeHeadSHA != candidate.LocalHeadSHA || previous.TargetSHA == candidate.TargetSHA {
 		return false, nil
 	}
-	current, err := c.DB.GetRun(c.Run.ID)
-	if err != nil {
+	qualified, err := qualifiedPublishedComparison(c, previous)
+	if err != nil || !qualified {
 		return false, err
-	}
-	if current == nil || current.HeadSHA != candidate.LocalHeadSHA || current.LastPushedSHA == nil || *current.LastPushedSHA != candidate.LocalHeadSHA || current.ReviewApprovedHeadSHA == nil || *current.ReviewApprovedHeadSHA != candidate.LocalHeadSHA {
-		return false, nil
-	}
-	qualified := previous.CIQualified || current.CIReadyAt != nil
-	if !qualified {
-		publications, err := c.DB.GetCommitStatusPublications(c.Ctx, c.Run.ID)
-		if err != nil {
-			return false, err
-		}
-		for _, publication := range publications {
-			qualified = qualified || publication.SHA == candidate.LocalHeadSHA && publication.Validated && publication.LastState == "success"
-		}
-	}
-	if !qualified {
-		return false, nil
 	}
 	if _, err := git.Run(c.Ctx, c.WorkDir, "merge-base", "--is-ancestor", previous.TargetSHA, candidate.TargetSHA); err != nil {
 		return false, fmt.Errorf("published target did not fast-forward: %w", err)
 	}
-	policy, ok := host.(scm.BranchUpdatePolicyReader)
-	if !ok {
-		return false, nil
-	}
-	strict, err := policy.RequiresUpToDate(c.Ctx, prFromOwnedURL(previous.PRURL), previous.TargetBranch)
-	if err != nil {
-		return false, fmt.Errorf("verify qualified head protection: %w", err)
-	}
-	if strict {
-		return false, nil
+	allowed, err := publishedTargetAllowsBehind(c, host, previous)
+	if err != nil || !allowed {
+		return false, err
 	}
 	if !host.Capabilities().MergeableState {
 		return false, nil
@@ -62,7 +39,86 @@ func retainPublishedComparison(c *pipeline.StepContext, host scm.Host, previous 
 	if state != scm.MergeableOK {
 		return false, fmt.Errorf("qualified head mergeability is %s after target advance", state)
 	}
+	if err := c.DB.RecordRetainedPRTarget(c.Run.ID, previous, candidate.TargetSHA); err != nil {
+		return false, err
+	}
 	return true, nil
+}
+
+func qualifiedPublishedComparison(c *pipeline.StepContext, previous *db.PRContext) (bool, error) {
+	if c.Run.Shipping != nil || previous == nil || previous.PRURL == "" {
+		return false, nil
+	}
+	current, err := c.DB.GetRun(c.Run.ID)
+	if err != nil {
+		return false, err
+	}
+	if current == nil || current.HeadSHA != previous.LocalHeadSHA || current.LastPushedSHA == nil || *current.LastPushedSHA != previous.LocalHeadSHA || current.ReviewApprovedHeadSHA == nil || *current.ReviewApprovedHeadSHA != previous.LocalHeadSHA {
+		return false, nil
+	}
+	qualified := previous.CIQualified || current.CIReadyAt != nil
+	if !qualified {
+		publications, err := c.DB.GetCommitStatusPublications(c.Ctx, c.Run.ID)
+		if err != nil {
+			return false, err
+		}
+		for _, publication := range publications {
+			qualified = qualified || publication.SHA == previous.LocalHeadSHA && publication.Validated && publication.LastState == "success"
+		}
+	}
+	return qualified, nil
+}
+
+func publishedTargetAllowsBehind(c *pipeline.StepContext, host scm.Host, previous *db.PRContext) (bool, error) {
+	policy, ok := host.(scm.BranchUpdatePolicyReader)
+	if !ok {
+		return false, nil
+	}
+	strict, err := policy.RequiresUpToDate(c.Ctx, prFromOwnedURL(previous.PRURL), previous.TargetBranch)
+	if err != nil {
+		return false, fmt.Errorf("verify qualified head protection: %w", err)
+	}
+	return !strict, nil
+}
+
+// A completed merge supplies positive merge evidence instead of the open PR's
+// mergeability flag. Prove the exact result against the target verified while
+// the PR was open, never an inferred merge parent or the latest target (which
+// may have advanced again). The original qualified comparison stays unchanged.
+func qualifiedAdvancedMergeTree(c *pipeline.StepContext, host scm.Host, receipt *db.PRContext, mergeSHA string) (string, error) {
+	qualified, err := qualifiedPublishedComparison(c, receipt)
+	if err != nil || !qualified {
+		return "", err
+	}
+	allowed, err := publishedTargetAllowsBehind(c, host, receipt)
+	if err != nil || !allowed {
+		return "", err
+	}
+	target, err := c.DB.GetRetainedPRTarget(c.Run.ID, receipt)
+	if err != nil {
+		return "", err
+	}
+	if target == "" {
+		return "", nil
+	}
+	if _, err := git.Run(c.Ctx, c.WorkDir, "merge-base", "--is-ancestor", receipt.TargetSHA, target); err != nil {
+		return "", fmt.Errorf("merged target did not fast-forward: %w", err)
+	}
+	if _, err := git.Run(c.Ctx, c.WorkDir, "merge-base", "--is-ancestor", target, mergeSHA); err != nil {
+		return "", fmt.Errorf("merged result does not contain the verified advanced target: %w", err)
+	}
+	comparison, err := prComparisonAtTarget(c, receipt.TargetBranch, target, receipt.LocalHeadSHA)
+	if err != nil {
+		return "", err
+	}
+	if comparison.MergeBaseSHA != receipt.MergeBaseSHA || comparison.DiffDigest != receipt.DiffDigest {
+		return "", fmt.Errorf("advanced merge parent changes the reviewed PR comparison")
+	}
+	tree, err := git.Run(c.Ctx, c.WorkDir, "merge-tree", "--write-tree", target, receipt.LocalHeadSHA)
+	if err != nil {
+		return "", fmt.Errorf("cannot prove advanced target merge result: %w", err)
+	}
+	return tree, nil
 }
 
 // reusableRewindReview requires both an identical canonical PR patch and a

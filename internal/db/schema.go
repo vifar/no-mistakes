@@ -533,4 +533,6 @@ var migrationStatements = []string{
       AND EXISTS (SELECT 1 FROM runs r WHERE r.id=run_id AND r.ci_ready_at IS NOT NULL
         AND r.head_sha=local_head_sha AND r.last_pushed_sha=local_head_sha
         AND r.review_approved_head_sha=local_head_sha)`,
+	// Separate observation: never replace the original qualification comparison.
+	`ALTER TABLE run_pr_contexts ADD COLUMN retained_target_sha TEXT`,
 }
