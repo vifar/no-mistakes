@@ -23,16 +23,6 @@ CREATE TABLE IF NOT EXISTS controlled_shutdown_runs (
  run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
  instance TEXT NOT NULL, lifecycle TEXT NOT NULL, reason TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS document_passes (
-    id TEXT PRIMARY KEY,
-    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    from_head_sha TEXT NOT NULL,
-    to_head_sha TEXT,
-    commit_count INTEGER NOT NULL DEFAULT 0,
-    findings_json TEXT,
-    carried_review_from TEXT
-);
-CREATE UNIQUE INDEX IF NOT EXISTS document_pass_pending ON document_passes(run_id) WHERE to_head_sha IS NULL;
 CREATE TABLE IF NOT EXISTS pipeline_commit_heads (
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     head_sha TEXT NOT NULL,
