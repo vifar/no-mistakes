@@ -136,6 +136,9 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	shellenv.ConfigureShellCommand(cmd)
 	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
+		if ctx.Err() != nil {
+			err = errors.Join(err, ctx.Err())
+		}
 		return nil, &CommandError{
 			Command: safeurl.RedactText(strings.Join(args, " ")),
 			Stderr:  safeurl.RedactText(stderr.String()),

@@ -58,6 +58,23 @@ func cancellationOnly(err, cause error) bool {
 	return err == context.Canceled || err == cause
 }
 
+func shutdownCancellationOnly(err error, ctxs ...context.Context) bool {
+	for _, cause := range []error{ErrDaemonShutdown, ErrParkedAtShutdown} {
+		if errors.Is(err, cause) && cancellationOnly(err, cause) {
+			return true
+		}
+	}
+	for _, ctx := range ctxs {
+		if ctx != nil {
+			cause := context.Cause(ctx)
+			if errors.Is(cause, ErrDaemonShutdown) && cancellationOnly(err, cause) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func watcherCancellation(err error) bool {
 	var stepErr *stepExecutionError
 	return errors.As(err, &stepErr) && stepErr.watchOnly

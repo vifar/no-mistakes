@@ -452,12 +452,12 @@ func TestWatcherTargetRefReadCancellation(t *testing.T) {
 			}
 			if mode == "independent Git failure" {
 				var exit *exec.ExitError
-				if !errors.As(readErr, &exit) || exit.ExitCode() != 128 || errors.Is(readErr, context.Canceled) {
+				if !errors.As(readErr, &exit) || exit.ExitCode() != 128 || !errors.Is(readErr, context.Canceled) {
 					t.Errorf("independent Git exit lost identity: %v", readErr)
 				}
 			} else if mode == "independent signal" || mode == "independent SIGTERM" {
 				var exit *exec.ExitError
-				if !errors.As(readErr, &exit) || errors.Is(readErr, context.Canceled) {
+				if !errors.As(readErr, &exit) || !errors.Is(readErr, context.Canceled) {
 					t.Errorf("independent signal lost failure identity: %v", readErr)
 				}
 				if exit != nil {
@@ -470,7 +470,7 @@ func TestWatcherTargetRefReadCancellation(t *testing.T) {
 						t.Errorf("independent leader exit = %v", exit)
 					}
 				}
-			} else if errors.Is(readErr, context.Canceled) != strings.HasPrefix(mode, "context cancellation before ref launch") {
+			} else if !errors.Is(readErr, context.Canceled) {
 				t.Errorf("target read cancellation provenance = %v", readErr)
 			}
 			if strings.HasPrefix(mode, "context cancellation before ref launch") {
@@ -606,8 +606,12 @@ func TestWatcherImmutableRefErrorsRetainIdentity(t *testing.T) {
 				}
 				select {
 				case err := <-done:
-					if errors.Is(err, context.Canceled) != (mode == "cancelled context") {
+					if !errors.Is(err, context.Canceled) {
 						t.Errorf("%s ref error lost cancellation identity: %v", check, err)
+					}
+					var exit *exec.ExitError
+					if mode != "cancelled context" && !errors.As(err, &exit) {
+						t.Errorf("%s ref error lost independent command evidence: %v", check, err)
 					}
 					if mode != "cancelled context" && err.Error() != "observe shipping ref: remote observation failed" {
 						t.Errorf("ref error changed redacted rendering: %v", err)

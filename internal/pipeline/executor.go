@@ -986,7 +986,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.mu.Unlock()
 	duration := recoveredStepDuration(gate.stepResult)
 	failRecoveredGate := func(err error) error {
-		if errors.Is(err, ErrParkedAtShutdown) || errors.Is(err, ErrDaemonShutdown) || errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+		if shutdownCancellationOnly(err, ctx) {
 			current, dbErr := e.db.GetStepResult(gate.stepResult.ID)
 			if dbErr == nil && current != nil && (current.Status == types.StepStatusAwaitingApproval || current.Status == types.StepStatusFixReview) {
 				return ErrParkedAtShutdown
@@ -1150,7 +1150,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	response, reconciled, err = e.waitForApprovalDispatch(ctx, gate.step, reconcileCtx, gate.findings, true, false, recorded)
 	// A daemon shutdown leaves the gate parked for recovery: its awaiting
 	// marker, and any response already recorded, stay as they are.
-	if errors.Is(err, ErrDaemonShutdown) || errors.Is(err, ErrParkedAtShutdown) {
+	if shutdownCancellationOnly(err, ctx) {
 		return ErrParkedAtShutdown
 	}
 	e.endGateWait(run.ID, parkStart, err)
@@ -2230,7 +2230,7 @@ rounds:
 			e.yieldSlotForGateWait()
 			response, reconciled, err := e.waitForApprovalDispatch(ctx, step, sctx, effectiveFindings, true, false, nil)
 			// A daemon shutdown leaves the gate parked for recovery.
-			if errors.Is(err, ErrDaemonShutdown) || errors.Is(err, ErrParkedAtShutdown) {
+			if shutdownCancellationOnly(err, ctx) {
 				return false, "", ErrParkedAtShutdown
 			}
 			e.endGateWait(run.ID, parkStart, err)
@@ -2907,7 +2907,7 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 				}
 				continue
 			}
-			if errors.Is(err, ErrFatalGateReconciliation) && ctx.Err() == nil {
+			if errors.Is(err, ErrFatalGateReconciliation) {
 				return approvalResponse{}, false, err
 			}
 			if err != nil && ctx.Err() == nil {
@@ -3027,13 +3027,7 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 // recovery marks it ci_monitor_interrupted. The run's shape is read from the
 // same durable condition that recovery uses.
 func (e *Executor) ciMonitorInterruptedByShutdown(runID string, err error, ctxs ...context.Context) bool {
-	shutdown := errors.Is(err, ErrDaemonShutdown)
-	for _, ctx := range ctxs {
-		if ctx != nil && errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
-			shutdown = true
-		}
-	}
-	if !shutdown {
+	if !shutdownCancellationOnly(err, ctxs...) {
 		return false
 	}
 	// A planned shutdown of a certified watcher takes the bounded cancellation

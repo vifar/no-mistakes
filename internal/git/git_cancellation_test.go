@@ -108,8 +108,8 @@ func TestRunCancellationPreservesCommandProvenance(t *testing.T) {
 					if mode != "cancelled context" && !errors.As(err, &exit) {
 						t.Errorf("original command exit is not inspectable: %v", err)
 					}
-					if errors.Is(err, context.Canceled) != (mode == "cancelled context") {
-						t.Errorf("cancellation classification = %v: %v", errors.Is(err, context.Canceled), err)
+					if !errors.Is(err, context.Canceled) {
+						t.Errorf("context cancellation metadata = %v: %v", errors.Is(err, context.Canceled), err)
 					}
 					if strings.Contains(err.Error(), "private-token") {
 						t.Errorf("rendered error leaked credential: %v", err)
