@@ -267,11 +267,7 @@ When the daemon is at its `daemon.max_concurrent_runs` limit, the launch is reco
 Backgrounding a call is fine for an agent harness, but the run never advances past a gate on its own.
 When the CI step reports readiness for an open PR, `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns readiness and links to the check-scope and no-CI rules.
 Treat that as the agent stopping point: ask the user to review and merge the PR from the `help` line.
-For ordinary runs, when the live target commit advances with green checks and no merge conflict, CI clears readiness and keeps monitoring, withholding checks-passed.
-It may wait until ci_timeout, or indefinitely when unlimited.
-When CI returns, including with findings, the boundary guard rejects the changed comparison and terminates the run.
-The monitor does not automatically repair or revalidate that changed comparison.
-After termination, restart from the current target and head; never hand-rebase.
+Target movement follows the [CI comparison rules](/no-mistakes/reference/pipeline-steps/#ci), including the [published-qualification exception](/no-mistakes/reference/pipeline-steps/#target-advances-after-qualification).
 After the run stops, see [`no-mistakes rerun`](#no-mistakes-rerun) for restart and custody conditions.
 Reattaching with `axi run` while the monitor is still active leaves HEAD unchanged and does not refresh the target comparison.
 Successful outcomes (`checks-passed`, `passed`, `passed-with-override`, and `passed-with-skips`) also carry `help` instructions telling the agent to summarize the run.
