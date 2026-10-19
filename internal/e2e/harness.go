@@ -677,7 +677,7 @@ func (h *Harness) CancelRun(runID string) {
 
 func (h *Harness) waitForRunStatus(branch string, timeout time.Duration, match func(types.RunStatus) bool, action string) *ipc.RunInfo {
 	h.t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := pollDeadline(h.t, timeout)
 
 	var lastRun *ipc.RunInfo
 	for time.Now().Before(deadline) {
@@ -719,6 +719,22 @@ func (h *Harness) waitForRunStatus(branch string, timeout time.Duration, match f
 	}
 	h.t.Fatalf("no run found for branch %s within %v", branch, timeout)
 	return nil
+}
+
+// Keep a stalled wait's diagnostic and cleanup ahead of testing's package
+// alarm. A late journey must not consume a fresh timeout beyond that alarm.
+func pollDeadline(t *testing.T, timeout time.Duration) time.Time {
+	t.Helper()
+	now := time.Now()
+	deadline := now.Add(timeout)
+	if alarm, ok := t.Deadline(); ok {
+		remaining := alarm.Sub(now)
+		reserve := min(5*time.Second, remaining/2)
+		if diagnosticDeadline := alarm.Add(-reserve); diagnosticDeadline.Before(deadline) {
+			deadline = diagnosticDeadline
+		}
+	}
+	return deadline
 }
 
 // dumpDebugState writes the daemon log, agent log, and per-step run

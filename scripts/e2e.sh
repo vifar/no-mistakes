@@ -65,8 +65,9 @@ trap cleanup_inventory EXIT INT TERM
 # Default args match the historical Makefile e2e target; callers may override.
 if [[ "$#" -eq 0 ]]; then
   # The default suite has one shared 2400s budget, including the journey
-  # matrix. Split only that matrix across two Go processes: each process has
-  # its own process-wide test environment, while daemon slots remain shared.
+  # matrix. Each worker has its own process-wide test environment, while
+  # daemon slots remain shared. The terminal-merge table runs beside the
+  # remaining suite so its 15 real daemon journeys do not form a serial tail.
   budget_seconds=2400
   # Bash puts each asynchronous job in its own process group while monitor
   # mode is enabled. A group contains go test and its test binary descendants.
@@ -138,10 +139,18 @@ if [[ "$#" -eq 0 ]]; then
   fi
 
   go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
-    -skip '^TestUserJourney$' ./internal/e2e/... ./internal/pipeline/steps/... &
+    -run '^TestTargetAdvanceTerminalMergeLiveJourney$' ./internal/e2e/... &
+  terminal_pid=$!
+  go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
+    -skip '^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney)$' ./internal/e2e/... ./internal/pipeline/steps/... &
   remaining_pid=$!
-  wait "$remaining_pid"
-  remaining_status=$?
+  terminal_status=0
+  remaining_status=0
+  wait "$terminal_pid" || terminal_status=$?
+  wait "$remaining_pid" || remaining_status=$?
+  if (( terminal_status != 0 )); then
+    exit "$terminal_status"
+  fi
   exit "$remaining_status"
 fi
 

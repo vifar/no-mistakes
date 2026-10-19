@@ -68,15 +68,15 @@ func TestTargetAdvanceTerminalMergeLiveJourney(t *testing.T) {
 			}
 			waitUntil := func(label string, predicate func() bool) {
 				t.Helper()
-				deadline := time.Now().Add(90 * time.Second)
+				deadline := pollDeadline(t, 90*time.Second)
 				for time.Now().Before(deadline) {
 					if predicate() {
 						return
 					}
 					time.Sleep(200 * time.Millisecond)
 				}
-				out, _ := j.h.Run("axi", "status", "--run", run.ID)
-				t.Fatalf("never observed %s:\n%s\n%s", label, out, j.ciLog(run.ID))
+				j.h.dumpDebugState()
+				t.Fatalf("timed out waiting for %s (run %s):\n%s", label, run.ID, j.ciLog(run.ID))
 			}
 			if mode != "missing observation" && mode != "exact target" {
 				waitUntil("verified advanced target", func() bool {

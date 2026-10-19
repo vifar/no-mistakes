@@ -15,14 +15,29 @@ import (
 	"time"
 )
 
+// The 15 terminal-merge scenarios added by #95 must not queue behind the
+// remaining journeys: at 30fb0ae1 that serial tail exhausted the shared 2400s
+// budget in two CI runs. Execute the wrapper and inspect its child invocations.
+func TestE2EWrapperTerminalMergeJourneyHasIndependentWorker(t *testing.T) {
+	result := runE2EWrapper(t, "", "")
+	if result.status != 0 {
+		t.Fatalf("wrapper failed: %s", result.output)
+	}
+	terminal := callContaining(t, result.calls, "-run ^TestTargetAdvanceTerminalMergeLiveJourney$")
+	remainder := callContaining(t, result.calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney)$")
+	if !strings.Contains(terminal, "-timeout ") || !strings.Contains(remainder, "-timeout ") {
+		t.Fatalf("workers must retain the shared suite budget: %q", result.calls)
+	}
+}
+
 func TestE2EWrapperDefaultPartitionsJourneyAndRunsRemainder(t *testing.T) {
 	result := runE2EWrapperWithCap(t, "", "", "08")
 	if result.status != 0 {
 		t.Fatalf("wrapper status = %d, output: %s", result.status, result.output)
 	}
 	calls := result.calls
-	if len(calls) != 4 { // two journey processes, cleanup, and remainder
-		t.Fatalf("go calls = %q, want two journey processes, cleanup, and remainder", calls)
+	if len(calls) != 5 { // two matrix processes, terminal journey, remainder, cleanup
+		t.Fatalf("go calls = %q, want two matrix processes, terminal journey, remainder, and cleanup", calls)
 	}
 	assertBothMatrixCallsFinishedBeforeCleanup(t, result.events)
 	first := callContaining(t, calls, "-run ^TestUserJourney$/(claude|codex)$")
@@ -36,7 +51,7 @@ func TestE2EWrapperDefaultPartitionsJourneyAndRunsRemainder(t *testing.T) {
 	if !strings.Contains(first, "-timeout 2400s") || !strings.Contains(second, "-timeout 2400s") || !strings.Contains(first, "./internal/e2e/...") || !strings.Contains(second, "./internal/e2e/...") {
 		t.Errorf("matrix invocations must each receive the full shared upper-bound timeout: %q", calls[:2])
 	}
-	remaining := callContaining(t, calls, "-skip ^TestUserJourney$ ./internal/e2e/... ./internal/pipeline/steps/...")
+	remaining := callContaining(t, calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney)$ ./internal/e2e/... ./internal/pipeline/steps/...")
 	if !strings.Contains(remaining, "-timeout ") {
 		t.Errorf("remaining-suite timeout missing: %q", remaining)
 	}
@@ -53,6 +68,16 @@ func TestE2EWrapperWaitsForBothMatrixProcessesAndPropagatesFailure(t *testing.T)
 	assertBothMatrixCallsFinishedBeforeCleanup(t, result.events)
 	if !hasCallContaining(result.calls, "-run ^TestUserJourney$/(claude|codex)$") || !hasCallContaining(result.calls, "-skip ^TestUserJourney$/(claude|codex)$") {
 		t.Fatalf("both matrix invocations must have completed before wrapper exits: %q", result.calls)
+	}
+}
+
+func TestE2EWrapperPropagatesTerminalJourneyFailure(t *testing.T) {
+	result := runE2EWrapper(t, "terminal", "")
+	if result.status != 19 {
+		t.Fatalf("wrapper status = %d, want terminal failure 19; output: %s", result.status, result.output)
+	}
+	if len(result.calls) != 5 || result.events[len(result.events)-1] != "cleanup" {
+		t.Fatalf("both remaining workers must finish before cleanup: calls=%q events=%q", result.calls, result.events)
 	}
 }
 
@@ -84,7 +109,7 @@ func assertBothMatrixCallsFinishedBeforeCleanup(t *testing.T, events []string) {
 		if event == "cleanup" {
 			cleanup = i
 		}
-		if strings.HasPrefix(event, "end:test -tags=e2e -count=1 -timeout 2400s -run ") {
+		if strings.HasPrefix(event, "end:test -tags=e2e -count=1 -timeout 2400s -run ^TestUserJourney$") {
 			ended = append(ended, i)
 		}
 	}
@@ -158,7 +183,7 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 	fakeGo := filepath.Join(binDir, "go")
 	goScript := "#!/bin/sh\n"
 	goScript += "case \" $* \" in *' run ./internal/e2edaemon/reapmain.go '*) printf 'cleanup\\n' >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0 ;; esac\n"
-	goScript += "case \"$*\" in *' -skip ^TestUserJourney$ ./internal/e2e/... '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=remaining ;; *' -run ^TestUserJourney$/(claude|codex)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=claude-codex ;; *' -run ^TestUserJourney$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=complement ;; *) exit 0 ;; esac\n"
+	goScript += "case \"$*\" in *' -skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney)$ ./internal/e2e/... '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=remaining ;; *' -run ^TestTargetAdvanceTerminalMergeLiveJourney$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=terminal ;; *' -run ^TestUserJourney$/(claude|codex)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=claude-codex ;; *' -run ^TestUserJourney$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=complement ;; *) exit 0 ;; esac\n"
 	goScript += "export NM_E2E_FAKE_PARENT_PID=$$\n"
 	goScript += "\"$NM_E2E_FAKE_CHILD\" \"$selector\" &\nchild_pid=$!\n"
 	goScript += "trap 'wait \"$child_pid\" 2>/dev/null || true; printf \"parent-end:%s\\n\" \"$selector\" >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0' TERM INT\n"
@@ -213,9 +238,6 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 	go func() {
 		reader := bufio.NewReader(ready)
 		wantLines := 4
-		if stage == "remaining" {
-			wantLines = 2
-		}
 		lines := make([]string, 0, wantLines)
 		for len(lines) < wantLines {
 			line, readErr := reader.ReadString('\n')
@@ -233,9 +255,6 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 		t.Fatalf("timed out waiting for both fake jobs and children to report readiness: %v", readyCtx.Err())
 	}
 	wantJobs := 2
-	if stage == "remaining" {
-		wantJobs = 1
-	}
 	if len(readyLines) != wantJobs*2 {
 		t.Fatalf("ready lines = %q, want %d parent and child readiness reports", readyLines, wantJobs)
 	}
@@ -350,7 +369,7 @@ func runE2EWrapperWithCap(t *testing.T, failOnMatrix, explicit, cap string) e2eW
 	contents := "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$NM_E2E_FAKE_GO_LOG\"\n"
 	contents += "case \" $* \" in *' run ./internal/e2edaemon/reapmain.go '*) printf 'cleanup\\n' >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0 ;; esac\n"
 	contents += "printf 'begin:%s\\n' \"$*\" >>\"$NM_E2E_FAKE_GO_EVENTS\"\nstatus=0\n"
-	contents += "case \"$NM_E2E_FAKE_GO_FAIL_MATRIX:$*\" in first:*\"-run ^TestUserJourney$/(claude|codex)$\"*) status=17 ;; esac\n"
+	contents += "case \"$NM_E2E_FAKE_GO_FAIL_MATRIX:$*\" in first:*\"-run ^TestUserJourney$/(claude|codex)$\"*) status=17 ;; terminal:*\"-run ^TestTargetAdvanceTerminalMergeLiveJourney$\"*) status=19 ;; esac\n"
 	contents += "printf 'end:%s:%s\\n' \"$*\" \"$status\" >>\"$NM_E2E_FAKE_GO_EVENTS\"\nexit \"$status\"\n"
 	if err := os.WriteFile(fakeGo, []byte(contents), 0o755); err != nil {
 		t.Fatal(err)
