@@ -46,10 +46,11 @@ Administrators install these dependencies; the runner account does not gain
 sudo access. The default end-to-end suite shares a 40-minute budget inside
 the 45-minute job bound. With at least two daemon slots, the user-journey
 matrix runs in two isolated Go test processes: Claude and Codex in one, all
-other agents in the other. The terminal-merge journey table and the remaining
-tests then run alongside each other in separate Go test processes with the unused
-portion of that budget. All workers share the same daemon cap. With one daemon
-slot, the complete suite runs in a single process with the same budget. Each run retains the shared
+other agents in the other. The terminal-merge and retained-target continuity
+journey tables then share one Go test process alongside the remaining tests
+in another, both using the unused portion of that budget. All workers share
+the same daemon cap. With one daemon slot, the complete suite runs in a single
+process with the same budget. Each run retains the shared
 temporary-daemon inventory and cleanup trap.
 
 ## Required execution policy
