@@ -226,9 +226,10 @@ type StepOutcome struct {
 	// FixSummary, when non-empty, records the result of a fix attempt.
 	FixSummary      string
 	RepairPublished bool
-	// ReviewApprovedHeadSHA is set only by a successfully executed full review
-	// round. The executor durably records it only when the review step actually
-	// completes, never while that outcome is parked or after a failed round.
+	// ReviewApprovedHeadSHA is set by a successful full review or proven reuse
+	// of clean review credit after target integration. The executor durably
+	// records it only when the review step completes, never while that outcome
+	// is parked or after a failed round.
 	ReviewApprovedHeadSHA string
 	// Set only by the executor after applying outstanding-finding resolution.
 	// Legacy raw boundary outcomes cannot prove a clean effective gate.

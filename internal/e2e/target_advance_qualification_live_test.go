@@ -110,6 +110,30 @@ func TestTargetAdvanceDuringReviewFixLiveJourney(t *testing.T) {
 				if run.Status != types.RunCompleted {
 					t.Fatalf("review fix target advance refused: %s %s", run.Status, deref(run.Error))
 				}
+				database, err := db.OpenReadOnly(filepath.Join(h.NMHome, "state.sqlite"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				history, err := database.GetTargetRewindHistory(run.ID)
+				_ = database.Close()
+				if err != nil || len(history) != 1 {
+					t.Fatalf("missing superseded review history: %+v %v", history, err)
+				}
+				selectionPreserved := false
+				for _, round := range history[0].Rounds {
+					if round["selection_source"] != db.RoundSelectionSourceUser {
+						continue
+					}
+					raw, _ := round["selected_finding_ids"].(string)
+					var ids []string
+					if json.Unmarshal([]byte(raw), &ids) == nil && len(ids) == 1 && ids[0] == "fix-feature" {
+						selectionPreserved = true
+					}
+				}
+				if !selectionPreserved {
+					t.Fatal("target rewind discarded the operator's review-fix selection")
+				}
+				t.Log("superseded review round retains the operator's selection of fix-feature")
 				published := h.UpstreamBranchSHA(branch)
 				if !isAncestorIn(t, h, h.UpstreamDir, target, published) || published != run.HeadSHA {
 					t.Fatal("publication does not contain verified target")
@@ -351,4 +375,86 @@ func TestTargetAdvanceAcceptedGapRecoversLiveJourney(t *testing.T) {
 	}
 	t.Logf("external head %s withheld readiness; qualification remains bound only to %s", changed, head)
 	j.finish(branch)
+}
+
+// A permissive target policy alone is insufficient: the forge must confirm
+// mergeability, and strict shipping never receives the published-head
+// exception. The oracle is readiness plus the unchanged remote head and
+// persisted original comparison, observed through the real CLI and daemon.
+func TestTargetAdvancePublishedGuardsLiveJourney(t *testing.T) {
+	for _, guard := range []string{"CONFLICTING", "UNKNOWN", "strict shipping"} {
+		t.Run(guard, func(t *testing.T) {
+			strict := guard == "strict shipping"
+			j := newScopeJourney(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t)})
+			j.setTrusted("commands:\n  test: 'true'\n  lint: 'true'\n")
+			healthy := forgeState{Protection: &forgeEndpoint{Body: []byte(`{"strict":false,"contexts":[],"checks":[]}`)}, Checks: []forgeCheck{greenCheck("build")}}
+			j.setForge(healthy)
+			j.init()
+			const branch = "feature/published-guards"
+			var run *ipc.RunInfo
+			if strict {
+				_, run, _ = j.strictRun(branch)
+			} else {
+				j.push(branch)
+				run = j.expectReady(branch, 90*time.Second)
+			}
+			if !run.CIReady || (run.Shipping != nil) != strict {
+				t.Fatalf("fixture not qualified in requested mode: %+v", run)
+			}
+			head := j.h.UpstreamBranchSHA(branch)
+			database, err := db.OpenReadOnly(filepath.Join(j.h.NMHome, "state.sqlite"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			original, err := database.GetRunPRContext(run.ID)
+			if err != nil || !strict && original == nil {
+				t.Fatalf("missing original comparison: %+v %v", original, err)
+			}
+			shippingComparison, err := database.GetReviewComparison(run.ID)
+			if err != nil || strict && shippingComparison == nil {
+				t.Fatalf("missing strict comparison: %+v %v", shippingComparison, err)
+			}
+			waitReady := func(want bool, timeout time.Duration) {
+				t.Helper()
+				deadline := time.Now().Add(timeout)
+				for time.Now().Before(deadline) {
+					if j.h.RunInfo(run.ID).CIReady == want {
+						return
+					}
+					time.Sleep(200 * time.Millisecond)
+				}
+				t.Fatalf("readiness never became %t:\n%s", want, j.ciLog(run.ID))
+			}
+			assertBound := func() {
+				t.Helper()
+				current, err := database.GetRunPRContext(run.ID)
+				if err != nil || !reflect.DeepEqual(current, original) || j.h.UpstreamBranchSHA(branch) != head {
+					t.Fatalf("guard moved the published head/comparison: %+v -> %+v (%v)", original, current, err)
+				}
+				currentShipping, err := database.GetReviewComparison(run.ID)
+				expectedShipping := shippingComparison
+				if strict {
+					// Strict shipping invalidates the old approval rather than
+					// receiving the ordinary published-head exception.
+					expected := *shippingComparison
+					expected.Approved = false
+					expectedShipping = &expected
+				}
+				if err != nil || !reflect.DeepEqual(currentShipping, expectedShipping) {
+					t.Fatalf("guard transferred strict qualification: %+v -> %+v (%v)", shippingComparison, currentShipping, err)
+				}
+			}
+			if !strict {
+				blocked := healthy
+				blocked.Mergeable = guard
+				j.setForge(blocked)
+			}
+			advanceMain(t, j.h, "target.txt", "advanced target\n", "advance target after qualification")
+			waitReady(false, 360*time.Second)
+			assertBound()
+			t.Logf("%s withheld readiness after target advance at unchanged published head %s:\n%s", guard, head, j.ciLog(run.ID))
+			j.finish(branch)
+		})
+	}
 }
