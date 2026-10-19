@@ -18,7 +18,7 @@ import (
 // and confirmed attempts must both refuse drift without charging a rewind.
 // The real daemon performs migration, recovery, and comparison validation.
 func TestTargetAdvanceUpgradeProvenanceJourney(t *testing.T) {
-	for _, provenance := range []string{"legacy unknown", "confirmed attempt"} {
+	for _, provenance := range []string{"legacy unknown", "confirmed attempt", "skipped Rebase", "status attempt"} {
 		t.Run(provenance, func(t *testing.T) {
 			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t)})
 			commitTrustedRepoConfig(t, h, "commands:\n  test: 'false'\nauto_fix:\n  test: 0\n")
@@ -44,7 +44,22 @@ func TestTargetAdvanceUpgradeProvenanceJourney(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				err = database.MarkRunRetargetAttempted(parked.ID)
+				switch provenance {
+				case "confirmed attempt":
+					err = database.MarkRunRetargetAttempted(parked.ID)
+				case "skipped Rebase":
+					var steps []*db.StepResult
+					steps, err = database.GetStepsByRun(parked.ID)
+					if err == nil {
+						for _, step := range steps {
+							if step.StepName == types.StepRebase {
+								err = database.UpdateStepStatus(step.ID, types.StepStatusSkipped)
+							}
+						}
+					}
+				case "status attempt":
+					err = database.PutCommitStatusAttempt(parked.ID, db.CommitStatusAttempt{CommitStatusPublication: db.CommitStatusPublication{SHA: parked.HeadSHA, Host: "github.com", Repo: "test/repo"}, Target: "upstream", Ref: "refs/heads/" + branch})
+				}
 				closeErr := database.Close()
 				if err != nil || closeErr != nil {
 					t.Fatalf("record confirmed attempt: %v %v", err, closeErr)
@@ -58,6 +73,15 @@ func TestTargetAdvanceUpgradeProvenanceJourney(t *testing.T) {
 			if terminal.Status != types.RunFailed || terminal.Error == nil || !strings.Contains(*terminal.Error, "PR comparison changed after rebase") {
 				out, _ := h.Run("axi", "status", "--run", parked.ID)
 				t.Fatalf("unproven retarget absence proceeded: %s %s\n%s", terminal.Status, deref(terminal.Error), out)
+			}
+			cause := map[string]string{
+				"legacy unknown":    "PR retarget provenance is unknown",
+				"confirmed attempt": "PR retarget was attempted",
+				"skipped Rebase":    "Rebase was skipped",
+				"status attempt":    "commit-status attempt is recorded",
+			}[provenance]
+			if !strings.HasSuffix(*terminal.Error, ": "+cause) {
+				t.Fatalf("refusal did not name its exact cause %q: %s", cause, *terminal.Error)
 			}
 			charge, pending, history := targetRewindHistory(t, h.NMHome, parked.ID)
 			if charge != 0 || pending || history != 0 || h.UpstreamBranchSHA("main") != target {

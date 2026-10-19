@@ -980,7 +980,7 @@ Any git error while checking also counts as not a pure replay. The check is deli
 
 The replay check uses the run's current review-approved head, which a permitted [documentation-only carry](#documentdoc_only_paths) can advance. If the repaired branch includes additional commits beyond that approved head (for example, a Test or Lint auto-fix commit, or an earlier published CI repair), the repair is not a pure replay of the approved commits and Review re-runs as it does with the key off.
 
-This setting applies only to ordinary runs without a fixed pull request comparison. When a run uses a fixed comparison, it repeats the full Review after a rebase, even if the replay is pure. Current guarded network runs use a fixed comparison, so enabling this setting does not transfer their Review approval. Strict shipping also requires a fresh Review receipt for its exact pinned comparison and never carries Review approval through a replay or changed comparison, regardless of this value.
+This setting applies only to ordinary runs without a fixed pull request comparison. A CI rebase repair on a fixed comparison repeats the full Review, even if the replay is pure. Current guarded network runs use a fixed comparison, so enabling this setting does not transfer their Review approval. The separate [unpublished target-advance rewind rules](/no-mistakes/reference/pipeline-steps/#target-advances-before-publication) govern review credit before publication. Strict shipping also requires a fresh Review receipt for its exact pinned comparison and never carries Review approval through a replay or changed comparison, regardless of this value.
 
 The key has no effect when:
 

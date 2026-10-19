@@ -152,6 +152,8 @@ That is a successful agent stopping point: report that the PR is ready and ask t
 Successful outcomes also instruct the agent to summarize the run for the user.
 When the pipeline applied fixes, successful outcomes include a `fixes` table listing each fix so the agent can acknowledge what it missed and the user can review them.
 
+The following fallback applies outside the [published-qualification exception](/no-mistakes/reference/pipeline-steps/#target-advances-after-qualification):
+
 For ordinary runs, when the live target commit advances with green checks and no merge conflict, CI clears readiness and keeps monitoring, withholding checks-passed.
 It may wait until ci_timeout, or indefinitely when unlimited.
 When CI returns, including with findings, the boundary guard rejects the changed comparison and terminates the run.
