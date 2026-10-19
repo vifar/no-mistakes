@@ -297,3 +297,67 @@ func TestRawShutdown_RevocationCannotRenewOrPreemptIndependentError(t *testing.T
 		t.Fatalf("real failure lost precedence: %+v,%v", stored, err)
 	}
 }
+
+func TestCommitStatus_CustomGateUnresolvedFindingsCannotCertifyOrPreserve(t *testing.T) {
+	for _, anchor := range []types.StepName{types.StepRebase, types.StepReview, types.StepTest, types.StepDocument, types.StepLint} {
+		for _, tc := range []struct {
+			name, findings string
+			eligible       bool
+		}{
+			{"clean", "", true},
+			{"empty", `{"findings":[]}`, true},
+			{"warning", `{"findings":[{"severity":"warning","description":"near limit"}]}`, true},
+			{"error", `{"findings":[{"severity":"error","description":"below budget"}]}`, false},
+			{"error no-op", `{"findings":[{"severity":"error","description":"below budget","action":"no-op"}]}`, false},
+			{"legacy error", `{"items":[{"severity":"error","description":"below budget"}]}`, false},
+			{"unreadable", "{", false},
+		} {
+			t.Run(string(anchor)+"/"+tc.name, func(t *testing.T) {
+				d, run, p := certifiedStatusFixture(t)
+				step, err := d.InsertStepResult(run.ID, types.CustomGateStepName(anchor, "budget"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.findings != "" {
+					if err := d.SetStepFindings(step.ID, tc.findings); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := d.CompleteStep(step.ID, 0, 1, ""); err != nil {
+					t.Fatal(err)
+				}
+				certificate, err := d.BuildStatusCertificate(run.ID, "head", "config")
+				if err != nil {
+					t.Fatal(err)
+				}
+				if (certificate != nil) != tc.eligible {
+					t.Errorf("certification eligible=%v, want %v", certificate != nil, tc.eligible)
+				}
+				if certificate != nil {
+					p.StrictCertificate = certificate
+					if err := d.PutCommitStatusPublication(run.ID, p); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := d.TerminalizeCertifiedWatcher(run.ID, types.RunCancelReasonAbortedByUser, "head", "config", types.RunCancelled); err != nil {
+					t.Fatal(err)
+				}
+				stored, err := d.GetCommitStatusPublication(context.Background(), run.ID, p)
+				if err != nil {
+					t.Fatal(err)
+				}
+				preserved := stored.PreserveSuccess != nil && *stored.PreserveSuccess
+				if preserved != tc.eligible {
+					t.Errorf("preserved success=%v, want %v", preserved, tc.eligible)
+				}
+				if !tc.eligible && stored.StrictCertificate != nil {
+					t.Error("unresolved gate retained certificate")
+				}
+				terminal, err := d.GetRun(run.ID)
+				if err != nil || terminal.Status != types.RunCancelled {
+					t.Fatalf("truthful cancellation lost: %+v, %v", terminal, err)
+				}
+			})
+		}
+	}
+}

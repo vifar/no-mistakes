@@ -128,6 +128,17 @@ func buildStatusCertificate(q statusQuery, runID, head, configDigest string) (*s
 		if status != "completed" || exit == nil || *exit != 0 || override != nil || approval != nil {
 			return nil, nil
 		}
+		if p.Name.IsCustomGate() && p.Findings != nil && *p.Findings != "" {
+			findings, err := types.ParseFindingsJSON(*p.Findings)
+			if err != nil {
+				return nil, nil
+			}
+			for _, finding := range findings.Items {
+				if finding.Severity == types.FindingSeverityError {
+					return nil, nil
+				}
+			}
+		}
 		if core {
 			if seen[p.Name] || executedHead == nil || *executedHead != head || stepEpoch == nil || *stepEpoch != epoch || digest == nil || *digest != configDigest {
 				return nil, nil
