@@ -252,9 +252,21 @@ func (d *DB) UpdateRepoWorkingPath(id, workingPath string) (*Repo, error) {
 
 // DeleteRepo deletes a repo by ID (cascade deletes runs and steps).
 func (d *DB) DeleteRepo(id string) error {
-	_, err := d.sql.Exec(`DELETE FROM repos WHERE id = ?`, id)
+	tx, err := d.sql.Begin()
 	if err != nil {
+		return fmt.Errorf("begin delete repo: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM push_notifications
+		WHERE run_id IN (SELECT id FROM runs WHERE repo_id = ?)
+		OR diagnostic_run_id IN (SELECT id FROM runs WHERE repo_id = ?)`, id, id); err != nil {
+		return fmt.Errorf("delete repo push notifications: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM repos WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("delete repo: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete repo: %w", err)
 	}
 	return nil
 }
