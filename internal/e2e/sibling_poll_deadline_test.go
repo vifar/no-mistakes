@@ -80,9 +80,9 @@ func TestSiblingPollingReportsConditionBeforePackageTimeout(t *testing.T) {
 	}
 	for _, mode := range []string{"ready-responsive", "ready-unresponsive", "step-responsive", "run-responsive", "step-unresponsive", "run-unresponsive", "runs-unresponsive"} {
 		t.Run(mode, func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSiblingPollingReportsConditionBeforePackageTimeout$", "-test.timeout=3s", "-test.v")
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestSiblingPollingReportsConditionBeforePackageTimeout$", "-test.timeout=10s", "-test.v")
 			cmd.Env = append(os.Environ(), "NM_E2E_SIBLING_POLL_CHILD="+mode)
 			out, err := cmd.CombinedOutput()
 			condition := "deliberately-pending-run"

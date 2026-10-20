@@ -128,15 +128,17 @@ func runGhStatefulPRStub(args []string) int {
 				break
 			}
 		}
-		if forge != nil {
-			if out, errText, handled := forge.rest(repo, endpoint, args); handled {
-				if errText != "" {
-					fmt.Fprintln(os.Stderr, errText)
-					return 1
-				}
-				fmt.Println(out)
-				return 0
+		answers := forge
+		if answers == nil {
+			answers = &ghForge{}
+		}
+		if out, errText, handled := answers.rest(repo, endpoint, args); handled {
+			if errText != "" {
+				fmt.Fprintln(os.Stderr, errText)
+				return 1
 			}
+			fmt.Println(out)
+			return 0
 		}
 		if endpoint == "repos/"+repo+"/pulls" {
 			headFilter := ""
@@ -180,10 +182,6 @@ func runGhStatefulPRStub(args []string) int {
 			fmt.Println(string(data))
 			return 0
 		}
-	}
-	if len(args) >= 1 && args[0] == "api" && slices.ContainsFunc(args, func(arg string) bool { return strings.HasSuffix(arg, "/actions/runs") }) {
-		fmt.Println(`[{"total_count":0,"workflow_runs":[]}]`)
-		return 0
 	}
 	if len(args) < 2 || args[0] != "pr" {
 		fmt.Fprintf(os.Stderr, "fakeagent gh stateful-pr: subcommand not implemented: %v\n", args)

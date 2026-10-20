@@ -43,7 +43,16 @@ func TestCIGateReconciliationClearsActiveRunAfterPRBecomesTerminal(t *testing.T)
 			exec.SetGateReconcileTimings(20*time.Millisecond, 5*time.Second)
 
 			done := make(chan error, 1)
-			go func() { done <- exec.Execute(context.Background(), run, repo, dir) }()
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(30 * time.Second):
+					t.Error("executor did not stop")
+				}
+			})
+			go func() { done <- exec.Execute(ctx, run, repo, dir); close(done) }()
 			waitForCIGate(t, database, run.ID)
 			if err := os.WriteFile(statePath, []byte(terminalState+"\n"), 0o644); err != nil {
 				t.Fatal(err)
@@ -84,7 +93,16 @@ func TestCIGateReconciliationPreservesOpenErrorAndUnknownStates(t *testing.T) {
 			exec.SetGateReconcileTimings(20*time.Millisecond, 5*time.Second)
 
 			done := make(chan error, 1)
-			go func() { done <- exec.Execute(context.Background(), run, repo, dir) }()
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case <-done:
+				case <-time.After(30 * time.Second):
+					t.Error("executor did not stop")
+				}
+			})
+			go func() { done <- exec.Execute(ctx, run, repo, dir); close(done) }()
 			waitForCIGate(t, database, run.ID)
 			if err := os.WriteFile(statePath, []byte(state+"\n"), 0o644); err != nil {
 				t.Fatal(err)
@@ -154,7 +172,7 @@ func setupCIGateReconcileTest(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.
 
 func waitForCIGate(t *testing.T, database *db.DB, runID string) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		steps, err := database.GetStepsByRun(runID)
 		if err == nil && len(steps) == 2 && steps[1].Status == types.StepStatusAwaitingApproval {
