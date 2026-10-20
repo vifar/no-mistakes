@@ -903,3 +903,77 @@ func TestIdentityRealGitDiagnosticIsNotTreatedAsAStall(t *testing.T) {
 		t.Fatal("unresolved Git failure was admitted")
 	}
 }
+
+// The blocked-read diagnostic is matched whole. A repository whose PATH
+// contains the words of that diagnostic must not turn an ordinary ownership
+// refusal into a successful classification.
+func TestIdentityBlockedReadDiagnosticIsMatchedWhole(t *testing.T) {
+	f := newTopologyFixture(t)
+	gitfault.Install(t, "error")
+	t.Setenv("NM_GIT_FAULT_STDERR", "fatal: detected dubious ownership in repository at '/tmp/Interrupted system call'")
+	if _, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: f.work}); err == nil {
+		t.Fatal("a diagnostic that merely mentions the blocked-read text was admitted")
+	}
+}
+
+// The fallback must not accept a directory that merely carries a HEAD file
+// and object and reference basenames as the MANAGED GATE. A directory inside
+// a managed gate that looks like a bare repository to a metadata-only reader
+// must not be classified as the registered gate itself, because the gate's
+// refusal is what the managed-gate proof exists to provide.
+//
+// Regressions: issue #1301 review finding on the managed-gate proof.
+func TestIdentityFallbackDoesNotAcceptAnOrdinaryDirectoryAsTheManagedGate(t *testing.T) {
+	f := newTopologyFixture(t)
+	// A directory inside the managed worktree that looks like a bare
+	// repository to a metadata-only reader.
+	decoy := filepath.Join(f.managed, "decoy")
+	if err := os.MkdirAll(decoy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []string{"objects/info", "objects/pack", "refs/heads", "refs/tags"} {
+		if err := os.MkdirAll(filepath.Join(decoy, filepath.FromSlash(entry)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(decoy, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitfault.Install(t, "blocked-read")
+	got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: decoy})
+	if err != nil {
+		t.Fatalf("blocked identity read was fatal: %+v, %v", got, err)
+	}
+	// The decoy is not the registered gate, so it must not carry the gate's
+	// managed identity.
+	if got.ManagedGit {
+		t.Fatalf("an ordinary directory was admitted as the managed gate: %+v", got)
+	}
+}
+
+// A linked worktree's common directory comes from its own `commondir` file
+// when that file can be read. A repository whose metadata directory merely
+// sits under a directory named `worktrees` must not have that name treated
+// as the linked-worktree layout.
+//
+// Regressions: issue #1301 review finding on the basename inference.
+func TestIdentityFallbackDoesNotInferACommonDirectoryFromADirectoryName(t *testing.T) {
+	f := newTopologyFixture(t)
+	root := t.TempDir()
+	// A --separate-git-dir repository whose metadata directory is named
+	// "worktrees", with no commondir file of its own.
+	if err := os.MkdirAll(filepath.Join(root, "worktrees"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := filepath.Join(root, "worktrees", "metadata")
+	work := filepath.Join(root, "work")
+	run(t, "", "git", "init", "--separate-git-dir", metadata, work)
+	gitfault.Install(t, "blocked-read")
+	got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: work})
+	if err != nil {
+		t.Fatalf("a valid separate-git-dir repository was refused: %+v, %v", got, err)
+	}
+	if got.Nested {
+		t.Fatalf("an ordinary repository was refused: %+v", got)
+	}
+}
