@@ -77,6 +77,56 @@ func TestPushStep_FormatterCommitAtThePublicationBoundaryIsThePipelineOwn(t *tes
 	}
 }
 
+// TestPushStep_AForeignForgeHeadIsNeverAdopted proves the local commit
+// lineage cannot certify another publisher's head. The lineage proves the
+// LOCAL advance was the pipeline's own; it says nothing about the forge's
+// head, and a PR moved by someone else is not this run's head.
+func TestPushStep_AForeignForgeHeadIsNeverAdopted(t *testing.T) {
+	c, _, _ := unpublishedAttestationFixture(t)
+	receipt, err := c.DB.GetRunPRContext(c.Run.ID)
+	if err != nil || receipt == nil {
+		t.Fatal(err)
+	}
+	// The pipeline committed its own change, so the LOCAL head moved.
+	if err := os.WriteFile(filepath.Join(c.WorkDir, "agent-change.txt"), []byte("change\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	headBefore := c.Run.HeadSHA
+	if err := stagePipelineChanges(c); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitPipelineCorrection(c.Ctx, c.WorkDir, "no-mistakes: apply agent fixes", c.Log); err != nil {
+		t.Fatal(err)
+	}
+	newHead := gitCmd(t, c.WorkDir, "rev-parse", "HEAD")
+	if err := recordPipelineHeadRange(c, headBefore, newHead); err != nil {
+		t.Fatal(err)
+	}
+	c.Run.HeadSHA = newHead
+	if err := c.DB.UpdateRunHeadSHA(c.Run.ID, newHead); err != nil {
+		t.Fatal(err)
+	}
+	// Another publisher moved the attached PR's head at the same time.
+	foreign := strings.Repeat("a", 40)
+	c.PRTarget = &pipeline.PRTargetSelection{
+		PRURL: receipt.PRURL, SourceRepo: receipt.SourceRepo, SourceBranch: receipt.SourceBranch,
+		ForgeHeadSHA: foreign, TargetBranch: receipt.TargetBranch,
+	}
+	// The local commit lineage must not certify the foreign forge head.
+	selection := *c.PRTarget
+	c.PRContextAfterStep = true
+	if _, err := guardPRContextWithSelection(c, types.StepPush, selection, false); err == nil {
+		t.Fatal("a foreign forge head was accepted at the publication boundary")
+	}
+	after, err := c.DB.GetRunPRContext(c.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.ForgeHeadSHA == foreign {
+		t.Fatal("the foreign forge head was adopted into the receipt")
+	}
+}
+
 // TestPushStep_AnUnexplainedHeadMoveStillRefuses proves the new path does not
 // weaken the guard: a head the pipeline did NOT move is still refused.
 func TestPushStep_AnUnexplainedHeadMoveStillRefuses(t *testing.T) {

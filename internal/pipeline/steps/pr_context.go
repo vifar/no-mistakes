@@ -308,10 +308,16 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 	// an unexplained change. Without this, a formatter that reformats one
 	// file fails the run at the publication boundary - the same class of
 	// false failure as the target advance this guard also recovers from.
+	//
+	// The LOCAL commit lineage says nothing about the forge's head. Another
+	// publisher moving the attached PR is not this run's advance, so the
+	// forge head must be unchanged here; a published-head transition has its
+	// own proof below.
 	if previous != nil && sctx.PRContextAfterStep && !forward &&
 		previous.LocalHeadSHA != candidate.LocalHeadSHA &&
 		previous.TargetBranch == candidate.TargetBranch && previous.TargetSHA == candidate.TargetSHA &&
 		previous.SourceRepo == candidate.SourceRepo && previous.SourceBranch == candidate.SourceBranch &&
+		previous.ForgeHeadSHA == candidate.ForgeHeadSHA &&
 		(previous.PRURL == "" || previous.PRURL == candidate.PRURL) {
 		if err := sctx.DB.ValidatePipelineHeadForward(sctx.Run.ID, previous.LocalHeadSHA, candidate.LocalHeadSHA); err == nil {
 			if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", previous.LocalHeadSHA, candidate.LocalHeadSHA); err == nil {
