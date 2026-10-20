@@ -117,6 +117,13 @@ type opencodeAgent struct {
 	subprocessContext
 	mu     sync.Mutex
 	server *managedServer
+	// apiVersion is the detected wire generation of the server API
+	// (1.x root-level routes, 2.x /api routes). It is detected once, when
+	// the server comes up, and every request path is derived from it.
+	apiVersion opencodeAPIVersion
+	// apiAuth is the credential the 2.x server requires on every /api
+	// request. It comes from the agent's own environment, never guessed.
+	apiAuth opencodeAuth
 }
 
 func (a *opencodeAgent) Name() string { return "opencode" }
@@ -194,6 +201,14 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 	baseURL, err := a.ensureServer(ctx, opts.CWD, opts.Env)
 	if err != nil {
 		return nil, err
+	}
+
+	// The 2.x API is a different protocol, not a different route list: the
+	// session body, the prompt endpoint, the event frames and the
+	// completion signal all changed. It runs its own path so the 1.x path
+	// stays exactly as it was.
+	if a.version() == opencodeAPIVersion2 {
+		return a.runOnceV2(ctx, opts, baseURL, nativeFormat)
 	}
 
 	// Create session with blanket permissions

@@ -127,14 +127,17 @@ func (a *rovodevAgent) createSession(ctx context.Context, baseURL string) (strin
 	body := map[string]string{"custom_title": "no-mistakes"}
 	resp, err := doJSON(ctx, http.MethodPost, baseURL+"/v3/sessions/create", nil, body)
 	if err != nil {
-		return "", fmt.Errorf("rovodev create session: %w", err)
+		// The session never existed, so the agent never held the prompt and
+		// no tool could have run. The agent is unavailable rather than
+		// wrong, so the fallback wrapper moves to the next one.
+		return "", agentSetupFailure(fmt.Errorf("rovodev create session: %w", err))
 	}
 
 	var result struct {
 		SessionID string `json:"session_id"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", fmt.Errorf("rovodev create session parse: %w", err)
+		return "", agentSetupFailure(fmt.Errorf("rovodev create session parse: %w", err))
 	}
 	return result.SessionID, nil
 }
