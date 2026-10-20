@@ -100,3 +100,83 @@ func TestPushStep_AnUnexplainedHeadMoveStillRefuses(t *testing.T) {
 		t.Fatal("an unexplained head move was accepted at the publication boundary")
 	}
 }
+
+func TestPushStep_CorrectionAndTargetAdvanceRewind(t *testing.T) {
+	for _, boundary := range []string{"post-step", "publication"} {
+		t.Run(boundary, func(t *testing.T) {
+			var c *pipeline.StepContext
+			if boundary == "post-step" {
+				c, _, _ = unpublishedAttestationFixture(t)
+				c.Repo.URLsVerified = true
+			} else {
+				c, _ = publicationFixture(t)
+			}
+			oldHead := c.Run.HeadSHA
+			target := advanceRewindTarget(t, c)
+			if err := os.WriteFile(filepath.Join(c.WorkDir, "feature.txt"), []byte("formatted feature\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := (&PushStep{}).Execute(c)
+			if err != nil || outcome == nil {
+				t.Fatalf("push correction: %+v, %v", outcome, err)
+			}
+			if boundary == "post-step" {
+				if outcome.RestartFrom != types.StepReview {
+					t.Fatalf("correction did not request review: %+v", outcome)
+				}
+				receipt, err := c.DB.GetRunPRContext(c.Run.ID)
+				if err != nil || receipt == nil {
+					t.Fatalf("receipt: %+v, %v", receipt, err)
+				}
+				selected := pipeline.PRTargetSelection{PRURL: receipt.PRURL, SourceRepo: receipt.SourceRepo, SourceBranch: receipt.SourceBranch, ForgeHeadSHA: receipt.ForgeHeadSHA, TargetBranch: receipt.TargetBranch}
+				c.PRContextAfterStep = true
+				decision, err := guardPRContextWithSelection(c, types.StepPush, selected, false)
+				if err != nil || decision.RestartFrom != types.StepRebase {
+					t.Fatalf("post-step rewind: %+v, %v", decision, err)
+				}
+			} else if outcome.RestartFrom != types.StepRebase {
+				t.Fatalf("publication did not rewind: %+v", outcome)
+			}
+			newHead := gitCmd(t, c.WorkDir, "rev-parse", "HEAD")
+			if newHead == oldHead || gitCmd(t, c.WorkDir, "show", newHead+":feature.txt") != "formatted feature" {
+				t.Fatal("correction was not preserved")
+			}
+			pending, err := c.DB.GetPendingTargetRewind(c.Run.ID)
+			if err != nil || pending == nil || pending.LocalHeadSHA != newHead || pending.TargetSHA != target {
+				t.Fatalf("correction and target not bound to rewind: %+v, %v", pending, err)
+			}
+			run, err := c.DB.GetRun(c.Run.ID)
+			if err != nil || run.LastPushedSHA != nil || run.TargetAdvanceRewinds != 1 {
+				t.Fatalf("expected one unpublished rewind: %+v, %v", run, err)
+			}
+		})
+	}
+}
+
+func TestPushStep_TargetAdvanceRejectsUnrecordedCorrection(t *testing.T) {
+	for _, boundary := range []string{"post-step", "publication"} {
+		t.Run(boundary, func(t *testing.T) {
+			c, selected := publicationFixture(t)
+			advanceRewindTarget(t, c)
+			gitCmd(t, c.WorkDir, "commit", "--allow-empty", "-m", "unrecorded correction")
+			c.Run.HeadSHA = gitCmd(t, c.WorkDir, "rev-parse", "HEAD")
+			if err := c.DB.UpdateRunHeadSHA(c.Run.ID, c.Run.HeadSHA); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			if boundary == "post-step" {
+				c.PRContextAfterStep = true
+				_, err = guardPRContextWithSelection(c, types.StepPush, selected, false)
+			} else {
+				_, err = detectTargetAdvanceAtPublication(c, types.StepPush)
+			}
+			if err == nil {
+				t.Fatal("unrecorded correction accepted")
+			}
+			pending, err := c.DB.GetPendingTargetRewind(c.Run.ID)
+			if err != nil || pending != nil {
+				t.Fatalf("unrecorded correction created a rewind: %+v, %v", pending, err)
+			}
+		})
+	}
+}

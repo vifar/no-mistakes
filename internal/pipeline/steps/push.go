@@ -123,6 +123,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 			if err := recordPipelineHeadRange(sctx, headBeforeCommit, headSHA); err != nil {
 				return nil, err
 			}
+			if err := recordAgentFixHead(sctx, s.Name(), headSHA); err != nil {
+				return nil, err
+			}
 			newHeadSHA = headSHA
 		}
 	}

@@ -127,6 +127,24 @@ func observeRewindBranch(c *pipeline.StepContext, remote, branch, privateRef str
 	return &sha, nil
 }
 
+func attributeTargetAdvanceHead(c *pipeline.StepContext, previous *db.PRContext, candidate db.PRContextCandidate) (*db.PRContext, error) {
+	if err := c.DB.ValidatePipelineHeadForward(c.Run.ID, previous.LocalHeadSHA, candidate.LocalHeadSHA); err != nil {
+		return nil, fmt.Errorf("target advance with unexplained local head: %w", err)
+	}
+	if _, err := git.Run(c.Ctx, c.WorkDir, "merge-base", "--is-ancestor", previous.LocalHeadSHA, candidate.LocalHeadSHA); err != nil {
+		return nil, fmt.Errorf("target advance with non-descendant pipeline head: %w", err)
+	}
+	own, err := prComparisonAtTarget(c, previous.TargetBranch, previous.TargetSHA, candidate.LocalHeadSHA)
+	if err != nil {
+		return nil, err
+	}
+	own.PRURL, own.SourceRepo, own.SourceBranch, own.ForgeHeadSHA = previous.PRURL, previous.SourceRepo, previous.SourceBranch, previous.ForgeHeadSHA
+	if _, err := c.DB.AdvanceRunPRContext(c.Run.ID, own); err != nil {
+		return nil, err
+	}
+	return c.DB.GetRunPRContext(c.Run.ID)
+}
+
 func classifyTargetAdvance(c *pipeline.StepContext, step types.StepName, selection pipeline.PRTargetSelection, previous *db.PRContext, candidate db.PRContextCandidate, source *string) (db.PRContextBindResult, error) {
 	refusal := func(cause error) (db.PRContextBindResult, error) {
 		return db.PRContextBindResult{}, fmt.Errorf("PR comparison changed after rebase; start a new run for the current target and head: %w", cause)
@@ -218,10 +236,7 @@ func detectTargetAdvanceAtPublication(c *pipeline.StepContext, step types.StepNa
 	// without one is a comparison the run has not attached yet.
 	candidate.PRURL, candidate.ForgeHeadSHA = previous.PRURL, previous.ForgeHeadSHA
 	candidate.SourceRepo, candidate.SourceBranch = previous.SourceRepo, previous.SourceBranch
-	// A head that moved is a different condition with its own owner (the
-	// forward-commit attribution and the publication continuity checks). Only
-	// an unchanged head with a moved target is a target advance.
-	if candidate.LocalHeadSHA != previous.LocalHeadSHA || candidate.LocalHeadSHA != c.Run.HeadSHA {
+	if candidate.LocalHeadSHA != c.Run.HeadSHA {
 		return false, nil
 	}
 	if candidate.TargetSHA == previous.TargetSHA && candidate.TargetBranch == previous.TargetBranch {
@@ -247,6 +262,12 @@ func detectTargetAdvanceAtPublication(c *pipeline.StepContext, step types.StepNa
 	candidate.TargetSHA, candidate.MergeBaseSHA, candidate.DiffDigest = exact.TargetSHA, exact.MergeBaseSHA, exact.DiffDigest
 	if candidate.TargetSHA == previous.TargetSHA {
 		return false, nil
+	}
+	if candidate.LocalHeadSHA != previous.LocalHeadSHA {
+		previous, err = attributeTargetAdvanceHead(c, previous, candidate)
+		if err != nil {
+			return false, err
+		}
 	}
 	if _, err := classifyTargetAdvance(c, step, selection, previous, candidate, observed.source); err != nil {
 		return false, err
