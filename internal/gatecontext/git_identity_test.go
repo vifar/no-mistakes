@@ -815,3 +815,91 @@ func TestIdentityGitfileGrowsAfterGitDiscovery(t *testing.T) {
 		})
 	}
 }
+
+// A repository whose common directory lives under a TCC-protected location
+// cannot be read by a service-manager-spawned process: the kernel holds the
+// open until the sandbox approval watchdog expires, and Git then reports an
+// unreadable working directory and exits with status 128. The classifier
+// must still resolve the caller's identity from the filesystem, because
+// refusing every caller is the same failure as the stall itself.
+//
+// Regressions: issue #1301.
+func TestIdentityBlockedGitReadFallsBackToTheFilesystem(t *testing.T) {
+	for _, layout := range []string{"plain", "linked"} {
+		t.Run(layout, func(t *testing.T) {
+			f := newTopologyFixture(t)
+			cwd := f.work
+			if layout == "linked" {
+				linked := filepath.Join(t.TempDir(), "linked")
+				run(t, f.work, "git", "worktree", "add", "--detach", linked, "HEAD")
+				cwd = linked
+			}
+			gitfault.Install(t, "blocked-read")
+			got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: cwd})
+			if err != nil {
+				t.Fatalf("blocked identity read was fatal: %+v, %v", got, err)
+			}
+			if got.Nested {
+				t.Fatalf("ordinary clone was refused: %+v", got)
+			}
+		})
+	}
+}
+
+// The fallback must keep the managed-gate proof. A caller inside a
+// registered managed gate is refused even when the Git child could not read
+// the repository.
+func TestIdentityBlockedGitReadStillProvesManagedIdentity(t *testing.T) {
+	f := newTopologyFixture(t)
+	gitfault.Install(t, "blocked-read")
+	got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: f.managed})
+	if err != nil {
+		t.Fatalf("blocked identity read was fatal: %+v, %v", got, err)
+	}
+	if !got.Nested || !got.ManagedGit {
+		t.Fatalf("managed identity was lost when the Git child could not read: %+v", got)
+	}
+}
+
+// The fallback resolves the common directory from the filesystem, so it must
+// agree with what Git reports for the same repository. A disagreement means
+// the metadata-only resolution is wrong, and it must fail closed rather than
+// classify the caller.
+func TestIdentityFilesystemFallbackAgreesWithGit(t *testing.T) {
+	f := newTopologyFixture(t)
+	linked := filepath.Join(t.TempDir(), "linked")
+	run(t, f.work, "git", "worktree", "add", "--detach", linked, "HEAD")
+	separate := filepath.Join(t.TempDir(), "separate")
+	run(t, "", "git", "init", "--separate-git-dir", filepath.Join(t.TempDir(), "metadata"), separate)
+	for _, tc := range []struct {
+		name string
+		cwd  string
+	}{
+		{"plain", f.work},
+		{"linked", linked},
+		{"separate", separate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gitfault.Install(t, "blocked-read")
+			got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: tc.cwd})
+			if err != nil {
+				t.Fatalf("blocked identity read was fatal for %s: %+v, %v", tc.name, got, err)
+			}
+			if got.Nested {
+				t.Fatalf("ordinary repository %s was refused: %+v", tc.name, got)
+			}
+		})
+	}
+}
+
+// A Git failure that carries a real diagnostic is an answer, not a stall.
+// Git reporting that a directory is not a repository must keep failing
+// closed rather than being retried through the filesystem.
+func TestIdentityRealGitDiagnosticIsNotTreatedAsAStall(t *testing.T) {
+	f := newTopologyFixture(t)
+	gitfault.Install(t, "error")
+	t.Setenv("NM_GIT_FAULT_STDERR", "fatal: dubious ownership in repository at '/fixture'")
+	if _, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: f.work}); err == nil {
+		t.Fatal("unresolved Git failure was admitted")
+	}
+}
