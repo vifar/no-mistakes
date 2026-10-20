@@ -117,9 +117,13 @@ authenticated process-ancestry lookup can take longer.
 A blocked identity command can be answered by filesystem corroboration, without
 increasing its deadline. In recorded macOS launchd failures, protected-folder
 content opens waited for privacy approval until the kernel's approval watchdog
-expired; metadata lookups remained fast. Corroboration uses those metadata
-operations and bounded content reads. At most eight content reads may remain in
-flight, and every caller waits under its own context and per-read budget.
+expired; metadata lookups remained fast. This condition is intermittent; successful
+discovery in a later probe does not establish a permanent macOS cure. All metadata
+content reads, including those before Git starts and during corroboration, are
+limited to 1 MiB and a 250-millisecond wait under the caller's context. At most
+eight content readers may remain in flight; waiting for a reader slot uses the
+same per-read budget. Fallback uses a separate five-second context derived from
+the still-live caller, without extending the identity Git budget.
 
 The fallback requires the same nearest physical metadata boundary, a recognizable
 actual HEAD and common HEAD, and object/reference directories. A present
@@ -128,10 +132,14 @@ bare metadata; a directory name cannot substitute for that pointer. Unreadable
 or malformed metadata leaves identity unresolved and fails closed. The fallback
 never proves repository absence or accepts HEAD existence alone.
 
-Only a deadline from a started identity Git child or Git's complete interrupted
-working-directory diagnostic can enable fallback. Metadata-read and startup
-timeouts remain errors. A substantive Git diagnostic stays fail-closed even
-when a later deadline is reported alongside it.
+Fallback requires a still-live caller and either a deadline from a started
+identity Git child with no substantive stderr or the complete diagnostic
+`fatal: Unable to read current working directory: Interrupted system call`
+with a sole normal exit 128. Metadata-read and startup timeouts remain errors.
+Other Git diagnostics and normal exit 128 remain fail-closed even when a later
+deadline is reported alongside them. Required content-read failures include
+guidance to check daemon access to repository files, and error wrapping preserves
+the underlying command, context, and output-drain errors.
 
 A Git failure proceeds as repository absence only after a single recognized
 English discovery diagnostic, a normal exit, complete output draining, and
