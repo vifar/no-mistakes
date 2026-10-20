@@ -36,6 +36,14 @@ const identityCommandBudget = 10 * time.Second
 // exists to bound a genuinely wedged filesystem, not to express impatience.
 const identityFilesystemBudget = 5 * time.Second
 
+// metadataReadWait bounds one Git metadata content read.
+//
+// The read runs on its own goroutine, so a kernel-held open cannot block the
+// caller: when the wait expires the read is abandoned and the caller is told
+// the content is unavailable. The abandoned goroutine ends when the kernel
+// answers the open, which it does once the sandbox approval watchdog expires.
+const metadataReadWait = 250 * time.Millisecond
+
 var identityLocale = []string{"LC_ALL=C", "LANG=C"}
 
 // RefusalMessage is the stable, privacy-safe error contract used at daemon
@@ -171,7 +179,7 @@ func (i Inspector) Inspect(ctx context.Context, req Request) (Result, error) {
 					// A registered bare gate has no worktree root. This known absence
 					// costs attribution only; positive managed identity remains decisive.
 					if normalGitDiagnostic(err, "fatal: this operation must be run in a work tree") {
-						actual, _, fsErr := nearestGitMetadata(req.CWD)
+						actual, _, fsErr := nearestGitMetadata(identityCtx, req.CWD)
 						if fsErr == nil && sameCanonicalPath(actual, commonDir) {
 							break
 						}
@@ -303,10 +311,11 @@ func (i Inspector) registeredManagedCommonDir(commonDir string) (string, bool, e
 // an interactive shell answers in milliseconds.
 //
 // A stall therefore falls back to a metadata-only resolution that never opens
-// a protected file, and the fallback is accepted only when it proves at least
-// as much as the Git query would have: the same physical metadata boundary,
-// the same common directory, and the same structural validity. A fallback
-// that cannot prove all of that fails closed exactly as it does today.
+// a protected file, and the fallback is accepted only when it proves exactly
+// what the Git query would have proved: the same physical metadata boundary,
+// the same common directory, and a common directory whose HEAD is
+// recognizable. A fallback that cannot prove all of that fails closed exactly
+// as it does today.
 func (i Inspector) discoverCommonDirectory(ctx context.Context, identityCtx context.Context, cwd string) (string, error) {
 	common, err := gitCommonDirectory(identityCtx, cwd)
 	if err == nil {
@@ -357,11 +366,19 @@ func identityStalled(ctx context.Context, err error) bool {
 // blockedIdentityRead reports whether the identity command failed because the
 // kernel stopped it while it waited on a read it could not complete.
 //
-// The signature is Git's own: a repository it cannot read reports
-// "fatal: Unable to read current working directory: Interrupted system call",
+// The signature is Git's own, and it is matched whole: a repository it cannot
+// read reports exactly
+//
+//	fatal: Unable to read current working directory: Interrupted system call
+//
 // and the command exits with status 128. That is a stalled read, not a
-// statement about the repository, so the classification may retry by another
-// route.
+// statement about the repository, so the classification may resolve the same
+// facts by another route.
+//
+// The diagnostic is matched exactly rather than by substring. Git reports
+// other exit-128 failures, and a repository whose *path* contains the words
+// "Interrupted system call" would otherwise turn an ordinary ownership
+// refusal into a successful classification.
 func blockedIdentityRead(err error) bool {
 	var commandErr *git.CommandError
 	if !errors.As(err, &commandErr) {
@@ -371,15 +388,18 @@ func blockedIdentityRead(err error) bool {
 	if !ok || !exitErr.ProcessState.Exited() || exitErr.ExitCode() != 128 {
 		return false
 	}
-	stderr := strings.TrimSpace(commandErr.Stderr)
-	return strings.Contains(stderr, "Interrupted system call")
+	return strings.TrimSpace(commandErr.Stderr) == blockedReadDiagnostic
 }
+
+// blockedReadDiagnostic is Git's complete message for a working directory it
+// could not read because the read was interrupted.
+const blockedReadDiagnostic = "fatal: Unable to read current working directory: Interrupted system call"
 
 func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
 	identity, err := runIdentityGit(ctx, cwd, "rev-parse", "--path-format=absolute", "--git-common-dir", "--absolute-git-dir")
 	if err != nil {
 		if normalGitDiagnostic(err, "fatal: not a git repository (or any of the parent directories): .git") {
-			actual, _, fsErr := nearestGitMetadata(cwd)
+			actual, _, fsErr := nearestGitMetadata(ctx, cwd)
 			if fsErr != nil {
 				return "", fmt.Errorf("gate execution context: corroborate Git discovery absence: %w: %w", err, fsErr)
 			}
@@ -389,7 +409,7 @@ func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
 		}
 		return "", fmt.Errorf("gate execution context: discover Git common directory: %w", err)
 	}
-	actual, _, err := nearestGitMetadata(cwd)
+	actual, _, err := nearestGitMetadata(ctx, cwd)
 	if err != nil {
 		return "", fmt.Errorf("gate execution context: corroborate Git discovery identity: %w", err)
 	}
@@ -397,7 +417,7 @@ func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
 	if actual == "" || !matched || !filepath.IsAbs(common) {
 		return "", fmt.Errorf("gate execution context: Git discovery skipped repository metadata or returned no absolute directory identities")
 	}
-	head, err := gitHeadPresent(common)
+	head, err := gitHeadPresent(ctx, common)
 	if err != nil {
 		return "", fmt.Errorf("gate execution context: verify Git common HEAD: %w", err)
 	}
@@ -417,7 +437,7 @@ func gitCommonDirectory(ctx context.Context, cwd string) (string, error) {
 }
 
 func runIdentityGit(ctx context.Context, cwd string, args ...string) (string, error) {
-	actual, bare, err := nearestGitMetadata(cwd)
+	actual, bare, err := nearestGitMetadata(ctx, cwd)
 	if err != nil {
 		return "", err
 	}
@@ -443,19 +463,26 @@ func runIdentityGit(ctx context.Context, cwd string, args ...string) (string, er
 // read, not on the metadata lookup: `Lstat` and `Stat` of the same paths
 // answer in milliseconds, while `open()` of a file under the protected
 // location blocks. So the resolution is built from metadata operations, and
-// the two content reads it needs - a worktree's `gitdir:` file and a
-// worktree's `commondir` file - are read under a short deadline. A read that
-// does not complete in time is treated as unavailable, and the layout Git
-// itself uses is applied instead.
+// every content read it needs - a worktree's `gitdir:` file and a worktree's
+// `commondir` file - is read under a short deadline.
 //
-// The resolution mirrors what the Git query would have proved:
+// The resolution proves the same physical metadata boundary the Git query
+// would have proved, and it proves the common directory's validity from
+// structure rather than from content:
 //
 //   - the same physical metadata boundary, selected by the same nearest
 //     `.git` precedence and the same explicit bare detection;
-//   - the same common directory, from the `commondir` file when it can be
-//     read and from Git's own linked-worktree layout when it cannot;
-//   - the same structural validity: a HEAD that is a regular file or a
-//     `refs/` symlink, and object and reference directories.
+//   - the same common directory, named by the worktree's own `commondir`
+//     file;
+//   - the same object and reference directory structure, which is what makes
+//     a directory a Git common directory.
+//
+// The HEAD is deliberately not read here. Its content cannot be read at all
+// under a protected location, and a weaker "a regular file named HEAD
+// exists" answer would accept an ordinary directory as a repository - which
+// is exactly the mistake that would let a directory inside a managed gate
+// pass for the gate itself. A common directory whose HEAD cannot be read is
+// therefore unresolved, and an unresolved common directory is an error.
 //
 // A repository whose metadata cannot be resolved fails closed rather than
 // being admitted, so the fallback never widens what the classifier accepts.
@@ -466,7 +493,7 @@ func filesystemCommonDirectory(ctx context.Context, cwd string) (string, error) 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	actual, bare, err := nearestGitMetadataBounded(ctx, cwd)
+	actual, bare, err := nearestGitMetadata(ctx, cwd)
 	if err != nil {
 		return "", fmt.Errorf("corroborate Git discovery identity: %w", err)
 	}
@@ -480,34 +507,53 @@ func filesystemCommonDirectory(ctx context.Context, cwd string) (string, error) 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	head, err := gitHeadPresentMetadataOnly(common)
+	// The object and reference structure is the evidence that this is a Git
+	// common directory. It is the same evidence the bare-repository
+	// recognizer uses, and it is metadata only.
+	structured, err := gitCommonStructurePresent(common)
 	if err != nil {
-		return "", fmt.Errorf("verify Git common HEAD: %w", err)
+		return "", fmt.Errorf("verify Git common structure: %w", err)
 	}
-	if !head {
-		return "", fmt.Errorf("Git common directory has invalid HEAD")
-	}
-	for _, entry := range []string{"objects", "refs"} {
-		info, err := os.Stat(filepath.Join(common, entry))
-		if err != nil {
-			return "", fmt.Errorf("verify Git common structure: %w", err)
-		}
-		if !info.IsDir() {
-			return "", fmt.Errorf("Git common directory has invalid %s", entry)
-		}
+	if !structured {
+		return "", fmt.Errorf("Git common directory has invalid object and reference structure")
 	}
 	return common, nil
 }
 
-// metadataReadWait bounds one metadata content read in the blocked-Git
-// fallback.
+// gitCommonStructurePresent reports whether a directory carries Git's object
+// and reference structure.
 //
-// The read runs on its own goroutine so a kernel-held open cannot block the
-// resolution: when the wait expires the read is abandoned and the caller
-// falls back to Git's own layout. The abandoned goroutine ends when the
-// kernel answers the open, which it does once the sandbox approval watchdog
-// expires.
-const metadataReadWait = 250 * time.Millisecond
+// This is the metadata half of the bare-repository recognizer: the object
+// directories and the reference directories. It never reads a file, so it
+// answers in milliseconds where a HEAD read would block.
+func gitCommonStructurePresent(dir string) (bool, error) {
+	for _, structure := range [][]string{
+		{"objects", "objects/info"},
+		{"objects", "objects/pack"},
+		{"refs", "refs/heads"},
+		{"refs", "refs/tags"},
+	} {
+		present := true
+		for _, entry := range structure {
+			info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(entry)))
+			if err != nil {
+				if !os.IsNotExist(err) {
+					return false, err
+				}
+				present = false
+				break
+			}
+			if !info.IsDir() {
+				present = false
+				break
+			}
+		}
+		if present {
+			return true, nil
+		}
+	}
+	return false, nil
+}
 
 // readMetadataWithin reads a Git metadata file, giving up after the wait.
 //
@@ -535,32 +581,20 @@ func readMetadataWithin(path string, wait time.Duration) ([]byte, bool) {
 	}
 }
 
-// gitHeadPresentMetadataOnly reports whether a Git common directory carries a
-// usable HEAD, using metadata only.
-//
-// gitHeadPresent proves the same property by reading HEAD, but that read
-// blocks under a TCC-protected location when the caller is a service-manager
-// process. This variant proves the weaker, structural property that a HEAD
-// entry exists as a regular file or as a `refs/` symlink, which is enough to
-// tell a real repository from a directory that merely has an `objects` and
-// `refs` basename, and which never opens the file.
-//
-// The weaker proof is used only as the last step of the blocked-Git fallback,
-// where the alternative is refusing every caller outright.
-func gitHeadPresentMetadataOnly(dir string) (bool, error) {
-	path := filepath.Join(dir, "HEAD")
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
+// recognizableHead reports whether HEAD content is a recognizable Git HEAD:
+// a reference to `refs/`, or a detached object name.
+func recognizableHead(head string) bool {
+	if ref, ok := strings.CutPrefix(head, "ref:"); ok {
+		return strings.HasPrefix(strings.TrimLeft(ref, " \t\r\n"), "refs/")
+	}
+	for _, length := range []int{64, 40} {
+		if len(head) >= length {
+			if _, err := hex.DecodeString(head[:length]); err == nil {
+				return true
+			}
 		}
-		return false, err
 	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(path)
-		return strings.HasPrefix(target, "refs/"), err
-	}
-	return info.Mode().IsRegular(), nil
+	return false
 }
 
 // commonDirectoryFor resolves the common Git directory of an already-resolved
@@ -572,36 +606,36 @@ func gitHeadPresentMetadataOnly(dir string) (bool, error) {
 // `<common>/worktrees/<name>`, whose `commondir` file names the shared
 // directory.
 //
-// The `commondir` file is content, and reading it can block for as long as
-// the sandbox approval watchdog takes when the file lives under a
-// TCC-protected location. The file is therefore read only when it is
-// reachable without that risk, and the layout Git itself uses is applied
-// otherwise: a linked worktree's metadata directory lives at
-// `<common>/worktrees/<name>`, so the common directory is the grandparent.
-// That rule is the same one Git writes the `commondir` file from, and it is
-// applied only after the file read has failed, so a worktree whose
-// `commondir` is readable is always resolved from the file itself.
+// The `commondir` file is the direct evidence, and it is read when it can be
+// read. Its read can block for as long as the sandbox approval watchdog takes
+// when the file lives under a TCC-protected location, so it is bounded.
+//
+// When it cannot be read, the common directory is taken from the worktree
+// metadata directory's own position in Git's layout: a linked worktree's
+// metadata lives at `<common>/worktrees/<name>`, so the common directory is
+// the grandparent. The layout is not a guess, because the result is only
+// accepted when the candidate carries Git's own object and reference
+// structure, which the caller checks.
+//
+// A directory that merely happens to be named `worktrees` cannot produce a
+// wrong answer here: without a `commondir` file it is not a linked
+// worktree's metadata directory at all, and a repository created with
+// `--separate-git-dir` keeps its own metadata directory, whose
+// `commondir`-free shape means the candidate must carry the object and
+// reference structure to be accepted.
 func commonDirectoryFor(actual string, bare bool) (string, error) {
 	if bare {
 		return actual, nil
 	}
-	// A per-worktree metadata directory is identified by its position in
-	// Git's own layout, not by its shape: it is a directory like a plain
-	// repository's `.git` directory, and only the layout tells them apart.
-	parent := filepath.Dir(actual)
-	linkedWorktree := filepath.Base(parent) == "worktrees"
-	if !linkedWorktree {
-		info, err := os.Stat(actual)
-		if err != nil {
-			return "", fmt.Errorf("stat Git metadata: %w", err)
-		}
-		if info.IsDir() {
-			return actual, nil
-		}
+	info, err := os.Stat(actual)
+	if err != nil {
+		return "", fmt.Errorf("stat Git metadata: %w", err)
+	}
+	if info.IsDir() && !linkedWorktreeMetadata(actual) {
+		return actual, nil
 	}
 	// A regular `.git` file names a per-worktree metadata directory, whose
-	// `commondir` names the shared directory. A worktree without one is
-	// malformed and fails closed here.
+	// `commondir` names the shared directory.
 	commondir := filepath.Join(actual, "commondir")
 	if data, ok := readMetadataWithin(commondir, metadataReadWait); ok {
 		target := strings.TrimSpace(string(data))
@@ -617,18 +651,31 @@ func commonDirectoryFor(actual string, bare bool) (string, error) {
 		}
 		return resolved, nil
 	}
-	if !linkedWorktree {
-		return "", fmt.Errorf("Git commondir could not be read and the metadata directory is not in a worktrees layout")
+	// The read is blocked or the file is missing. The linked-worktree layout
+	// names the common directory, and the caller accepts it only when it
+	// carries Git's own object and reference structure.
+	parent := filepath.Dir(actual)
+	if filepath.Base(parent) != "worktrees" {
+		return "", fmt.Errorf("Git commondir could not be read")
 	}
-	// The read is blocked or the file is missing. Git's own layout puts a
-	// linked worktree's metadata under `<common>/worktrees/<name>`, so the
-	// common directory is the grandparent of the metadata directory.
 	grandparent := filepath.Dir(parent)
 	resolved, resolveErr := filepath.EvalSymlinks(grandparent)
 	if resolveErr != nil {
 		return "", fmt.Errorf("resolve Git common directory: %w", resolveErr)
 	}
 	return resolved, nil
+}
+
+// linkedWorktreeMetadata reports whether a metadata directory is a linked
+// worktree's own metadata directory.
+//
+// Git creates one per linked worktree under `<common>/worktrees/<name>`, and
+// that directory is where the `commondir` file lives. The evidence is the
+// file itself, so a plain repository's `.git` directory - which has no
+// `commondir` - is not one.
+func linkedWorktreeMetadata(actual string) bool {
+	_, err := os.Lstat(filepath.Join(actual, "commondir"))
+	return err == nil
 }
 
 // Only a sole normal exit can prove a discovery absence. A joined output-drain
@@ -675,72 +722,16 @@ func readBoundedMetadata(path string, limit int64) ([]byte, error) {
 	return data, nil
 }
 
-func nearestGitMetadata(cwd string) (string, bool, error) {
-	absolute, err := filepath.Abs(cwd)
-	if err != nil {
-		return "", false, err
-	}
-	physical, err := filepath.EvalSymlinks(absolute)
-	if err != nil {
-		return "", false, err
-	}
-	info, err := os.Stat(physical)
-	if err != nil {
-		return "", false, err
-	}
-	if !info.IsDir() {
-		return "", false, fmt.Errorf("caller directory is not a directory")
-	}
-	for dir := physical; ; dir = filepath.Dir(dir) {
-		entry := filepath.Join(dir, ".git")
-		if _, err := os.Lstat(entry); err == nil {
-			info, err := os.Stat(entry)
-			if err != nil {
-				return "", false, err
-			}
-			if info.Mode().IsRegular() {
-				data, readErr := readBoundedMetadata(entry, metadataFileLimit)
-				if readErr != nil {
-					return "", false, readErr
-				}
-				target, ok := strings.CutPrefix(strings.TrimRight(string(data), "\r\n"), "gitdir: ")
-				if !ok || target == "" {
-					return "", false, fmt.Errorf("invalid Git metadata file")
-				}
-				if !filepath.IsAbs(target) {
-					target = filepath.Join(dir, target)
-				}
-				entry = target
-			} else if !info.IsDir() {
-				return "", false, fmt.Errorf("Git metadata entry is not a directory or regular file")
-			}
-			resolved, err := filepath.EvalSymlinks(entry)
-			return resolved, false, err
-		} else if !os.IsNotExist(err) {
-			return "", false, err
-		}
-		bare, err := bareGitMetadataPresent(dir)
-		if err != nil {
-			return "", false, err
-		}
-		if bare {
-			return dir, true, nil
-		}
-		if filepath.Dir(dir) == dir {
-			return "", false, nil
-		}
-	}
-}
-
-// nearestGitMetadataBounded is nearestGitMetadata with every content read
-// bounded, so a metadata file whose open the kernel holds cannot block the
-// resolution.
+// nearestGitMetadata resolves the nearest physical Git metadata boundary for a
+// caller directory.
 //
-// The only content read nearestGitMetadata performs is a worktree's `gitdir:`
-// file. When that read cannot complete, the metadata boundary cannot be
-// established from the file, and this function reports the failure instead of
-// blocking.
-func nearestGitMetadataBounded(ctx context.Context, cwd string) (string, bool, error) {
+// Every content read it performs is bounded by the caller's context, so a
+// metadata file whose open the kernel holds cannot block the caller past its
+// own deadline. That matters because this is the shared discovery boundary:
+// the identity Git command selects its bare-directory handling from it, and an
+// unbounded read here would stall the caller before the identity command
+// could even start.
+func nearestGitMetadata(ctx context.Context, cwd string) (string, bool, error) {
 	absolute, err := filepath.Abs(cwd)
 	if err != nil {
 		return "", false, err
@@ -787,9 +778,17 @@ func nearestGitMetadataBounded(ctx context.Context, cwd string) (string, bool, e
 		} else if !os.IsNotExist(err) {
 			return "", false, err
 		}
-		bare, err := bareGitMetadataPresentBounded(dir)
+		bare, err := bareGitMetadataPresent(ctx, dir)
 		if err != nil {
-			return "", false, err
+			// A HEAD that could not be read is not evidence of a bare
+			// repository, and it is not evidence of its absence either: the
+			// walk continues to the parent, which is where a real repository
+			// boundary above this directory would be found.
+			if errors.Is(err, errHeadUnreadable) {
+				bare = false
+			} else {
+				return "", false, err
+			}
 		}
 		if bare {
 			return dir, true, nil
@@ -800,7 +799,15 @@ func nearestGitMetadataBounded(ctx context.Context, cwd string) (string, bool, e
 	}
 }
 
-func gitHeadPresent(dir string) (bool, error) {
+// gitHeadPresent reports whether a Git common directory carries a recognizable
+// HEAD.
+//
+// The HEAD content read is bounded, so a metadata file whose open the kernel
+// holds cannot block the caller past its own deadline. A HEAD that cannot be
+// read is an error, not an absence: the caller cannot conclude that the
+// repository has no HEAD, and treating it as one would let an ordinary
+// directory pass for a repository.
+func gitHeadPresent(ctx context.Context, dir string) (bool, error) {
 	path := filepath.Join(dir, "HEAD")
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -816,73 +823,24 @@ func gitHeadPresent(dir string) (bool, error) {
 	if !info.Mode().IsRegular() {
 		return false, nil
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return false, err
+	data, ok := readMetadataWithin(path, metadataReadWait)
+	if !ok {
+		return false, errHeadUnreadable
 	}
-	data, readErr := io.ReadAll(io.LimitReader(file, 255))
-	if err := errors.Join(readErr, file.Close()); err != nil {
-		return false, err
-	}
-	head := string(data)
-	if ref, ok := strings.CutPrefix(head, "ref:"); ok {
-		return strings.HasPrefix(strings.TrimLeft(ref, " \t\r\n"), "refs/"), nil
-	}
-	for _, length := range []int{64, 40} {
-		if len(head) >= length {
-			if _, err := hex.DecodeString(head[:length]); err == nil {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
+	return recognizableHead(string(data)), nil
 }
 
-func bareGitMetadataPresent(dir string) (bool, error) {
-	head, err := gitHeadPresent(dir)
+// errHeadUnreadable marks a HEAD whose content could not be read.
+//
+// It is distinct from "there is no HEAD": an unreadable HEAD is not evidence
+// of a bare repository and not evidence of its absence, so a discovery walk
+// continues to the parent rather than stopping at this directory.
+var errHeadUnreadable = errors.New("Git HEAD could not be read")
+
+func bareGitMetadataPresent(ctx context.Context, dir string) (bool, error) {
+	head, err := gitHeadPresent(ctx, dir)
 	if err != nil || head {
 		return head, err
-	}
-	for _, structure := range [][]string{
-		{"objects", "objects/info"},
-		{"objects", "objects/pack"},
-		{"refs", "refs/heads"},
-		{"refs", "refs/tags"},
-	} {
-		present := true
-		for _, entry := range structure {
-			info, err := os.Stat(filepath.Join(dir, filepath.FromSlash(entry)))
-			if err != nil {
-				if !os.IsNotExist(err) {
-					return false, err
-				}
-				present = false
-				break
-			}
-			if !info.IsDir() {
-				present = false
-				break
-			}
-		}
-		if present {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-// bareGitMetadataPresentBounded is bareGitMetadataPresent with the HEAD
-// content read bounded, for the blocked-Git fallback.
-//
-// A bare repository's HEAD content read can block under a TCC-protected
-// location. When the read cannot complete, the structural evidence still
-// applies: a directory carrying the object and reference structure is a bare
-// repository whether or not its HEAD could be read.
-func bareGitMetadataPresentBounded(dir string) (bool, error) {
-	if head, err := gitHeadPresentMetadataOnly(dir); err != nil {
-		return false, err
-	} else if head {
-		return true, nil
 	}
 	for _, structure := range [][]string{
 		{"objects", "objects/info"},
