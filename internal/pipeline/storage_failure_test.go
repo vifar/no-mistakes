@@ -34,6 +34,15 @@ func TestExecutorDocumentLockIsInfrastructureNotCodeFailure(t *testing.T) {
 	}
 }
 
+func TestExecutorStatusValidationContentionIsInfrastructure(t *testing.T) {
+	for _, operation := range []string{"RecordStatusValidationStep", "InvalidateStatusValidation", "ReconcileRecoveredRun"} {
+		t.Run(operation, func(t *testing.T) {
+			t.Parallel()
+			testExecutorWriterLock(t, operation)
+		})
+	}
+}
+
 func testExecutorWriterLock(t *testing.T, operation string) {
 	t.Helper()
 	for _, releaseEarly := range []bool{true, false} {
@@ -50,6 +59,17 @@ func testExecutorWriterLock(t *testing.T, operation string) {
 			}
 			from, to := strings.Repeat("a", 40), run.HeadSHA
 			var passID string
+			var validationStepID string
+			if operation == "RecordStatusValidationStep" {
+				step, err := database.InsertStepResult(run.ID, types.StepTest)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := database.CompleteStep(step.ID, 0, 1, ""); err != nil {
+					t.Fatal(err)
+				}
+				validationStepID = step.ID
+			}
 			if operation == "CompleteDocumentPass" || operation == "CarryValidationOverDocOnlyCommits" {
 				var err error
 				passID, err = database.BeginDocumentPass(run.ID, from)
@@ -104,6 +124,12 @@ func testExecutorWriterLock(t *testing.T, operation string) {
 				}
 				start := time.Now()
 				switch operation {
+				case "RecordStatusValidationStep":
+					err = sctx.DB.RecordStatusValidationStep(validationStepID, sctx.Run.ID, to, "config", 0)
+				case "InvalidateStatusValidation":
+					err = sctx.DB.InvalidateStatusValidation(sctx.Run.ID)
+				case "ReconcileRecoveredRun":
+					_, err = sctx.DB.ReconcileRecoveredRun(sctx.Run.ID, "runtime")
 				case "UpdateRunPRState":
 					err = sctx.DB.UpdateRunPRState(sctx.Run.ID, "open")
 				case "BeginDocumentPass":

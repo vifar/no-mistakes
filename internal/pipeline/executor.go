@@ -636,7 +636,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.FailRun(run, repo, startErr, ctx)
 	}
 	if err := e.clearStorageFailure(run.ID); err != nil {
-		return e.failRun(run, repo, err)
+		return e.FailRun(run, repo, err)
 	}
 	run.Status = types.RunRunning
 	e.emitRunEvent(ipc.EventRunUpdated, run, repo)

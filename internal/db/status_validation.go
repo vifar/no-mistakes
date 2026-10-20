@@ -7,8 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -49,19 +49,16 @@ func invalidateStatusValidation(ctx context.Context, tx *sql.Tx, runID string) e
 }
 
 func (d *DB) InvalidateStatusValidation(runID string) error {
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if err := invalidateStatusValidation(context.Background(), tx, runID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return sqlitewrite.Transaction(context.Background(), d.sql, "InvalidateStatusValidation", func(writeCtx context.Context, tx *sql.Tx) error {
+		if err := invalidateStatusValidation(writeCtx, tx, runID); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (d *DB) RecordStatusValidationStep(stepID, runID, head, configDigest string, epoch int64) error {
-	_, err := d.sql.Exec(`INSERT INTO status_validation_steps(step_id,head_sha,epoch,config_digest)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "RecordStatusValidationStep", `INSERT INTO status_validation_steps(step_id,head_sha,epoch,config_digest)
 	 SELECT id,?,?,? FROM step_results WHERE id=? AND run_id=? AND status='completed'
 	 AND COALESCE((SELECT epoch FROM status_validation_epochs WHERE run_id=?),0)=?
 	 ON CONFLICT(step_id) DO UPDATE SET head_sha=excluded.head_sha,epoch=excluded.epoch,config_digest=excluded.config_digest`, head, epoch, configDigest, stepID, runID, runID, epoch)
@@ -184,7 +181,7 @@ func (d *DB) BuildStatusCertificate(runID, head, configDigest string) (*string, 
 
 // Revocation is durable before outbound I/O; an uncertain reply cannot reuse old proof.
 func (d *DB) RevokeStatusCertificate(ctx context.Context, runID string, p CommitStatusPublication) error {
-	_, err := d.sql.ExecContext(ctx, `UPDATE commit_status_publications SET strict_certificate=NULL,preserve_success=NULL WHERE run_id=? AND host=? AND repo=? AND sha=? AND retired=0`, runID, p.Host, p.Repo, p.SHA)
+	_, err := sqlitewrite.Exec(ctx, d.sql, "RevokeStatusCertificate", `UPDATE commit_status_publications SET strict_certificate=NULL,preserve_success=NULL WHERE run_id=? AND host=? AND repo=? AND sha=? AND retired=0`, runID, p.Host, p.Repo, p.SHA)
 	return err
 }
 
@@ -193,72 +190,66 @@ type ControlledShutdownBinding struct{ Instance, Lifecycle, Reason string }
 // TerminalizeCertifiedWatcher atomically binds the cancelled outcome and eligibility.
 // Missing or stale execution proof or certificates cannot preserve success.
 func (d *DB) TerminalizeCertifiedWatcher(runID, message, head, configDigest string, status types.RunStatus, bindings ...*ControlledShutdownBinding) error {
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	run := &Run{}
-	if err := scanRun(tx.QueryRow(`SELECT `+runColumns+` FROM runs WHERE id=?`, runID), run); err != nil {
-		return err
-	}
-	if run.Status != types.RunRunning && run.Status != types.RunPending {
-		return nil
-	}
-	certificate, err := buildStatusCertificate(tx, runID, head, configDigest)
-	if err != nil {
-		return err
-	}
-	if run.Status != types.RunRunning || run.PushActive || run.HeadSHA != head || run.LastPushedSHA == nil || *run.LastPushedSHA != head {
-		certificate = nil
-	}
-	if len(bindings) > 0 && bindings[0] != nil {
-		b := bindings[0]
-		var matches bool
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM controlled_shutdown_runs WHERE run_id=? AND instance=? AND lifecycle=? AND reason=?)`, runID, b.Instance, b.Lifecycle, b.Reason).Scan(&matches); err != nil {
+	return sqlitewrite.Transaction(context.Background(), d.sql, "TerminalizeCertifiedWatcher", func(writeCtx context.Context, tx *sql.Tx) error {
+		run := &Run{}
+		if err := scanRun(tx.QueryRowContext(writeCtx, `SELECT `+runColumns+` FROM runs WHERE id=?`, runID), run); err != nil {
 			return err
 		}
-		if !matches || run.Status != types.RunRunning {
+		if run.Status != types.RunRunning && run.Status != types.RunPending {
+			return nil
+		}
+		certificate, err := buildStatusCertificate(tx, runID, head, configDigest)
+		if err != nil {
+			return err
+		}
+		if run.Status != types.RunRunning || run.PushActive || run.HeadSHA != head || run.LastPushedSHA == nil || *run.LastPushedSHA != head {
 			certificate = nil
 		}
-	}
-	if certificate != nil {
-		if _, err := tx.Exec(`UPDATE commit_status_publications SET preserve_success=1 WHERE run_id=? AND sha=? AND retired=0 AND last_state='success' AND strict_certificate=?`, runID, head, *certificate); err != nil {
+		if len(bindings) > 0 && bindings[0] != nil {
+			b := bindings[0]
+			var matches bool
+			if err := tx.QueryRowContext(writeCtx, `SELECT EXISTS(SELECT 1 FROM controlled_shutdown_runs WHERE run_id=? AND instance=? AND lifecycle=? AND reason=?)`, runID, b.Instance, b.Lifecycle, b.Reason).Scan(&matches); err != nil {
+				return err
+			}
+			if !matches || run.Status != types.RunRunning {
+				certificate = nil
+			}
+		}
+		if certificate != nil {
+			if _, err := tx.ExecContext(writeCtx, `UPDATE commit_status_publications SET preserve_success=1 WHERE run_id=? AND sha=? AND retired=0 AND last_state='success' AND strict_certificate=?`, runID, head, *certificate); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.ExecContext(writeCtx, `UPDATE commit_status_publications SET strict_certificate=NULL,preserve_success=NULL WHERE run_id=?`, runID); err != nil {
+				return err
+			}
+		}
+		ts := now()
+		if _, err := tx.ExecContext(writeCtx, `UPDATE runs SET error=?,status=?,head_sha=?,push_active=0,terminal_head_verified_at=?,updated_at=? WHERE id=?`, message, status, head, ts, ts, runID); err != nil {
 			return err
 		}
-	} else {
-		if _, err := tx.Exec(`UPDATE commit_status_publications SET strict_certificate=NULL,preserve_success=NULL WHERE run_id=?`, runID); err != nil {
-			return err
-		}
-	}
-	ts := now()
-	if _, err := tx.Exec(`UPDATE runs SET error=?,status=?,head_sha=?,push_active=0,terminal_head_verified_at=?,updated_at=? WHERE id=?`, message, status, head, ts, ts, runID); err != nil {
-		return err
-	}
-	return tx.Commit()
+		return nil
+	})
 }
 
 func (d *DB) PrepareControlledShutdown(runIDs []string, instance, lifecycle, reason string) error {
 	if instance == "" || lifecycle == "" || reason == "" {
 		return fmt.Errorf("missing controlled shutdown identity")
 	}
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, runID := range runIDs {
-		result, err := tx.Exec(`INSERT INTO controlled_shutdown_runs(run_id,instance,lifecycle,reason) VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET instance=excluded.instance,lifecycle=excluded.lifecycle,reason=excluded.reason WHERE controlled_shutdown_runs.reason!=?`, runID, instance, lifecycle, reason, RawShutdownReason)
-		if err != nil {
-			return err
+	return sqlitewrite.Transaction(context.Background(), d.sql, "PrepareControlledShutdown", func(writeCtx context.Context, tx *sql.Tx) error {
+		for _, runID := range runIDs {
+			result, err := tx.ExecContext(writeCtx, `INSERT INTO controlled_shutdown_runs(run_id,instance,lifecycle,reason) VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET instance=excluded.instance,lifecycle=excluded.lifecycle,reason=excluded.reason WHERE controlled_shutdown_runs.reason!=?`, runID, instance, lifecycle, reason, RawShutdownReason)
+			if err != nil {
+				return err
+			}
+			if n, err := result.RowsAffected(); err != nil {
+				return err
+			} else if n != 1 {
+				return fmt.Errorf("controlled shutdown superseded")
+			}
 		}
-		if n, err := result.RowsAffected(); err != nil {
-			return err
-		} else if n != 1 {
-			return fmt.Errorf("controlled shutdown superseded")
-		}
-	}
-	return tx.Commit()
+		return nil
+	})
 }
 
 func (d *DB) ControlledShutdownMatches(runID, instance, lifecycle, reason string) (bool, error) {
@@ -269,67 +260,60 @@ func (d *DB) ControlledShutdownMatches(runID, instance, lifecycle, reason string
 
 // RecordIneligibleTerminal commits terminal truth and revocation together.
 func (d *DB) RecordIneligibleTerminal(runID, message string, status types.RunStatus, head *string) error {
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var current types.RunStatus
-	if err := tx.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&current); err != nil {
-		return err
-	}
-	if current == types.RunCancelled {
-		var preserved bool
-		if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM commit_status_publications WHERE run_id=? AND preserve_success=1 AND strict_certificate IS NOT NULL AND last_state='success')`, runID).Scan(&preserved); err != nil {
-			return err
-		}
-		if preserved {
-			return nil
-		}
-	}
-	if _, err := tx.Exec(`UPDATE commit_status_publications SET strict_certificate=NULL,preserve_success=NULL WHERE run_id=?`, runID); err != nil {
-		return err
-	}
-	ts := now()
-	if head != nil {
-		_, err = tx.Exec(`UPDATE runs SET error=?,status=?,head_sha=?,push_active=0,terminal_head_verified_at=?,updated_at=? WHERE id=?`, message, status, *head, ts, ts, runID)
-	} else {
-		_, err = tx.Exec(`UPDATE runs SET error=?,status=?,push_active=0,terminal_head_verified_at=NULL,updated_at=? WHERE id=?`, message, status, ts, runID)
-	}
-	if err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
-func (d *DB) SupersedeUncommittedCancellations(runIDs []string, instance string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	tx, err := d.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, runID := range runIDs {
+	return sqlitewrite.Transaction(context.Background(), d.sql, "RecordIneligibleTerminal", func(writeCtx context.Context, tx *sql.Tx) error {
 		var current types.RunStatus
-		if err := tx.QueryRowContext(ctx, `SELECT status FROM runs WHERE id=?`, runID).Scan(&current); err != nil {
+		if err := tx.QueryRowContext(writeCtx, `SELECT status FROM runs WHERE id=?`, runID).Scan(&current); err != nil {
 			return err
 		}
-		if current != types.RunRunning && current != types.RunPending {
-			continue
+		if current == types.RunCancelled {
+			var preserved bool
+			if err := tx.QueryRowContext(writeCtx, `SELECT EXISTS(SELECT 1 FROM commit_status_publications WHERE run_id=? AND preserve_success=1 AND strict_certificate IS NOT NULL AND last_state='success')`, runID).Scan(&preserved); err != nil {
+				return err
+			}
+			if preserved {
+				return nil
+			}
 		}
-		if instance == "" {
-			return fmt.Errorf("missing raw shutdown runtime identity")
+		if _, err := tx.ExecContext(writeCtx, `UPDATE commit_status_publications SET strict_certificate=NULL,preserve_success=NULL WHERE run_id=?`, runID); err != nil {
+			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO controlled_shutdown_runs(run_id,instance,lifecycle,reason) VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET instance=excluded.instance,lifecycle=excluded.lifecycle,reason=excluded.reason`, runID, instance, instance, RawShutdownReason)
+		var err error
+		ts := now()
+		if head != nil {
+			_, err = tx.ExecContext(writeCtx, `UPDATE runs SET error=?,status=?,head_sha=?,push_active=0,terminal_head_verified_at=?,updated_at=? WHERE id=?`, message, status, *head, ts, ts, runID)
+		} else {
+			_, err = tx.ExecContext(writeCtx, `UPDATE runs SET error=?,status=?,push_active=0,terminal_head_verified_at=NULL,updated_at=? WHERE id=?`, message, status, ts, runID)
+		}
 		if err != nil {
 			return err
 		}
-		if err := invalidateStatusValidation(ctx, tx, runID); err != nil {
-			return err
+		return nil
+	})
+}
+
+func (d *DB) SupersedeUncommittedCancellations(runIDs []string, instance string) error {
+	return sqlitewrite.Transaction(context.Background(), d.sql, "SupersedeUncommittedCancellations", func(writeCtx context.Context, tx *sql.Tx) error {
+		for _, runID := range runIDs {
+			var current types.RunStatus
+			if err := tx.QueryRowContext(writeCtx, `SELECT status FROM runs WHERE id=?`, runID).Scan(&current); err != nil {
+				return err
+			}
+			if current != types.RunRunning && current != types.RunPending {
+				continue
+			}
+			if instance == "" {
+				return fmt.Errorf("missing raw shutdown runtime identity")
+			}
+			_, err := tx.ExecContext(writeCtx, `INSERT INTO controlled_shutdown_runs(run_id,instance,lifecycle,reason) VALUES(?,?,?,?) ON CONFLICT(run_id) DO UPDATE SET instance=excluded.instance,lifecycle=excluded.lifecycle,reason=excluded.reason`, runID, instance, instance, RawShutdownReason)
+			if err != nil {
+				return err
+			}
+			if err := invalidateStatusValidation(writeCtx, tx, runID); err != nil {
+				return err
+			}
 		}
-	}
-	return tx.Commit()
+		return nil
+	})
 }
 
 // HasStatusPreservationProof reports whether a run holds an acknowledged,
@@ -346,58 +330,54 @@ func (d *DB) HasStatusPreservationProof(runID string) (bool, error) {
 // approval gate or monitoring CI). Its status proof is invalidated with it, so
 // the resumed run must earn any preservation again.
 func (d *DB) ReleaseShutdownForRecovery(runID string) error {
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	var status types.RunStatus
-	if err := tx.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&status); err != nil {
-		return err
-	}
-	if status.Terminal() {
-		return tx.Commit()
-	}
-	if _, err := tx.Exec(`DELETE FROM controlled_shutdown_runs WHERE run_id=?`, runID); err != nil {
-		return err
-	}
-	if err := invalidateStatusValidation(context.Background(), tx, runID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return sqlitewrite.Transaction(context.Background(), d.sql, "ReleaseShutdownForRecovery", func(writeCtx context.Context, tx *sql.Tx) error {
+		var status types.RunStatus
+		if err := tx.QueryRowContext(writeCtx, `SELECT status FROM runs WHERE id=?`, runID).Scan(&status); err != nil {
+			return err
+		}
+		if status.Terminal() {
+			return nil
+		}
+		if _, err := tx.ExecContext(writeCtx, `DELETE FROM controlled_shutdown_runs WHERE run_id=?`, runID); err != nil {
+			return err
+		}
+		if err := invalidateStatusValidation(writeCtx, tx, runID); err != nil {
+			return err
+		}
+		return nil
+	})
 }
 
 func (d *DB) ReconcileRecoveredRun(runID, instance string) (bool, error) {
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback()
-	var status types.RunStatus
-	if err := tx.QueryRow(`SELECT status FROM runs WHERE id=?`, runID).Scan(&status); err != nil {
-		return false, err
-	}
-	if status.Terminal() {
-		return false, tx.Commit()
-	}
 	var obsolete bool
-	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM controlled_shutdown_runs WHERE run_id=? AND instance<>?)`, runID, instance).Scan(&obsolete); err != nil {
-		return false, err
-	}
-	if err := invalidateStatusValidation(context.Background(), tx, runID); err != nil {
-		return false, err
-	}
-	if obsolete {
-		if _, err := tx.Exec(`DELETE FROM controlled_shutdown_runs WHERE run_id=? AND instance<>?`, runID, instance); err != nil {
-			return false, err
+	err := sqlitewrite.Transaction(context.Background(), d.sql, "ReconcileRecoveredRun", func(writeCtx context.Context, tx *sql.Tx) error {
+		obsolete = false
+		var status types.RunStatus
+		if err := tx.QueryRowContext(writeCtx, `SELECT status FROM runs WHERE id=?`, runID).Scan(&status); err != nil {
+			return err
 		}
-		ts := now()
-		if _, err := tx.Exec(`UPDATE runs SET status=?,error=?,push_active=0,terminal_head_verified_at=NULL,awaiting_agent_since=NULL,updated_at=? WHERE id=?`, types.RunFailed, "daemon crashed during execution", ts, runID); err != nil {
-			return false, err
+		if status.Terminal() {
+			return nil
 		}
-		if _, err := tx.Exec(`UPDATE step_results SET status=?,error=?,completed_at=? WHERE run_id=? AND status IN ('running','awaiting_approval','fixing','fix_review')`, types.StepStatusFailed, "daemon crashed during execution", ts, runID); err != nil {
-			return false, err
+		if err := tx.QueryRowContext(writeCtx, `SELECT EXISTS(SELECT 1 FROM controlled_shutdown_runs WHERE run_id=? AND instance<>?)`, runID, instance).Scan(&obsolete); err != nil {
+			return err
 		}
-	}
-	return obsolete, tx.Commit()
+		if err := invalidateStatusValidation(writeCtx, tx, runID); err != nil {
+			return err
+		}
+		if obsolete {
+			if _, err := tx.ExecContext(writeCtx, `DELETE FROM controlled_shutdown_runs WHERE run_id=? AND instance<>?`, runID, instance); err != nil {
+				return err
+			}
+			ts := now()
+			if _, err := tx.ExecContext(writeCtx, `UPDATE runs SET status=?,error=?,push_active=0,terminal_head_verified_at=NULL,awaiting_agent_since=NULL,updated_at=? WHERE id=?`, types.RunFailed, "daemon crashed during execution", ts, runID); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(writeCtx, `UPDATE step_results SET status=?,error=?,completed_at=? WHERE run_id=? AND status IN ('running','awaiting_approval','fixing','fix_review')`, types.StepStatusFailed, "daemon crashed during execution", ts, runID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return obsolete && err == nil, err
 }
