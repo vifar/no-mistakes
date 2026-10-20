@@ -21,10 +21,11 @@ var (
 	entropy   = ulid.Monotonic(rand.Reader, 0)
 )
 
-// Bump whenever schemaSQL or migrationStatements changes. Version zero is the
-// historical, unversioned schema; its complete upgrade runs once before the
-// stamp is committed. Current opens execute no DDL or backfill DML.
-const schemaVersion = 4
+// Bump whenever schemaSQL, migrationStatements, statusValidationMigrationStatements,
+// or additiveMigrationStatements changes. Version zero is the historical,
+// unversioned schema; its complete upgrade runs once before the stamp is
+// committed. Current opens execute no DDL or backfill DML.
+const schemaVersion = 5
 
 // DB wraps a SQLite database connection.
 type DB struct {
@@ -95,6 +96,15 @@ func migrateWriteAttempt(sqlDB *sql.DB) error {
 				return fmt.Errorf("migrate db (%s): %w", stmt, err)
 			}
 		}
+		// Every later schema version adds its own additive statements here, so
+		// an upgraded database receives the columns the current binary reads.
+		// A statement for a version newer than the database's is harmless: it
+		// is additive and idempotent.
+		for _, stmt := range additiveMigrationStatements {
+			if _, err := tx.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
+				return fmt.Errorf("migrate db (%s): %w", stmt, err)
+			}
+		}
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
 			return err
 		}
@@ -104,6 +114,16 @@ func migrateWriteAttempt(sqlDB *sql.DB) error {
 		return fmt.Errorf("migrate db (schemaSQL): %w", err)
 	}
 	for _, stmt := range migrationStatements {
+		if _, err := tx.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
+			return fmt.Errorf("migrate db (%s): %w", stmt, err)
+		}
+	}
+	// The legacy (unversioned) upgrade creates its tables with CREATE TABLE IF
+	// NOT EXISTS, so an EXISTING runs table keeps its old shape. The additive
+	// statements are the only way it receives the newer columns, and the
+	// database is stamped with the current version afterwards - so skipping
+	// them here would leave it permanently missing them.
+	for _, stmt := range additiveMigrationStatements {
 		if _, err := tx.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
 			return fmt.Errorf("migrate db (%s): %w", stmt, err)
 		}

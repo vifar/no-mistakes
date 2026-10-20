@@ -116,6 +116,43 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		// Scratch-safe staging can leave nothing to commit; an unchanged head
 		// is not a new pipeline commit and must not restart Review.
 		if headSHA != headBeforeCommit {
+			// Record the commit lineage: it is the proof that this head
+			// advance was the pipeline's own, so the comparison guard at the
+			// publication boundary follows it instead of refusing it as an
+			// unexplained change.
+			if err := recordPipelineHeadRange(sctx, headBeforeCommit, headSHA); err != nil {
+				return nil, err
+			}
+			if err := recordAgentFixHead(sctx, s.Name(), headSHA); err != nil {
+				return nil, err
+			}
+			// The comparison receipt follows the run's own head, exactly as
+			// it does for every other forward commit. Without this the
+			// attestation's own comparison would refuse the head the pipeline
+			// just committed.
+			//
+			// The FORGE head is the other publisher's claim on the branch. It
+			// is never adopted here: a PR whose head moved while this step
+			// was committing is not this run's head, and the attestation's own
+			// comparison must refuse it.
+			receipt, err := sctx.DB.GetRunPRContext(sctx.Run.ID)
+			if err != nil {
+				return nil, err
+			}
+			if receipt != nil {
+				if selected := sctx.PRTarget; selected != nil && selected.ForgeHeadSHA != "" &&
+					receipt.ForgeHeadSHA != "" && selected.ForgeHeadSHA != receipt.ForgeHeadSHA {
+					return nil, fmt.Errorf("the pull request head moved to %s while the pipeline committed its own changes", shortObjectID(selected.ForgeHeadSHA))
+				}
+				own, err := prComparisonAtTarget(sctx, receipt.TargetBranch, receipt.TargetSHA, headSHA)
+				if err != nil {
+					return nil, err
+				}
+				own.PRURL, own.SourceRepo, own.SourceBranch, own.ForgeHeadSHA = receipt.PRURL, receipt.SourceRepo, receipt.SourceBranch, receipt.ForgeHeadSHA
+				if _, err := sctx.DB.AdvanceRunPRContext(sctx.Run.ID, own); err != nil {
+					return nil, err
+				}
+			}
 			newHeadSHA = headSHA
 		}
 	}
@@ -157,6 +194,19 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 			return &pipeline.StepOutcome{RestartFrom: types.StepRebase}, nil
 		}
 	}
+	// The target branch can move after the last step boundary and before the
+	// attestation write. The attestation compares the LIVE target with this
+	// run's receipt, so it would fail the run on a base that merely moved.
+	// Nothing is published yet at this point, so the same safe rewind the
+	// Review..Lint boundaries use applies: rewind to Rebase, re-integrate,
+	// re-validate, and push. A real conflict still parks in Rebase.
+	rewind, err := detectTargetAdvanceAtPublication(sctx, s.Name())
+	if err != nil {
+		return nil, err
+	}
+	if rewind {
+		return &pipeline.StepOutcome{RestartFrom: types.StepRebase}, nil
+	}
 	// This run's own review/test/document have already completed by now (see
 	// AllSteps' fixed order), so these are honest statuses to attest for the
 	// head about to be pushed - see attestHeadBeforePush.
@@ -165,6 +215,18 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, fmt.Errorf("load step results for attestation: %w", err)
 	}
 	if err := publishRunHead(sctx, headBeingPushed, newHeadSHA, attestationSteps); err != nil {
+		// The target can also move between this check and the attestation
+		// write. The attestation's own comparison is the authority there, and
+		// it names the condition; the same rewind applies.
+		if errors.Is(err, errTargetComparisonAdvanced) {
+			rewind, rewindErr := detectTargetAdvanceAtPublication(sctx, s.Name())
+			if rewindErr != nil {
+				return nil, rewindErr
+			}
+			if rewind {
+				return &pipeline.StepOutcome{RestartFrom: types.StepRebase}, nil
+			}
+		}
 		return nil, err
 	}
 

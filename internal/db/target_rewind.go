@@ -128,7 +128,7 @@ func targetRewindRun(q rewindQuery, runID string, step types.StepName) (*Run, er
 	if prohibitedReason != "" {
 		return refuse(prohibitedReason)
 	}
-	if step.Order() < types.StepRebase.Order() || step.Order() > types.StepLint.Order() {
+	if step.Order() < types.StepRebase.Order() || step.Order() > types.StepPush.Order() {
 		return refuse("boundary outside unpublished validation: " + string(step))
 	}
 	if r.Status != types.RunRunning && r.Status != types.RunPending {
@@ -206,5 +206,88 @@ func (d *DB) MarkRunRetargetAttempted(runID string) error {
 // TargetRewindRefusal explains an excluded state without changing it.
 func (d *DB) TargetRewindRefusal(runID string, step types.StepName) error {
 	_, err := targetRewindRun(d.sql, runID, step)
+	return err
+}
+
+// MaxLeftoverValidationCommits bounds how many times one run may commit a
+// predecessor's leftover validation edits. One is enough to preserve the
+// work and send it through re-review; a second would mean an agent keeps
+// writing files, and looping on that never ends.
+const MaxLeftoverValidationCommits = 1
+
+// CanCommitLeftoverValidationEdits reports whether this run may still commit
+// a predecessor's leftover validation edits.
+func (d *DB) CanCommitLeftoverValidationEdits(runID string) (bool, error) {
+	var count int
+	if err := d.sql.QueryRow(`SELECT COALESCE(leftover_validation_commits,0) FROM runs WHERE id=?`, runID).Scan(&count); err != nil {
+		return false, fmt.Errorf("read leftover validation commit budget: %w", err)
+	}
+	return count < MaxLeftoverValidationCommits, nil
+}
+
+// RecordLeftoverValidationCommit charges the run's leftover-validation budget
+// and advances its head. The charge and the head move land together, so a
+// crash between them can never leave the budget spent with the head behind.
+func (d *DB) RecordLeftoverValidationCommit(runID, headSHA string) error {
+	if !validGitSHA(headSHA) {
+		return fmt.Errorf("record leftover validation commit: invalid head")
+	}
+	return sqlitewrite.Transaction(context.Background(), d.sql, "RecordLeftoverValidationCommit", func(writeCtx context.Context, tx *sql.Tx) error {
+		var count int
+		if err := tx.QueryRowContext(writeCtx, `SELECT COALESCE(leftover_validation_commits,0) FROM runs WHERE id=?`, runID).Scan(&count); err != nil {
+			return fmt.Errorf("record leftover validation commit: read budget: %w", err)
+		}
+		if count >= MaxLeftoverValidationCommits {
+			return fmt.Errorf("%w: the run already committed a predecessor's leftover validation edits", ErrTargetAdvanceIneligible)
+		}
+		if _, err := tx.ExecContext(writeCtx, `UPDATE runs SET leftover_validation_commits=leftover_validation_commits+1, head_sha=?, updated_at=? WHERE id=?`, headSHA, now(), runID); err != nil {
+			return fmt.Errorf("record leftover validation commit: write: %w", err)
+		}
+		return nil
+	})
+}
+
+// AdvancePendingTargetRewindHead rebinds a pending rewind to a newer local
+// head. It is used when the pipeline itself commits the previous step's
+// leftover worktree edits BEFORE the rewind integrates: the pending rewind
+// was classified against the old head, and the integration must still be
+// bound to the exact head it will integrate.
+//
+// The transition is refused unless the new head is a strict descendant of the
+// head the pending rewind recorded, so a rewritten or unrelated head can
+// never be smuggled into a pending integration. The caller proves the
+// ancestry with Git and passes the proof in, because the database has no
+// repository to ask.
+func (d *DB) AdvancePendingTargetRewindHead(runID, expectedHead, newHead string, descendant bool) error {
+	if !validGitSHA(expectedHead) || !validGitSHA(newHead) || expectedHead == newHead {
+		return fmt.Errorf("advance pending target rewind head: invalid head transition")
+	}
+	if !descendant {
+		return fmt.Errorf("advance pending target rewind head: the new head is not a descendant of the pending rewind's head")
+	}
+	_, err := sqlitewrite.Value(context.Background(), "advance pending target rewind head", func(writeCtx context.Context) (struct{}, error) {
+		tx, err := d.sql.BeginTx(writeCtx, nil)
+		if err != nil {
+			return struct{}{}, fmt.Errorf("advance pending target rewind head: begin: %w", err)
+		}
+		defer tx.Rollback()
+		pending, err := pendingTargetRewind(tx, runID)
+		if err != nil {
+			return struct{}{}, err
+		}
+		if pending == nil {
+			return struct{}{}, fmt.Errorf("advance pending target rewind head: no pending rewind")
+		}
+		if pending.LocalHeadSHA != expectedHead {
+			return struct{}{}, fmt.Errorf("advance pending target rewind head: pending rewind is bound to %s, not %s", pending.LocalHeadSHA, expectedHead)
+		}
+		if _, err := tx.ExecContext(writeCtx, `UPDATE run_target_rewinds SET local_head_sha=? WHERE id=?`, newHead, pending.ID); err != nil {
+			return struct{}{}, fmt.Errorf("advance pending target rewind head: write: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return struct{}{}, fmt.Errorf("advance pending target rewind head: commit: %w", err)
+		}
+		return struct{}{}, nil
+	})
 	return err
 }

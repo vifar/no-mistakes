@@ -30,6 +30,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/worktreescratch"
 )
 
 // EventFunc is called when a pipeline event occurs, for streaming to subscribers.
@@ -1957,6 +1958,16 @@ rounds:
 			priorGeneration := e.evidenceGeneration.Load()
 			restartIndex, contextErr := e.checkPRContext(ctx, run, repo, workDir, stepName, currentIndex, true, stepName == types.StepRebase && outcome != nil && !outcome.NeedsApproval && outcome.RestartFrom == "")
 			if contextErr != nil {
+				// The guard refused AFTER this step ran. The step itself
+				// produced no authority (its verdict is not recorded), so it
+				// must not stay "running": a terminal run with a running
+				// step wedges branch_sync in push_in_progress with no
+				// supported exit.
+				redacted := safeurl.RedactText(contextErr.Error())
+				if dbErr := e.db.FailStep(sr.ID, redacted, time.Since(phaseStart).Milliseconds()); dbErr != nil {
+					slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
+				}
+				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redacted, nil)
 				return false, "", contextErr
 			}
 
@@ -3276,11 +3287,18 @@ func (e *Executor) verifyCompletionHead(run *db.Run) (string, error) {
 	if strings.TrimSpace(observed) != head {
 		return "", fmt.Errorf("worktree head does not match recorded completion head")
 	}
-	dirty, err := git.HasUncommittedChanges(ctx, e.workDir)
+	var excludes []string
+	if e.config != nil {
+		excludes = e.config.StagingExclude
+	}
+	dirtyPaths, err := worktreescratch.DirtyPaths(func(args ...string) (string, error) {
+		out, err := git.RunRaw(ctx, e.workDir, args...)
+		return string(out), err
+	}, excludes)
 	if err != nil {
 		return "", fmt.Errorf("check worktree before completion: %w", err)
 	}
-	if dirty {
+	if len(dirtyPaths) > 0 {
 		return "", fmt.Errorf("worktree is dirty before completion")
 	}
 	if !e.preserveUnpublishedTerminalHead(ctx, recordedRun, head) {

@@ -300,7 +300,7 @@ func TestDocumentJourneyAdmissionAndInterruptedHistory(t *testing.T) {
 			boundary := types.CustomGateStepName(types.StepTest, "boundary")
 			parked := waitForStepStatus(t, h, branch, boundary, types.StepStatusAwaitingApproval, 90*time.Second)
 			worktree := paths.WithRoot(h.NMHome).WorktreeDir(parked.RepoID, parked.ID)
-			cause := "clean worktree"
+			cause := "1 entries are hidden from status by index flags"
 			wantPasses := 0
 			if kind == "interrupted" {
 				gateJourneyDaemon(t, h, "stop")
@@ -319,7 +319,6 @@ func TestDocumentJourneyAdmissionAndInterruptedHistory(t *testing.T) {
 						flag = "--skip-worktree"
 					}
 					gitIn(t, h, worktree, "update-index", flag, "feature.txt")
-					cause = "1 entries are hidden from status by index flags"
 				}
 				if kind != "flag-without-edit" {
 					if err := os.WriteFile(filepath.Join(worktree, "feature.txt"), []byte("owner's uncommitted bytes\n"), 0600); err != nil {
@@ -333,6 +332,25 @@ func TestDocumentJourneyAdmissionAndInterruptedHistory(t *testing.T) {
 			}
 			flags := gitIn(t, h, worktree, "ls-files", "-v")
 			h.Respond(parked.ID, boundary, types.ActionApprove)
+			if kind == "dirty" {
+				// The custom gate's leftover edit is preserved before Document,
+				// which sends it back through Review and this gate again.
+				step, _ := findStep(parked.Steps, boundary)
+				revalidated := documentJourneyNextGate(t, h, parked.ID, boundary, step.Gate.Nonce)
+				review, ok := findStep(revalidated.Steps, types.StepReview)
+				if revalidated.HeadSHA == submitted || !ok || review.Status != types.StepStatusCompleted || review.RoundCount < 2 ||
+					gitIn(t, h, worktree, "show", revalidated.HeadSHA+":feature.txt") != strings.TrimSpace(string(before)) {
+					t.Fatalf("inherited edit was not preserved and re-reviewed: %+v", revalidated)
+				}
+				h.Respond(parked.ID, boundary, types.ActionApprove)
+				limited := documentJourneyNextGate(t, h, parked.ID, types.StepDocument, "")
+				after, err := os.ReadFile(filepath.Join(worktree, "feature.txt"))
+				if err != nil || string(after) != string(before) || limited.HeadSHA != revalidated.HeadSHA ||
+					gitIn(t, h, worktree, "ls-files", "-v") != flags || len(documentJourneyPasses(t, h, parked.ID)) != 0 || documentJourneyCalls(h) != 0 {
+					t.Fatalf("zero Document budget changed the preserved edit or launched an agent: %+v error=%v", limited, err)
+				}
+				return
+			}
 			failed := documentJourneyFailed(t, h, branch, cause)
 			after, err := os.ReadFile(filepath.Join(worktree, "feature.txt"))
 			if err != nil || string(after) != string(before) || gitIn(t, h, worktree, "rev-parse", "HEAD") != submitted || gitIn(t, h, worktree, "ls-files", "-v") != flags {

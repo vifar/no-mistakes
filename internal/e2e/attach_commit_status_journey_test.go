@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/scm/plugin/fakeplugin"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -253,15 +253,24 @@ func TestAttachCommitStatusJourney(t *testing.T) {
 		statusCommand(t, h, h.WorkDir, "daemon", "stop", "--force")
 		// Crash window: the forge received failure, but its durable acknowledgement
 		// was lost. Recovery would repost it unless the replacement retires it.
-		database, err := db.Open(paths.WithRoot(h.NMHome).DB())
+		database, err := sql.Open("sqlite", paths.WithRoot(h.NMHome).DB())
 		if err != nil {
 			t.Fatal(err)
 		}
-		p := db.CommitStatusPublication{SHA: head, Host: "github.com", Repo: "example/closes", LastState: "pending"}
-		if err := database.PutCommitStatusPublication(old.ID, p); err != nil {
-			t.Fatal(err)
+		defer database.Close()
+		loseAcknowledgement := func() {
+			t.Helper()
+			// Seed a lost POST acknowledgement, bypassing the live writer's
+			// terminal-state guard. Preserve ownership and retirement evidence.
+			result, err := database.Exec(`UPDATE commit_status_publications SET last_state='pending' WHERE run_id=? AND sha=? AND host='github.com' AND repo='example/closes'`, old.ID, head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n, err := result.RowsAffected(); err != nil || n != 1 {
+				t.Fatalf("lost acknowledgement fixture: rows=%d error=%v", n, err)
+			}
 		}
-		_ = database.Close()
+		loseAcknowledgement()
 		// Restart first: recovery is obliged to retry this old failure.
 		statusCommand(t, h, h.WorkDir, "daemon", "start")
 		deadline := time.Now().Add(10 * time.Second)
@@ -276,16 +285,9 @@ func TestAttachCommitStatusJourney(t *testing.T) {
 		}
 		forge.assert(t, head, "pending", "failure", "failure", "pending")
 		statusCommand(t, h, h.WorkDir, "daemon", "stop", "--force")
-		database, err = db.Open(paths.WithRoot(h.NMHome).DB())
-		if err != nil {
-			t.Fatal(err)
-		}
 		// Replay the old acknowledgement loss after adoption too. A dedup-only
 		// implementation would now put failure after the replacement's pending.
-		if err := database.PutCommitStatusPublication(old.ID, p); err != nil {
-			t.Fatal(err)
-		}
-		_ = database.Close()
+		loseAcknowledgement()
 		statusCommand(t, h, h.WorkDir, "daemon", "start")
 		resumed := waitForStepStatus(t, h, branch, types.StepReview, types.StepStatusAwaitingApproval, 60*time.Second)
 		if resumed.ID != current.ID {

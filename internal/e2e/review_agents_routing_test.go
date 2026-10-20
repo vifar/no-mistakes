@@ -40,6 +40,7 @@ func writeReviewAgentsRoutingScenario(t *testing.T) string {
     stage: ["feature.txt"]
     structured:
       summary: "resolve review finding"
+      verification: passed
   - match: "` + rereviewTurnMarker + `"
     text: "clean after fix"
     structured:

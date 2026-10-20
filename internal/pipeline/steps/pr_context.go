@@ -254,24 +254,9 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 	// Attribute that movement before classifying drift, using the commit edges
 	// recorded by commitChanges, never mutable runs.head_sha alone.
 	if targetChanged && eligible && previous.LocalHeadSHA != candidate.LocalHeadSHA &&
-		sctx.PRContextAfterStep && step.Order() >= types.StepReview.Order() && step.Order() <= types.StepLint.Order() &&
+		sctx.PRContextAfterStep && step.Order() >= types.StepReview.Order() && step.Order() <= types.StepPush.Order() &&
 		sameRewindIdentity(previous, candidate) && candidate.LocalHeadSHA == sctx.Run.HeadSHA {
-		if err := sctx.DB.ValidatePipelineHeadForward(sctx.Run.ID, previous.LocalHeadSHA, candidate.LocalHeadSHA); err != nil {
-			return pipeline.PRContextDecision{}, fmt.Errorf("target advance with unexplained local head: %w", err)
-		}
-		if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", previous.LocalHeadSHA, candidate.LocalHeadSHA); err != nil {
-			return pipeline.PRContextDecision{}, fmt.Errorf("target advance with non-descendant pipeline head: %w", err)
-		}
-		// Keep the old target until the rewind transaction records the advance.
-		own, err := prComparisonAtTarget(sctx, previous.TargetBranch, previous.TargetSHA, candidate.LocalHeadSHA)
-		if err != nil {
-			return pipeline.PRContextDecision{}, err
-		}
-		own.PRURL, own.SourceRepo, own.SourceBranch, own.ForgeHeadSHA = previous.PRURL, previous.SourceRepo, previous.SourceBranch, previous.ForgeHeadSHA
-		if _, err := sctx.DB.AdvanceRunPRContext(sctx.Run.ID, own); err != nil {
-			return pipeline.PRContextDecision{}, err
-		}
-		previous, err = sctx.DB.GetRunPRContext(sctx.Run.ID)
+		previous, err = attributeTargetAdvanceHead(sctx, previous, candidate)
 		if err != nil {
 			return pipeline.PRContextDecision{}, err
 		}
@@ -314,6 +299,27 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 		if step == types.StepPush && previous.LocalHeadSHA == localHead &&
 			candidate.ForgeHeadSHA == localHead {
 			forward = true
+		}
+	}
+	// A step can move the head itself: the Push step commits the formatter's
+	// and the agents' leftover changes, and a fix round commits its repair.
+	// The recorded commit lineage is the proof that the advance was the
+	// pipeline's own, so the comparison follows it instead of refusing it as
+	// an unexplained change. Without this, a formatter that reformats one
+	// file fails the run at the publication boundary - the same class of
+	// false failure as the target advance this guard also recovers from.
+	//
+	// The LOCAL commit lineage says nothing about the forge's head. Another
+	// publisher moving the attached PR is not this run's advance, so the
+	// forge identity and head must be unchanged here; a published-head
+	// transition has its own proof below.
+	if previous != nil && sctx.PRContextAfterStep && !forward &&
+		previous.LocalHeadSHA != candidate.LocalHeadSHA &&
+		previous.TargetSHA == candidate.TargetSHA && sameRewindIdentity(previous, candidate) {
+		if err := sctx.DB.ValidatePipelineHeadForward(sctx.Run.ID, previous.LocalHeadSHA, candidate.LocalHeadSHA); err == nil {
+			if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", previous.LocalHeadSHA, candidate.LocalHeadSHA); err == nil {
+				forward = true
+			}
 		}
 	}
 	// Push and a later CI repair can publish a descendant of the last bound
@@ -463,12 +469,15 @@ func verifyPRMutationComparison(sctx *pipeline.StepContext, host scm.Host, pr *s
 		return fmt.Errorf("durable run head differs from PR comparison receipt before update")
 	}
 	if allowProposed {
-		dirty, err := git.HasUncommittedChanges(sctx.Ctx, sctx.WorkDir)
+		// Recognized tool scratch is not an edit: it is never committed, so
+		// it must not make the worktree look dirty here. A real edit still
+		// refuses, exactly as before.
+		dirtyPaths, err := worktreeDirtyPathsOutsideScratch(sctx)
 		if err != nil {
 			return fmt.Errorf("check worktree before PR attestation update: %w", err)
 		}
-		if dirty {
-			return fmt.Errorf("worktree is dirty before PR attestation update")
+		if len(dirtyPaths) > 0 {
+			return fmt.Errorf("worktree is dirty before PR attestation update: %s", strings.Join(dirtyPaths, ", "))
 		}
 	}
 	reader, ok := host.(scm.PRFactsReader)
@@ -505,7 +514,7 @@ func verifyPRMutationComparison(sctx *pipeline.StepContext, host scm.Host, pr *s
 	expected := receipt.PRContextCandidate
 	expected.PRURL, expected.SourceRepo, expected.SourceBranch, expected.ForgeHeadSHA = "", "", "", ""
 	if current != expected {
-		return fmt.Errorf("live target commit, merge base, or diff differs from PR comparison receipt before update")
+		return fmt.Errorf("%w: live target commit, merge base, or diff differs from PR comparison receipt before update", errTargetComparisonAdvanced)
 	}
 	return nil
 }

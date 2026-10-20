@@ -88,6 +88,7 @@ CREATE TABLE IF NOT EXISTS runs (
     external_ci_owner    TEXT NOT NULL DEFAULT '',
     pi_profile           TEXT,
     verification_plan    TEXT,
+    leftover_validation_commits INTEGER NOT NULL DEFAULT 0,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
@@ -556,3 +557,20 @@ var migrationStatements = append([]string{
 	// Separate observation: never replace the original qualification comparison.
 	`ALTER TABLE run_pr_contexts ADD COLUMN retained_target_sha TEXT`,
 }, statusValidationMigrationStatements...)
+
+// additiveMigrationStatements hold the additive schema changes that a
+// database created before the referenced column existed must receive. They
+// run on versioned and legacy unversioned upgrades, and each statement must be
+// idempotent via its error being tolerated when the column already exists.
+//
+// A statement added here must ALSO be applied to a fresh database, so it
+// belongs in `schemaSQL` (the fresh-database DDL) as well.
+var additiveMigrationStatements = []string{
+	// How many times this run committed a predecessor's leftover validation
+	// edits as a pipeline correction. It bounds the loop: each such commit
+	// sends the head through revalidation. An agent that keeps writing files
+	// must not keep the run going forever. One commit per run is the bound: the
+	// first leftover is preserved and re-reviewed, and a second one is
+	// refused rather than looped on.
+	`ALTER TABLE runs ADD COLUMN leftover_validation_commits INTEGER NOT NULL DEFAULT 0`,
+}

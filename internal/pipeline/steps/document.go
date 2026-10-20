@@ -118,12 +118,44 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if err := assertDocumentIndexVisible(sctx); err != nil {
 		return nil, err
 	}
-	status, err := stepGitRun(sctx, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
+	// The clean-entry contract covers the worktree's real edits. Recognized
+	// tool scratch (a test harness's live database, for example) is not an
+	// edit: it never belongs in the branch, and it must not kill the run.
+	dirtyPaths, err := worktreeDirtyPathsOutsideScratch(sctx)
 	if err != nil {
 		return nil, err
 	}
-	if status != "" {
-		return nil, fmt.Errorf("Document requires a clean worktree so convergence can safely discard only its own edits")
+	if len(dirtyPaths) > 0 {
+		// A previous step's agent left edits in the worktree. Refusing here
+		// kills the run over work the pipeline can preserve: the edits are
+		// committed as a pipeline correction attributed to the step that left
+		// them, and the run returns to Review so they are reviewed before
+		// anything is published. Document starts without real edits and
+		// discards only its own proposal; inherited scratch stays outside
+		// that proposal even if the agent stages it.
+		restart, commitErr := commitPredecessorValidationEdits(sctx)
+		if commitErr != nil {
+			return nil, commitErr
+		}
+		if restart {
+			return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
+		}
+		return nil, fmt.Errorf("Document requires a clean worktree so convergence can safely discard only its own edits: %s", strings.Join(dirtyPaths, ", "))
+	}
+	var entryPaths []string
+	for _, args := range [][]string{
+		{"ls-files", "--others", "--exclude-standard", "-z"},
+		{"diff", "--cached", "--diff-filter=A", "--no-renames", "--name-only", "-z", "HEAD"},
+	} {
+		out, err := stepGitRunRaw(sctx, args...)
+		if err != nil {
+			return nil, err
+		}
+		entryPaths = append(entryPaths, documentNULPaths(out)...)
+	}
+	retainedScratch, err := documentScratchPaths(sctx, entryPaths)
+	if err != nil {
+		return nil, err
 	}
 	observed, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
@@ -192,7 +224,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if result == nil {
 		return nil, fmt.Errorf("agent document returned no result")
 	}
-	paths, untracked, err := documentCandidatePaths(sctx, headBefore)
+	paths, untracked, err := documentCandidatePaths(sctx, headBefore, retainedScratch)
 	if err != nil {
 		return nil, err
 	}
@@ -216,18 +248,22 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if err != nil {
 		return nil, err
 	}
-	needsCommit, err := stepGitRun(sctx, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
+	// The prospective-commit count excludes recognized tool scratch: a test
+	// harness's live database left behind by an earlier step is not this
+	// pass's proposal, so it must not consume the commit budget or trigger
+	// the rollback.
+	needsCommit, err := worktreeDirtyPathsOutsideScratch(sctx)
 	if err != nil {
 		return nil, err
 	}
 	prospectiveCommits := agentCommits
-	if needsCommit != "" {
+	if len(subtractDocumentPaths(needsCommit, retainedScratch)) > 0 {
 		prospectiveCommits++
 	}
 	capExceeded := prospectiveCommits > limit-history.commits
 	suppressed := capExceeded || repeated
 	if suppressed {
-		if err := discardDocumentCandidate(sctx, headBefore, paths, untracked); err != nil {
+		if err := discardDocumentCandidate(sctx, headBefore, paths, untracked, retainedScratch); err != nil {
 			return nil, err
 		}
 		if proposedErr != nil {

@@ -54,7 +54,11 @@ func TestUserJourney(t *testing.T) {
 	}
 }
 
-func TestTestAgentNewTestFilesRefuseDirtyDocumentEntry(t *testing.T) {
+// TestTestAgentNewTestFilesArePreservedAndReReviewed proves the Test agent's
+// uncommitted files do not kill the run: the pipeline preserves them as a
+// pipeline commit and sends them through re-review, so nothing reaches the
+// branch without a review of the head that carries it.
+func TestTestAgentNewTestFilesArePreservedAndReReviewed(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t)})
 	if out, err := h.Run("init"); err != nil {
 		t.Fatalf("nm init: %v\n%s", err, out)
@@ -1848,11 +1852,13 @@ func assertTestAgentNewTestFileRun(t *testing.T, h *Harness) {
 	t.Helper()
 	h.CommitChange("test-agent-new-test-file", "test-agent-new-test-file.txt", "test agent new test file\n", "add test agent new test file")
 	h.PushToGate("test-agent-new-test-file")
-	// Test may report a new test file without parking. Document's clean-entry
-	// contract then refuses the uncommitted edits before publication.
+	// Test may report a new test file without parking. The file is not
+	// committed, so the next step finds a dirty worktree. The pipeline
+	// preserves it as a pipeline correction and sends the run back to
+	// Review, so the file is reviewed before anything is published.
 	run := h.WaitForRun("test-agent-new-test-file", 60*time.Second)
-	if run.Status != types.RunFailed || !strings.Contains(deref(run.Error), "Document requires a clean worktree") {
-		t.Fatalf("test-agent-new-test-file should fail Document's clean-entry check: status=%s error=%v", run.Status, deref(run.Error))
+	if run.Status == types.RunFailed && strings.Contains(deref(run.Error), "Document requires a clean worktree") {
+		t.Fatalf("the run died on the Test agent's uncommitted file: status=%s error=%v", run.Status, deref(run.Error))
 	}
 	testStep, ok := findStep(run.Steps, types.StepTest)
 	if !ok {
@@ -1861,28 +1867,80 @@ func assertTestAgentNewTestFileRun(t *testing.T, h *Harness) {
 	if testStep.Status != types.StepStatusCompleted {
 		t.Fatalf("test step status = %s, want completed", testStep.Status)
 	}
-	if testStep.FindingsJSON == nil {
-		t.Fatal("expected test step to record findings JSON for new test file")
+	assertUncommittedTestFileIsPreservedAndReReviewed(t, h, run, "agent_test.py", "def test_agent():\n    pass\n")
+}
+
+// assertUncommittedTestFileIsPreservedAndReReviewed proves the Test agent's
+// uncommitted file is PRESERVED as a pipeline commit and sent through
+// re-review, instead of killing the run.
+//
+// The oracle is the run's own terminal outcome plus the branch's own content:
+// the run must COMPLETE, the file must be on the published branch with its
+// content intact, and a review must have run against the head that carries
+// the correction. A run that failed after Document, or that published the
+// correction without a review of its head, does not satisfy this.
+func assertUncommittedTestFileIsPreservedAndReReviewed(t *testing.T, h *Harness, run *ipc.RunInfo, path, content string) {
+	t.Helper()
+	if run.Status != types.RunCompleted {
+		t.Fatalf("the run status = %s, want completed: %v", run.Status, deref(run.Error))
 	}
-	findings, err := types.ParseFindingsJSON(*testStep.FindingsJSON)
+	document, ok := findStep(run.Steps, types.StepDocument)
+	if !ok {
+		t.Fatal("expected a document step")
+	}
+	if document.Status == types.StepStatusFailed {
+		t.Fatalf("the document step died on the predecessor's uncommitted file: %+v", document)
+	}
+	review, ok := findStep(run.Steps, types.StepReview)
+	if !ok || review.Status != types.StepStatusCompleted {
+		t.Fatalf("the review did not complete: %+v", review)
+	}
+	// The review that completed covered the preserved file, so the file was
+	// reviewed at the head that carries it.
+	if review.FindingsJSON == nil {
+		t.Fatalf("the completed review recorded no findings: %+v", review)
+	}
+	findings, err := types.ParseFindingsJSON(*review.FindingsJSON)
 	if err != nil {
-		t.Fatalf("parse new test file findings: %v", err)
+		t.Fatalf("parse the review findings: %v", err)
 	}
-	if len(findings.Items) != 1 || findings.Items[0].File != "agent_test.py" ||
-		findings.Items[0].Action != types.ActionNoOp {
-		t.Fatalf("Test lost its informational note about the added test: %+v", findings.Items)
+	covered := false
+	for _, reviewed := range findings.ReviewedPaths {
+		if reviewed == path {
+			covered = true
+		}
 	}
-	assertDirtyDocumentEntryStopsPublication(t, h, run)
+	if !covered {
+		t.Fatalf("the completed review did not cover the preserved file %s: %+v", path, findings.ReviewedPaths)
+	}
+	// The re-review is what the correction caused: the run reviewed the
+	// file's head before it existed and again after.
+	if review.RoundCount < 2 {
+		t.Fatalf("the run did not re-review after the correction: %+v", review)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	// The file is on the published branch, with its content intact.
+	published, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/"+strings.TrimPrefix(run.Branch, "refs/heads/")+":"+path)
+	if err != nil {
+		t.Fatalf("the preserved file %s is not on the published branch: %v", path, err)
+	}
+	if string(published) != content {
+		t.Fatalf("the preserved file %s = %q, want %q", path, published, content)
+	}
+	commits := gitIn(t, h, h.UpstreamDir, "log", "-3", "--format=%h %s", "refs/heads/"+strings.TrimPrefix(run.Branch, "refs/heads/"))
+	t.Logf("completed run %s published %s with content %q; Review completed %d rounds and covered %s; published commits:\n%s", run.ID, path, published, review.RoundCount, path, commits)
 }
 
 func assertTestAgentStagedNewTestFileRun(t *testing.T, h *Harness) {
 	t.Helper()
 	h.CommitChange("test-agent-staged-new-test-file", "test-agent-staged-new-test-file.txt", "test agent staged new test file\n", "add test agent staged new test file")
 	h.PushToGate("test-agent-staged-new-test-file")
-	// Staging the file does not satisfy Document's clean-entry contract.
+	// Staging the file does not satisfy Document's clean-entry contract, so
+	// the pipeline preserves it as a pipeline commit and re-reviews it.
 	run := h.WaitForRun("test-agent-staged-new-test-file", 60*time.Second)
-	if run.Status != types.RunFailed || !strings.Contains(deref(run.Error), "Document requires a clean worktree") {
-		t.Fatalf("test-agent-staged-new-test-file should fail Document's clean-entry check: status=%s error=%v", run.Status, deref(run.Error))
+	if run.Status == types.RunFailed && strings.Contains(deref(run.Error), "Document requires a clean worktree") {
+		t.Fatalf("the run died on the Test agent's staged file: status=%s error=%v", run.Status, deref(run.Error))
 	}
 	testStep, ok := findStep(run.Steps, types.StepTest)
 	if !ok {
@@ -1891,39 +1949,7 @@ func assertTestAgentStagedNewTestFileRun(t *testing.T, h *Harness) {
 	if testStep.Status != types.StepStatusCompleted {
 		t.Fatalf("test step status = %s, want completed", testStep.Status)
 	}
-	if testStep.FindingsJSON == nil {
-		t.Fatal("expected test step to record findings JSON for staged new test file")
-	}
-	findings, err := types.ParseFindingsJSON(*testStep.FindingsJSON)
-	if err != nil {
-		t.Fatalf("parse staged new test file findings: %v", err)
-	}
-	if len(findings.Items) != 1 || findings.Items[0].File != "agent_staged_test.go" ||
-		findings.Items[0].Action != types.ActionNoOp {
-		t.Fatalf("Test lost its informational note about the staged test: %+v", findings.Items)
-	}
-	assertDirtyDocumentEntryStopsPublication(t, h, run)
-}
-
-func assertDirtyDocumentEntryStopsPublication(t *testing.T, h *Harness, run *ipc.RunInfo) {
-	t.Helper()
-	document, ok := findStep(run.Steps, types.StepDocument)
-	if !ok || document.Status != types.StepStatusFailed {
-		t.Fatalf("expected failed Document step, got %+v", document)
-	}
-	for _, name := range []types.StepName{types.StepLint, types.StepPush, types.StepPR, types.StepCI} {
-		step, ok := findStep(run.Steps, name)
-		if !ok || step.Status != types.StepStatusPending {
-			t.Fatalf("%s should remain pending after dirty Document entry, got %+v", name, step)
-		}
-	}
-	assertPromptsAbsent(t, h.AgentInvocations(), documentTurnMarker+strings.TrimPrefix(run.Branch, "refs/heads/"))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	out, err := h.runGit(ctx, h.UpstreamDir, "show-ref", "--verify", "--quiet", "refs/heads/"+strings.TrimPrefix(run.Branch, "refs/heads/"))
-	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
-		t.Fatalf("dirty Document entry must not publish the branch: %v %s", err, out)
-	}
+	assertUncommittedTestFileIsPreservedAndReReviewed(t, h, run, "agent_staged_test.go", "package main\n")
 }
 
 func assertReviewWarningRun(t *testing.T, h *Harness) {
