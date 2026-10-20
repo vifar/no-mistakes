@@ -111,7 +111,7 @@ func worktreeDirtyPathsOutsideScratch(sctx *pipeline.StepContext) ([]string, err
 			return nil, fmt.Errorf("invalid git status entry %q", entry)
 		}
 		file := entry[3:]
-		if entry[0] == '?' {
+		if entry[0] == '?' || entry[0] == 'A' {
 			// An untracked path is scratch when its first new component marks
 			// scratch, or when it matches a staging exclude.
 			scratch, err := firstNewScratchComponent(sctx, headDirs, file, false)

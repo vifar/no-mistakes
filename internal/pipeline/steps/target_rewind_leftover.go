@@ -239,45 +239,30 @@ func rewindProducerStep(c *pipeline.StepContext) (string, error) {
 	if len(history) == 0 {
 		return "", nil
 	}
+	latest := history[len(history)-1]
+	if latest.BoundaryStep != nil {
+		name := types.StepName(*latest.BoundaryStep)
+		if anchor, ok := name.CustomGateAnchor(); ok {
+			name = anchor
+		}
+		return string(name), nil
+	}
 	producer := ""
-	for _, entry := range history[len(history)-1].Steps {
-		if archivedStepStatus(entry) != string(types.StepStatusCompleted) {
+	for _, entry := range latest.Steps {
+		if entry["status"] != string(types.StepStatusCompleted) {
 			continue
 		}
-		name := archivedStepName(entry)
-		if name == "" {
-			continue
+		rawName, _ := entry["step_name"].(string)
+		name := types.StepName(rawName)
+		if anchor, ok := name.CustomGateAnchor(); ok {
+			name = anchor
 		}
-		switch name {
+		switch string(name) {
 		case string(types.StepRebase), string(types.StepReview), string(types.StepTest), string(types.StepDocument), string(types.StepLint):
-			producer = name
+			producer = string(name)
 		}
 	}
 	return producer, nil
-}
-
-// archivedStepName reads the step name from an archived step row.
-func archivedStepName(entry map[string]any) string {
-	for _, key := range []string{"step_name", "stepName"} {
-		if value, ok := entry[key]; ok {
-			if name, ok := value.(string); ok {
-				return name
-			}
-		}
-	}
-	return ""
-}
-
-// archivedStepStatus reads the status from an archived step row.
-func archivedStepStatus(entry map[string]any) string {
-	for _, key := range []string{"status", "step_status"} {
-		if value, ok := entry[key]; ok {
-			if status, ok := value.(string); ok {
-				return status
-			}
-		}
-	}
-	return ""
 }
 
 // lastCompletedValidationStep names the last core step that COMPLETED in this

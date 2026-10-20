@@ -82,7 +82,7 @@ func documentCapFinding(findings Findings, discarded bool) Findings {
 // Recognized tool scratch is EXCLUDED: a test harness's live database left
 // behind by an earlier step is not this pass's proposal, so it must not count
 // as a prospective commit and must never be deleted by the rollback.
-func documentCandidatePaths(sctx *pipeline.StepContext, from string) ([]string, []string, error) {
+func documentCandidatePaths(sctx *pipeline.StepContext, from string, retained []string) ([]string, []string, error) {
 	head, err := stepGitRun(sctx, "rev-parse", "HEAD")
 	if err != nil {
 		return nil, nil, err
@@ -91,30 +91,26 @@ func documentCandidatePaths(sctx *pipeline.StepContext, from string) ([]string, 
 	if err != nil {
 		return nil, nil, err
 	}
-	for _, args := range [][]string{
-		{"diff", "--cached", "--name-only", "--no-renames", "--ignore-submodules=none", "-z", "HEAD"},
-		{"diff", "--name-only", "--no-renames", "--ignore-submodules=none", "-z"},
-	} {
-		out, err := stepGitRunRaw(sctx, args...)
-		if err != nil {
-			return nil, nil, fmt.Errorf("read Document edits: %w", err)
-		}
-		paths = append(paths, documentNULPaths(out)...)
+	dirty, err := worktreeDirtyPathsOutsideScratch(sctx)
+	if err != nil {
+		return nil, nil, err
 	}
+	paths = subtractDocumentPaths(append(paths, dirty...), retained)
 	untracked, err := stepGitRunRaw(sctx, "ls-files", "--others", "--exclude-standard", "-z")
 	if err != nil {
 		return nil, nil, fmt.Errorf("read untracked Document edits: %w", err)
 	}
-	newPaths := documentNULPaths(untracked)
-	scratch, err := documentScratchPaths(sctx, newPaths)
-	if err != nil {
-		return nil, nil, err
+	candidates := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		candidates[path] = true
 	}
-	if len(scratch) > 0 {
-		newPaths = subtractDocumentPaths(newPaths, scratch)
-		paths = subtractDocumentPaths(paths, scratch)
+	var newPaths []string
+	for _, path := range documentNULPaths(untracked) {
+		if candidates[path] {
+			newPaths = append(newPaths, path)
+		}
 	}
-	return append(paths, newPaths...), newPaths, nil
+	return paths, newPaths, nil
 }
 
 // documentScratchPaths returns the subset of paths that is recognized tool
@@ -269,7 +265,7 @@ func documentCommitCount(sctx *pipeline.StepContext, from, to string) (int, erro
 // The caller proved a clean starting tree BEFORE invoking the agent. Only
 // that invocation's edits may be discarded, including its own commits. A
 // failed restoration aborts the step instead of leaving edits for Push.
-func discardDocumentCandidate(sctx *pipeline.StepContext, from string, paths, untracked []string) error {
+func discardDocumentCandidate(sctx *pipeline.StepContext, from string, paths, untracked, retained []string) error {
 	// Recheck before ANY mutation: the agent may have set flags after entry.
 	// Refusal leaves its commits, files, flags and pending pass untouched.
 	if err := assertDocumentIndexVisible(sctx); err != nil {
@@ -321,11 +317,11 @@ func discardDocumentCandidate(sctx *pipeline.StepContext, from string, paths, un
 			return fmt.Errorf("restore converged Document head: %w", err)
 		}
 	}
-	status, err := stepGitRun(sctx, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
+	dirty, err := worktreeDirtyPathsOutsideScratch(sctx)
 	if err != nil {
 		return err
 	}
-	if status != "" {
+	if len(subtractDocumentPaths(dirty, retained)) > 0 {
 		return fmt.Errorf("suppressed Document edits remain in the worktree")
 	}
 	return nil

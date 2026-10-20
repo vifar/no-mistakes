@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -166,39 +167,54 @@ func TestTargetRewindLeftoverCommitFailureNamesTheStepAndPaths(t *testing.T) {
 // LIVE rows finds no completed step and blames the wrong one. The ARCHIVED
 // rewind history is the evidence that keeps the attribution honest.
 func TestTargetRewindAttributesTheProducerFromArchivedEvidence(t *testing.T) {
-	c, selected := rewindFixture(t)
-	// The run completed Review and Test before the target moved.
-	for _, name := range []types.StepName{types.StepReview, types.StepTest} {
-		step, err := c.DB.InsertStepResult(c.Run.ID, name)
-		if err != nil {
-			t.Fatal(err)
+	gate := types.CustomGateStepName(types.StepTest, "validation")
+	for _, name := range []types.StepName{types.StepTest, types.StepDocument, gate} {
+		for _, postStep := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/post_%t", name, postStep), func(t *testing.T) {
+				c, selected := rewindFixture(t)
+				review, err := c.DB.InsertStepResult(c.Run.ID, types.StepReview)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := c.DB.CompleteStep(review.ID, 0, 1, "review.log"); err != nil {
+					t.Fatal(err)
+				}
+				step, err := c.DB.InsertStepResult(c.Run.ID, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if postStep {
+					err = c.DB.StartStep(step.ID)
+				} else {
+					err = c.DB.CompleteStep(step.ID, 0, 1, "step.log")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				advanceRewindTarget(t, c)
+				c.PRContextAfterStep = postStep
+				boundary := types.StepPush
+				if postStep {
+					boundary = name
+				}
+				if _, err := guardPRContextWithSelection(c, boundary, selected, false); err != nil {
+					t.Fatal(err)
+				}
+				if postStep {
+					if err := c.DB.RecordTargetRewindBoundary(c.Run.ID, 1, string(name), `{}`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				want := name
+				if name == gate {
+					want = types.StepTest
+				}
+				producer, err := rewindProducerStep(c)
+				if err != nil || producer != string(want) {
+					t.Fatalf("producer = %q, want %s: %v", producer, want, err)
+				}
+			})
 		}
-		if err := c.DB.CompleteStep(step.ID, 0, 1, "step.log"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	advanceRewindTarget(t, c)
-	c.PRContextAfterStep = true
-	if _, err := guardPRContextWithSelection(c, types.StepTest, selected, false); err != nil {
-		t.Fatal(err)
-	}
-	// The rewind's own transaction reset the live step rows.
-	live, err := c.DB.GetStepsByRun(c.Run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range live {
-		if row.StepName == types.StepTest && row.Status == types.StepStatusCompleted {
-			t.Fatal("the fixture did not reset the live step rows")
-		}
-	}
-	// The archived evidence still names the producer.
-	producer, err := rewindProducerStep(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if producer != string(types.StepTest) {
-		t.Fatalf("the producer = %q, want test", producer)
 	}
 }
 

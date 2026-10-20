@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -231,5 +232,97 @@ func TestDocumentStep_ToolScratchAloneDoesNotBlockTheStep(t *testing.T) {
 	tracked := gitCmd(t, c.WorkDir, "ls-files")
 	if strings.Contains(tracked, ".journal-live") {
 		t.Fatalf("tool scratch entered the branch: %s", tracked)
+	}
+}
+
+func TestDocumentStep_PreservesInheritedScratchAcrossRollback(t *testing.T) {
+	for _, initialStaged := range []bool{false, true} {
+		for _, action := range []string{"untracked", "staged", "committed"} {
+			t.Run(fmt.Sprintf("initial_staged_%t/%s", initialStaged, action), func(t *testing.T) {
+				c := documentFixture(t)
+				head := c.Run.HeadSHA
+				c.Config.Document.MaxCommitsPerRun = 1
+				path := ".journal-live/postgres.log"
+				full := filepath.Join(c.WorkDir, path)
+				if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, []byte("live database log\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if initialStaged {
+					gitCmd(t, c.WorkDir, "add", path)
+				}
+				c.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					if action == "committed" {
+						gitCmd(t, c.WorkDir, "add", "-A")
+					}
+					for _, text := range []string{"first proposal\n", "second proposal\n"} {
+						if err := os.WriteFile(filepath.Join(c.WorkDir, "guide.md"), []byte(text), 0600); err != nil {
+							t.Fatal(err)
+						}
+						if action != "committed" {
+							gitCmd(t, c.WorkDir, "reset", "--", path)
+						}
+						gitCmd(t, c.WorkDir, "add", "guide.md")
+						gitCmd(t, c.WorkDir, "commit", "-qm", "update guide")
+					}
+					if action == "staged" {
+						gitCmd(t, c.WorkDir, "add", "-A")
+					}
+					return &agent.Result{Output: []byte(`{"findings":[],"summary":"updated guide"}`)}, nil
+				}}
+				out, err := (&DocumentStep{}).Execute(c)
+				if err != nil || out == nil || !out.NeedsApproval {
+					t.Fatalf("over-budget proposal did not park cleanly: %+v %v", out, err)
+				}
+				if got := gitCmd(t, c.WorkDir, "rev-parse", "HEAD"); got != head {
+					t.Fatalf("proposal head survived: %s", got)
+				}
+				if _, err := os.Stat(filepath.Join(c.WorkDir, "guide.md")); !os.IsNotExist(err) {
+					t.Fatalf("proposal file survived: %v", err)
+				}
+				if got, err := os.ReadFile(full); err != nil || string(got) != "live database log\n" {
+					t.Fatalf("inherited scratch lost: %q %v", got, err)
+				}
+				dirty, err := worktreeDirtyPathsOutsideScratch(c)
+				if err != nil || len(dirty) != 0 {
+					t.Fatalf("rollback left real edits: %q %v", dirty, err)
+				}
+			})
+		}
+	}
+}
+
+func TestDocumentStep_StagedScratchDoesNotSpendCommitBudget(t *testing.T) {
+	c := documentFixture(t)
+	c.Config.Document.MaxCommitsPerRun = 1
+	path := filepath.Join(c.WorkDir, ".journal-live/postgres.log")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("scratch\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, c.WorkDir, "add", "-A")
+	c.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		gitCmd(t, c.WorkDir, "reset", "--", ".journal-live/postgres.log")
+		if err := os.WriteFile(filepath.Join(c.WorkDir, "guide.md"), []byte("accepted guide\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, c.WorkDir, "add", "guide.md")
+		gitCmd(t, c.WorkDir, "commit", "-qm", "update guide")
+		gitCmd(t, c.WorkDir, "add", "-A")
+		return &agent.Result{Output: []byte(`{"findings":[],"summary":"updated guide"}`)}, nil
+	}}
+	out, err := (&DocumentStep{}).Execute(c)
+	if err != nil || out == nil || out.NeedsApproval {
+		t.Fatalf("scratch rejected an allowed commit: %+v %v", out, err)
+	}
+	if got, err := os.ReadFile(filepath.Join(c.WorkDir, "guide.md")); err != nil || string(got) != "accepted guide\n" {
+		t.Fatalf("allowed proposal lost: %q %v", got, err)
+	}
+	if got := gitCmd(t, c.WorkDir, "ls-tree", "-r", "--name-only", "HEAD", "--", ".journal-live"); got != "" {
+		t.Fatalf("scratch published: %s", got)
 	}
 }

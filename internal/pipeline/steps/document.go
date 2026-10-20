@@ -142,6 +142,21 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		}
 		return nil, fmt.Errorf("Document requires a clean worktree so convergence can safely discard only its own edits: %s", strings.Join(dirtyPaths, ", "))
 	}
+	var entryPaths []string
+	for _, args := range [][]string{
+		{"ls-files", "--others", "--exclude-standard", "-z"},
+		{"diff", "--cached", "--diff-filter=A", "--no-renames", "--name-only", "-z", "HEAD"},
+	} {
+		out, err := stepGitRunRaw(sctx, args...)
+		if err != nil {
+			return nil, err
+		}
+		entryPaths = append(entryPaths, documentNULPaths(out)...)
+	}
+	retainedScratch, err := documentScratchPaths(sctx, entryPaths)
+	if err != nil {
+		return nil, err
+	}
 	observed, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
 		return nil, err
@@ -209,7 +224,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if result == nil {
 		return nil, fmt.Errorf("agent document returned no result")
 	}
-	paths, untracked, err := documentCandidatePaths(sctx, headBefore)
+	paths, untracked, err := documentCandidatePaths(sctx, headBefore, retainedScratch)
 	if err != nil {
 		return nil, err
 	}
@@ -242,13 +257,13 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		return nil, err
 	}
 	prospectiveCommits := agentCommits
-	if len(needsCommit) > 0 {
+	if len(subtractDocumentPaths(needsCommit, retainedScratch)) > 0 {
 		prospectiveCommits++
 	}
 	capExceeded := prospectiveCommits > limit-history.commits
 	suppressed := capExceeded || repeated
 	if suppressed {
-		if err := discardDocumentCandidate(sctx, headBefore, paths, untracked); err != nil {
+		if err := discardDocumentCandidate(sctx, headBefore, paths, untracked, retainedScratch); err != nil {
 			return nil, err
 		}
 		if proposedErr != nil {
