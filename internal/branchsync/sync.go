@@ -1666,7 +1666,11 @@ func (s *Service) anchorSupersededPushHead(ctx context.Context, runID string, ge
 		proof = "worktree"
 	}
 	gateDir := strings.TrimSpace(s.GateDir)
-	if gateDir == "" || !gateExists(gateDir) {
+	exists, err := gateExists(gateDir)
+	if err != nil {
+		return ref, "", false
+	}
+	if !exists {
 		return ref, proof, proof != ""
 	}
 	if !objectExists(ctx, gateDir, superseded) {
@@ -1696,9 +1700,21 @@ func preserveAnchorAt(ctx context.Context, dir, ref, head string) bool {
 	return err == nil && anchored == head
 }
 
-func gateExists(gateDir string) bool {
+func gateExists(gateDir string) (bool, error) {
+	if gateDir == "" {
+		return false, nil
+	}
 	info, err := os.Stat(gateDir)
-	return err == nil && info.IsDir()
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return false, fmt.Errorf("local gate %s is not a directory", gateDir)
+	}
+	return true, nil
 }
 
 // rewrittenMirrorNote names what happens to the private mirror after a
@@ -1709,12 +1725,22 @@ func gateExists(gateDir string) bool {
 // as still guarded, never as retired.
 func (s *Service) rewrittenMirrorNote(ctx context.Context, branch, anchorRef string) string {
 	gateDir := strings.TrimSpace(s.GateDir)
-	if gateDir == "" || branch == "" || !gateExists(gateDir) {
+	if branch == "" {
+		return ""
+	}
+	gatePresent, err := gateExists(gateDir)
+	if err != nil {
+		return fmt.Sprintf("the local gate could not be inspected: %v; the next `no-mistakes axi run` still guards any private mirror", err)
+	}
+	if !gatePresent {
 		return ""
 	}
 	mirrorRef := "refs/heads/" + branch
 	mirror, exists, err := git.DirectRefTarget(ctx, gateDir, mirrorRef)
-	if err != nil || !exists {
+	if err != nil {
+		return fmt.Sprintf("the private mirror %s could not be inspected: %v; the next `no-mistakes axi run` still guards it", mirrorRef, err)
+	}
+	if !exists {
 		return ""
 	}
 	if _, err := git.Run(ctx, gateDir, "rev-parse", "--verify", anchorRef+"^{commit}"); err != nil {

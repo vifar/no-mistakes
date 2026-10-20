@@ -2,6 +2,7 @@ package branchsync
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -188,5 +189,75 @@ func TestRefusedRewriteRecoveryLeavesTheMirrorRefusal(t *testing.T) {
 	}
 	if _, err := gate.PlanSupersededSubmissionReconciliation(f.ctx, f.service.GateDir, f.local, "feature/sync", rebased, f.source()); !isStaleBranchRefusal(err) {
 		t.Fatalf("a refused recovery let the mirror retire: %v", err)
+	}
+}
+
+func TestRecoverRewrittenRemoteDistinguishesAbsentAndUninspectableGates(t *testing.T) {
+	t.Parallel()
+
+	for _, kind := range []string{"unconfigured", "absent", "symlink-loop", "file", "not-repository"} {
+		t.Run(kind, func(t *testing.T) {
+			t.Parallel()
+			f, rebased := newHandRebasedFixture(t)
+			gateDir := f.service.GateDir
+			path := filepath.Join(t.TempDir(), "gate")
+			wantRecovery := false
+			switch kind {
+			case "unconfigured":
+				path = ""
+				wantRecovery = true
+			case "absent":
+				wantRecovery = true
+			case "symlink-loop":
+				if err := os.Symlink(path, path); err != nil {
+					t.Fatal(err)
+				}
+			case "file":
+				mustWrite(t, path, "not a gate\n")
+			case "not-repository":
+				if err := os.Mkdir(path, 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.service.GateDir = path
+			state := f.service.Recover(f.ctx, false)
+			if state.Recovered != wantRecovery {
+				t.Fatalf("recover with %s gate = %#v", kind, state)
+			}
+			if wantRecovery {
+				if state.Recovery == nil || state.Recovery.Proof != "worktree" {
+					t.Fatalf("recovery without a gate lacks worktree proof: %#v", state)
+				}
+				return
+			}
+			if state.Safety != "blocked_recover_preserve_failed" {
+				t.Fatalf("recover with invalid gate = %#v", state)
+			}
+			run, err := f.db.GetRun(f.run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if ptr(run.LastPushedSHA) != f.pushed || value(run.PushGeneration) != value(f.run.PushGeneration) {
+				t.Fatalf("failed recovery changed the binding: %#v", run)
+			}
+			if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != rebased {
+				t.Fatalf("failed recovery moved HEAD to %s, want %s", got, rebased)
+			}
+			anchor := rewrittenAnchorRef(f.run.ID, value(f.run.PushGeneration))
+			if note := f.service.rewrittenMirrorNote(f.ctx, "feature/sync", anchor); !strings.Contains(note, "could not be inspected") {
+				t.Fatalf("gate inspection failure was hidden: %q", note)
+			}
+			f.service.GateDir = gateDir
+			if _, err := gate.PlanSupersededSubmissionReconciliation(f.ctx, gateDir, f.local, "feature/sync", rebased, f.source()); !isStaleBranchRefusal(err) {
+				t.Fatalf("failed recovery credited an uncommitted rebind: %v", err)
+			}
+			recovered := f.service.Recover(f.ctx, false)
+			if !recovered.Recovered {
+				t.Fatalf("retry with accessible gate = %#v", recovered)
+			}
+			if got := mustRun(t, gateDir, "rev-parse", anchor+"^{commit}"); got != f.pushed {
+				t.Fatalf("retry gate anchor = %s, want %s", got, f.pushed)
+			}
+		})
 	}
 }
