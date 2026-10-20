@@ -83,9 +83,10 @@ Pipeline-control commands check the caller's Git common and actual metadata
 directories in one command first. Physical-ancestor checks corroborate successful
 discovery too: incomplete metadata skipped by Git cannot select an enclosing
 repository. Gitfile targets are compared with the actual metadata directory so
-linked and separate Git directories remain supported. Reopened gitfiles are limited
-to 1 MiB and must still be regular files. The independently resolved actual metadata
-path frames the raw common/actual command output, preserving embedded newlines and
+linked and separate Git directories remain supported. Gitfiles and `commondir`
+files may be symlinks to readable regular files; nonregular targets are refused,
+and the regular-file check is repeated after opening. The independently resolved
+actual metadata path frames the raw common/actual command output, preserving embedded newlines and
 terminal whitespace without shell evaluation. The framing boundary converts native
 Windows separators to Git's forward slashes; Unix backslashes remain literal
 filename bytes. Optional top-level attribution also
@@ -113,6 +114,34 @@ The identity Git commands share a ten-second execution budget and honor an
 earlier caller deadline. This is a command budget, not a deadline for the whole
 classifier: filesystem checks, database reads, process-start system calls, and
 authenticated process-ancestry lookup can take longer.
+
+A blocked identity command can be answered by filesystem corroboration, without
+increasing its deadline. In recorded macOS launchd failures, protected-folder
+content opens waited for privacy approval until the kernel's approval watchdog
+expired; metadata lookups remained fast. This condition is intermittent; successful
+discovery in a later probe does not establish a permanent macOS cure. All metadata
+content reads, including those before Git starts and during corroboration, are
+limited to 1 MiB and a 250-millisecond wait under the caller's context. At most
+eight content readers may remain in flight; waiting for a reader slot uses the
+same per-read budget. Fallback uses a separate five-second context derived from
+the still-live caller, without extending the identity Git budget.
+
+The fallback requires the same nearest physical metadata boundary, a recognizable
+actual HEAD and common HEAD, and object/reference directories. A present
+`commondir` must be read and resolved successfully for every layout, including
+bare metadata. If `commondir` is absent, the actual metadata directory itself is
+common; a directory name cannot substitute for that pointer. Unreadable
+or malformed metadata leaves identity unresolved and fails closed. The fallback
+never proves repository absence or accepts HEAD existence alone.
+
+Fallback requires a still-live caller and either a deadline from a started
+identity Git child with no substantive stderr or the complete diagnostic
+`fatal: Unable to read current working directory: Interrupted system call`
+with a sole normal exit 128. Metadata-read and startup timeouts remain errors.
+Other Git diagnostics and normal exit 128 remain fail-closed even when a later
+deadline is reported alongside them. Required content-read failures include
+guidance to check daemon access to repository files, and error wrapping preserves
+the underlying command, context, and output-drain errors.
 
 A Git failure proceeds as repository absence only after a single recognized
 English discovery diagnostic, a normal exit, complete output draining, and

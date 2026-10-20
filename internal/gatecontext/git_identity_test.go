@@ -815,3 +815,316 @@ func TestIdentityGitfileGrowsAfterGitDiscovery(t *testing.T) {
 		})
 	}
 }
+
+// When the Git child cannot answer but required metadata is readable,
+// filesystem corroboration must still resolve an ordinary caller. Unreadable
+// metadata remains an error. Regressions: issue #120.
+func TestIdentityBlockedGitReadFallsBackToTheFilesystem(t *testing.T) {
+	for _, layout := range []string{"plain", "linked"} {
+		t.Run(layout, func(t *testing.T) {
+			f := newTopologyFixture(t)
+			cwd := f.work
+			if layout == "linked" {
+				linked := filepath.Join(t.TempDir(), "linked")
+				run(t, f.work, "git", "worktree", "add", "--detach", linked, "HEAD")
+				cwd = linked
+			}
+			gitfault.Install(t, "blocked-read")
+			got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: cwd})
+			if err != nil {
+				t.Fatalf("blocked identity read was fatal: %+v, %v", got, err)
+			}
+			if got.Nested {
+				t.Fatalf("ordinary clone was refused: %+v", got)
+			}
+		})
+	}
+}
+
+// The fallback must keep the managed-gate proof. A caller inside a
+// registered managed gate is refused even when the Git child could not read
+// the repository.
+func TestIdentityBlockedGitReadStillProvesManagedIdentity(t *testing.T) {
+	f := newTopologyFixture(t)
+	gitfault.Install(t, "blocked-read")
+	got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: f.managed})
+	if err != nil {
+		t.Fatalf("blocked identity read was fatal: %+v, %v", got, err)
+	}
+	if !got.Nested || !got.ManagedGit {
+		t.Fatalf("managed identity was lost when the Git child could not read: %+v", got)
+	}
+}
+
+// The fallback resolves the common directory from the filesystem, so it must
+// agree with what Git reports for the same repository. A disagreement means
+// the metadata-only resolution is wrong, and it must fail closed rather than
+// classify the caller.
+func TestIdentityFilesystemFallbackAgreesWithGit(t *testing.T) {
+	f := newTopologyFixture(t)
+	linked := filepath.Join(t.TempDir(), "linked")
+	run(t, f.work, "git", "worktree", "add", "--detach", linked, "HEAD")
+	separate := filepath.Join(t.TempDir(), "separate")
+	run(t, "", "git", "init", "--separate-git-dir", filepath.Join(t.TempDir(), "metadata"), separate)
+	for _, tc := range []struct {
+		name string
+		cwd  string
+	}{
+		{"plain", f.work},
+		{"linked", linked},
+		{"separate", separate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gitfault.Install(t, "blocked-read")
+			got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: tc.cwd})
+			if err != nil {
+				t.Fatalf("blocked identity read was fatal for %s: %+v, %v", tc.name, got, err)
+			}
+			if got.Nested {
+				t.Fatalf("ordinary repository %s was refused: %+v", tc.name, got)
+			}
+		})
+	}
+}
+
+// A Git failure that carries a real diagnostic is an answer, not a stall.
+// Git reporting that a directory is not a repository must keep failing
+// closed rather than being retried through the filesystem.
+func TestIdentityRealGitDiagnosticIsNotTreatedAsAStall(t *testing.T) {
+	f := newTopologyFixture(t)
+	gitfault.Install(t, "error")
+	t.Setenv("NM_GIT_FAULT_STDERR", "fatal: dubious ownership in repository at '/fixture'")
+	if _, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: f.work}); err == nil {
+		t.Fatal("unresolved Git failure was admitted")
+	}
+}
+
+// The blocked-read diagnostic is matched whole. A repository whose PATH
+// contains the words of that diagnostic must not turn an ordinary ownership
+// refusal into a successful classification.
+func TestIdentityBlockedReadDiagnosticIsMatchedWhole(t *testing.T) {
+	f := newTopologyFixture(t)
+	gitfault.Install(t, "error")
+	t.Setenv("NM_GIT_FAULT_STDERR", "fatal: detected dubious ownership in repository at '/tmp/Interrupted system call'")
+	if _, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: f.work}); err == nil {
+		t.Fatal("a diagnostic that merely mentions the blocked-read text was admitted")
+	}
+}
+
+// A common directory whose HEAD is malformed is rejected by the Git query
+// itself, so it never reaches the blocked-read fallback.
+//
+// Git reports a malformed HEAD as "not a git repository", which is an answer
+// rather than a stall, and the fallback is reached only for a stall.
+//
+// Regressions: issue #120 review finding on the weaker HEAD acceptance.
+func TestIdentityMalformedCommonHeadIsRejectedByTheGitQuery(t *testing.T) {
+	f := newTopologyFixture(t)
+	work := f.work
+	head := filepath.Join(work, ".git", "HEAD")
+	original, err := os.ReadFile(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(head, []byte("invalid\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.WriteFile(head, original, 0o644) })
+	got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: work})
+	if err == nil {
+		t.Fatalf("a common directory with a malformed HEAD was admitted: %+v", got)
+	}
+}
+
+// The fallback must not accept a directory as a repository on the strength of
+// a HEAD file that merely exists, and it must not accept a malformed HEAD.
+//
+// A directory with a HEAD file, an objects directory and a refs directory is
+// not evidence of a repository when its HEAD is not a recognizable one.
+// Accepting such a directory would let an ordinary directory inside a
+// managed gate pass for the gate itself, which is exactly what the
+// managed-gate proof exists to prevent.
+//
+// A directory whose HEAD IS recognizable is a bare repository to Git itself,
+// so it is admitted as one - but it is never the registered managed gate.
+//
+// Regressions: issue #120 review finding on the managed-gate proof.
+func TestIdentityFallbackDoesNotAcceptAnOrdinaryDirectoryAsARepository(t *testing.T) {
+	f := newTopologyFixture(t)
+	// A directory that a metadata-only reader would take for a bare
+	// repository: a HEAD file, an objects directory and a refs directory.
+	decoy := filepath.Join(f.managed, "decoy")
+	if err := os.MkdirAll(decoy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []string{"objects/info", "objects/pack", "refs/heads", "refs/tags"} {
+		if err := os.MkdirAll(filepath.Join(decoy, filepath.FromSlash(entry)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A HEAD that is not a reference and not an object name.
+	if err := os.WriteFile(filepath.Join(decoy, "HEAD"), []byte("invalid\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitfault.Install(t, "blocked-read")
+	got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: decoy})
+	if err == nil {
+		t.Fatalf("an ordinary directory was admitted as a repository: %+v", got)
+	}
+}
+
+// A directory whose HEAD is recognizable is a bare repository to Git itself,
+// so the fallback may admit it - but it is never the registered managed gate,
+// and the gate's refusal must not extend to it either.
+func TestIdentityFallbackDoesNotAcceptAnOrdinaryDirectoryAsTheManagedGate(t *testing.T) {
+	f := newTopologyFixture(t)
+	decoy := filepath.Join(f.managed, "decoy")
+	if err := os.MkdirAll(decoy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []string{"objects/info", "objects/pack", "refs/heads", "refs/tags"} {
+		if err := os.MkdirAll(filepath.Join(decoy, filepath.FromSlash(entry)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(decoy, "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitfault.Install(t, "blocked-read")
+	got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: decoy})
+	if err != nil {
+		t.Fatalf("blocked identity read was fatal: %+v, %v", got, err)
+	}
+	if got.ManagedGit {
+		t.Fatalf("an ordinary directory was admitted as the managed gate: %+v", got)
+	}
+}
+
+// A linked worktree's common directory comes from its own `commondir` file
+// when that file can be read. A repository whose metadata directory merely
+// sits under a directory named `worktrees` must not have that name treated
+// as the linked-worktree layout.
+//
+// Regressions: issue #120 review finding on the basename inference.
+func TestIdentityFallbackDoesNotInferACommonDirectoryFromADirectoryName(t *testing.T) {
+	f := newTopologyFixture(t)
+	root := t.TempDir()
+	// A --separate-git-dir repository whose metadata directory is named
+	// "worktrees", with no commondir file of its own.
+	if err := os.MkdirAll(filepath.Join(root, "worktrees"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := filepath.Join(root, "worktrees", "metadata")
+	work := filepath.Join(root, "work")
+	run(t, "", "git", "init", "--separate-git-dir", metadata, work)
+	gitfault.Install(t, "blocked-read")
+	got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: work})
+	if err != nil {
+		t.Fatalf("a valid separate-git-dir repository was refused: %+v, %v", got, err)
+	}
+	if got.Nested {
+		t.Fatalf("an ordinary repository was refused: %+v", got)
+	}
+}
+
+func TestIdentityFallbackRejectsBareCommonPointerDamage(t *testing.T) {
+	for _, damage := range []string{"empty", "missing-target", "directory"} {
+		t.Run(damage, func(t *testing.T) {
+			f := newTopologyFixture(t)
+			bare := filepath.Join(t.TempDir(), "bare.git")
+			run(t, "", "git", "init", "--bare", bare)
+			pointer := filepath.Join(bare, "commondir")
+			if damage == "directory" {
+				if err := os.Mkdir(pointer, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				content := ""
+				if damage == "missing-target" {
+					content = "../missing\n"
+				}
+				if err := os.WriteFile(pointer, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gitfault.Install(t, "blocked-read")
+			if got, err := (gatecontext.Inspector{Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: bare}); err == nil {
+				t.Fatalf("damaged bare commondir admitted: %+v", got)
+			}
+		})
+	}
+}
+
+func TestIdentityFallbackRejectsLinkedActualHeadDamage(t *testing.T) {
+	for _, damage := range []string{"missing", "malformed"} {
+		t.Run(damage, func(t *testing.T) {
+			f := newTopologyFixture(t)
+			linked := filepath.Join(t.TempDir(), "linked")
+			run(t, f.work, "git", "worktree", "add", "--detach", linked, "HEAD")
+			data, err := os.ReadFile(filepath.Join(linked, ".git"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			actual := strings.TrimSpace(strings.TrimPrefix(string(data), "gitdir: "))
+			head := filepath.Join(actual, "HEAD")
+			if damage == "missing" {
+				err = os.Remove(head)
+			} else {
+				err = os.WriteFile(head, []byte("invalid\n"), 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			gitfault.Install(t, "blocked-read")
+			if got, err := (gatecontext.Inspector{Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: linked}); err == nil {
+				t.Fatalf("damaged linked actual HEAD admitted: %+v", got)
+			}
+		})
+	}
+}
+
+// Git accepts regular-file symlink targets for gitfiles and commondir. The
+// classifier must retain that compatibility in both normal and fallback reads.
+func TestIdentityReadableSymlinkMetadata(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native Windows symlink privileges are not available in this validation")
+	}
+	for _, entry := range []string{"gitfile", "commondir"} {
+		for _, mode := range []string{"normal", "blocked-read"} {
+			t.Run(entry+"/"+mode, func(t *testing.T) {
+				f := newTopologyFixture(t)
+				work := filepath.Join(t.TempDir(), "work")
+				var pointer string
+				if entry == "gitfile" {
+					metadata := filepath.Join(t.TempDir(), "metadata")
+					run(t, "", "git", "init", "--separate-git-dir", metadata, work)
+					pointer = filepath.Join(work, ".git")
+				} else {
+					run(t, f.work, "git", "worktree", "add", "--detach", work, "HEAD")
+					data, err := os.ReadFile(filepath.Join(work, ".git"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					actual := strings.TrimSpace(strings.TrimPrefix(string(data), "gitdir: "))
+					pointer = filepath.Join(actual, "commondir")
+				}
+				backing := pointer + "-target"
+				if err := os.Rename(pointer, backing); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Base(backing), pointer); err != nil {
+					t.Fatal(err)
+				}
+				// Real Git is the compatibility oracle, before fault injection.
+				run(t, work, "git", "rev-parse", "--path-format=absolute", "--git-common-dir", "--absolute-git-dir")
+				if mode == "blocked-read" {
+					gitfault.Install(t, mode)
+				}
+				got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: work})
+				if err != nil || got.Nested {
+					t.Fatalf("valid symlinked metadata rejected: %+v, %v", got, err)
+				}
+			})
+		}
+	}
+}
