@@ -316,6 +316,24 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 			forward = true
 		}
 	}
+	// A step can move the head itself: the Push step commits the formatter's
+	// and the agents' leftover changes, and a fix round commits its repair.
+	// The recorded commit lineage is the proof that the advance was the
+	// pipeline's own, so the comparison follows it instead of refusing it as
+	// an unexplained change. Without this, a formatter that reformats one
+	// file fails the run at the publication boundary - the same class of
+	// false failure as the target advance this guard also recovers from.
+	if previous != nil && sctx.PRContextAfterStep && !forward &&
+		previous.LocalHeadSHA != candidate.LocalHeadSHA &&
+		previous.TargetBranch == candidate.TargetBranch && previous.TargetSHA == candidate.TargetSHA &&
+		previous.SourceRepo == candidate.SourceRepo && previous.SourceBranch == candidate.SourceBranch &&
+		(previous.PRURL == "" || previous.PRURL == candidate.PRURL) {
+		if err := sctx.DB.ValidatePipelineHeadForward(sctx.Run.ID, previous.LocalHeadSHA, candidate.LocalHeadSHA); err == nil {
+			if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", previous.LocalHeadSHA, candidate.LocalHeadSHA); err == nil {
+				forward = true
+			}
+		}
+	}
 	// Push and a later CI repair can publish a descendant of the last bound
 	// head. The durable publication record attributes that advance to this run;
 	// the receipt follows it without replaying completed steps.

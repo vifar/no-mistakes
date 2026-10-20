@@ -1928,6 +1928,8 @@ func assertUncommittedTestFileIsPreservedAndReReviewed(t *testing.T, h *Harness,
 	if string(published) != content {
 		t.Fatalf("the preserved file %s = %q, want %q", path, published, content)
 	}
+	commits := gitIn(t, h, h.UpstreamDir, "log", "-3", "--format=%h %s", "refs/heads/"+strings.TrimPrefix(run.Branch, "refs/heads/"))
+	t.Logf("completed run %s published %s with content %q; Review completed %d rounds and covered %s; published commits:\n%s", run.ID, path, published, review.RoundCount, path, commits)
 }
 
 func assertTestAgentStagedNewTestFileRun(t *testing.T, h *Harness) {

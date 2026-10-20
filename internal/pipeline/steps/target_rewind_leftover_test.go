@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -166,39 +167,54 @@ func TestTargetRewindLeftoverCommitFailureNamesTheStepAndPaths(t *testing.T) {
 // LIVE rows finds no completed step and blames the wrong one. The ARCHIVED
 // rewind history is the evidence that keeps the attribution honest.
 func TestTargetRewindAttributesTheProducerFromArchivedEvidence(t *testing.T) {
-	c, selected := rewindFixture(t)
-	// The run completed Review and Test before the target moved.
-	for _, name := range []types.StepName{types.StepReview, types.StepTest} {
-		step, err := c.DB.InsertStepResult(c.Run.ID, name)
-		if err != nil {
-			t.Fatal(err)
+	gate := types.CustomGateStepName(types.StepTest, "validation")
+	for _, name := range []types.StepName{types.StepTest, types.StepDocument, gate} {
+		for _, postStep := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/post_%t", name, postStep), func(t *testing.T) {
+				c, selected := rewindFixture(t)
+				review, err := c.DB.InsertStepResult(c.Run.ID, types.StepReview)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := c.DB.CompleteStep(review.ID, 0, 1, "review.log"); err != nil {
+					t.Fatal(err)
+				}
+				step, err := c.DB.InsertStepResult(c.Run.ID, name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if postStep {
+					err = c.DB.StartStep(step.ID)
+				} else {
+					err = c.DB.CompleteStep(step.ID, 0, 1, "step.log")
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				advanceRewindTarget(t, c)
+				c.PRContextAfterStep = postStep
+				boundary := types.StepPush
+				if postStep {
+					boundary = name
+				}
+				if _, err := guardPRContextWithSelection(c, boundary, selected, false); err != nil {
+					t.Fatal(err)
+				}
+				if postStep {
+					if err := c.DB.RecordTargetRewindBoundary(c.Run.ID, 1, string(name), `{}`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				want := name
+				if name == gate {
+					want = types.StepTest
+				}
+				producer, err := rewindProducerStep(c)
+				if err != nil || producer != string(want) {
+					t.Fatalf("producer = %q, want %s: %v", producer, want, err)
+				}
+			})
 		}
-		if err := c.DB.CompleteStep(step.ID, 0, 1, "step.log"); err != nil {
-			t.Fatal(err)
-		}
-	}
-	advanceRewindTarget(t, c)
-	c.PRContextAfterStep = true
-	if _, err := guardPRContextWithSelection(c, types.StepTest, selected, false); err != nil {
-		t.Fatal(err)
-	}
-	// The rewind's own transaction reset the live step rows.
-	live, err := c.DB.GetStepsByRun(c.Run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range live {
-		if row.StepName == types.StepTest && row.Status == types.StepStatusCompleted {
-			t.Fatal("the fixture did not reset the live step rows")
-		}
-	}
-	// The archived evidence still names the producer.
-	producer, err := rewindProducerStep(c)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if producer != string(types.StepTest) {
-		t.Fatalf("the producer = %q, want test", producer)
 	}
 }
 
@@ -258,5 +274,76 @@ func TestAdvancePendingTargetRewindHeadRefusesAnUnrelatedHead(t *testing.T) {
 	after, err := c.DB.GetPendingTargetRewind(c.Run.ID)
 	if err != nil || after.LocalHeadSHA != other {
 		t.Fatalf("the pending rewind's head did not follow the proven descendant: %+v %v", after, err)
+	}
+}
+
+func TestTargetRewindSpentBudgetStillUnstagesScratch(t *testing.T) {
+	for _, strategy := range []string{"rebase", "merge"} {
+		for _, realEdits := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/real_edits_%t", strategy, realEdits), func(t *testing.T) {
+				c, selected := rewindFixture(t)
+				c.Config.Rebase.Strategy = strategy
+				if err := c.DB.RecordLeftoverValidationCommit(c.Run.ID, c.Run.HeadSHA); err != nil {
+					t.Fatal(err)
+				}
+				target := advanceRewindTarget(t, c)
+				c.PRContextAfterStep = true
+				decision, err := guardPRContextWithSelection(c, types.StepTest, selected, false)
+				if err != nil || decision.RestartFrom != types.StepRebase {
+					t.Fatalf("target advance did not rewind: %+v %v", decision, err)
+				}
+				path := ".journal-live/postgres.log"
+				full := filepath.Join(c.WorkDir, path)
+				if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, []byte("live scratch\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, c.WorkDir, "add", path)
+				if realEdits {
+					if err := os.WriteFile(filepath.Join(c.WorkDir, "feature.txt"), []byte("second real edit\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					gitCmd(t, c.WorkDir, "add", "feature.txt")
+				}
+				head := gitCmd(t, c.WorkDir, "rev-parse", "HEAD")
+				c.PRContextAfterStep = false
+				out, err := (&RebaseStep{}).Execute(c)
+				if realEdits {
+					if err == nil || !strings.Contains(err.Error(), "correction budget already spent") ||
+						!strings.Contains(err.Error(), "test step left uncommitted edits") ||
+						!strings.Contains(err.Error(), "feature.txt") || strings.Contains(err.Error(), path) {
+						t.Fatalf("second real edits need an attributed refusal naming only real paths: %+v %v", out, err)
+					}
+					if got := gitCmd(t, c.WorkDir, "rev-parse", "HEAD"); got != head {
+						t.Fatalf("refused edits moved head: %s", got)
+					}
+					if got, err := os.ReadFile(filepath.Join(c.WorkDir, "feature.txt")); err != nil || string(got) != "second real edit\n" {
+						t.Fatalf("refused edits lost: %q %v", got, err)
+					}
+				} else {
+					if err != nil || out == nil || out.NeedsApproval {
+						t.Fatalf("scratch blocked integration: %+v %v", out, err)
+					}
+					if _, err := git.Run(c.Ctx, c.WorkDir, "merge-base", "--is-ancestor", target, "HEAD"); err != nil {
+						t.Fatalf("target was not integrated: %v", err)
+					}
+				}
+				if got, err := os.ReadFile(full); err != nil || string(got) != "live scratch\n" {
+					t.Fatalf("scratch lost: %q %v", got, err)
+				}
+				if got := gitCmd(t, c.WorkDir, "ls-files", "--", path); got != "" {
+					t.Fatalf("scratch remains indexed: %s", got)
+				}
+				if got := gitCmd(t, c.WorkDir, "ls-tree", "-r", "--name-only", "HEAD", "--", path); got != "" {
+					t.Fatalf("scratch was committed: %s", got)
+				}
+				allowed, err := c.DB.CanCommitLeftoverValidationEdits(c.Run.ID)
+				if err != nil || allowed {
+					t.Fatalf("budget changed: allowed=%t err=%v", allowed, err)
+				}
+			})
+		}
 	}
 }

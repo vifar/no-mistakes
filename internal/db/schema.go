@@ -560,7 +560,7 @@ var migrationStatements = append([]string{
 
 // additiveMigrationStatements hold the additive schema changes that a
 // database created before the referenced column existed must receive. They
-// run on every upgrade from a versioned database, and each statement must be
+// run on versioned and legacy unversioned upgrades, and each statement must be
 // idempotent via its error being tolerated when the column already exists.
 //
 // A statement added here must ALSO be applied to a fresh database, so it
@@ -568,8 +568,8 @@ var migrationStatements = append([]string{
 var additiveMigrationStatements = []string{
 	// How many times this run committed a predecessor's leftover validation
 	// edits as a pipeline correction. It bounds the loop: each such commit
-	// restarts the run at Review, and an agent that keeps writing files must
-	// not keep the run going forever. One commit per run is the bound: the
+	// sends the head through revalidation. An agent that keeps writing files
+	// must not keep the run going forever. One commit per run is the bound: the
 	// first leftover is preserved and re-reviewed, and a second one is
 	// refused rather than looped on.
 	`ALTER TABLE runs ADD COLUMN leftover_validation_commits INTEGER NOT NULL DEFAULT 0`,

@@ -116,6 +116,13 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		// Scratch-safe staging can leave nothing to commit; an unchanged head
 		// is not a new pipeline commit and must not restart Review.
 		if headSHA != headBeforeCommit {
+			// Record the commit lineage: it is the proof that this head
+			// advance was the pipeline's own, so the comparison guard at the
+			// publication boundary follows it instead of refusing it as an
+			// unexplained change.
+			if err := recordPipelineHeadRange(sctx, headBeforeCommit, headSHA); err != nil {
+				return nil, err
+			}
 			newHeadSHA = headSHA
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -37,7 +38,7 @@ func completionWorktree(t *testing.T) (string, string) {
 }
 
 func TestExecutorCompletionRequiresExactCleanReceiptHead(t *testing.T) {
-	for _, scenario := range []string{"current", "descendant", "dirty", "missing-receipt", "missing-head", "unavailable-head"} {
+	for _, scenario := range []string{"current", "scratch", "staged-scratch", "excluded-scratch", "dirty-beside-scratch", "config-file", "descendant", "dirty", "missing-receipt", "missing-head", "unavailable-head"} {
 		t.Run(scenario, func(t *testing.T) {
 			database, p, run, repo := setupTest(t)
 			workDir, head := completionWorktree(t)
@@ -53,12 +54,38 @@ func TestExecutorCompletionRequiresExactCleanReceiptHead(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if scenario == "descendant" || scenario == "dirty" {
+			if scenario == "descendant" || scenario == "dirty" || scenario == "dirty-beside-scratch" {
 				if err := os.WriteFile(filepath.Join(workDir, "file.txt"), []byte("second"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 				if scenario == "descendant" {
 					if err := git.CommitAll(context.Background(), workDir, "second"); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			// The preservation contract permits scratch while real edits still
+			// refuse completion, including edits beside scratch and new config.
+			scratchPath := ""
+			cfg := &config.Config{StagingExclude: []string{"evidence/**"}}
+			switch scenario {
+			case "scratch", "staged-scratch", "dirty-beside-scratch":
+				scratchPath = ".journal-live/postgres.log"
+			case "excluded-scratch":
+				scratchPath = "evidence/result.log"
+			case "config-file":
+				scratchPath = ".github/workflows/test.yml"
+			}
+			if scratchPath != "" {
+				full := filepath.Join(workDir, scratchPath)
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, []byte("retained bytes"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if scenario == "staged-scratch" {
+					if _, err := git.Run(context.Background(), workDir, "add", "--", scratchPath); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -75,18 +102,23 @@ func TestExecutorCompletionRequiresExactCleanReceiptHead(t *testing.T) {
 				}
 			}
 			events := &eventCollector{}
-			executor := NewExecutor(database, p, nil, nil, nil, events.handler)
+			executor := NewExecutor(database, p, cfg, nil, nil, events.handler)
 			executor.workDir = workDir
 			mergedCalls := 0
 			merged := "merged"
 			run.PRState = &merged
 			executor.SetOnPRMerged(func(context.Context, string) { mergedCalls++ })
 			err := executor.completeRun(context.Background(), run, repo)
+			if scratchPath != "" {
+				if got, err := os.ReadFile(filepath.Join(workDir, scratchPath)); err != nil || string(got) != "retained bytes" {
+					t.Fatalf("completion changed retained contents: %q %v", got, err)
+				}
+			}
 			current, dbErr := database.GetRun(run.ID)
 			if dbErr != nil {
 				t.Fatal(dbErr)
 			}
-			if scenario == "current" {
+			if scenario == "current" || scenario == "scratch" || scenario == "staged-scratch" || scenario == "excluded-scratch" {
 				if err != nil || current.Status != types.RunCompleted || current.HeadSHA != head || current.TerminalHeadVerifiedAt == nil || mergedCalls != 1 {
 					t.Fatalf("completion: err=%v run=%+v merged calls=%d", err, current, mergedCalls)
 				}

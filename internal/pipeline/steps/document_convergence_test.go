@@ -660,7 +660,7 @@ func TestDocumentCandidatePathsIncludesEveryWorkspaceLayer(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "untracked.md"), []byte("new\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	paths, untracked, err := documentCandidatePaths(sc, head)
+	paths, untracked, err := documentCandidatePaths(sc, head, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
