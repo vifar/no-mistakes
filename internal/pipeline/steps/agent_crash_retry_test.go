@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 type processExitError struct{ message string }
@@ -33,6 +34,7 @@ func TestTestStep_AgentCrashRetryExitThenSuccess(t *testing.T) {
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
 	sctx.Config.AgentCrashRetries = 1
+	testgit.BindRunComparison(t, sctx.DB, sctx.Run, dir, "main", "", "", "")
 	executor := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&TestStep{}}, nil)
 	if err := executor.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err != nil || calls != 2 {
 		t.Fatalf("Test crash did not recover: calls=%d error=%v", calls, err)

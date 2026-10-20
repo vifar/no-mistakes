@@ -298,7 +298,15 @@ func testRetainedCoverageCase(t *testing.T, recovered bool, mode string) {
 		expectRefusal = mode != "record:scope"
 	}
 	for {
-		_, err := executor.RespondWithOverrides(types.StepReview, types.ActionCompleteCoverage, nil, nil, nil, nil, "", func() *types.GateIdentity { g := executor.CurrentGate(); return &g }(), pipeline.ResponseOptions{Coverage: binding})
+		gate := executor.CurrentGate()
+		if gate.Nonce == "" {
+			if time.Now().After(deadline) {
+				t.Fatal("recovered coverage gate was not registered")
+			}
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		_, err := executor.RespondWithOverrides(types.StepReview, types.ActionCompleteCoverage, nil, nil, nil, nil, "", &gate, pipeline.ResponseOptions{Coverage: binding})
 		if expectRefusal && err != nil && !strings.Contains(err.Error(), "no step awaiting approval") {
 			steps, readErr := sctx.DB.GetStepsByRun(run.ID)
 			if readErr != nil || len(steps) != 2 || steps[0].Status != types.StepStatusAwaitingApproval || steps[1].Status != types.StepStatusPending || len(ag.calls) != 2 {

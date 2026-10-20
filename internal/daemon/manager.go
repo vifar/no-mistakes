@@ -382,6 +382,9 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 			m.mu.Unlock()
 			handle.cancel(nil)
 			close(handle.done)
+			if handle.discardRetryConfig != nil {
+				m.discardRefusedRetryRun(runID, handle.discardRetryConfig)
+			}
 			// Once consumed, the run goroutine owns the slot and frees it.
 			slot.Release()
 		}
@@ -2598,6 +2601,9 @@ type runHandle struct {
 	runCtx   context.Context
 	done     chan struct{}
 	consumed bool
+	// A retry refused before executor start is deleted only after its failed
+	// setup settles and its ownership handle has been released.
+	discardRetryConfig *config.Config
 }
 
 // admitRun decides a new run's admission and, when it does not fit, queues it.
@@ -2654,6 +2660,9 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				m.mu.Unlock()
 				handle.cancel(nil)
 				close(handle.done)
+				if handle.discardRetryConfig != nil {
+					m.discardRefusedRetryRun(run.ID, handle.discardRetryConfig)
+				}
 			}
 		}()
 	}
@@ -2796,7 +2805,7 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	}
 	if retry != nil {
 		if err := retry.proveAtLaunch(ctx, m, globalCfg, cfg, effectiveRepoCfg, run.ID); err != nil {
-			m.discardRefusedRetryRun(run.ID, cfg)
+			handle.discardRetryConfig = cfg
 			trackStartFailure("retry_proof")
 			return "", err
 		}

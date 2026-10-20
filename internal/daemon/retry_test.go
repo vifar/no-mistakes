@@ -24,6 +24,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/verificationplan"
 )
@@ -221,6 +222,7 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 		return []pipeline.Step{steps[0], steps[1], steps[2]}
 	})
 	repo, submitted := setupTestGitRepo(t, p, d, "retry-proof-repo")
+	gitCmd(t, repo.WorkingPath, "branch", "-m", "main")
 	f := &retryFixture{p: p, d: d, repo: repo, submitted: submitted, callerHead: submitted, executions: &executions}
 	if opts.beforeSource != nil {
 		opts.beforeSource(t, f)
@@ -271,6 +273,7 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 			t.Fatal(err)
 		}
 	}
+	testgit.BindRunComparison(t, d, source, repo.WorkingPath, "main", "", "", "")
 	if err := d.UpdateRunErrorStatusWithVerifiedHead(source.ID, "step review failed", types.RunFailed, submitted); err != nil {
 		t.Fatal(err)
 	}
@@ -311,6 +314,7 @@ func (f *retryFixture) continuationOf(t *testing.T, source *db.Run) *db.Run {
 			t.Fatal(err)
 		}
 	}
+	testgit.BindRunComparison(t, f.d, next, f.repo.WorkingPath, "main", "", "", "")
 	if err := f.d.UpdateRunErrorStatusWithVerifiedHead(next.ID, "step test failed", types.RunFailed, f.submitted); err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +345,10 @@ type countingStep struct {
 
 func (s *countingStep) Name() types.StepName { return s.name }
 
-func (s *countingStep) Execute(*pipeline.StepContext) (*pipeline.StepOutcome, error) {
+func (s *countingStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := bindMockRunComparison(sctx); err != nil {
+		return nil, err
+	}
 	s.count.Add(1)
 	return &pipeline.StepOutcome{}, nil
 }
@@ -403,9 +410,17 @@ func TestRetryRefusesUnlessEveryProofHolds(t *testing.T) {
 			return f.source.ID
 		}},
 		{name: "an active run on the branch", proof: "no active run", opts: retryFixtureOptions{beforeSource: func(t *testing.T, f *retryFixture) {
-			if _, err := f.d.InsertRun(f.repo.ID, "main", f.submitted, f.submitted); err != nil {
+			active, err := f.d.InsertRun(f.repo.ID, "main", f.submitted, f.submitted)
+			if err != nil {
 				t.Fatal(err)
 			}
+			// This record has no executor. Retire it after the refusal assertion
+			// so the real daemon can certify its shutdown during cleanup.
+			t.Cleanup(func() {
+				if err := f.d.UpdateRunStatus(active.ID, types.RunCancelled); err != nil {
+					t.Error(err)
+				}
+			})
 		}}},
 		{name: "a cancelled run", proof: "failed run", breakProof: func(t *testing.T, f *retryFixture) string {
 			if err := f.d.UpdateRunStatus(f.source.ID, types.RunCancelled); err != nil {
@@ -603,7 +618,7 @@ func TestRetryContinuesAFailedTestWhenTheCarriedReviewConfigurationHolds(t *test
 				t.Fatalf("retry: %v", err)
 			}
 			if run := waitForRunTerminalState(t, f.d, result.RunID); run.Status != types.RunCompleted || result.Step != types.StepTest {
-				t.Fatalf("retry = %+v, run = %s; want test continued to completion", result, run.Status)
+				t.Fatalf("retry = %+v, run = %s (%v); want test continued to completion", result, run.Status, run.Error)
 			}
 		})
 	}
@@ -630,7 +645,7 @@ func TestRetryContinuesWhenTheCarriedReviewRanOnItsRoleAgent(t *testing.T) {
 				t.Fatalf("retry: %v", err)
 			}
 			if run := waitForRunTerminalState(t, f.d, result.RunID); run.Status != types.RunCompleted {
-				t.Fatalf("run = %s, want completed", run.Status)
+				t.Fatalf("run = %s (%v), want completed", run.Status, run.Error)
 			}
 		})
 	}
@@ -696,6 +711,9 @@ type conversationProbeStep struct {
 func (s *conversationProbeStep) Name() types.StepName { return types.StepTest }
 
 func (s *conversationProbeStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := bindMockRunComparison(sctx); err != nil {
+		return nil, err
+	}
 	conv, err := reviewqa.Load(reviewqa.Dir(sctx.EvidenceDir))
 	if err != nil {
 		return nil, err
