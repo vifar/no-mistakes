@@ -20,7 +20,7 @@ var (
 	runPreparationCleanup = cleanupPreparationChanges
 )
 
-// ensurePrepared runs the trusted preparation command before the first
+// ensurePrepared runs the effective preparation command before the first
 // configured Test, Lint, or Format command, or an opted-in agent-only Test.
 // Successful preparation is shared for the executor lifetime. Only ignored
 // materialization (for example node_modules) and submodules checked out at

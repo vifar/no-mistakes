@@ -48,8 +48,8 @@ func validateCommandOverrides(overrides map[string]CommandOverride) error {
 }
 
 // validateMachineLocalPrepare checks a machine-local dependency-preparation
-// command. It is a shell command like any other configured one, so it must be
-// nonempty and carry no NUL.
+// command. Empty disables it; a supplied command must contain non-whitespace
+// text and carry no NUL.
 func validateMachineLocalPrepare(command string) error {
 	if command == "" {
 		return nil

@@ -376,7 +376,7 @@ A non-zero exit or launch failure fails that step before its command runs.
 Use this for deterministic dependency materialization such as `npm ci --prefer-offline`. The run worktree starts with tracked files only, so ignored dependency directories such as `node_modules` are otherwise absent. no-mistakes keeps ignored files produced by preparation, and keeps any submodule it checks out at the commit the superproject records, while removing its tracked, ordinary untracked, and nested-repository mutations before continuing; a submodule commit the command moved to is reset to the recorded commit. Earlier pending tracked and ordinary untracked pipeline changes are restored exactly, so preparation can run before a later configured command without admitting setup artifacts into a fix commit.
 
 Like every `commands.*` value, `commands.prepare` comes from the trusted default-branch configuration unless that trusted copy explicitly enables `allow_repo_commands: true`. no-mistakes never auto-detects an install command from the pushed branch.
-A repository that supplies no `commands.prepare` can still get one from the operator's machine-local [`repository_overrides.prepare`](/no-mistakes/reference/global-config/#machine-local-commands), which fills that gap and never replaces a repository's own command.
+For operator-supplied preparation when the effective repository command is empty, see machine-local [`repository_overrides.<remote>.prepare`](/no-mistakes/reference/global-config/#machine-local-commands).
 
 ### commands.test
 
@@ -1192,9 +1192,9 @@ test:
 
 Opts agent-only Test into running `commands.prepare` before its first agent turn (including a repair turn). Uses the same successful-worktree receipt, cleanup/restoration, failure reporting, and recovery behavior as configured Test/Lint/Format; later configured commands do not install again. A new worktree prepares separately. Existing dependencies or an agent's claim that installation succeeded do not count as managed preparation. An empty `commands.prepare` remains a no-op, and configured `commands.test` retains its existing preparation behavior.
 
-This is **eager**, not on-demand: opted-in repositories pay setup cost even when the evidence agent subsequently reports `no-surface`. Leave it off to retain lazy command-only preparation. Preparation does not replace fresh Test evidence or change verdict/approval policy. Failures stop Test before the agent launches and never record successful preparation.
+This is **eager**, not on-demand: opted-in repositories pay setup cost even when the evidence agent subsequently reports `no-surface`. For repository-supplied preparation commands, leave it off to retain lazy command-only preparation. Preparation does not replace fresh Test evidence or change verdict/approval policy. Failures stop Test before the agent launches and never record successful preparation.
 
-The trigger always comes from the trusted default branch; pushed-branch text cannot enable it. The executable `commands.prepare` value separately follows the existing `allow_repo_commands` policy.
+This repository setting always comes from the trusted default branch; pushed-branch text cannot enable it. The executable `commands.prepare` value separately follows the existing `allow_repo_commands` policy. For the operator-supplied eager preparation path, see machine-local [`repository_overrides.<remote>.prepare`](/no-mistakes/reference/global-config/#machine-local-commands).
 
 ### test.base_attribution
 

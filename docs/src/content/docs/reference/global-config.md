@@ -1341,11 +1341,12 @@ Repository command selection still comes from the trusted default branch, or the
 Only the operator's global config can supply these local settings, never a repository's `.no-mistakes.yaml`.
 With no matching command override, execution remains unchanged.
 
-A matching `prepare` key is the one exception, and it can only ever fill a gap: it supplies a dependency-preparation command for a repository that configured **none**.
-The repository's own trusted command always wins when it has one, so this can never replace what a maintainer asked to run.
-It exists because a repository with no `.no-mistakes.yaml` could otherwise get [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) from no source at all, which left the operator provisioning dependencies by hand in every run worktree.
-It also supplies the eager preparation trigger, so an agent-only Test prepares its dependencies before its first turn.
-The preparation step log declares a machine-local command, so a reader can tell which policy produced the prepared worktree.
+A matching `repository_overrides.<remote>.prepare` supplies a dependency-preparation command only when the effective repository `commands.prepare` is empty.
+Repository command selection follows the trust policy above, including `allow_repo_commands`; a non-empty selected repository command takes precedence and retains the repository's own `test.prepare` behavior.
+When the machine-local command fills the gap, agent-only Test prepares dependencies before its first turn, including repairs, without requiring repository `test.prepare: true`.
+It uses the existing [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) execution, cleanup, failure, and worktree-receipt safeguards.
+An empty string leaves the setting unset; whitespace-only strings and commands containing NUL are configuration errors. Surrounding whitespace is trimmed before execution.
+The step log declares `machine-local prepare command applied:` followed by the command when preparation runs.
 
 ```yaml
 repository_overrides:
@@ -1353,7 +1354,7 @@ repository_overrides:
     prepare: "pnpm install --frozen-lockfile"
 ```
 
-The `commands` block below is a DIFFERENT surface and still refuses a command string: a machine-local **replacement** could neuter what a repository asked to run, while filling an empty value cannot.
+The `commands` block below accepts additional checks and scheduling settings, but refuses replacement command strings: a replacement could bypass the repository's required check.
 
 ```yaml
 repository_overrides:
@@ -1375,8 +1376,6 @@ repository_overrides:
 | `additional` | `test`, `lint` | Ordered list of separate shell checks added after the repository check; every check must succeed |
 | `nice` | `prepare`, `test`, `lint`, `format` | POSIX niceness adjustment from `0` to `19`; `0` leaves scheduling unchanged |
 
-The repository's `prepare` command is a separate key on the same override, and it is the only machine-local setting that can supply a command string; see [Machine-local commands](#machine-local-commands) above.
-
 Test runs the committed command first, then each added command in a separate shell, retaining a failure from either source even when another check succeeds.
 Test still performs its unconditional agent-driven end-user scenarios afterwards.
 Lint runs additional checks after the existing lint duty, including agent-driven lint when `commands.lint` is empty.
@@ -1385,7 +1384,7 @@ Its finding names that machine-local check and its exit code, and never attribut
 `additional` is refused for preparation and formatting, because those commands are not independent check gates.
 Replacement command strings, `command`, `replace`, `skip`, per-command `env`, unknown command names, empty additional checks, and niceness outside `0` through `19` are configuration errors.
 
-Overrides are always declared, never silent: whenever a command runs under any of these settings, its step log states `machine-local overrides applied to commands.<name>:` followed by the niceness and the added checks, once per step rather than per check, and Test passes the same declaration to its agent for the testing summary.
+Whenever a command runs under the `commands` block's settings, its step log states `machine-local overrides applied to commands.<name>:` followed by the niceness and the added checks, once per step rather than per check, and Test passes the same declaration to its agent for the testing summary.
 These settings are scoped to configured shell commands and their local checks, not agents, built-in Git operations, forge commands, or repository-declared extra gates.
 
 There is no per-command environment override.

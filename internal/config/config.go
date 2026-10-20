@@ -370,9 +370,9 @@ type RepositoryOverride struct {
 	Review   OperatorReviewRaw          `yaml:"review"`
 	Document DocumentRaw                `yaml:"document"`
 	// Prepare supplies a dependency-preparation command for a repository that
-	// configured NONE. It fills an empty value only: the repository's own
-	// trusted command always wins when it has one, so this can never replace
-	// what a maintainer asked to run. It is a separate field from the
+	// configured NONE. It fills an empty effective value only, after repository
+	// command trust selection, so it cannot replace a selected repository
+	// command. It is a separate field from the
 	// commands surface precisely because that surface refuses a command
 	// string - a machine-local REPLACEMENT could neuter a repository's own
 	// command, while filling an empty one cannot.
@@ -3993,11 +3993,9 @@ func machineLocalPrepareSupplied(override *RepositoryOverride) bool {
 // resolveCommands fills a command the repository left unset with the
 // operator's machine-local value for it.
 //
-// The repository's trusted value always wins when it has one: the machine-local
-// surface supplements, it never replaces, and a pushed branch can never
-// displace the maintainer's own command. Only a command the repository
-// supplied NOTHING for can be filled, which is what gives a repository with no
-// trusted .no-mistakes.yaml a way to have its dependencies prepared at all.
+// The caller must pass the effective repository commands after trust selection,
+// including any trusted allow_repo_commands opt-in. The machine-local surface
+// fills only an empty selected value; it never replaces a repository command.
 func resolveCommands(repo Commands, override *RepositoryOverride) Commands {
 	resolved := repo
 	if override == nil {
