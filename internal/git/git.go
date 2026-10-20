@@ -27,6 +27,15 @@ type CommandError struct {
 	Command string
 	Stderr  string
 	Err     error
+	// Cancelled records that THIS command's context cancelled it, so the
+	// command's own exit is the cancellation's doing and not a failure that
+	// would have happened anyway.
+	//
+	// A signal alone does not prove it: a child can die of SIGSEGV on its
+	// own and then race a shutdown that happened to observe the context
+	// afterwards. The provenance is known here, at the execution boundary,
+	// and nowhere else.
+	Cancelled bool
 }
 
 func (e *CommandError) Error() string {
@@ -34,6 +43,17 @@ func (e *CommandError) Error() string {
 }
 
 func (e *CommandError) Unwrap() error { return e.Err }
+
+// CancelledByContext reports whether the error is a command that this
+// context cancelled, so its exit is process noise rather than a failure of
+// its own.
+func CancelledByContext(err error) bool {
+	var commandErr *CommandError
+	if !errors.As(err, &commandErr) {
+		return false
+	}
+	return commandErr.Cancelled
+}
 
 // IsZeroSHA returns true if the SHA is the null/zero ref that git uses for
 // new or deleted branches (40 zeros).
@@ -136,13 +156,15 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	shellenv.ConfigureShellCommand(cmd)
 	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
-		if ctx.Err() != nil {
+		cancelled := ctx.Err() != nil
+		if cancelled {
 			err = errors.Join(err, ctx.Err())
 		}
 		return nil, &CommandError{
-			Command: safeurl.RedactText(strings.Join(args, " ")),
-			Stderr:  safeurl.RedactText(stderr.String()),
-			Err:     err,
+			Command:   safeurl.RedactText(strings.Join(args, " ")),
+			Stderr:    safeurl.RedactText(stderr.String()),
+			Err:       err,
+			Cancelled: cancelled,
 		}
 	}
 	return out, nil

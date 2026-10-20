@@ -362,19 +362,34 @@ func (m *RunManager) startQueuedRun(runID string, slot *runSlot) (func(), bool) 
 // everything from its row. Setup failures use failRunSetup to preserve a prior
 // cancellation cause; there is no caller left to return them to.
 func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHandle) {
+	// setupErr is the failure that ends the launch. It is settled in the
+	// deferred block, AFTER the workload boundary and the slot release, so a
+	// settlement that waits on storage never holds the run's capacity.
+	var setupErr error
 	defer func() {
 		// launchRun transfers the handle to the run goroutine once the
 		// executor exists; any earlier exit must unregister it here.
 		//
-		// The queued run's workload never started, so it is already over.
-		// Report that FIRST, before the custody bookkeeping below, which can
-		// still be waiting on storage to record the terminal outcome.
-		handle.reportWorkloadStopped()
+		// The queued run's workload never started, so it is already over -
+		// but ONLY while this still owns the handle. Once launchRun has
+		// handed the handle to the pipeline goroutine, that goroutine owns the
+		// workload signal, and reporting it here too would close the channel a
+		// second time.
+		if !handle.consumed {
+			// Report the boundary and free the slot FIRST, before the
+			// settlement below, which can still be waiting on storage to
+			// record the terminal outcome.
+			handle.reportWorkloadStopped()
+			slot.Release()
+		}
 		if r := recover(); r != nil {
 			slog.Error("panic launching queued run", "run_id", runID, "panic", r)
-			m.failRunSetup(handle.runCtx, runID, false, fmt.Errorf("internal panic: %v", r))
+			setupErr = fmt.Errorf("internal panic: %v", r)
 		}
 		if !handle.consumed {
+			if setupErr != nil {
+				m.failRunSetup(handle.runCtx, runID, false, setupErr)
+			}
 			if !m.terminalRunSettled(runID) {
 				return
 			}
@@ -385,12 +400,10 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 			m.mu.Unlock()
 			handle.cancel(nil)
 			close(handle.done)
-			// Once consumed, the run goroutine owns the slot and frees it.
-			slot.Release()
 		}
 	}()
 	if cause := context.Cause(handle.runCtx); cause != nil {
-		m.failRunSetup(handle.runCtx, runID, false, cause)
+		setupErr = cause
 		return
 	}
 	run, err := m.db.GetRun(runID)
@@ -399,12 +412,12 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		if err == nil {
 			err = fmt.Errorf("run is missing")
 		}
-		m.failRunSetup(handle.runCtx, runID, false, fmt.Errorf("queued run is unreadable: %w", err))
+		setupErr = fmt.Errorf("queued run is unreadable: %w", err)
 		return
 	}
 	fail := func(err error) {
 		slog.Error("queued run cannot start", "run_id", runID, "error", err)
-		m.failRunSetup(handle.runCtx, runID, false, err)
+		setupErr = err
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil || repo == nil {
@@ -2685,9 +2698,12 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				err = fmt.Errorf("internal panic: %v", r)
 			}
 			// The run's workload never started, so it is already over. Report
-			// that FIRST, before the settlement below, which can still be
-			// waiting on storage to record the terminal outcome.
+			// the boundary and free the slot BEFORE the settlement below,
+			// which can still be waiting on storage to record the terminal
+			// outcome. Holding the slot across that wait would keep every
+			// later run from starting while the storage stays unhealthy.
 			handle.reportWorkloadStopped()
+			slot.Release()
 			if err != nil {
 				err = errors.Join(err, m.failRunSetup(setupCtx, run.ID, started, err))
 			}
@@ -2697,7 +2713,6 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 			if cleanupWorktree != nil {
 				cleanupWorktree()
 			}
-			slot.Release()
 		}
 	}()
 

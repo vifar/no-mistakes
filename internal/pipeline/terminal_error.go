@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -119,9 +120,17 @@ func cancellationAttributable(err, cause error) bool {
 			if isProcessNoise(child) {
 				continue
 			}
-			if !cancellationAttributable(child, cause) {
-				return false
+			// A child that is ITSELF attributable carries the cancellation
+			// too, even when the cancellation is deeper in its chain - a
+			// cleanup path that joins a cancelled command error onto a
+			// successful cleanup still reports the cancellation. The join
+			// must see that, or the enclosing join would reject an error
+			// that is purely the cancellation.
+			if cancellationAttributable(child, cause) {
+				cancelled = true
+				continue
 			}
+			return false
 		}
 		return cancelled
 	}
@@ -148,21 +157,21 @@ func isCancellationLeaf(err, cause error) bool {
 }
 
 // isProcessNoise reports whether an error is a subprocess's exit rather than a
-// failure of its own. A process KILLED by a cancellation reports its exit
+// failure of its own. A command CANCELLED by the context reports its exit
 // alongside the cancellation, and that exit says what the process was doing
 // when it was stopped, not that it failed on its own.
 //
-// Only a process that was stopped by a signal qualifies. A process that
-// exited on its own with a failure code - git refusing a ref, 128 - failed for
-// its own reasons, and the cancellation that happened to be observed
-// afterwards does not change that.
-//
-// A wrapper adds a message around the exit, so the question is asked of the
-// cause it wraps. A composite error that merely CONTAINS an exit alongside an
-// independent failure is not noise: every part of it is inspected.
+// The provenance comes from the execution boundary, not from the shape of the
+// error: a git command records that its own context cancelled it. A signal
+// alone does not prove it - a child can die of SIGSEGV on its own and then
+// race a shutdown that happened to observe the context afterwards - so a
+// signalled exit whose provenance is unknown keeps its own outcome.
 func isProcessNoise(err error) bool {
 	if err == nil {
 		return false
+	}
+	if git.CancelledByContext(err) {
+		return true
 	}
 	if exit, ok := err.(*exec.ExitError); ok {
 		return processWasSignaled(exit)
