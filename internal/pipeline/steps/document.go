@@ -233,12 +233,16 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if err != nil {
 		return nil, err
 	}
-	needsCommit, err := stepGitRun(sctx, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
+	// The prospective-commit count excludes recognized tool scratch: a test
+	// harness's live database left behind by an earlier step is not this
+	// pass's proposal, so it must not consume the commit budget or trigger
+	// the rollback.
+	needsCommit, err := worktreeDirtyPathsOutsideScratch(sctx)
 	if err != nil {
 		return nil, err
 	}
 	prospectiveCommits := agentCommits
-	if needsCommit != "" {
+	if len(needsCommit) > 0 {
 		prospectiveCommits++
 	}
 	capExceeded := prospectiveCommits > limit-history.commits

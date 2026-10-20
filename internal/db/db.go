@@ -118,6 +118,16 @@ func migrateWriteAttempt(sqlDB *sql.DB) error {
 			return fmt.Errorf("migrate db (%s): %w", stmt, err)
 		}
 	}
+	// The legacy (unversioned) upgrade creates its tables with CREATE TABLE IF
+	// NOT EXISTS, so an EXISTING runs table keeps its old shape. The additive
+	// statements are the only way it receives the newer columns, and the
+	// database is stamped with the current version afterwards - so skipping
+	// them here would leave it permanently missing them.
+	for _, stmt := range additiveMigrationStatements {
+		if _, err := tx.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
+			return fmt.Errorf("migrate db (%s): %w", stmt, err)
+		}
+	}
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
 		return fmt.Errorf("migrate db (PRAGMA user_version): %w", err)
 	}

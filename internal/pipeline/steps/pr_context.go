@@ -463,12 +463,15 @@ func verifyPRMutationComparison(sctx *pipeline.StepContext, host scm.Host, pr *s
 		return fmt.Errorf("durable run head differs from PR comparison receipt before update")
 	}
 	if allowProposed {
-		dirty, err := git.HasUncommittedChanges(sctx.Ctx, sctx.WorkDir)
+		// Recognized tool scratch is not an edit: it is never committed, so
+		// it must not make the worktree look dirty here. A real edit still
+		// refuses, exactly as before.
+		dirtyPaths, err := worktreeDirtyPathsOutsideScratch(sctx)
 		if err != nil {
 			return fmt.Errorf("check worktree before PR attestation update: %w", err)
 		}
-		if dirty {
-			return fmt.Errorf("worktree is dirty before PR attestation update")
+		if len(dirtyPaths) > 0 {
+			return fmt.Errorf("worktree is dirty before PR attestation update: %s", strings.Join(dirtyPaths, ", "))
 		}
 	}
 	reader, ok := host.(scm.PRFactsReader)

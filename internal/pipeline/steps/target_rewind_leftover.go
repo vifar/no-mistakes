@@ -61,7 +61,7 @@ func commitLeftoverValidationEdits(c *pipeline.StepContext) (bool, error) {
 	if !allowed {
 		return false, nil
 	}
-	producer, err := lastCompletedValidationStep(c, types.StepRebase)
+	producer, err := rewindProducerStep(c)
 	if err != nil {
 		return false, err
 	}
@@ -222,6 +222,64 @@ func commitPredecessorValidationEdits(c *pipeline.StepContext) (bool, error) {
 	return true, nil
 }
 
+// rewindProducerStep names the step whose agent left the edits a pending
+// rewind is about to preserve.
+//
+// The LIVE step rows are useless here: the rewind's own classification
+// transaction reset every step from Rebase to pending, so a lookup over them
+// finds no completed validation step and blames the wrong one. The ARCHIVED
+// rewind history is the evidence: it holds the step rows as they were BEFORE
+// the reset, so the last step that completed there is the step that ran last
+// before the advance.
+func rewindProducerStep(c *pipeline.StepContext) (string, error) {
+	history, err := c.DB.GetTargetRewindHistory(c.Run.ID)
+	if err != nil {
+		return "", err
+	}
+	if len(history) == 0 {
+		return "", nil
+	}
+	producer := ""
+	for _, entry := range history[len(history)-1].Steps {
+		if archivedStepStatus(entry) != string(types.StepStatusCompleted) {
+			continue
+		}
+		name := archivedStepName(entry)
+		if name == "" {
+			continue
+		}
+		switch name {
+		case string(types.StepRebase), string(types.StepReview), string(types.StepTest), string(types.StepDocument), string(types.StepLint):
+			producer = name
+		}
+	}
+	return producer, nil
+}
+
+// archivedStepName reads the step name from an archived step row.
+func archivedStepName(entry map[string]any) string {
+	for _, key := range []string{"step_name", "stepName"} {
+		if value, ok := entry[key]; ok {
+			if name, ok := value.(string); ok {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// archivedStepStatus reads the status from an archived step row.
+func archivedStepStatus(entry map[string]any) string {
+	for _, key := range []string{"status", "step_status"} {
+		if value, ok := entry[key]; ok {
+			if status, ok := value.(string); ok {
+				return status
+			}
+		}
+	}
+	return ""
+}
+
 // lastCompletedValidationStep names the last core step that COMPLETED in this
 // run, which is the step whose agent could have left the current worktree
 // edits. It is execution evidence, not the name of the boundary that
@@ -289,7 +347,7 @@ func leftoverValidationEditsRefusal(c *pipeline.StepContext, err error) error {
 	if pending == nil {
 		return err
 	}
-	producer, producerErr := lastCompletedValidationStep(c, types.StepRebase)
+	producer, producerErr := rewindProducerStep(c)
 	if producerErr != nil || producer == "" {
 		producer = pendingStepName(c, pending.Step)
 	}

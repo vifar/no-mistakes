@@ -78,6 +78,10 @@ func documentCapFinding(findings Findings, discarded bool) Findings {
 
 // documentCandidatePaths includes committed, staged, unstaged, and untracked
 // changes. --no-renames preserves both sides of a move and -z preserves names.
+//
+// Recognized tool scratch is EXCLUDED: a test harness's live database left
+// behind by an earlier step is not this pass's proposal, so it must not count
+// as a prospective commit and must never be deleted by the rollback.
 func documentCandidatePaths(sctx *pipeline.StepContext, from string) ([]string, []string, error) {
 	head, err := stepGitRun(sctx, "rev-parse", "HEAD")
 	if err != nil {
@@ -102,7 +106,58 @@ func documentCandidatePaths(sctx *pipeline.StepContext, from string) ([]string, 
 		return nil, nil, fmt.Errorf("read untracked Document edits: %w", err)
 	}
 	newPaths := documentNULPaths(untracked)
+	scratch, err := documentScratchPaths(sctx, newPaths)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(scratch) > 0 {
+		newPaths = subtractDocumentPaths(newPaths, scratch)
+		paths = subtractDocumentPaths(paths, scratch)
+	}
 	return append(paths, newPaths...), newPaths, nil
+}
+
+// documentScratchPaths returns the subset of paths that is recognized tool
+// scratch. A path is scratch when its first new component marks scratch, or
+// when it matches a staging exclude - the SAME identity the automatic
+// staging uses, so the two can never disagree about what belongs in the
+// branch.
+func documentScratchPaths(sctx *pipeline.StepContext, paths []string) ([]string, error) {
+	headDirs := map[string]bool{}
+	var scratch []string
+	for _, path := range paths {
+		component, err := firstNewScratchComponent(sctx, headDirs, path, false)
+		if err != nil {
+			return nil, err
+		}
+		if component != "" {
+			scratch = append(scratch, path)
+			continue
+		}
+		if _, excluded := matchesStagingExclude(sctx, path); excluded {
+			scratch = append(scratch, path)
+		}
+	}
+	return scratch, nil
+}
+
+// subtractDocumentPaths removes every path in drop from paths, preserving the
+// order of the rest.
+func subtractDocumentPaths(paths, drop []string) []string {
+	if len(drop) == 0 {
+		return paths
+	}
+	excluded := make(map[string]bool, len(drop))
+	for _, path := range drop {
+		excluded[path] = true
+	}
+	kept := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if !excluded[path] {
+			kept = append(kept, path)
+		}
+	}
+	return kept
 }
 
 func documentRangePaths(sctx *pipeline.StepContext, from, to string) ([]string, error) {

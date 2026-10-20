@@ -94,7 +94,10 @@ func firstNewScratchComponent(sctx *pipeline.StepContext, headDirs map[string]bo
 // The scratch identity is the SAME one the automatic staging uses, so the two
 // can never disagree about what belongs in the branch.
 func worktreeDirtyPathsOutsideScratch(sctx *pipeline.StepContext) ([]string, error) {
-	out, err := stepGitRunRaw(sctx, "status", "--porcelain", "--untracked-files=all", "--no-renames", "--ignore-submodules=none")
+	// NUL-delimited records: without -z, git quotes and folds unusual names
+	// into one line, and two untracked files can share a line - which would
+	// hide a real file behind a scratch one.
+	out, err := stepGitRunRaw(sctx, "status", "--porcelain", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=none")
 	if err != nil {
 		return nil, err
 	}

@@ -156,6 +156,54 @@ func TestDocumentStep_RefusesASecondLeftoverCommit(t *testing.T) {
 	}
 }
 
+// TestDocumentStep_RealFileBesideScratchIsNotHidden proves a real untracked
+// file is preserved even when scratch sits beside it. The status parsing must
+// be NUL-delimited: without it, two untracked files share one record and the
+// scratch check swallows the real one.
+func TestDocumentStep_RealFileBesideScratchIsNotHidden(t *testing.T) {
+	c := documentFixture(t)
+	// The Test agent left scratch and a real new test file side by side.
+	scratch := filepath.Join(c.WorkDir, ".journal-live")
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scratch, "postgres.log"), []byte("scratch\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.WorkDir, "new_test.go"), []byte("package main\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dirty, err := worktreeDirtyPathsOutsideScratch(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, path := range dirty {
+		if path == "new_test.go" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the real file beside the scratch was hidden: %+v", dirty)
+	}
+	// The step preserves the real file and sends the run back to Review.
+	outcome, err := (&DocumentStep{}).Execute(c)
+	if err != nil {
+		t.Fatalf("the documentation pass failed: %v", err)
+	}
+	if outcome == nil || outcome.RestartFrom != types.StepReview {
+		t.Fatalf("the real file did not cause a re-review: %+v", outcome)
+	}
+	// The real file is preserved, and the scratch never enters the branch.
+	tracked := gitCmd(t, c.WorkDir, "ls-files")
+	if !strings.Contains(tracked, "new_test.go") {
+		t.Fatalf("the real file was lost: %s", tracked)
+	}
+	if strings.Contains(tracked, ".journal-live") {
+		t.Fatalf("tool scratch entered the branch: %s", tracked)
+	}
+}
+
 // TestDocumentStep_ToolScratchAloneDoesNotBlockTheStep proves recognized tool
 // scratch is not an edit: a test harness's live database left behind by the
 // Test agent must not stop the documentation pass, and it must never enter

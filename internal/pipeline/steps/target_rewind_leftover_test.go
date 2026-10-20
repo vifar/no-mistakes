@@ -160,6 +160,48 @@ func TestTargetRewindLeftoverCommitFailureNamesTheStepAndPaths(t *testing.T) {
 	}
 }
 
+// TestTargetRewindAttributesTheProducerFromArchivedEvidence proves the
+// attribution survives the rewind's own reset. The classification
+// transaction resets every step from Rebase to pending, so a lookup over the
+// LIVE rows finds no completed step and blames the wrong one. The ARCHIVED
+// rewind history is the evidence that keeps the attribution honest.
+func TestTargetRewindAttributesTheProducerFromArchivedEvidence(t *testing.T) {
+	c, selected := rewindFixture(t)
+	// The run completed Review and Test before the target moved.
+	for _, name := range []types.StepName{types.StepReview, types.StepTest} {
+		step, err := c.DB.InsertStepResult(c.Run.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.DB.CompleteStep(step.ID, 0, 1, "step.log"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	advanceRewindTarget(t, c)
+	c.PRContextAfterStep = true
+	if _, err := guardPRContextWithSelection(c, types.StepTest, selected, false); err != nil {
+		t.Fatal(err)
+	}
+	// The rewind's own transaction reset the live step rows.
+	live, err := c.DB.GetStepsByRun(c.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range live {
+		if row.StepName == types.StepTest && row.Status == types.StepStatusCompleted {
+			t.Fatal("the fixture did not reset the live step rows")
+		}
+	}
+	// The archived evidence still names the producer.
+	producer, err := rewindProducerStep(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if producer != string(types.StepTest) {
+		t.Fatalf("the producer = %q, want test", producer)
+	}
+}
+
 // TestTargetRewindWithoutLeftoverEditsCommitsNothing proves the ordinary
 // rewind path is unchanged when the worktree is already clean.
 func TestTargetRewindWithoutLeftoverEditsCommitsNothing(t *testing.T) {
