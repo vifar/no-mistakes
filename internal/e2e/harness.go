@@ -34,6 +34,7 @@ type Harness struct {
 
 	NMBin       string // absolute path to the no-mistakes binary under test
 	FakeAgent   string // absolute path to the fake agent binary
+	FakeCLI     string // absolute path to the fake provider CLI binary
 	BinDir      string // temp dir holding agent symlinks; prepended to PATH
 	NMHome      string // value used as $NM_HOME (daemon DB, socket, config)
 	HomeDir     string // value used as $HOME so git operations don't read user state
@@ -79,7 +80,7 @@ type SetupOpts struct {
 
 const e2eDaemonStartTimeout = "45s"
 
-// NewHarness builds the no-mistakes + fakeagent binaries (once per test
+// NewHarness builds the fixture binaries (once per test
 // process), creates a temp git repo with origin, writes the no-mistakes
 // global config to point at the chosen fake agent, and registers cleanup
 // to stop the daemon and remove temp state at test end.
@@ -89,7 +90,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 		opts.Agent = "claude"
 	}
 
-	nmBin, fakeBin := buildBinaries(t)
+	nmBin, fakeBin, cliBin := buildBinaries(t)
 
 	// Keep Unix socket paths short. A containing tmp segment already
 	// satisfies the daemon reaper's safety gate; elsewhere nmh-* does too.
@@ -106,6 +107,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 		t:                 t,
 		NMBin:             nmBin,
 		FakeAgent:         fakeBin,
+		FakeCLI:           cliBin,
 		BinDir:            filepath.Join(root, "bin"),
 		NMHome:            filepath.Join(root, "h"),
 		HomeDir:           filepath.Join(root, "home"),
@@ -923,13 +925,15 @@ var (
 	buildOnce sync.Once
 	builtNM   string
 	builtFake string
+	builtCLI  string
 	buildErr  error
 )
 
-// buildBinaries compiles the no-mistakes binary and the fakeagent binary
-// once per `go test` invocation. Both are placed in a per-process build
-// dir; subsequent harnesses reuse them.
-func buildBinaries(t *testing.T) (nmBin, fakeBin string) {
+// buildBinaries compiles the no-mistakes, fakeagent, and fakecli binaries
+// once per `go test` invocation. All three are placed in a per-process build
+// dir before harnesses isolate HOME (and Go's default cache); subsequent
+// harnesses reuse them.
+func buildBinaries(t *testing.T) (nmBin, fakeBin, cliBin string) {
 	t.Helper()
 	buildOnce.Do(func() {
 		dir, err := os.MkdirTemp("", "nm-e2e-bin-*")
@@ -939,6 +943,7 @@ func buildBinaries(t *testing.T) (nmBin, fakeBin string) {
 		}
 		nm := filepath.Join(dir, executableName("no-mistakes"))
 		fake := filepath.Join(dir, executableName("fakeagent"))
+		cli := filepath.Join(dir, executableName("fakecli"))
 
 		repoRoot, err := findRepoRoot()
 		if err != nil {
@@ -950,6 +955,7 @@ func buildBinaries(t *testing.T) (nmBin, fakeBin string) {
 		}{
 			{nm, "./cmd/no-mistakes"},
 			{fake, "./cmd/fakeagent"},
+			{cli, "./internal/pipeline/fakecli"},
 		} {
 			cmd := exec.Command("go", "build", "-tags=e2e", "-o", target.out, target.pkg)
 			cmd.Dir = repoRoot
@@ -961,11 +967,12 @@ func buildBinaries(t *testing.T) (nmBin, fakeBin string) {
 		}
 		builtNM = nm
 		builtFake = fake
+		builtCLI = cli
 	})
 	if buildErr != nil {
 		t.Fatalf("build binaries: %v", buildErr)
 	}
-	return builtNM, builtFake
+	return builtNM, builtFake, builtCLI
 }
 
 func executableName(base string) string {

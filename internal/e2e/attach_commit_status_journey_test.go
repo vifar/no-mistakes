@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -108,16 +107,6 @@ func newStatusJourney(t *testing.T, provider string) (*Harness, *journeyStatusSe
 
 	// Keep the existing stateful PR fixture, forwarding only status API calls
 	// through the standard fakecli shim to the HTTP request boundary.
-	statusCLI := filepath.Join(h.BinDir, "status-cli")
-	root, err := findRepoRoot()
-	if err != nil {
-		t.Fatal(err)
-	}
-	build := exec.Command("go", "build", "-o", statusCLI, "./internal/pipeline/fakecli")
-	build.Dir = root
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build status shim: %v\n%s", err, out)
-	}
 	providerDir := filepath.Join(h.BinDir, "provider")
 	if err := os.Mkdir(providerDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -127,7 +116,7 @@ func newStatusJourney(t *testing.T, provider string) (*Harness, *journeyStatusSe
 	if err := os.Rename(gh, backup); err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\ncase \"$*\" in\n*'/statuses/'*) exec " + shellQuote(statusCLI) + " \"$@\";;\n" +
+	script := "#!/bin/sh\ncase \"$*\" in\n*'/statuses/'*) exec " + shellQuote(h.FakeCLI) + " \"$@\";;\n" +
 		"*) exec " + shellQuote(backup) + " \"$@\";;\nesac\n"
 	if err := os.WriteFile(gh, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
