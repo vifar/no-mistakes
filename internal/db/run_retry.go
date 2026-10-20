@@ -1,10 +1,12 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -24,7 +26,7 @@ type RunRetry struct {
 // InsertRunRetry records the audit link for a continuation run. It fails when
 // the source run was already continued.
 func (d *DB) InsertRunRetry(r RunRetry) error {
-	_, err := d.sql.Exec(
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "InsertRunRetry",
 		`INSERT INTO run_retries (run_id, source_run_id, step_name, source_round, source_error, checkpoint_head_sha, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		r.RunID, r.SourceRunID, r.StepName, r.SourceRound, r.SourceError, r.CheckpointHeadSHA, now(),
 	)
@@ -62,6 +64,6 @@ func (d *DB) getRunRetry(query, id string) (*RunRetry, error) {
 // retry refused at launch uses it so the refused continuation never becomes
 // the branch's latest run.
 func (d *DB) DeleteRun(id string) error {
-	_, err := d.sql.Exec(`DELETE FROM runs WHERE id = ?`, id)
+	_, err := sqlitewrite.Exec(context.Background(), d.sql, "DeleteRun", `DELETE FROM runs WHERE id = ?`, id)
 	return err
 }

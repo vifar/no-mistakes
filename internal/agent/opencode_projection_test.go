@@ -134,6 +134,39 @@ func v2Agent(server *httptest.Server) *opencodeAgent {
 	return &opencodeAgent{bin: "opencode", server: &managedServer{port: mustParsePort(server.URL)}, apiVersion: opencodeAPIVersion2}
 }
 
+func NewOpencodeV2TestAgent(serverURL string) Agent {
+	return v2Agent(&httptest.Server{URL: serverURL})
+}
+
+func TestOpencodeV2_ToolProgressEvents(t *testing.T) {
+	for _, kind := range []string{"session.tool.called", "session.tool.success", "session.tool.failed", "session.tool.progress", "session.reasoning.delta"} {
+		for _, observe := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/observe=%v", kind, observe), func(t *testing.T) {
+				state := opencodeV2Stream{sessionID: "ses_owned"}
+				count := 0
+				opts := RunOpts{OnChunk: func(text string) { t.Errorf("tool event leaked into text: %q", text) }}
+				if observe {
+					opts.OnLifecycle = func(event LifecycleEvent) {
+						if event.Phase == LifecyclePhaseProgress {
+							count++
+						}
+					}
+				}
+				for _, session := range []string{"ses_foreign", "ses_owned"} {
+					state.read(strings.NewReader(fmt.Sprintf("data: {\"type\":%q,\"data\":{\"sessionID\":%q,\"assistantMessageID\":\"msg_1\",\"id\":\"tool_1\"}}\n\n", kind, session)), opts)
+					want := 0
+					if observe && session == "ses_owned" && kind != "session.tool.progress" && kind != "session.reasoning.delta" {
+						want = 1
+					}
+					if count != want {
+						t.Fatalf("progress=%d want=%d for %s", count, want, session)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestOpencodeV2_FullLifecycleUsesAsyncCompletionAndValidatesFinalJSON(t *testing.T) {
 	f := &opencodeV2Fixture{pages: []string{v2Page(`{"summary":"final only"}`)}, events: `data: {"type":"session.text.delta","data":{"sessionID":"ses_other","delta":"FOREIGN"}}
 

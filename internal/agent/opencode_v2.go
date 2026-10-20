@@ -314,11 +314,13 @@ func (s *opencodeV2Stream) emit(messageID, text string, opts RunOpts) {
 }
 
 func (s *opencodeV2Stream) read(reader io.Reader, opts RunOpts) {
+	progress := agentProgressEmitter(opts, "opencode")
 	_ = parseSSE(reader, func(event sseEvent) bool {
 		var value struct {
 			Type string `json:"type"`
 			Data struct {
 				SessionID string          `json:"sessionID"`
+				ToolID    string          `json:"id"`
 				MessageID string          `json:"assistantMessageID"`
 				Ordinal   int             `json:"ordinal"`
 				Text      string          `json:"text"`
@@ -350,6 +352,10 @@ func (s *opencodeV2Stream) read(reader io.Reader, opts RunOpts) {
 				s.flushed[key] = true
 			}
 			s.parts[key] = data.Text
+		case "session.tool.called", "session.tool.success", "session.tool.failed":
+			if data.MessageID != "" && data.ToolID != "" && progress != nil {
+				progress()
+			}
 		case "session.step.ended", "session.step.failed":
 			if data.Tokens != nil && data.MessageID != "" {
 				s.usage[data.MessageID] = opencodeTokensToUsage(data.Tokens)
