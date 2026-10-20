@@ -1958,6 +1958,16 @@ rounds:
 			priorGeneration := e.evidenceGeneration.Load()
 			restartIndex, contextErr := e.checkPRContext(ctx, run, repo, workDir, stepName, currentIndex, true, stepName == types.StepRebase && outcome != nil && !outcome.NeedsApproval && outcome.RestartFrom == "")
 			if contextErr != nil {
+				// The guard refused AFTER this step ran. The step itself
+				// produced no authority (its verdict is not recorded), so it
+				// must not stay "running": a terminal run with a running
+				// step wedges branch_sync in push_in_progress with no
+				// supported exit.
+				redacted := safeurl.RedactText(contextErr.Error())
+				if dbErr := e.db.FailStep(sr.ID, redacted, time.Since(phaseStart).Milliseconds()); dbErr != nil {
+					slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
+				}
+				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redacted, nil)
 				return false, "", contextErr
 			}
 
