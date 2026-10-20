@@ -24,7 +24,7 @@ import (
 // execution proof is earned by the real daemon, never inserted by the test.
 // Deliberately damaging that persisted proof tests fail-closed cancellation.
 func TestCustomGateWatcherProofProductionJourneys(t *testing.T) {
-	for _, mode := range []string{"clean", "approved-warning", "formatter-comparison-refusal", "missing-proof", "epoch-drift", "config-drift", "push-generation-drift"} {
+	for _, mode := range []string{"clean", "approved-warning", "formatter-stale-gate", "missing-proof", "epoch-drift", "config-drift", "push-generation-drift"} {
 		t.Run(mode, func(t *testing.T) {
 			j := newScopeJourney(t, SetupOpts{Agent: "claude", Scenario: certifiedWatcherScenario(t)})
 			h := j.h
@@ -35,7 +35,7 @@ func TestCustomGateWatcherProofProductionJourneys(t *testing.T) {
 			}
 			h.CommitChange("main", "gate.sh", gateScript, "add execution receipt gate")
 			trusted := "commands:\n  test: 'true'\n  lint: 'true'\n"
-			if mode == "formatter-comparison-refusal" {
+			if mode == "formatter-stale-gate" {
 				trusted += "  format: 'printf formatted > formatted.txt'\n"
 			}
 			trusted += "gates:\n  - name: budget\n    after: rebase\n    command: sh gate.sh\n"
@@ -67,39 +67,6 @@ func TestCustomGateWatcherProofProductionJourneys(t *testing.T) {
 			if mode == "approved-warning" {
 				run := waitForStepStatus(t, h, branch, gate, types.StepStatusAwaitingApproval, 30*time.Second)
 				h.Respond(run.ID, gate, types.ActionApprove)
-			}
-			if mode == "formatter-comparison-refusal" {
-				// Main's comparison guard refuses this unpublished advance before
-				// Review can replay. Preserve that stronger public boundary rather
-				// than disabling it to manufacture an otherwise unreachable reset.
-				run := h.WaitForRun(branch, 30*time.Second)
-				if run.Status != types.RunFailed || !strings.Contains(deref(run.Error), "PR comparison changed after review; start a new run for the current target and head") || run.HeadSHA == headA {
-					t.Fatalf("formatter advance did not fail closed: %+v", run)
-				}
-				database, err := db.OpenReadOnly(paths.WithRoot(h.NMHome).DB())
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer database.Close()
-				publications, err := database.GetCommitStatusPublications(t.Context(), run.ID)
-				if err != nil {
-					t.Fatal(err)
-				}
-				for _, p := range publications {
-					if p.StrictCertificate != nil || p.LastState == "success" || p.PreserveSuccess != nil && *p.PreserveSuccess {
-						t.Fatalf("unvalidated formatter head certified: %+v", p)
-					}
-				}
-				receipt, err := os.ReadFile(filepath.Join(h.NMHome, "gate-heads"))
-				if err != nil || string(receipt) != headA+"\n" {
-					t.Fatalf("gate did not execute once at A: %q %v", receipt, err)
-				}
-				out, err := h.Run("axi", "status")
-				if err != nil {
-					t.Fatalf("status: %v\n%s", err, out)
-				}
-				t.Logf("RESULT: gate executed at A=%s; formatter created B=%s; comparison guard refused before certification, error=%q\nCLI status:\n%s", headA, run.HeadSHA, deref(run.Error), out)
-				return
 			}
 			run := waitForStepStatus(t, h, branch, types.StepCI, types.StepStatusRunning, 45*time.Second)
 			control, err := sql.Open("sqlite", paths.WithRoot(h.NMHome).DB())
@@ -144,7 +111,18 @@ func TestCustomGateWatcherProofProductionJourneys(t *testing.T) {
 			if err != nil || gateRow == nil || gateRow.Status != types.StepStatusCompleted {
 				t.Fatalf("custom gate not completed: %+v %v", gateRow, err)
 			}
-			if publications[0].StrictCertificate == nil {
+			if mode == "formatter-stale-gate" {
+				// Push revalidates its correction from Review. The gate anchored
+				// after Rebase ran only at A, so it cannot certify head B.
+				review, ok := findStep(run.Steps, types.StepReview)
+				if stored.HeadSHA == headA || !ok || review.Status != types.StepStatusCompleted || review.RoundCount < 2 ||
+					h.UpstreamBranchSHA(branch) != stored.HeadSHA || gitIn(t, h, h.UpstreamDir, "show", stored.HeadSHA+":formatted.txt") != "formatted" {
+					t.Fatalf("formatter correction was not revalidated and published: %+v", stored)
+				}
+				if publications[0].StrictCertificate != nil {
+					t.Fatal("old-head custom gate certified the formatter correction")
+				}
+			} else if publications[0].StrictCertificate == nil {
 				t.Fatal("current-head custom gate did not earn a certificate")
 			}
 			switch mode {

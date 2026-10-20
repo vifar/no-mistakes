@@ -66,8 +66,11 @@ func TestPushCorrectionIndependentForgeHeadLiveJourney(t *testing.T) {
 			if got := h.UpstreamBranchSHA(branch); got != target {
 				t.Fatalf("pipeline overwrote independent publisher: %s, want %s", got, target)
 			}
-			worktree := paths.WithRoot(h.NMHome).WorktreeDir(run.RepoID, run.ID)
-			if stored.HeadSHA == source || gitIn(t, h, worktree, "show", stored.HeadSHA+":feature.txt") != "corrected by Push" {
+			// Terminal cleanup may already have removed the managed worktree.
+			// The recovery ref is the durable custody contract for this commit.
+			gate := paths.WithRoot(h.NMHome).RepoDir(run.RepoID)
+			if stored.HeadSHA == source || gitIn(t, h, h.WorkDir, "--git-dir="+gate, "rev-parse", "refs/no-mistakes/recover/"+run.ID) != stored.HeadSHA ||
+				gitIn(t, h, h.WorkDir, "--git-dir="+gate, "show", stored.HeadSHA+":feature.txt") != "corrected by Push" {
 				t.Fatal("the refusal did not exercise a retained pipeline correction")
 			}
 			out, err := h.Run("axi", "status", "--run", run.ID)
