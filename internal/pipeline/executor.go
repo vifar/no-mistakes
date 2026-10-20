@@ -3337,6 +3337,7 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		runStatus = types.RunCancelled
 	}
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
+	e.releaseStoppedSlot()
 	executionErr := err
 	writeTerminal := func() error {
 		if err := RecordCancellationAttribution(e.db, run.ID, ctxs...); err != nil {

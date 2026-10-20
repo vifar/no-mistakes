@@ -38,6 +38,16 @@ type RunSlot interface {
 // leave it nil.
 func (e *Executor) SetRunSlot(slot RunSlot) { e.slot = slot }
 
+// releaseStoppedSlot returns daemon capacity after execution has stopped, even
+// when durable terminal settlement must wait for the database to recover. This
+// releases capacity only; FailRun still retains custody until settlement. Slots
+// used by embeddings need not implement the daemon's permanent release hook.
+func (e *Executor) releaseStoppedSlot() {
+	if slot, ok := e.slot.(interface{ Release() }); ok {
+		slot.Release()
+	}
+}
+
 func (e *Executor) yieldSlot() {
 	if e.slot != nil {
 		e.slot.Yield()
