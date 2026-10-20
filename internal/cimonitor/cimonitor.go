@@ -50,6 +50,12 @@ const (
 	// running checks, because the only thing that clears it happens outside
 	// the pipeline.
 	ChecksAwaitingApprovalMsg = "CI workflows are held awaiting maintainer approval - no jobs have run, waiting..."
+	// ChecksAwaitingManualJobMsg is logged when the provider is holding the
+	// pipeline on a blocking manual job - GitLab stops at the job's stage
+	// until a person runs it. Nothing the repository does clears it,
+	// so like the maintainer-approval hold it is named instead of being
+	// reported as checks that are running.
+	ChecksAwaitingManualJobMsg = "CI is held on a blocking manual job awaiting a person to run it, waiting..."
 	// BehindBaseMsg is the one poll a green PR the forge reports BEHIND
 	// waits for its base to stop moving before the monitor rebases it.
 	BehindBaseMsg = "all CI checks passed but the PR is behind a base that requires up-to-date branches, waiting for the base to settle before rebasing..."
@@ -122,6 +128,7 @@ func ParseActivity(logs []string) Activity {
 		case strings.Contains(line, "issues detected"),
 			strings.Contains(line, "CI checks running"),
 			line == ChecksAwaitingApprovalMsg,
+			line == ChecksAwaitingManualJobMsg,
 			strings.HasPrefix(line, ChecksHeadWaitingPrefix),
 			line == BehindBaseMsg,
 			strings.Contains(line, "mergeable state still pending"),

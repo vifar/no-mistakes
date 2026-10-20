@@ -301,6 +301,14 @@ func (p gitlabHeadPipeline) completedAt() time.Time {
 	return time.Time{}
 }
 
+// awaitingManualJob reports whether the pipeline's own status says a person
+// must act before it can finish: GitLab reports `manual` for a pipeline stopped
+// at a blocking manual job. It is the aggregate form of the job-level rule, for
+// when no job or trigger-job row carries the wait itself.
+func (p gitlabHeadPipeline) awaitingManualJob() bool {
+	return strings.EqualFold(strings.TrimSpace(p.Status), "manual")
+}
+
 // sourceRevision is the source-branch commit the merge request currently points
 // at, or "" when neither of the fields that carry it was reported. Both fields
 // are read, never assumed: a check read that cannot name the revision it is
@@ -1082,11 +1090,41 @@ type gitlabJob struct {
 	} `json:"pipeline"`
 }
 
+// bucket maps the job to a check bucket. A failed job with allow_failure set
+// is non-blocking in GitLab (the pipeline is green, shown as "passed with
+// warnings"), so it maps to CheckBucketSkip like other non-blocking outcomes
+// instead of CheckBucketFail.
+//
+// A manual job's bucket depends on the same flag, and the two readings are
+// opposites. A blocking manual job (`allow_failure: false`, the default for
+// `when: manual` inside `rules`) stops the pipeline at its stage until a person
+// runs it, and GitLab's own merge rules treat that pipeline as
+// unfinished; mapping it to a skip lets a merge request read as ready while
+// GitLab would refuse to merge it. It maps to CheckBucketPending instead - the
+// job is waiting on a person, not finished - and jobsToChecks marks it
+// AwaitingManualJob so the CI step names the wait and keeps it away from the
+// fix agent. An optional manual job (`allow_failure: true`, the default outside
+// `rules`) is one GitLab does not wait for - the pipeline can succeed without
+// it - so it stays a skip.
 func (j gitlabJob) bucket() scm.CheckBucket {
-	if j.AllowFailure && strings.EqualFold(strings.TrimSpace(j.Status), "failed") {
+	status := strings.ToLower(strings.TrimSpace(j.Status))
+	switch {
+	case status == "manual":
+		if j.AllowFailure {
+			return scm.CheckBucketSkip
+		}
+		return scm.CheckBucketPending
+	case j.AllowFailure && status == "failed":
 		return scm.CheckBucketSkip
 	}
 	return gitlabStatusBucket(j.Status)
+}
+
+// awaitingManualJob reports whether the job is a blocking manual job: GitLab
+// holds the pipeline at it until a person runs it. It is the one
+// pending check that cannot progress on its own and that no rerun can clear.
+func (j gitlabJob) awaitingManualJob() bool {
+	return strings.EqualFold(strings.TrimSpace(j.Status), "manual") && !j.AllowFailure
 }
 
 // completedAt parses the job's finished_at timestamp, returning the zero time
@@ -1328,14 +1366,15 @@ func jobsToChecks(jobs []gitlabJob) []scm.Check {
 	checks := make([]scm.Check, 0, len(jobs))
 	for _, job := range jobs {
 		checks = append(checks, scm.Check{
-			Name:        job.Name,
-			ProviderID:  gitlabJobProviderID("gitlab-job", job.ID),
-			HeadSHA:     gitlabJobHeadSHA(job),
-			Bucket:      job.bucket(),
-			Kind:        scm.CheckKindRun,
-			State:       gitlabCheckState(job.Status),
-			CompletedAt: job.completedAt(),
-			Link:        strings.TrimSpace(job.WebURL),
+			Name:              job.Name,
+			ProviderID:        gitlabJobProviderID("gitlab-job", job.ID),
+			HeadSHA:           gitlabJobHeadSHA(job),
+			Bucket:            job.bucket(),
+			Kind:              scm.CheckKindRun,
+			State:             gitlabCheckState(job.Status),
+			CompletedAt:       job.completedAt(),
+			Link:              strings.TrimSpace(job.WebURL),
+			AwaitingManualJob: job.awaitingManualJob(),
 		})
 	}
 	return checks
@@ -1367,13 +1406,14 @@ func triggerJobsToChecks(jobs []gitlabTriggerJob) []scm.Check {
 			}
 		}
 		checks = append(checks, scm.Check{
-			Name:        job.Name,
-			ProviderID:  gitlabJobProviderID("gitlab-trigger-job", job.ID),
-			Bucket:      job.bucket(),
-			Kind:        scm.CheckKindRun,
-			State:       gitlabCheckState(job.Status),
-			CompletedAt: job.completedAt(),
-			Link:        link,
+			Name:              job.Name,
+			ProviderID:        gitlabJobProviderID("gitlab-trigger-job", job.ID),
+			Bucket:            job.bucket(),
+			Kind:              scm.CheckKindRun,
+			State:             gitlabCheckState(job.Status),
+			CompletedAt:       job.completedAt(),
+			Link:              link,
+			AwaitingManualJob: job.awaitingManualJob(),
 		})
 	}
 	return checks
@@ -1428,13 +1468,14 @@ func pipelineAggregateCheck(pipeline gitlabHeadPipeline, checks []scm.Check) (sc
 		}
 	}
 	return scm.Check{
-		Name:        fmt.Sprintf("Pipeline #%d", pipeline.ID),
-		ProviderID:  "gitlab-pipeline:" + strconv.Itoa(pipeline.ID),
-		Bucket:      bucket,
-		Kind:        scm.CheckKindRun,
-		State:       gitlabCheckState(pipeline.Status),
-		CompletedAt: pipeline.completedAt(),
-		Link:        strings.TrimSpace(pipeline.WebURL),
+		Name:              fmt.Sprintf("Pipeline #%d", pipeline.ID),
+		ProviderID:        "gitlab-pipeline:" + strconv.Itoa(pipeline.ID),
+		Bucket:            bucket,
+		Kind:              scm.CheckKindRun,
+		State:             gitlabCheckState(pipeline.Status),
+		CompletedAt:       pipeline.completedAt(),
+		Link:              strings.TrimSpace(pipeline.WebURL),
+		AwaitingManualJob: pipeline.awaitingManualJob(),
 	}, true
 }
 
@@ -1482,6 +1523,14 @@ func findFailedJobTargetIDs(out []byte, checkTargets []scm.CheckTarget) []int {
 	return matched
 }
 
+// gitlabStatusBucket maps a raw provider state - a job's or a pipeline's -
+// onto the shared bucket, ignoring job-level policy; gitlabJob.bucket applies
+// allow_failure on top for the jobs it maps. `manual` is a wait on a person,
+// not a finished state: a pipeline's own status is `manual` while it is
+// stopped at a blocking manual job, and reporting that as a skip would let a
+// blocked pipeline read green. Job-level manual states never reach this case -
+// gitlabJob.bucket splits them by allow_failure first - so this mapping serves
+// the pipeline-status reading, not the job reader.
 func gitlabStatusBucket(state string) scm.CheckBucket {
 	switch strings.ToLower(strings.TrimSpace(state)) {
 	case "success":
@@ -1492,9 +1541,7 @@ func gitlabStatusBucket(state string) scm.CheckBucket {
 		return scm.CheckBucketCancel
 	case "skipped":
 		return scm.CheckBucketSkip
-	case "manual":
-		return scm.CheckBucketSkip
-	case "pending", "running", "created", "waiting_for_resource", "preparing", "scheduled":
+	case "manual", "pending", "running", "created", "waiting_for_resource", "preparing", "scheduled":
 		return scm.CheckBucketPending
 	default:
 		return ""

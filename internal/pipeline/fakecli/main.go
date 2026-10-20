@@ -1323,13 +1323,15 @@ func fakeCIGlabIsStatusChecksRead(joined string) bool {
 }
 
 // fakePipelineStatus derives a pipeline status from a job list the way GitLab
-// aggregates one: any failed job fails the pipeline, any cancelled job cancels
-// it, a job still in flight keeps it running, and jobs that all finished
-// cleanly pass it. An explicit FAKE_CLI_PIPELINE_STATUS overrides the
-// derivation, which is how a test states a pipeline whose reported status no
-// job list explains (a pipeline that failed before creating a job). An empty
-// job list derives "success"; the empty-jobs failure is exactly the case an
-// explicit override is for.
+// aggregates one: a job still in flight keeps it running, a blocking manual job
+// stops it at that stage (status "manual"), a failed job fails it, a cancelled
+// job cancels it, and jobs that all finished cleanly pass it. The manual check
+// follows GitLab's own precedence, which reads a blocking manual job before a
+// failure. An explicit FAKE_CLI_PIPELINE_STATUS overrides the derivation, which
+// is how a test states a pipeline whose reported status no job list explains (a
+// pipeline that failed before creating a job). An empty job list derives
+// "success"; the empty-jobs failure is exactly the case an explicit override is
+// for.
 func fakePipelineStatus(checksJSON string) string {
 	if override := os.Getenv("FAKE_CLI_PIPELINE_STATUS"); override != "" {
 		return override
@@ -1341,24 +1343,35 @@ func fakePipelineStatus(checksJSON string) string {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(checksJSON)), &jobs); err != nil || len(jobs) == 0 {
 		return "success"
 	}
-	status := "success"
+	var running, manualBlocked, failed, canceled bool
 	for _, job := range jobs {
 		switch strings.ToLower(strings.TrimSpace(job.Status)) {
 		case "failed":
-			if job.AllowFailure {
-				continue
+			if !job.AllowFailure {
+				failed = true
 			}
-			return "failed"
 		case "canceled", "cancelled":
-			status = "canceled"
-		case "success", "skipped", "manual":
-		default:
-			if status != "canceled" {
-				status = "running"
+			canceled = true
+		case "manual":
+			if !job.AllowFailure {
+				manualBlocked = true
 			}
+		case "success", "skipped":
+		default:
+			running = true
 		}
 	}
-	return status
+	switch {
+	case running:
+		return "running"
+	case manualBlocked:
+		return "manual"
+	case failed:
+		return "failed"
+	case canceled:
+		return "canceled"
+	}
+	return "success"
 }
 
 // fakeGlabTriggerJobs serves the pipeline's trigger jobs on whichever route

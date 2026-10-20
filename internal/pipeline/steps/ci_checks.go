@@ -45,7 +45,7 @@ func hasFailingChecks(checks []scm.Check) bool {
 // has not started at all. Neither defers escalation of other checks' failures.
 func hasExecutingPendingChecks(checks []scm.Check) bool {
 	for _, c := range checks {
-		if c.Pending() && !c.AwaitingApproval && !c.ExpectedMissing {
+		if c.Pending() && !c.HeldForHuman() && !c.ExpectedMissing {
 			return true
 		}
 	}
@@ -55,6 +55,15 @@ func hasExecutingPendingChecks(checks []scm.Check) bool {
 func hasAwaitingApprovalChecks(checks []scm.Check) bool {
 	for _, c := range checks {
 		if c.AwaitingApproval && c.Pending() {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAwaitingManualJobChecks(checks []scm.Check) bool {
+	for _, c := range checks {
+		if c.AwaitingManualJob && c.Pending() {
 			return true
 		}
 	}

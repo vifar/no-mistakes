@@ -1010,11 +1010,104 @@ func TestFetchFailedCheckLogsParsesMRJSONAfterPreamble(t *testing.T) {
 	}
 }
 
-func TestGitlabStatusBucketTreatsManualJobsAsSkipped(t *testing.T) {
+// A blocking manual job (`when: manual` with `allow_failure: false`) stops the
+// pipeline at its stage until a person runs it, and GitLab's merge
+// rules treat that pipeline as unfinished. Reading it as a skip let a merge
+// request report ready while GitLab would refuse to merge it, so it is a
+// pending check marked as the human wait it is. An optional manual job
+// (`allow_failure: true`, the default outside `rules`) is one GitLab does not
+// wait for and keeps its skip.
+func TestParseGitlabJobsHonorsManualJobPolicy(t *testing.T) {
 	t.Parallel()
 
-	if got := gitlabStatusBucket("manual"); got != scm.CheckBucketSkip {
-		t.Fatalf("gitlabStatusBucket(manual) = %q, want %q", got, scm.CheckBucketSkip)
+	checks, err := parseGitlabJobs([]byte(`[
+		{"id":1,"name":"deploy","status":"manual","stage":"deploy","allow_failure":false},
+		{"id":2,"name":"optional-deploy","status":"manual","stage":"deploy","allow_failure":true},
+		{"id":3,"name":"build","status":"success","allow_failure":false}
+	]`))
+	if err != nil {
+		t.Fatalf("parseGitlabJobs() error = %v", err)
+	}
+	want := map[string]struct {
+		bucket            scm.CheckBucket
+		awaitingManualJob bool
+	}{
+		"deploy":          {bucket: scm.CheckBucketPending, awaitingManualJob: true},
+		"optional-deploy": {bucket: scm.CheckBucketSkip, awaitingManualJob: false},
+		"build":           {bucket: scm.CheckBucketPass, awaitingManualJob: false},
+	}
+	if len(checks) != len(want) {
+		t.Fatalf("parseGitlabJobs() = %+v, want %d checks", checks, len(want))
+	}
+	for _, c := range checks {
+		expected, ok := want[c.Name]
+		if !ok {
+			t.Fatalf("unexpected check %+v", c)
+		}
+		if c.Bucket != expected.bucket {
+			t.Errorf("check %q bucket = %q, want %q", c.Name, c.Bucket, expected.bucket)
+		}
+		if c.AwaitingManualJob != expected.awaitingManualJob {
+			t.Errorf("check %q AwaitingManualJob = %v, want %v", c.Name, c.AwaitingManualJob, expected.awaitingManualJob)
+		}
+	}
+}
+
+// A pipeline stopped at a blocking manual job reports `manual`, and the
+// aggregate row built for it carries the same human wait as the job row: named,
+// pending, and never read as work in flight. The row is still omitted when
+// another check already reports the same bucket.
+func TestPipelineAggregateCarriesTheManualJobWait(t *testing.T) {
+	t.Parallel()
+
+	aggregate, ok := pipelineAggregateCheck(gitlabHeadPipeline{ID: 7, Status: "manual"}, nil)
+	if !ok {
+		t.Fatal("pipelineAggregateCheck(manual) = no row, want the blocked pipeline surfaced")
+	}
+	if aggregate.Bucket != scm.CheckBucketPending || !aggregate.AwaitingManualJob {
+		t.Fatalf("aggregate = %+v, want a pending row marked as a human wait", aggregate)
+	}
+	if aggregate.Name != "Pipeline #7" {
+		t.Fatalf("aggregate name = %q, want the pipeline named", aggregate.Name)
+	}
+
+	if _, ok := pipelineAggregateCheck(gitlabHeadPipeline{ID: 7, Status: "manual"}, []scm.Check{{Name: "deploy", Bucket: scm.CheckBucketPending}}); ok {
+		t.Fatal("pipelineAggregateCheck() added a row that another check already carries")
+	}
+}
+
+// A trigger job that starts a downstream pipeline can itself be a blocking
+// manual job, and GitLab reports its status like any other job's. It carries
+// the same human wait, so the CI step waits on the person instead of treating
+// it as work in flight; an optional manual trigger job stays a skip.
+func TestTriggerJobsCarryTheManualJobWait(t *testing.T) {
+	t.Parallel()
+
+	checks := triggerJobsToChecks([]gitlabTriggerJob{
+		{gitlabJob: gitlabJob{ID: 1, Name: "deploy", Status: "manual"}},
+		{gitlabJob: gitlabJob{ID: 2, Name: "optional-deploy", Status: "manual", AllowFailure: true}},
+		{gitlabJob: gitlabJob{ID: 3, Name: "build", Status: "success"}},
+	})
+	want := map[string]struct {
+		bucket            scm.CheckBucket
+		awaitingManualJob bool
+	}{
+		"deploy":          {bucket: scm.CheckBucketPending, awaitingManualJob: true},
+		"optional-deploy": {bucket: scm.CheckBucketSkip, awaitingManualJob: false},
+		"build":           {bucket: scm.CheckBucketPass, awaitingManualJob: false},
+	}
+	if len(checks) != len(want) {
+		t.Fatalf("triggerJobsToChecks() = %+v, want %d checks", checks, len(want))
+	}
+	for _, c := range checks {
+		expected, ok := want[c.Name]
+		if !ok {
+			t.Fatalf("unexpected check %+v", c)
+		}
+		if c.Bucket != expected.bucket || c.AwaitingManualJob != expected.awaitingManualJob {
+			t.Errorf("check %q = (bucket %q, awaitingManualJob %v), want (%q, %v)",
+				c.Name, c.Bucket, c.AwaitingManualJob, expected.bucket, expected.awaitingManualJob)
+		}
 	}
 }
 
