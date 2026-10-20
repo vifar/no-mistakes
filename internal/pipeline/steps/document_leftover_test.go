@@ -1,0 +1,181 @@
+package steps
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
+
+// documentFixture builds a run that has completed Review and Test and is
+// entering the Document step with a clean worktree.
+func documentFixture(t *testing.T) *pipeline.StepContext {
+	t.Helper()
+	dir, base, head := setupGitRepo(t)
+	c := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	remote := filepath.Join(t.TempDir(), "upstream.git")
+	gitCmd(t, dir, "clone", "--bare", dir, remote)
+	gitCmd(t, dir, "--git-dir="+remote, "symbolic-ref", "HEAD", "refs/heads/main")
+	gitCmd(t, dir, "remote", "set-url", "origin", remote)
+	c.Repo.UpstreamURL = remote
+	c.Config.Rebase.MaxTargetAdvanceRewinds = 3
+	selected := pipeline.PRTargetSelection{TargetBranch: "main"}
+	if _, err := guardPRContextWithSelection(c, types.StepRebase, selected, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []types.StepName{types.StepReview, types.StepTest} {
+		step, err := c.DB.InsertStepResult(c.Run.ID, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.DB.SetStepFindings(step.ID, `{"findings":[],"reviewed_paths":["feature.txt"]}`); err != nil {
+			t.Fatal(err)
+		}
+		if name == types.StepReview {
+			err = c.DB.CompleteReviewStep(step.ID, c.Run.ID, head, 0, 1, "review.log")
+		} else {
+			err = c.DB.CompleteStep(step.ID, 0, 1, "step.log")
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	recordReviewApproval(t, c, head)
+	return c
+}
+
+// TestDocumentStep_CommitsThePredecessorLeftoverEditsAndRestartsFromReview
+// is the measured general-root failure: the Test agent edited a tracked file
+// and did not commit it, and the Document step refused with "Document
+// requires a clean worktree so convergence can safely discard only its own
+// edits", killing the run.
+//
+// The edits are preserved as an attributed pipeline commit and the run
+// returns to Review, so they are reviewed before anything is published.
+func TestDocumentStep_CommitsThePredecessorLeftoverEditsAndRestartsFromReview(t *testing.T) {
+	c := documentFixture(t)
+	// The Test agent left an edit it did not commit.
+	if err := os.WriteFile(filepath.Join(c.WorkDir, "feature.txt"), []byte("validated by the test agent\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	outcome, err := (&DocumentStep{}).Execute(c)
+	if err != nil {
+		t.Fatalf("the document step killed the run over the predecessor's edits: %v", err)
+	}
+	if outcome == nil || outcome.RestartFrom != types.StepReview {
+		t.Fatalf("the document step did not ask for a re-review: %+v", outcome)
+	}
+	// The edit survived, as a pipeline commit attributed to the step that
+	// left it.
+	content, err := os.ReadFile(filepath.Join(c.WorkDir, "feature.txt"))
+	if err != nil || string(content) != "validated by the test agent\n" {
+		t.Fatalf("the agent's edit was lost: %q %v", content, err)
+	}
+	subject := gitCmd(t, c.WorkDir, "log", "-1", "--format=%s")
+	if !strings.Contains(subject, "test") {
+		t.Fatalf("the leftover commit is not attributed to the step that left it: %q", subject)
+	}
+	body := gitCmd(t, c.WorkDir, "log", "-1", "--format=%B")
+	for _, forbidden := range []string{"Co-Authored-By", "Claude", "GPT", "Generated with"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("the leftover commit carries AI attribution %q: %q", forbidden, body)
+		}
+	}
+	// The worktree is clean now, so Document's own clean-entry contract
+	// holds on the next pass.
+	status := gitCmd(t, c.WorkDir, "status", "--porcelain")
+	if strings.TrimSpace(status) != "" {
+		t.Fatalf("the worktree is still dirty: %q", status)
+	}
+	// The run's head follows the commit.
+	if c.Run.HeadSHA != gitCmd(t, c.WorkDir, "rev-parse", "HEAD") {
+		t.Fatalf("the run head did not follow the commit: %s", c.Run.HeadSHA)
+	}
+}
+
+// TestDocumentStep_RefusesWhenTheLeftoverEditsCannotBeCommitted proves a
+// refusal still fails closed, and names the step and the paths.
+func TestDocumentStep_RefusesWhenTheLeftoverEditsCannotBeCommitted(t *testing.T) {
+	c := documentFixture(t)
+	// A protected path makes the staging refuse.
+	c.Config.ProtectedPaths = []string{"feature.txt"}
+	if err := os.WriteFile(filepath.Join(c.WorkDir, "feature.txt"), []byte("validated by the test agent\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (&DocumentStep{}).Execute(c)
+	if err == nil {
+		t.Fatal("a protected leftover edit was committed")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "test step left uncommitted edits") {
+		t.Fatalf("the refusal does not name the step: %v", err)
+	}
+	if !strings.Contains(message, "feature.txt") {
+		t.Fatalf("the refusal does not name the dirty paths: %v", err)
+	}
+}
+
+// TestDocumentStep_RefusesASecondLeftoverCommit proves the loop is bounded:
+// a run preserves ONE predecessor's leftover edits and sends them through
+// re-review. A second one is refused rather than looped on forever.
+func TestDocumentStep_RefusesASecondLeftoverCommit(t *testing.T) {
+	c := documentFixture(t)
+	// The first leftover edit is preserved.
+	if err := os.WriteFile(filepath.Join(c.WorkDir, "feature.txt"), []byte("validated by the test agent\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := (&DocumentStep{}).Execute(c)
+	if err != nil || outcome == nil || outcome.RestartFrom != types.StepReview {
+		t.Fatalf("the first leftover edit was not preserved: %+v %v", outcome, err)
+	}
+	// The second one is refused.
+	if err := os.WriteFile(filepath.Join(c.WorkDir, "feature.txt"), []byte("and again\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = (&DocumentStep{}).Execute(c)
+	if err == nil {
+		t.Fatal("a second leftover commit was allowed")
+	}
+	if !strings.Contains(err.Error(), "Document requires a clean worktree") {
+		t.Fatalf("the second refusal lost its wording: %v", err)
+	}
+	// The budget is spent exactly once.
+	allowed, err := c.DB.CanCommitLeftoverValidationEdits(c.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed {
+		t.Fatal("the leftover-validation budget was not charged")
+	}
+}
+
+// TestDocumentStep_ToolScratchAloneStillRefuses proves the change does not
+// sweep a test harness's scratch into the branch. Scratch is not a
+// validation edit, so there is nothing to commit and the original refusal
+// stands.
+func TestDocumentStep_ToolScratchAloneStillRefuses(t *testing.T) {
+	c := documentFixture(t)
+	scratch := filepath.Join(c.WorkDir, ".journal-live")
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(scratch, "postgres.log"), []byte("scratch\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := (&DocumentStep{}).Execute(c)
+	if err == nil {
+		t.Fatal("tool scratch was accepted as a validation edit")
+	}
+	if !strings.Contains(err.Error(), "Document requires a clean worktree") {
+		t.Fatalf("the refusal lost its wording: %v", err)
+	}
+	tracked := gitCmd(t, c.WorkDir, "ls-files")
+	if strings.Contains(tracked, ".journal-live") {
+		t.Fatalf("tool scratch entered the branch: %s", tracked)
+	}
+}

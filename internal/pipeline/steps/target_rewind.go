@@ -20,6 +20,17 @@ type rewindObservation struct {
 	source *string
 }
 
+// errTargetComparisonAdvanced marks the one comparison failure that a
+// pre-publication boundary can still recover from: the LIVE target, merge
+// base, or diff no longer matches the run's pinned receipt because the target
+// branch moved. It is NOT a security failure and NOT a proof of tampering -
+// the caller re-reads the target and classifies the advance with the same
+// rules every other target-advance boundary uses.
+//
+// Every other comparison failure (a changed PR identity, a changed head, an
+// unreadable receipt) keeps failing closed.
+var errTargetComparisonAdvanced = errors.New("live target comparison advanced")
+
 func sameRewindSource(a, b *string) bool {
 	return a == nil && b == nil || a != nil && b != nil && *a == *b
 }
@@ -144,6 +155,103 @@ func classifyTargetAdvance(c *pipeline.StepContext, step types.StepName, selecti
 		c.Log(fmt.Sprintf("target advanced from %s to %s at %s; rewinding to rebase (target_advance_rewinds=%d)", previous.TargetSHA, candidate.TargetSHA, step, run.TargetAdvanceRewinds))
 	}
 	return result, nil
+}
+
+// detectTargetAdvanceAtPublication re-reads the live target comparison at a
+// pre-publication boundary and classifies a target advance that the run can
+// still rewind. It returns true when the caller must restart from Rebase.
+//
+// The publication boundary (Push) is still PRE-publication: nothing is
+// published until the push itself settles, so the same rewind the Review..Lint
+// boundaries use is available here. A run that already published is not
+// eligible, and neither is a strict shipping run.
+//
+// The comparison is read from the LIVE target, never from a cached ref, so a
+// target that moved after the last step boundary is seen exactly as the
+// attestation write would see it.
+//
+// An unreadable target is NOT a detected advance. The attestation write
+// re-reads the same target and fails closed on its own comparison, so this
+// check never becomes a new failure mode: it only ever recognizes an advance
+// it can prove.
+func detectTargetAdvanceAtPublication(c *pipeline.StepContext, step types.StepName) (bool, error) {
+	if c == nil || c.DB == nil || c.Run == nil || c.Run.Shipping != nil {
+		return false, nil
+	}
+	previous, err := c.DB.GetRunPRContext(c.Run.ID)
+	if err != nil {
+		return false, err
+	}
+	if previous == nil {
+		return false, nil
+	}
+	eligible, err := c.DB.CanRewindTarget(c.Run.ID, step)
+	if err != nil {
+		return false, err
+	}
+	if !eligible {
+		return false, nil
+	}
+	selection := pipeline.PRTargetSelection{TargetBranch: previous.TargetBranch}
+	if c.PRTarget != nil && c.PRTarget.TargetBranch == previous.TargetBranch {
+		selection = *c.PRTarget
+	}
+	selection.TargetBranch = previous.TargetBranch
+	// The run's own recorded PR identity is the selection's identity. A live
+	// selection that names a different PR is not this run's PR.
+	if previous.PRURL != "" {
+		if selection.PRURL != "" && selection.PRURL != previous.PRURL {
+			return false, nil
+		}
+		selection.PRURL, selection.ForgeHeadSHA = previous.PRURL, previous.ForgeHeadSHA
+		selection.SourceRepo, selection.SourceBranch = previous.SourceRepo, previous.SourceBranch
+	}
+	candidate, err := readPRComparison(c, selection)
+	if err != nil {
+		if c.Log != nil {
+			c.Log(fmt.Sprintf("skipping the target-advance check at %s: %v", step, err))
+		}
+		return false, nil
+	}
+	// The comparison keeps the run's own recorded identity. A live selection
+	// that names a different PR is not this run's PR, and a comparison
+	// without one is a comparison the run has not attached yet.
+	candidate.PRURL, candidate.ForgeHeadSHA = previous.PRURL, previous.ForgeHeadSHA
+	candidate.SourceRepo, candidate.SourceBranch = previous.SourceRepo, previous.SourceBranch
+	// A head that moved is a different condition with its own owner (the
+	// forward-commit attribution and the publication continuity checks). Only
+	// an unchanged head with a moved target is a target advance.
+	if candidate.LocalHeadSHA != previous.LocalHeadSHA || candidate.LocalHeadSHA != c.Run.HeadSHA {
+		return false, nil
+	}
+	if candidate.TargetSHA == previous.TargetSHA && candidate.TargetBranch == previous.TargetBranch {
+		return false, nil
+	}
+	// The source branch and the attached PR must still be the ones this run
+	// recorded. A changed PR identity is not a target advance.
+	if !sameRewindIdentity(previous, candidate) {
+		return false, nil
+	}
+	observed, cleanup, observeErr := observeRewindRemotes(c, candidate.TargetBranch, previous.Generation)
+	if observeErr != nil {
+		if c.Log != nil {
+			c.Log(fmt.Sprintf("skipping the target-advance check at %s: %v", step, observeErr))
+		}
+		return false, nil
+	}
+	defer func() { err = errors.Join(err, cleanup()) }()
+	exact, err := prComparisonAtTarget(c, candidate.TargetBranch, observed.target, candidate.LocalHeadSHA)
+	if err != nil {
+		return false, err
+	}
+	candidate.TargetSHA, candidate.MergeBaseSHA, candidate.DiffDigest = exact.TargetSHA, exact.MergeBaseSHA, exact.DiffDigest
+	if candidate.TargetSHA == previous.TargetSHA {
+		return false, nil
+	}
+	if _, err := classifyTargetAdvance(c, step, selection, previous, candidate, observed.source); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // checkedRewindTargets runs before BOTH integration loops. Its returned values

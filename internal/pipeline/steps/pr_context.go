@@ -505,7 +505,7 @@ func verifyPRMutationComparison(sctx *pipeline.StepContext, host scm.Host, pr *s
 	expected := receipt.PRContextCandidate
 	expected.PRURL, expected.SourceRepo, expected.SourceBranch, expected.ForgeHeadSHA = "", "", "", ""
 	if current != expected {
-		return fmt.Errorf("live target commit, merge base, or diff differs from PR comparison receipt before update")
+		return fmt.Errorf("%w: live target commit, merge base, or diff differs from PR comparison receipt before update", errTargetComparisonAdvanced)
 	}
 	return nil
 }

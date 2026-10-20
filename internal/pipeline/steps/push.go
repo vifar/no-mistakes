@@ -157,6 +157,19 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 			return &pipeline.StepOutcome{RestartFrom: types.StepRebase}, nil
 		}
 	}
+	// The target branch can move after the last step boundary and before the
+	// attestation write. The attestation compares the LIVE target with this
+	// run's receipt, so it would fail the run on a base that merely moved.
+	// Nothing is published yet at this point, so the same safe rewind the
+	// Review..Lint boundaries use applies: rewind to Rebase, re-integrate,
+	// re-validate, and push. A real conflict still parks in Rebase.
+	rewind, err := detectTargetAdvanceAtPublication(sctx, s.Name())
+	if err != nil {
+		return nil, err
+	}
+	if rewind {
+		return &pipeline.StepOutcome{RestartFrom: types.StepRebase}, nil
+	}
 	// This run's own review/test/document have already completed by now (see
 	// AllSteps' fixed order), so these are honest statuses to attest for the
 	// head about to be pushed - see attestHeadBeforePush.
@@ -165,6 +178,18 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, fmt.Errorf("load step results for attestation: %w", err)
 	}
 	if err := publishRunHead(sctx, headBeingPushed, newHeadSHA, attestationSteps); err != nil {
+		// The target can also move between this check and the attestation
+		// write. The attestation's own comparison is the authority there, and
+		// it names the condition; the same rewind applies.
+		if errors.Is(err, errTargetComparisonAdvanced) {
+			rewind, rewindErr := detectTargetAdvanceAtPublication(sctx, s.Name())
+			if rewindErr != nil {
+				return nil, rewindErr
+			}
+			if rewind {
+				return &pipeline.StepOutcome{RestartFrom: types.StepRebase}, nil
+			}
+		}
 		return nil, err
 	}
 

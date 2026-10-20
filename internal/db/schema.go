@@ -533,6 +533,13 @@ var migrationStatements = append([]string{
    ) WHERE forge_head_sha IS NULL AND id IN (SELECT pending_target_rewind_id FROM runs)`,
 	// Explicit launch responsibility; never inferred from historical transcript IDs.
 	`ALTER TABLE runs ADD COLUMN launch_owner TEXT`,
+	// How many times this run committed a predecessor's leftover validation
+	// edits as a pipeline correction. It bounds the loop: each such commit
+	// restarts the run at Review, and an agent that keeps writing files must
+	// not keep the run going forever. One commit per run is the bound: the
+	// first leftover is preserved and re-reviewed, and a second one is
+	// refused rather than looped on.
+	`ALTER TABLE runs ADD COLUMN leftover_validation_commits INTEGER NOT NULL DEFAULT 0`,
 	`CREATE TABLE IF NOT EXISTS target_rewind_history (
         rewind_id TEXT PRIMARY KEY REFERENCES run_target_rewinds(id) ON DELETE CASCADE,
         comparison_json TEXT NOT NULL, review_head_sha TEXT,

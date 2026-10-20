@@ -129,11 +129,15 @@ func TestTargetRewindRefusesUnexplainedHeadAndPublication(t *testing.T) {
 	}
 }
 
+// TestTargetRewindPostStepWording proves the boundary that still refuses a
+// target advance is the first POST-publication one. Push is pre-publication,
+// so it rewinds instead of refusing (the measured controller failure); the PR
+// step publishes, so it keeps the refusal.
 func TestTargetRewindPostStepWording(t *testing.T) {
 	c, selected := rewindFixture(t)
 	c.PRContextAfterStep = true
 	advanceRewindTarget(t, c)
-	if _, err := guardPRContextWithSelection(c, types.StepPush, selected, false); err == nil || !strings.Contains(err.Error(), "start a new run") {
+	if _, err := guardPRContextWithSelection(c, types.StepPR, selected, false); err == nil || !strings.Contains(err.Error(), "start a new run") {
 		t.Fatalf("published boundary must retain refusal: %v", err)
 	}
 }

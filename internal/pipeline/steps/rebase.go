@@ -90,6 +90,15 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.Step
 		targets = forcePushRebaseTargets(branch, defaultBranch)
 	}
 
+	// A previous step's agent can leave uncommitted edits in the worktree.
+	// Git then refuses the integration outright, and the run dies on a base
+	// that merely moved. Commit those edits as a pipeline correction BEFORE
+	// the rewind integrates, so the work is preserved, attributed, and
+	// revalidated on the new head instead of lost.
+	if _, commitErr := commitLeftoverValidationEdits(sctx); commitErr != nil {
+		return nil, leftoverValidationEditsRefusal(sctx, commitErr)
+	}
+
 	// Mandatory fresh observations are separate from optional source sync.
 	// Preserve force-push policy: observe source, but never integrate it.
 	targets, cleanup, err := checkedRewindTargets(sctx, targets)

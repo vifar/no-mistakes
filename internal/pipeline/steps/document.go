@@ -123,6 +123,20 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		return nil, err
 	}
 	if status != "" {
+		// A previous step's agent left edits in the worktree. Refusing here
+		// kills the run over work the pipeline can preserve: the edits are
+		// committed as a pipeline correction attributed to the step that left
+		// them, and the run returns to Review so they are reviewed before
+		// anything is published. The clean-entry contract this check
+		// protects is unchanged - Document still starts from a clean
+		// worktree and still discards only its own edits.
+		restart, commitErr := commitPredecessorValidationEdits(sctx)
+		if commitErr != nil {
+			return nil, commitErr
+		}
+		if restart {
+			return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
+		}
 		return nil, fmt.Errorf("Document requires a clean worktree so convergence can safely discard only its own edits")
 	}
 	observed, err := git.HeadSHA(ctx, sctx.WorkDir)

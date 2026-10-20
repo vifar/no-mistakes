@@ -111,9 +111,9 @@ func TestTargetRewindTransactionRechecksEligibilityAndGeneration(t *testing.T) {
 		"retarget unknown":   "PR retarget provenance is unknown",
 		"strict":             "strict shipping run",
 		"skipped rebase":     "Rebase was skipped",
-		"push step":          "boundary outside unpublished validation: push",
+		"pr step":            "boundary outside unpublished validation: pr",
 	}
-	for _, kind := range []string{"last pushed", "push generation", "status attempt", "legacy publication", "PR completed", "retarget attempted", "retarget unknown", "strict", "skipped rebase", "push step", "stale generation", "wrong local head", "cap"} {
+	for _, kind := range []string{"last pushed", "push generation", "status attempt", "legacy publication", "PR completed", "retarget attempted", "retarget unknown", "strict", "skipped rebase", "pr step", "stale generation", "wrong local head", "cap"} {
 		t.Run(kind, func(t *testing.T) {
 			d, id, c, req := targetRewindDBFixture(t)
 			var err error
@@ -143,8 +143,8 @@ func TestTargetRewindTransactionRechecksEligibilityAndGeneration(t *testing.T) {
 				_, err = d.sql.Exec(`UPDATE runs SET shipping_options='{"mode":"full"}' WHERE id=?`, id)
 			case "skipped rebase":
 				_, err = d.sql.Exec(`UPDATE step_results SET status='skipped' WHERE run_id=? AND step_name='rebase'`, id)
-			case "push step":
-				req.Step = types.StepPush
+			case "pr step":
+				req.Step = types.StepPR
 			case "stale generation":
 				req.ExpectedGeneration = 2
 			case "wrong local head":
@@ -178,6 +178,93 @@ func TestTargetRewindTransactionRechecksEligibilityAndGeneration(t *testing.T) {
 				t.Fatalf("receipt changed: %+v %v", receipt, err)
 			}
 		})
+	}
+}
+
+// TestTargetRewindEligibleBoundaries covers the boundary range the rewind
+// accepts. Push is included: it is still PRE-publication, so a target that
+// moves between Lint and Push takes the same safe rewind the earlier
+// validation boundaries take. The PR step is the first post-publication
+// boundary and is excluded.
+func TestTargetRewindEligibleBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		step     types.StepName
+		eligible bool
+	}{
+		{types.StepReview, true},
+		{types.StepTest, true},
+		{types.StepDocument, true},
+		{types.StepLint, true},
+		{types.StepPush, true},
+		{types.StepPR, false},
+		{types.StepCI, false},
+	} {
+		t.Run(string(tc.step), func(t *testing.T) {
+			d, id, _, _ := targetRewindDBFixture(t)
+			allowed, err := d.CanRewindTarget(id, tc.step)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if allowed != tc.eligible {
+				t.Fatalf("CanRewindTarget(%s)=%t want %t", tc.step, allowed, tc.eligible)
+			}
+			reason := d.TargetRewindRefusal(id, tc.step)
+			if tc.eligible && reason != nil {
+				t.Fatalf("eligible boundary refused: %v", reason)
+			}
+			if !tc.eligible && !errors.Is(reason, ErrTargetAdvanceIneligible) {
+				t.Fatalf("ineligible boundary reason=%v", reason)
+			}
+		})
+	}
+}
+
+// TestLeftoverValidationCommitBudgetIsSpentOnce proves the run preserves ONE
+// predecessor's leftover validation edits. A second one is refused, so an
+// agent that keeps writing files cannot keep the run going forever.
+func TestLeftoverValidationCommitBudgetIsSpentOnce(t *testing.T) {
+	d, id, _, _ := targetRewindDBFixture(t)
+	head := strings.Repeat("b", 40)
+	allowed, err := d.CanCommitLeftoverValidationEdits(id)
+	if err != nil || !allowed {
+		t.Fatalf("the first leftover commit was refused: %t %v", allowed, err)
+	}
+	if err := d.RecordLeftoverValidationCommit(id, head); err != nil {
+		t.Fatal(err)
+	}
+	allowed, err = d.CanCommitLeftoverValidationEdits(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed {
+		t.Fatal("the leftover-validation budget was not charged")
+	}
+	if err := d.RecordLeftoverValidationCommit(id, strings.Repeat("c", 40)); err == nil {
+		t.Fatal("a second leftover commit was accepted")
+	}
+	// The charge and the head move land together.
+	run, err := d.GetRun(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadSHA != head {
+		t.Fatalf("the run head = %s, want %s", run.HeadSHA, head)
+	}
+}
+
+// TestRecordLeftoverValidationCommitRefusesAnInvalidHead proves the charge
+// never records a head it cannot verify.
+func TestRecordLeftoverValidationCommitRefusesAnInvalidHead(t *testing.T) {
+	d, id, _, _ := targetRewindDBFixture(t)
+	if err := d.RecordLeftoverValidationCommit(id, "not-a-sha"); err == nil {
+		t.Fatal("an invalid head was recorded")
+	}
+	allowed, err := d.CanCommitLeftoverValidationEdits(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed {
+		t.Fatal("a refused charge spent the budget")
 	}
 }
 
