@@ -34,8 +34,9 @@ import (
 //
 // The commit is scoped to what a correction commit can carry: tracked
 // modifications and additions that survive the pipeline's scratch rules. Tool
-// scratch (an ignored or scratch-shaped untracked path) is left alone - it
-// never blocks a rebase, and it never belongs in the branch.
+// scratch is excluded under the automatic staging rules; staged scratch is
+// unstaged without changing its worktree contents, even if the correction
+// budget is spent, so it does not leave an index that blocks integration.
 func commitLeftoverValidationEdits(c *pipeline.StepContext) (bool, error) {
 	if c == nil || c.DB == nil || c.Run == nil {
 		return false, nil
@@ -183,9 +184,8 @@ func commitWorktreeEdits(c *pipeline.StepContext, producer, reason string) (bool
 // committed edits are re-reviewed before anything is published, so no
 // unreviewed agent edit ever reaches the branch.
 //
-// It returns false without committing when the dirty paths are only tool
-// scratch (which a correction commit never carries), leaving the caller's
-// own refusal in place.
+// It returns false without committing when only tool scratch remains. The
+// caller excludes that scratch from its clean-entry check too.
 func commitPredecessorValidationEdits(c *pipeline.StepContext) (bool, error) {
 	if c == nil || c.DB == nil || c.Run == nil {
 		return false, nil
@@ -238,9 +238,10 @@ func commitPredecessorValidationEdits(c *pipeline.StepContext) (bool, error) {
 // The LIVE step rows are useless here: the rewind's own classification
 // transaction reset every step from Rebase to pending, so a lookup over them
 // finds no completed validation step and blames the wrong one. The ARCHIVED
-// rewind history is the evidence: it holds the step rows as they were BEFORE
-// the reset, so the last step that completed there is the step that ran last
-// before the advance.
+// rewind history is the evidence. At a post-step boundary, BoundaryStep names
+// the producer even though its archived status can still be running. At an
+// entry boundary, the last completed archived step supplies the producer.
+// Repository gates are attributed to their core anchor in either case.
 func rewindProducerStep(c *pipeline.StepContext) (string, error) {
 	history, err := c.DB.GetTargetRewindHistory(c.Run.ID)
 	if err != nil {
@@ -319,9 +320,9 @@ func leftoverPredecessorEditsRefusal(c *pipeline.StepContext, producer string, e
 	return fmt.Errorf("%w (the %s step left uncommitted edits in the run worktree: %s)", err, producer, strings.Join(paths, ", "))
 }
 
-// pendingStepName names the step whose boundary detected the advance. It is
-// the step that most recently ran before the rewind, and therefore the step
-// whose leftover edits the pipeline is about to commit.
+// pendingStepName supplies a diagnostic fallback when archived producer
+// evidence is unavailable. The detecting boundary alone does not prove who
+// left the edits.
 func pendingStepName(c *pipeline.StepContext, detected types.StepName) string {
 	detected = types.StepName(strings.TrimSpace(string(detected)))
 	switch detected {

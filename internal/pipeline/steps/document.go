@@ -130,9 +130,9 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		// kills the run over work the pipeline can preserve: the edits are
 		// committed as a pipeline correction attributed to the step that left
 		// them, and the run returns to Review so they are reviewed before
-		// anything is published. The clean-entry contract this check
-		// protects is unchanged - Document still starts from a clean
-		// worktree and still discards only its own edits.
+		// anything is published. Document starts without real edits and
+		// discards only its own proposal; inherited scratch stays outside
+		// that proposal even if the agent stages it.
 		restart, commitErr := commitPredecessorValidationEdits(sctx)
 		if commitErr != nil {
 			return nil, commitErr

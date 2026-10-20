@@ -262,9 +262,10 @@ func documentCommitCount(sctx *pipeline.StepContext, from, to string) (int, erro
 	return count, nil
 }
 
-// The caller proved a clean starting tree BEFORE invoking the agent. Only
-// that invocation's edits may be discarded, including its own commits. A
-// failed restoration aborts the step instead of leaving edits for Push.
+// The caller ruled out real edits and recorded inherited scratch BEFORE
+// invoking the agent. Only that invocation's proposal may be discarded,
+// including its own commits; retained scratch is excluded even if staged.
+// A failed restoration aborts the step instead of leaving edits for Push.
 func discardDocumentCandidate(sctx *pipeline.StepContext, from string, paths, untracked, retained []string) error {
 	// Recheck before ANY mutation: the agent may have set flags after entry.
 	// Refusal leaves its commits, files, flags and pending pass untouched.
