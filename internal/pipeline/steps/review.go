@@ -171,6 +171,8 @@ Rules:
 - Apply all the fixes you intend to make first; do not run any verification in between individual fixes.
 - After applying the fixes and before verification, re-trace for each finding the concrete failing sequence it describes through the code as it now is, and trace the ordinary successful path through every function you changed, including each of its callers. Remove any alias, branch, parameter, or helper your fix made unreachable. A fix that makes the reported sequence pass while breaking the ordinary path, a caller's assumption, or a sibling site is a regression the next review will report.
 - After all fixes are applied, run one focused verification limited to the changed area (the specific package, file, or test you touched) at the end of the fix round to confirm the fixes hold.
+- When running verification, run the repository's own commands (such as pnpm test, pnpm exec, npm test, cargo test, go test, or repository-local scripts and node_modules loaders) rather than a bare tool name on PATH; a PATH probe is not a dependency check.
+- When verification cannot run, is blocked, or fails, stop and do not commit changes or emit placeholder summaries claiming tests are blocked; unverified fixes are rejected and block the run.
 - Do NOT run the complete repository test suite or lint suite during this fix round. The pipeline has dedicated test and lint steps after review that are the authoritative test and lint gates; their coverage may itself be focused on the changed area when the repository has no configured test or lint commands.
 - Return JSON with a single "summary" field when you are done.
 - The summary must be one concise sentence fragment suitable for a git commit subject.
@@ -222,6 +224,9 @@ Previous review findings to address:
 		return nil, err
 	}
 	reviewTargetSHA := sctx.Run.HeadSHA
+	if err := checkReviewHeadVerified(ctx, sctx, baseSHA); err != nil {
+		return nil, err
+	}
 
 	// The changed-file set is read once and viewed two ways on purpose: the
 	// ignore-filtered subset decides whether there is anything to review, while

@@ -417,6 +417,14 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if summary == "" {
 		summary = "apply fixes"
 	}
+	if marker := CheckUnverifiedFixSummary(summary); marker != "" {
+		_ = resetWorktreeToHead(sctx)
+		return false, &UnverifiedFixError{
+			Step:    stepName,
+			Summary: summary,
+			Reason:  fmt.Sprintf("fixer reported verification was blocked or unverified (%s)", marker),
+		}
+	}
 	commitMessage, err := sctx.Config.Commit.RenderFixMessageForBranch(stepName, summary, sctx.Run.Branch)
 	if err != nil {
 		return false, fmt.Errorf("render %s fix commit message: %w", stepName, err)
@@ -606,6 +614,14 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 			return "", fmt.Errorf("validate %s fix summary: %w", stepName, err)
 		}
 		sctx.Log(fmt.Sprintf("warning: could not parse fix summary: %v", err))
+	}
+	if marker := CheckUnverifiedFixSummary(summary); marker != "" {
+		_ = resetWorktreeToHead(sctx)
+		return "", &UnverifiedFixError{
+			Step:    stepName,
+			Summary: summary,
+			Reason:  fmt.Sprintf("fixer reported verification was blocked or unverified (%s)", marker),
+		}
 	}
 	committed, err := commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result)
 	if err != nil {
