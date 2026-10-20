@@ -181,15 +181,11 @@ the sanctioned `sync --recover` -> rerun -> push loop cannot deadlock against
 the very anchor that loop wrote to declare the work preserved.
 
 The same credit covers `refs/no-mistakes/recover-rewritten/<run>/<generation>`
-(issue #97). The `recover_remote_rewritten` recovery pins the pipeline push
-head a remote rewrite superseded at that ref before it rebinds the push
-binding, and it pins it in the local gate as well as the worktree (staging the
-object from the worktree when the gate lacks it, and refusing before any
-rebind when a gate that exists cannot take the anchor). The private mirror
-usually still holds exactly that head, so without the credit every later
-submission of the verified rewrite was refused. Now the next `axi run`
-archives and retires the mirror, and its output names the archive tag and
-each anchor that preserves a retired commit.
+(issue #97), created by [rewritten push target recovery](/no-mistakes/reference/cli/#rewritten-push-target-recovery).
+That CLI reference owns the anchoring procedure and recovery and retirement
+output. Reconciliation reads the anchor from the gate, so a worktree-only
+anchor supplies no credit. A recovered rewrite can retire a mirror still
+holding the superseded pipeline head once every at-risk commit is preserved.
 
 Because that anchor is written before the rebind is attempted, its existence
 alone proves nothing was recovered: a recovery that anchors and then refuses
@@ -199,9 +195,10 @@ names is this repository's terminal run on this branch and its own record shows
 the rebind committed - its push generation is past the one the anchor names
 and its push binding no longer names the anchored head. The check reads the
 same run records as recorded supersession, so pipeline publication (which
-supplies none) never earns it. Mirror commits the anchor does not reach were
-never archived by the recovery, so they stay at risk and are still refused; a
-rewrite that was never recovered keeps the ordinary refusal. No other
+supplies none) never earns it. Mirror commits the anchor does not reach earn
+no credit from it: they still need containment proof or another eligible
+anchor. A rewrite that was never recovered earns no rewritten-anchor credit
+and keeps the ordinary refusal when no other proof applies. No other
 `refs/no-mistakes/` namespace earns the credit.
 
 This is a **preservation credit, not containment evidence**. It says nothing
@@ -209,8 +206,8 @@ about whether the content lands in the published tree; ancestry and
 final-tree survival remain the only proofs of that, and Decision
 41-A below remains the only head exception. The archive-before-delete contract
 is unchanged, so a credited reconciliation still archives the exact private
-head before removing the branch ref. A commit no anchor reaches is still
-refused, and the refusal names every proof that would clear it.
+head before removing the branch ref. An at-risk commit no eligible anchor
+reaches is still refused, and the refusal names every proof that would clear it.
 
 The credit scan never walks what the anchors can see. Recovery anchors
 accumulate for the life of the gate, so each membership scan is a `git
