@@ -312,18 +312,11 @@ func (a *opencodeAgent) sessionIDFromCreate(resp []byte) (string, error) {
 	return result.ID, nil
 }
 
-// messageBody builds the prompt payload for the detected version.
+// messageBody builds the 1.x prompt payload.
 //
-// 1.x posts to /session/{id}/message with `parts`, and carries the model
-// and the reasoning effort in that body. 2.x posts to
-// /api/session/{id}/prompt with a plain `text` field, returns IMMEDIATELY
-// (the turn runs in the background and reports through the event stream and
-// the message list), and takes the model from the session.
-//
-// 2.x has no json_schema output format on either endpoint, so the
-// structured-output path is not available there: the caller falls back to
-// the prompt-only route, which is the same route 1.x already uses when its
-// native structured output is rejected.
+// 1.x carries the model, reasoning effort, and optional native output format
+// in the message body. The 2.x payload is built separately in sendMessage;
+// runOnceV2 owns its prompt-only structured-output path.
 func (a *opencodeAgent) messageBody(prompt string, schema json.RawMessage) map[string]any {
 	body := map[string]any{
 		"role":  "user",
@@ -347,7 +340,7 @@ func (a *opencodeAgent) messageBody(prompt string, schema json.RawMessage) map[s
 	return body
 }
 
-// sendMessage sends the prompt and returns the assistant message.
+// sendMessage submits the prompt using the detected API generation.
 //
 // 1.x's endpoint blocks until the turn is over and answers with the message
 // itself. 2.x's endpoint does not block: it admits the prompt and returns
