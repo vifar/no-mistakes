@@ -114,6 +114,18 @@ earlier caller deadline. This is a command budget, not a deadline for the whole
 classifier: filesystem checks, database reads, process-start system calls, and
 authenticated process-ancestry lookup can take longer.
 
+A blocked identity command is answered by a metadata-only resolution, not by a
+longer deadline. On macOS, a process started by a service manager has no
+responsible application, so opening a file under a privacy-protected location
+(the Documents, Desktop, or Downloads folder) is held by the kernel until the
+sandbox approval watchdog expires. Git then reports an unreadable working
+directory and exits with status 128 instead of answering. The metadata-only
+resolution recovers the same physical metadata boundary, the same common
+directory, and the same structural validity using metadata operations, which
+are not held. It never proves a repository's absence: unresolved metadata
+fails closed, and a managed gate's identity is still proved. Every other Git
+diagnostic is an answer rather than a stall and keeps failing closed.
+
 A Git failure proceeds as repository absence only after a single recognized
 English discovery diagnostic, a normal exit, complete output draining, and
 filesystem checks that find no Git metadata in the caller's physical ancestors.
