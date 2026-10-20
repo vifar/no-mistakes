@@ -146,4 +146,3 @@ func MatchPattern(file, pattern string) bool {
 	matched, _ := path.Match(pattern, file)
 	return matched
 }
-
