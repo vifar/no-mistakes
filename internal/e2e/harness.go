@@ -322,7 +322,24 @@ func (h *Harness) RunInDir(dir string, args ...string) (string, error) {
 // RunInDirWithEnv invokes the no-mistakes binary in dir with env overrides.
 func (h *Harness) RunInDirWithEnv(dir string, env map[string]string, args ...string) (string, error) {
 	h.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	return h.RunInDirWithEnvTimeout(dir, env, harnessCommandTimeout, args...)
+}
+
+// harnessCommandTimeout is the budget for one harness-invoked command. It is
+// generous enough for the slowest ordinary command on a loaded runner.
+const harnessCommandTimeout = 60 * time.Second
+
+// RunInDirWithEnvTimeout invokes the no-mistakes binary in dir with env
+// overrides and an explicit budget.
+//
+// A command that runs a whole agent replay needs a budget of its own: the
+// generic one is sized for an ordinary command, and a replay that outlasts it
+// on a loaded runner is killed with a signal that reads like a product
+// failure. The budget belongs to the command, not to the product, so a test
+// that drives a long replay asks for the time it needs.
+func (h *Harness) RunInDirWithEnvTimeout(dir string, env map[string]string, timeout time.Duration, args ...string) (string, error) {
+	h.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.NMBin, args...)
 	cmd.Dir = dir

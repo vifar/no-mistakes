@@ -80,6 +80,27 @@ func drainPublicationSettlements() error {
 			terminalSettlementMu.Lock()
 			if err != nil {
 				startPublicationRecoveryLocked()
+				// A raw settlement whose storage is closed can never land, so it
+				// must leave the queue. Leaving it in place would make every
+				// later drain fail on it first, so the settlements queued behind
+				// it would never be attempted and their callers would wait
+				// forever. Storage that is merely unhealthy keeps the
+				// settlement queued, because the recovery loop retries it.
+				if pending.unavailable != nil && pending.unavailable() {
+					rawPublicationSettlements = rawPublicationSettlements[1:]
+					for _, owned := range rawPublicationSettlements {
+						select {
+						case owned.done <- err:
+						default:
+						}
+					}
+					select {
+					case pending.done <- err:
+					default:
+					}
+					terminalSettlementMu.Unlock()
+					continue
+				}
 				for _, owned := range rawPublicationSettlements {
 					select {
 					case owned.done <- err:
@@ -106,6 +127,11 @@ func drainPublicationSettlements() error {
 		err := pending.write()
 		terminalSettlementMu.Lock()
 		if err != nil && !pending.unavailable() {
+			// Storage that is merely unhealthy keeps the settlement queued: the
+			// publication recovery loop retries it, and its caller keeps waiting
+			// so the run keeps custody until the outcome is durable. Storage
+			// that is gone for good was already released by the unavailable
+			// check above.
 			startPublicationRecoveryLocked()
 			terminalSettlementMu.Unlock()
 			return err
@@ -341,7 +367,7 @@ func RecordRawShutdown(ctx context.Context, d *db.DB, runIDs []string, instance 
 		cancelOnce.Do(cancelRuns)
 		return d.SupersedeUncommittedCancellations(runIDs, instance)
 	}
-	pending := &publicationSettlement{write: write, done: make(chan error, 1)}
+	pending := &publicationSettlement{write: write, done: make(chan error, 1), unavailable: d.Closed}
 	terminalSettlementMu.Lock()
 	rawPublicationSettlements = append(rawPublicationSettlements, pending)
 	terminalSettlementMu.Unlock()

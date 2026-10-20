@@ -66,10 +66,20 @@ trap cleanup_inventory EXIT INT TERM
 if [[ "$#" -eq 0 ]]; then
   # The default suite has one shared 2400s budget, including the journey
   # matrix. Each worker has its own process-wide test environment, while
-  # daemon slots remain shared. The terminal-merge and retained-target tables share a worker beside the
-  # remaining suite. Their measured durations balance the two workers without
-  # adding serial tails or increasing the budget or daemon cap.
+  # daemon slots remain shared.
   budget_seconds=2400
+  # The remaining bucket is split across parallel shards, each with its own
+  # go test process. A single process for the whole bucket outgrew the
+  # budget: its slowest journeys plus everything queued behind them exceeded
+  # the shared 2400s, so the phase died on its own -timeout rather than on a
+  # failing test. Sharding by test name gives every shard its own timeout, so
+  # one slow journey can no longer consume the whole bucket's allowance, and
+  # the shards finish in the time of the slowest one instead of their sum.
+  #
+  # The shard count is deliberately small: each shard is a whole go test
+  # process with its own daemon slots, and the daemon cap is shared, so more
+  # shards than the cap supports only adds contention.
+  shard_count="${NM_E2E_SHARDS:-3}"
   # Bash puts each asynchronous job in its own process group while monitor
   # mode is enabled. A group contains go test and its test binary descendants.
   set -m
@@ -139,20 +149,106 @@ if [[ "$#" -eq 0 ]]; then
     exit 1
   fi
 
+  # The terminal-merge and retained-target journeys keep their own worker: they
+  # are the two slowest live journeys, and sharing a worker with the rest of
+  # the bucket is what made that worker the suite's long pole.
   go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
     -run '^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$' ./internal/e2e/... &
   terminal_pid=$!
-  go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
-    -skip '^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$' ./internal/e2e/... ./internal/pipeline/steps/... &
-  remaining_pid=$!
+
+  # Everything else is split across shards. Each shard runs its own go test
+  # process with its own timeout, so a slow journey in one shard cannot eat
+  # the allowance of the others, and the bucket costs the time of its slowest
+  # shard rather than the sum of all of them.
+  #
+  # The split balances by MEASURED TIME, not by test count. The journeys
+  # below are the measured long pole of the bucket - each one costs more than
+  # the rest of a shard together - so they are handed out one per shard
+  # explicitly. Everything else is spread by a checksum of the test's own
+  # name, which is stable across runs, so a test always lands in the same
+  # shard and a failure reproduces in the same place.
+  slow_journeys=(
+    TestAttachCommitStatusJourney
+    TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney
+    TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary
+    TestEvalJourney
+  )
+
+  all_tests="$(go test -tags=e2e -count=1 -timeout 60s -list '.*' ./internal/e2e/ 2>/dev/null | grep '^Test')"
+
+  # Every measured long pole is placed, round robin over the shards, so a
+  # shard count that does not match the number of long poles still places each
+  # one of them exactly once.
+  shard_slow=()
+  slow_index=0
+  while (( slow_index < ${#slow_journeys[@]} )); do
+    target=$((slow_index % shard_count))
+    if [[ -z "${shard_slow[$target]-}" ]]; then
+      shard_slow[$target]="${slow_journeys[$slow_index]}"
+    else
+      shard_slow[$target]="${shard_slow[$target]}
+${slow_journeys[$slow_index]}"
+    fi
+    slow_index=$((slow_index + 1))
+  done
+
+  shard_pids=()
+  shard_statuses=()
+  shard_index=0
+  while (( shard_index < shard_count )); do
+    shard_tests="${shard_slow[$shard_index]-}"
+    # The rest of the shard is the remaining tests whose name hashes into it.
+    rest="$(printf '%s\n' "$all_tests" | awk -v shard="$shard_index" -v count="$shard_count" -v slow="${slow_journeys[*]}" '
+      BEGIN { n = split(slow, names, " "); for (i = 1; i <= n; i++) skip[names[i]] = 1 }
+      {
+        name = $0
+        if (name in skip) { next }
+        checksum = 0
+        for (i = 1; i <= length(name); i++) {
+          checksum = (checksum * 31 + index("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", substr(name, i, 1))) % 1000003
+        }
+        if (checksum % count == shard) { print name }
+      }')"
+    if [[ -n "$rest" ]]; then
+      if [[ -n "$shard_tests" ]]; then
+        shard_tests="$shard_tests
+$rest"
+      else
+        shard_tests="$rest"
+      fi
+    fi
+    if [[ -z "$shard_tests" ]]; then
+      shard_index=$((shard_index + 1))
+      continue
+    fi
+    shard_pattern="$(printf '%s\n' "$shard_tests" | paste -sd'|' -)"
+    go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
+      -run "^(${shard_pattern})$" \
+      -skip '^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$' \
+      ./internal/e2e/... ./internal/pipeline/steps/... &
+    shard_pids+=("$!")
+    shard_statuses+=(0)
+    shard_index=$((shard_index + 1))
+  done
+
   terminal_status=0
-  remaining_status=0
   wait "$terminal_pid" || terminal_status=$?
-  wait "$remaining_pid" || remaining_status=$?
+  shard_index=0
+  while (( shard_index < ${#shard_pids[@]} )); do
+    wait "${shard_pids[$shard_index]}" || shard_statuses[$shard_index]=$?
+    shard_index=$((shard_index + 1))
+  done
   if (( terminal_status != 0 )); then
     exit "$terminal_status"
   fi
-  exit "$remaining_status"
+  shard_index=0
+  while (( shard_index < ${#shard_statuses[@]} )); do
+    if (( shard_statuses[$shard_index] != 0 )); then
+      exit "${shard_statuses[$shard_index]}"
+    fi
+    shard_index=$((shard_index + 1))
+  done
+  exit 0
 fi
 
 go test "$@"

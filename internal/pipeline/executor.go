@@ -122,6 +122,12 @@ type Executor struct {
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
 	onPRMerged            func(context.Context, string)
+	// onWorkloadDone reports that the run's pipeline work is decided. It runs
+	// at most once, before the terminal outcome is written to storage.
+	onWorkloadDone func()
+	// workloadDone records that the hook already ran, so a run that settles
+	// through more than one path reports the workload boundary only once.
+	workloadDone atomic.Bool
 }
 
 // ActiveAgentPID returns the current agent's PID without accessing the database.
@@ -209,6 +215,34 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 		return
 	}
 	e.onPRMerged = fn
+}
+
+// SetOnWorkloadDone registers a hook invoked once the run's pipeline work is
+// decided, before the terminal outcome is written to storage.
+//
+// The two are different moments. The work is over as soon as the run has
+// decided its outcome; recording that outcome can still be waiting on storage
+// that is slow or unhealthy, and a caller that must not be held hostage by
+// the recording waits for this hook rather than for the run to be fully
+// settled. The hook runs at most once per executor.
+func (e *Executor) SetOnWorkloadDone(fn func()) {
+	if e == nil {
+		return
+	}
+	e.onWorkloadDone = fn
+}
+
+// reportWorkloadDone invokes the workload boundary hook at most once. It is
+// the moment the run's pipeline work is decided, which is earlier than the
+// moment its outcome is durable.
+func (e *Executor) reportWorkloadDone() {
+	if e.onWorkloadDone == nil {
+		return
+	}
+	if !e.workloadDone.CompareAndSwap(false, true) {
+		return
+	}
+	e.onWorkloadDone()
 }
 
 // SetForgeContext configures the immutable provider context used by every
@@ -3107,6 +3141,10 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if e.ciMonitorInterruptedByShutdown(run.ID, err, ctxs...) {
 		return ErrCIMonitorInterruptedAtShutdown
 	}
+	// The run's work is over: it has decided its outcome. Recording that
+	// outcome can still be waiting on storage, and a caller that must not be
+	// held hostage by the recording waits for this boundary.
+	e.reportWorkloadDone()
 	infrastructure := sqlitewrite.IsContention(err)
 	errMsg := err.Error()
 	if infrastructure {
@@ -3121,18 +3159,23 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		if infrastructure {
 			break
 		}
-		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled && CancellationOnly(err, cause) {
-			errMsg = cause.Error()
-			explicitCancellation = cause.Error() == types.RunCancelReasonAbortedByUser
-			if planned, ok := cause.(*ControlledShutdownCause); ok && planned.Instance != "" && planned.Instance == e.runtimeInstance {
-				matches, matchErr := e.db.ControlledShutdownMatches(run.ID, planned.Instance, planned.Lifecycle, planned.Error())
-				if matchErr == nil && matches {
-					explicitCancellation = true
-					controlled = planned
-				}
-			}
-			break
+		cause := context.Cause(ctx)
+		if cause == nil || cause == context.Canceled {
+			continue
 		}
+		if !cancellationAttributable(err, cause) {
+			continue
+		}
+		errMsg = cause.Error()
+		explicitCancellation = cause.Error() == types.RunCancelReasonAbortedByUser
+		if planned, ok := cause.(*ControlledShutdownCause); ok && planned.Instance != "" && planned.Instance == e.runtimeInstance {
+			matches, matchErr := e.db.ControlledShutdownMatches(run.ID, planned.Instance, planned.Lifecycle, planned.Error())
+			if matchErr == nil && matches {
+				explicitCancellation = true
+				controlled = planned
+			}
+		}
+		break
 	}
 	runStatus := types.RunFailed
 	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded || controlled != nil {
@@ -3198,6 +3241,11 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if dbErr != nil {
 		slog.Warn("retrying terminal outcome settlement", "run", run.ID, "error", dbErr)
 		err = errors.Join(err, dbErr)
+		// The write is awaited here because the run's custody depends on it:
+		// the outcome is either durable or the run keeps its custody for the
+		// next start's recovery. A caller that must not be held hostage by
+		// the recording waits for the workload boundary, which the hook above
+		// already reported.
 		dbErr = SettleTerminalWrite(e.db, writeTerminal)
 	}
 	if dbErr != nil {
@@ -3264,6 +3312,10 @@ func (e *Executor) completeRun(ctx context.Context, run *db.Run, repo *db.Repo) 
 		e.reportPublishedHeadStatus(context.Background(), run, repo, "success")
 		e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	}
+	// The run's work is over: it has decided to complete and the outcome is
+	// recorded. A caller that must not be held hostage by the recording waits
+	// for this boundary.
+	e.reportWorkloadDone()
 	if run.Status != types.RunCompleted {
 		if run.Error != nil {
 			return errors.New(*run.Error)
