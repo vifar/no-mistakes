@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,64 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestPRContextGuardLocalLineagePreservesForgeHead(t *testing.T) {
+	for _, step := range []types.StepName{types.StepTest, types.StepPush} {
+		for _, targetMoves := range []bool{false, true} {
+			for _, forgeMoves := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/target_moves=%t/forge_moves=%t", step, targetMoves, forgeMoves), func(t *testing.T) {
+					c, selected := publicationFixture(t)
+					oldHead := c.Run.HeadSHA
+					selected.PRURL = "https://github.com/test/repo/pull/42"
+					selected.SourceRepo, selected.SourceBranch = "test/repo", "feature"
+					selected.ForgeHeadSHA = oldHead
+					receipt, err := c.DB.GetRunPRContext(c.Run.ID)
+					if err != nil || receipt == nil {
+						t.Fatalf("initial receipt: %+v, %v", receipt, err)
+					}
+					attached := receipt.PRContextCandidate
+					attached.PRURL, attached.SourceRepo, attached.SourceBranch, attached.ForgeHeadSHA = selected.PRURL, selected.SourceRepo, selected.SourceBranch, oldHead
+					if _, err := c.DB.AdvanceRunPRContext(c.Run.ID, attached); err != nil {
+						t.Fatal(err)
+					}
+					gitCmd(t, c.WorkDir, "commit", "--allow-empty", "-m", "pipeline repair")
+					newHead := gitCmd(t, c.WorkDir, "rev-parse", "HEAD")
+					if err := recordPipelineHeadRange(c, oldHead, newHead); err != nil {
+						t.Fatal(err)
+					}
+					if err := recordAgentFixHead(c, step, newHead); err != nil {
+						t.Fatal(err)
+					}
+					if targetMoves {
+						advanceRewindTarget(t, c)
+					}
+					if forgeMoves {
+						selected.ForgeHeadSHA = c.Run.BaseSHA
+					}
+					c.PRContextAfterStep = true
+					decision, err := guardPRContextWithSelection(c, step, selected, false)
+					if forgeMoves {
+						if err == nil {
+							t.Fatalf("local lineage certified an independent forge head: %+v", decision)
+						}
+					} else if err != nil || (targetMoves && decision.RestartFrom != types.StepRebase) || (!targetMoves && decision.RestartFrom != "") {
+						t.Fatalf("pipeline repair: %+v, %v", decision, err)
+					}
+					stored, err := c.DB.GetRunPRContext(c.Run.ID)
+					if err != nil || stored == nil || stored.ForgeHeadSHA != oldHead {
+						t.Fatalf("forge binding changed: %+v, %v", stored, err)
+					}
+					if forgeMoves && stored.PRContextCandidate != attached {
+						t.Fatalf("refused observation mutated receipt: %+v", stored)
+					}
+					if !forgeMoves && stored.LocalHeadSHA != newHead {
+						t.Fatalf("pipeline repair was not attributed: %+v", stored)
+					}
+				})
+			}
+		}
+	}
+}
 
 // TestPushStep_FormatterCommitAtThePublicationBoundaryIsThePipelineOwn proves
 // a commit the PUSH step itself made does not fail the run at the
@@ -74,56 +133,6 @@ func TestPushStep_FormatterCommitAtThePublicationBoundaryIsThePipelineOwn(t *tes
 	// The run published: the guard accepted the pipeline's own advance.
 	if run.LastPushedSHA == nil || *run.LastPushedSHA != newHead {
 		t.Fatalf("the run did not publish the head: %+v", run.LastPushedSHA)
-	}
-}
-
-// TestPushStep_AForeignForgeHeadIsNeverAdopted proves the local commit
-// lineage cannot certify another publisher's head. The lineage proves the
-// LOCAL advance was the pipeline's own; it says nothing about the forge's
-// head, and a PR moved by someone else is not this run's head.
-func TestPushStep_AForeignForgeHeadIsNeverAdopted(t *testing.T) {
-	c, _, _ := unpublishedAttestationFixture(t)
-	receipt, err := c.DB.GetRunPRContext(c.Run.ID)
-	if err != nil || receipt == nil {
-		t.Fatal(err)
-	}
-	// The pipeline committed its own change, so the LOCAL head moved.
-	if err := os.WriteFile(filepath.Join(c.WorkDir, "agent-change.txt"), []byte("change\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	headBefore := c.Run.HeadSHA
-	if err := stagePipelineChanges(c); err != nil {
-		t.Fatal(err)
-	}
-	if err := commitPipelineCorrection(c.Ctx, c.WorkDir, "no-mistakes: apply agent fixes", c.Log); err != nil {
-		t.Fatal(err)
-	}
-	newHead := gitCmd(t, c.WorkDir, "rev-parse", "HEAD")
-	if err := recordPipelineHeadRange(c, headBefore, newHead); err != nil {
-		t.Fatal(err)
-	}
-	c.Run.HeadSHA = newHead
-	if err := c.DB.UpdateRunHeadSHA(c.Run.ID, newHead); err != nil {
-		t.Fatal(err)
-	}
-	// Another publisher moved the attached PR's head at the same time.
-	foreign := strings.Repeat("a", 40)
-	c.PRTarget = &pipeline.PRTargetSelection{
-		PRURL: receipt.PRURL, SourceRepo: receipt.SourceRepo, SourceBranch: receipt.SourceBranch,
-		ForgeHeadSHA: foreign, TargetBranch: receipt.TargetBranch,
-	}
-	// The local commit lineage must not certify the foreign forge head.
-	selection := *c.PRTarget
-	c.PRContextAfterStep = true
-	if _, err := guardPRContextWithSelection(c, types.StepPush, selection, false); err == nil {
-		t.Fatal("a foreign forge head was accepted at the publication boundary")
-	}
-	after, err := c.DB.GetRunPRContext(c.Run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if after.ForgeHeadSHA == foreign {
-		t.Fatal("the foreign forge head was adopted into the receipt")
 	}
 }
 
