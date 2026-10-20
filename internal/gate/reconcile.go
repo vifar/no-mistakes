@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -16,6 +17,11 @@ type StaleBranchReconciliation struct {
 	Reconciled   bool
 	PreviousHead string
 	ArchivedTag  string
+	// PreservedBy names, sorted and without duplicates, every recovery anchor
+	// the plan credited for a private-only commit the live head does not
+	// contain. The caller reports it so a retired mirror always names where
+	// its commits are kept.
+	PreservedBy []string
 }
 
 // StaleBranchPlan is the verdict of a non-mutating stale-branch inspection.
@@ -288,7 +294,11 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 		}
 		// Recovery anchors are the tool's own sanctioned preservation record:
 		// terminalization pins every verified unpublished head at
-		// refs/no-mistakes/recover/<run>, and PreserveRecoveryAnchor never
+		// refs/no-mistakes/recover/<run>, the recover_remote_rewritten rebind
+		// pins the push head a remote rewrite superseded at
+		// refs/no-mistakes/recover-rewritten/<run>/<generation> (so a recovered
+		// rewrite retires the mirror that still holds that head instead of
+		// refusing every later run, #97), and PreserveRecoveryAnchor never
 		// replaces evidence (a conflicting anchor fails closed). A commit that
 		// one of those anchors keeps reachable is not at risk of being lost, so
 		// it is re-derived out of the at-risk set instead of deadlocking the
@@ -408,7 +418,25 @@ func ApplyStaleBranchReconciliation(ctx context.Context, gateDir string, plan St
 	if _, err := git.Run(ctx, gateDir, "update-ref", "--no-deref", "-d", plan.BranchRef, plan.PreviousHead); err != nil {
 		return result, fmt.Errorf("delete archived stale private mirror ref %s at %s: %w", plan.BranchRef, plan.PreviousHead, err)
 	}
-	return StaleBranchReconciliation{Reconciled: true, PreviousHead: plan.PreviousHead, ArchivedTag: plan.ArchiveTag}, nil
+	return StaleBranchReconciliation{Reconciled: true, PreviousHead: plan.PreviousHead, ArchivedTag: plan.ArchiveTag, PreservedBy: plan.preservingAnchors()}, nil
+}
+
+// preservingAnchors returns the distinct recovery anchors the plan credited,
+// sorted so the report is stable.
+func (p StaleBranchPlan) preservingAnchors() []string {
+	if len(p.PreservedByRecovery) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(p.PreservedByRecovery))
+	var anchors []string
+	for _, anchor := range p.PreservedByRecovery {
+		if !seen[anchor] {
+			seen[anchor] = true
+			anchors = append(anchors, anchor)
+		}
+	}
+	sort.Strings(anchors)
+	return anchors
 }
 
 func RestoreReconciledBranch(ctx context.Context, gateDir, branch string, result StaleBranchReconciliation) error {
@@ -455,27 +483,32 @@ func ArchivedHeadRecorded(ctx context.Context, gateDir, branch, head string) boo
 	return err == nil && objectType == "commit"
 }
 
-// recoveryAnchorPrefix is the ref namespace terminalization pins a run's
-// unpublished pipeline head to (custody.RecoveryRef). An anchor is created only
-// by the guarded custody path and never replaced: PreserveRecoveryAnchor
-// creates it with an expected-old-value of the zero ID and fails closed on any
-// conflicting existing ref, so a commit reachable from one is held by
-// deliberate, immutable preservation evidence rather than by accident.
-const recoveryAnchorPrefix = "refs/no-mistakes/recover/"
+// recoveryAnchorPrefixes are the ref namespaces the guarded recovery paths pin
+// preserved pipeline heads to: terminalization pins a run's unpublished head
+// at refs/no-mistakes/recover/<run> (custody.RecoveryRef), and the
+// recover_remote_rewritten rebind pins the pipeline push head a remote rewrite
+// superseded at refs/no-mistakes/recover-rewritten/<run>/<generation> (issue
+// #97). Both are created only through PreserveRecoveryAnchor, never replaced:
+// it creates the ref with an expected-old-value of the zero ID and fails
+// closed on any conflicting existing ref, so a commit reachable from one is
+// held by deliberate, immutable preservation evidence rather than by accident.
+// The trailing slash keeps each pattern to its own namespace.
+var recoveryAnchorPrefixes = []string{"refs/no-mistakes/recover/", "refs/no-mistakes/recover-rewritten/"}
 
 type recoveryAnchor struct {
 	ref  string
 	head string
 }
 
-// listRecoveryAnchors returns the direct commit targets under
-// refs/no-mistakes/recover/. for-each-ref reports a direct commit ref as
+// listRecoveryAnchors returns the direct commit targets under the recovery
+// anchor namespaces. for-each-ref reports a direct commit ref as
 // exactly three fields and a symbolic ref with a fourth %(symref) field, so a
 // symbolic, zero, or non-commit target is skipped rather than dereferenced:
 // it contributes no preservation evidence, and skipping is the conservative
 // direction (nothing gets credited).
 func listRecoveryAnchors(ctx context.Context, gateDir string) ([]recoveryAnchor, error) {
-	out, err := git.Run(ctx, gateDir, "for-each-ref", "--format=%(refname) %(objectname) %(objecttype) %(symref)", recoveryAnchorPrefix)
+	args := append([]string{"for-each-ref", "--format=%(refname) %(objectname) %(objecttype) %(symref)"}, recoveryAnchorPrefixes...)
+	out, err := git.Run(ctx, gateDir, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -505,7 +538,7 @@ func reconcileSatisfiers(runOwnedHeads []string) []string {
 	if hasRunOwnedHead(runOwnedHeads) {
 		satisfiers = append(satisfiers, "the private head being exactly the publishing run's Run.SubmittedHeadSHA or Run.LastPushedSHA (Decision 41-A)")
 	}
-	return append(satisfiers, "a refs/no-mistakes/recover/<run> recovery anchor reaching the commit")
+	return append(satisfiers, "a refs/no-mistakes/recover/<run> or refs/no-mistakes/recover-rewritten/<run>/<generation> recovery anchor reaching the commit")
 }
 
 func joinSatisfiers(satisfiers []string) string {

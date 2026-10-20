@@ -180,6 +180,20 @@ symbolic anchor fails closed and is never dereferenced). The credit exists so
 the sanctioned `sync --recover` -> rerun -> push loop cannot deadlock against
 the very anchor that loop wrote to declare the work preserved.
 
+The same credit covers `refs/no-mistakes/recover-rewritten/<run>/<generation>`
+(issue #97). The `recover_remote_rewritten` recovery pins the pipeline push
+head a remote rewrite superseded at that ref before it rebinds the push
+binding, and it pins it in the local gate as well as the worktree (staging the
+object from the worktree when the gate lacks it, and refusing before any
+rebind when a gate that exists cannot take the anchor). The private mirror
+usually still holds exactly that head, so without the credit every later
+submission of the verified rewrite was refused. Now the next `axi run`
+archives and retires the mirror, and its output names the archive tag and
+each anchor that preserves a retired commit. Mirror commits the anchor does
+not reach were never archived by the recovery, so they stay at risk and are
+still refused; a rewrite that was never recovered has no anchor and keeps the
+ordinary refusal. No other `refs/no-mistakes/` namespace earns the credit.
+
 This is a **preservation credit, not containment evidence**. It says nothing
 about whether the content lands in the published tree; ancestry and
 final-tree survival remain the only proofs of that, and Decision

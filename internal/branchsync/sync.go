@@ -1599,7 +1599,10 @@ func (s *Service) recoverRemoteRewritten(ctx context.Context, run *db.Run, keepL
 		Source: "remote_rewritten", RepositoryID: s.Repo.ID, RunID: run.ID, Branch: fresh.Local.Branch,
 		RequiredHead: live, PreservedHead: superseded, ArchiveRef: anchorRef, Proof: anchoredIn,
 	}
-	note := fmt.Sprintf("the superseded pipeline head was anchored at %s; the branch, worktree, and remote were not changed", anchorRef)
+	note := fmt.Sprintf("the push binding was rebound from %s to %s; the superseded pipeline head was anchored at %s; the branch, worktree, and remote were not changed", superseded, live, anchorRef)
+	if mirror := s.rewrittenMirrorNote(ctx, fresh.Local.Branch, anchorRef); mirror != "" {
+		note += "; " + mirror
+	}
 	if state.Error != "" {
 		note += "; " + strings.TrimSuffix(state.Error, "; no files or refs were changed")
 	}
@@ -1642,28 +1645,89 @@ func refuseUnverifiedPushBinding(fresh State) State {
 
 // anchorSupersededPushHead keeps the pipeline head a rewritten remote replaced
 // reachable before the binding stops recording it. It anchors in the worktree
-// when the object is there, else in the local gate, and never replaces an
-// existing conflicting anchor.
+// when the object is there and, whenever the local gate exists, in the gate
+// too, staging the object from the worktree when the gate lacks it. The gate
+// anchor is what lets the next submission retire a private mirror that still
+// holds the superseded head (issue #97): mirror reconciliation reads only gate
+// refs, so a worktree-only anchor left every later `axi run` refused. It never
+// replaces an existing conflicting anchor, and a gate that exists but cannot
+// be anchored fails the recovery closed before anything is rebound. The proof
+// names where the head was anchored first.
 func (s *Service) anchorSupersededPushHead(ctx context.Context, runID string, generation int64, superseded string) (string, string, bool) {
 	ref := rewrittenAnchorRef(runID, generation)
 	if superseded == "" {
 		return ref, "", false
 	}
-	candidates := []struct{ dir, name string }{{s.workDir(), "worktree"}}
-	if gateDir := strings.TrimSpace(s.GateDir); gateDir != "" {
-		candidates = append(candidates, struct{ dir, name string }{gateDir, "gate"})
-	}
-	for _, candidate := range candidates {
-		if !objectExists(ctx, candidate.dir, superseded) {
-			continue
-		}
-		if err := custody.PreserveRecoveryAnchor(ctx, candidate.dir, ref, superseded); err != nil {
+	proof := ""
+	if objectExists(ctx, s.workDir(), superseded) {
+		if !preserveAnchorAt(ctx, s.workDir(), ref, superseded) {
 			return ref, "", false
 		}
-		anchored, err := git.Run(ctx, candidate.dir, "rev-parse", ref+"^{commit}")
-		return ref, candidate.name, err == nil && anchored == superseded
+		proof = "worktree"
 	}
-	return ref, "", false
+	gateDir := strings.TrimSpace(s.GateDir)
+	if gateDir == "" || !gateExists(gateDir) {
+		return ref, proof, proof != ""
+	}
+	if !objectExists(ctx, gateDir, superseded) {
+		if proof == "" {
+			return ref, "", false
+		}
+		if err := git.FetchRemoteRef(ctx, gateDir, s.workDir(), ref, superseded); err != nil {
+			return ref, "", false
+		}
+	}
+	if !preserveAnchorAt(ctx, gateDir, ref, superseded) {
+		return ref, "", false
+	}
+	if proof == "" {
+		proof = "gate"
+	}
+	return ref, proof, true
+}
+
+// preserveAnchorAt creates (or confirms) one recovery anchor in dir and
+// verifies it names exactly head.
+func preserveAnchorAt(ctx context.Context, dir, ref, head string) bool {
+	if err := custody.PreserveRecoveryAnchor(ctx, dir, ref, head); err != nil {
+		return false
+	}
+	anchored, err := git.Run(ctx, dir, "rev-parse", ref+"^{commit}")
+	return err == nil && anchored == head
+}
+
+func gateExists(gateDir string) bool {
+	info, err := os.Stat(gateDir)
+	return err == nil && info.IsDir()
+}
+
+// rewrittenMirrorNote names what happens to the private mirror after a
+// recovered rewrite, so the success message accounts for every ref the
+// recovery touched or left: the gate anchor preserves the superseded head, and
+// the next submission archives and retires a mirror whose every commit that
+// anchor reaches. A mirror holding commits the anchor does not reach is named
+// as still guarded, never as retired.
+func (s *Service) rewrittenMirrorNote(ctx context.Context, branch, anchorRef string) string {
+	gateDir := strings.TrimSpace(s.GateDir)
+	if gateDir == "" || branch == "" || !gateExists(gateDir) {
+		return ""
+	}
+	mirrorRef := "refs/heads/" + branch
+	mirror, exists, err := git.DirectRefTarget(ctx, gateDir, mirrorRef)
+	if err != nil || !exists {
+		return ""
+	}
+	if _, err := git.Run(ctx, gateDir, "rev-parse", "--verify", anchorRef+"^{commit}"); err != nil {
+		return fmt.Sprintf("the private mirror %s at %s is not covered by a gate anchor, so the next `no-mistakes axi run` still guards it", mirrorRef, mirror)
+	}
+	unpreserved, err := git.Run(ctx, gateDir, "rev-list", "--count", mirror, "--not", anchorRef)
+	if err != nil {
+		return fmt.Sprintf("the private mirror %s at %s could not be compared with %s, so the next `no-mistakes axi run` still guards it", mirrorRef, mirror, anchorRef)
+	}
+	if unpreserved != "0" {
+		return fmt.Sprintf("the private mirror %s at %s holds %s commit(s) %s does not preserve, so the next `no-mistakes axi run` retires it only if the submitted head contains them", mirrorRef, mirror, unpreserved, anchorRef)
+	}
+	return fmt.Sprintf("the private mirror %s at %s is preserved by %s in the local gate, and the next `no-mistakes axi run` archives and retires it", mirrorRef, mirror, anchorRef)
 }
 
 // rewrittenAnchorRef names the anchor for the pipeline push head superseded by

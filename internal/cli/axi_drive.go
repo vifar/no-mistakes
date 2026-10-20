@@ -509,6 +509,7 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 			}()
 		}
 		var err error
+		env.notices = cmd.ErrOrStderr()
 		if launchNonce != "" {
 			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, omitIntent, externalCIOwner, launchNonce, validationGeneration, planID, closesIssues, profile)
 			if err == nil {
@@ -1010,7 +1011,26 @@ func preparePrivateMirror(ctx context.Context, env *axiEnv, branch, submissionHe
 		}
 		return gate.StaleBranchReconciliation{}, fmt.Errorf("prepare private mirror for %q: %w", branch, err)
 	}
+	if note := retiredMirrorNotice(branch, reconciliation); note != "" && env.notices != nil {
+		fmt.Fprintln(env.notices, note)
+	}
 	return reconciliation, nil
+}
+
+// retiredMirrorNotice names every ref a mirror retirement relied on: the
+// archive tag holding the exact retired head and each recovery anchor that
+// preserves a private-only commit the submission does not contain. A mirror
+// is never retired silently, so its commits stay findable from the run's own
+// output (issue #97).
+func retiredMirrorNotice(branch string, reconciliation gate.StaleBranchReconciliation) string {
+	if !reconciliation.Reconciled {
+		return ""
+	}
+	note := fmt.Sprintf("retired the private mirror for %q at %s; its exact head is archived at %s", branch, reconciliation.PreviousHead, reconciliation.ArchivedTag)
+	if len(reconciliation.PreservedBy) > 0 {
+		note += ", and its commits the submitted head does not contain are preserved by " + strings.Join(reconciliation.PreservedBy, ", ")
+	}
+	return note
 }
 
 // restoreMirrorAfterFailedPush puts a reconciled mirror branch back after its
