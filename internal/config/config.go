@@ -3968,7 +3968,8 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 
 // MergeForRemote combines global and per-repo config. Matching machine-local
 // formats sit between global defaults and repo formats; command execution
-// settings supplement the repository commands without replacing them.
+// settings supplement the repository commands without replacing them, with
+// preparation gap-filling governed by resolveCommands.
 func MergeForRemote(global *GlobalConfig, repo *RepoConfig, remote string) *Config {
 	var override *RepositoryOverride
 	if global != nil {

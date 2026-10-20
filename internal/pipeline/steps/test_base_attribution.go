@@ -134,7 +134,7 @@ func (a *baseAttribution) classify(headOutput, baseOutput string) {
 }
 
 // runTestCommandOnBase checks baseSHA out into a throwaway clone that shares
-// the run worktree's object store, runs the trusted commands.prepare there
+// the run worktree's object store, runs the effective commands.prepare there
 // when configured, then testCmd. A separate clone rather than a linked
 // worktree keeps the gate repository and the run worktree untouched.
 // Preparation is cleaned exactly as on the head, so only its ignored

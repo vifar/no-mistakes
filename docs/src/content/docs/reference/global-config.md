@@ -1394,7 +1394,7 @@ Toolchain paths (such as `PATH`) and parallelism settings (such as `GOMAXPROCS`)
 Positive niceness is refused on Windows; set resource limits in the operator's own environment there.
 A missing `nice` utility fails the command rather than silently ignoring the request.
 
-Before executing an opted-in run, no-mistakes records the full resolved configuration in `<NM_HOME>/logs/<run-id>/command-config.ndjson`, including the unchanged team command strings, added checks, niceness, trusted-config SHA, and tool build.
+Before executing a run with matching `repository_overrides.<remote>.commands` settings, no-mistakes records the full resolved configuration in `<NM_HOME>/logs/<run-id>/command-config.ndjson`, including the effective command strings, added checks, niceness, trusted-config SHA, and tool build. The separate `prepare` setting alone does not enable this snapshot.
 It also records the values configured commands inherit from the daemon's environment for `PATH`, `GOMAXPROCS`, `MAKEFLAGS`, `CARGO_BUILD_JOBS`, and `CMAKE_BUILD_PARALLEL_LEVEL`, omitting any that are unset; these values appear only in this file, never in step logs, agent prompts, findings, or the PR.
 This record is independent of optional eval capture.
 Recovery appends a new snapshot of the configuration it resolves, including removal of a previously active local override.
