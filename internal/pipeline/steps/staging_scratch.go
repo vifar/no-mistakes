@@ -7,6 +7,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/worktreescratch"
 )
 
 // maxListedPaths caps how many offending paths a refusal or log line names.
@@ -16,118 +17,32 @@ const maxListedPaths = 20
 // under the Windows command-line limit.
 const stagingBatchBytes = 16000
 
-// knownConfigDirs are hidden directories that hold committed project
-// configuration rather than tool scratch. A new one is still staged and
-// published; every other hidden directory that is new is treated as scratch.
-var knownConfigDirs = map[string]bool{
-	".github":       true,
-	".gitlab":       true,
-	".circleci":     true,
-	".devcontainer": true,
-	".vscode":       true,
-	".husky":        true,
-	".changeset":    true,
-	".storybook":    true,
-}
-
-// isScratchDirName reports whether a directory name marks tool scratch when the
-// directory is new: node_modules, or a hidden directory that is not a known
-// project-configuration directory.
+// The executor and pipeline steps share one scratch identity. The runner
+// retains the step's environment for all Git observations.
 func isScratchDirName(name string) bool {
-	if name == "node_modules" {
-		return true
-	}
-	return len(name) > 1 && strings.HasPrefix(name, ".") && name != ".." && !knownConfigDirs[name]
+	return worktreescratch.IsDirName(name)
 }
 
 func matchesStagingExclude(sctx *pipeline.StepContext, file string) (string, bool) {
-	file = strings.TrimSuffix(file, "/")
-	for _, pattern := range sctx.Config.StagingExclude {
-		if matchIgnorePattern(file, pattern) {
-			return pattern, true
-		}
-	}
-	return "", false
+	return worktreescratch.MatchesExclude(file, sctx.Config.StagingExclude)
 }
 
 func gitTreeHasDirectory(sctx *pipeline.StepContext, tree, dir string) (bool, error) {
-	out, err := stepGitRun(sctx, "--literal-pathspecs", "ls-tree", "-z", tree, "--", dir)
-	if err != nil {
-		return false, err
-	}
-	fields := strings.Fields(strings.SplitN(out, "\t", 2)[0])
-	return len(fields) == 3 && fields[1] == "tree", nil
+	return worktreescratch.TreeHasDirectory(func(args ...string) (string, error) {
+		return stepGitRunRaw(sctx, args...)
+	}, tree, dir)
 }
 
-// firstNewScratchComponent returns the first path component of rel that
-// marks tool scratch, or "" when rel is not scratch.
 func firstNewScratchComponent(sctx *pipeline.StepContext, headDirs map[string]bool, rel string, dirPath bool) (string, error) {
-	parts := strings.Split(strings.TrimSuffix(rel, "/"), "/")
-	if !dirPath {
-		parts = parts[:len(parts)-1]
-	}
-	for i, part := range parts {
-		if isScratchDirName(part) {
-			dir := strings.Join(parts[:i+1], "/")
-			exists, known := headDirs[dir]
-			if !known {
-				var err error
-				exists, err = gitTreeHasDirectory(sctx, "HEAD", dir)
-				if err != nil {
-					return "", err
-				}
-				headDirs[dir] = exists
-			}
-			if !exists {
-				return dir + "/", nil
-			}
-		}
-	}
-	return "", nil
+	return worktreescratch.FirstNewComponent(func(args ...string) (string, error) {
+		return stepGitRunRaw(sctx, args...)
+	}, headDirs, rel, dirPath)
 }
 
-// worktreeDirtyPathsOutsideScratch lists the worktree's dirty paths that are
-// NOT recognized tool scratch. A tracked modification or a new non-scratch
-// file is a real edit; a new hidden scratch directory (a test harness's live
-// database, for example) is not.
-//
-// The scratch identity is the SAME one the automatic staging uses, so the two
-// can never disagree about what belongs in the branch.
 func worktreeDirtyPathsOutsideScratch(sctx *pipeline.StepContext) ([]string, error) {
-	// NUL-delimited records: without -z, git quotes and folds unusual names
-	// into one line, and two untracked files can share a line - which would
-	// hide a real file behind a scratch one.
-	out, err := stepGitRunRaw(sctx, "status", "--porcelain", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=none")
-	if err != nil {
-		return nil, err
-	}
-	headDirs := map[string]bool{}
-	var paths []string
-	for _, entry := range strings.Split(strings.TrimSuffix(out, "\x00"), "\x00") {
-		if entry == "" {
-			continue
-		}
-		if len(entry) < 4 || entry[2] != ' ' {
-			return nil, fmt.Errorf("invalid git status entry %q", entry)
-		}
-		file := entry[3:]
-		if entry[0] == '?' || entry[0] == 'A' {
-			// An untracked path is scratch when its first new component marks
-			// scratch, or when it matches a staging exclude.
-			scratch, err := firstNewScratchComponent(sctx, headDirs, file, false)
-			if err != nil {
-				return nil, err
-			}
-			if scratch != "" {
-				continue
-			}
-			if _, excluded := matchesStagingExclude(sctx, file); excluded {
-				continue
-			}
-		}
-		paths = append(paths, file)
-	}
-	return paths, nil
+	return worktreescratch.DirtyPaths(func(args ...string) (string, error) {
+		return stepGitRunRaw(sctx, args...)
+	}, sctx.Config.StagingExclude)
 }
 
 // stageUntrackedChanges stages untracked files individually. Scratch-directory

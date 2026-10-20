@@ -30,6 +30,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"github.com/kunchenguid/no-mistakes/internal/worktreescratch"
 )
 
 // EventFunc is called when a pipeline event occurs, for streaming to subscribers.
@@ -3276,11 +3277,18 @@ func (e *Executor) verifyCompletionHead(run *db.Run) (string, error) {
 	if strings.TrimSpace(observed) != head {
 		return "", fmt.Errorf("worktree head does not match recorded completion head")
 	}
-	dirty, err := git.HasUncommittedChanges(ctx, e.workDir)
+	var excludes []string
+	if e.config != nil {
+		excludes = e.config.StagingExclude
+	}
+	dirtyPaths, err := worktreescratch.DirtyPaths(func(args ...string) (string, error) {
+		out, err := git.RunRaw(ctx, e.workDir, args...)
+		return string(out), err
+	}, excludes)
 	if err != nil {
 		return "", fmt.Errorf("check worktree before completion: %w", err)
 	}
-	if dirty {
+	if len(dirtyPaths) > 0 {
 		return "", fmt.Errorf("worktree is dirty before completion")
 	}
 	if !e.preserveUnpublishedTerminalHead(ctx, recordedRun, head) {

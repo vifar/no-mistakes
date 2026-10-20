@@ -2,11 +2,11 @@ package steps
 
 import (
 	"context"
-	"path"
 	"path/filepath"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/worktreescratch"
 )
 
 // isTestFile returns true if the file path matches common test file naming patterns.
@@ -73,31 +73,8 @@ func detectNewTestFiles(ctx context.Context, dir string) []string {
 	return testFiles
 }
 
-// matchIgnorePattern checks if a file path matches an ignore pattern.
-// Patterns follow gitignore-like semantics:
-//   - No slash: match against filename only (e.g., "*.generated.go" matches "pkg/foo.generated.go")
-//   - Ends with "/**": match any file under that directory (e.g., "vendor/**" matches "vendor/pkg/foo.go")
-//   - Otherwise: path.Match against the full path
-//
-// file is always a git path, which is "/"-separated on every platform, so the
-// slash-based path.Match is the matcher rather than filepath.Match: the latter
-// splits on os.PathSeparator, so on Windows its "*" would run straight through
-// "/" and silently widen "docs/*.md" into the whole docs subtree. The documented
-// rule - "*" never crosses a "/" - is therefore the rule on every host.
 func matchIgnorePattern(file, pattern string) bool {
-	// "vendor/**" → matches anything under "vendor/"
-	if strings.HasSuffix(pattern, "/**") {
-		prefix := strings.TrimSuffix(pattern, "/**")
-		return file == prefix || strings.HasPrefix(file, prefix+"/")
-	}
-	// No slash in pattern → match against basename only
-	if !strings.Contains(pattern, "/") {
-		matched, _ := path.Match(pattern, path.Base(file))
-		return matched
-	}
-	// Full path match
-	matched, _ := path.Match(pattern, file)
-	return matched
+	return worktreescratch.MatchPattern(file, pattern)
 }
 
 // changedPathList splits a NUL-delimited `git diff --name-only -z` payload,

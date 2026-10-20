@@ -311,8 +311,10 @@ func TestTargetRewindSpentBudgetStillUnstagesScratch(t *testing.T) {
 				c.PRContextAfterStep = false
 				out, err := (&RebaseStep{}).Execute(c)
 				if realEdits {
-					if err == nil && (out == nil || !out.NeedsApproval) {
-						t.Fatalf("second real edits were accepted: %+v", out)
+					if err == nil || !strings.Contains(err.Error(), "correction budget already spent") ||
+						!strings.Contains(err.Error(), "test step left uncommitted edits") ||
+						!strings.Contains(err.Error(), "feature.txt") || strings.Contains(err.Error(), path) {
+						t.Fatalf("second real edits need an attributed refusal naming only real paths: %+v %v", out, err)
 					}
 					if got := gitCmd(t, c.WorkDir, "rev-parse", "HEAD"); got != head {
 						t.Fatalf("refused edits moved head: %s", got)

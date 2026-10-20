@@ -62,6 +62,13 @@ func commitLeftoverValidationEdits(c *pipeline.StepContext) (bool, error) {
 		return false, err
 	}
 	if !allowed {
+		paths, err := leftoverDirtyPaths(c)
+		if err != nil {
+			return false, err
+		}
+		if len(paths) > 0 {
+			return false, fmt.Errorf("leftover validation correction budget already spent")
+		}
 		return false, nil
 	}
 	producer, err := rewindProducerStep(c)
