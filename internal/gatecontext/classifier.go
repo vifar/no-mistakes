@@ -515,7 +515,12 @@ var metadataReadHook = func(path string) ([]byte, error) {
 // stopped waiting. Saturation fails closed within the same caller budget.
 var metadataReaders = make(chan struct{}, 8)
 
-func readMetadataWithin(ctx context.Context, path string, wait time.Duration) ([]byte, error) {
+func readMetadataWithin(ctx context.Context, path string, wait time.Duration) (data []byte, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("read Git metadata (check daemon access to repository files): %w", err)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
