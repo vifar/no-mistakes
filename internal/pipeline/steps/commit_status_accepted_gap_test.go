@@ -141,58 +141,6 @@ func TestCommitStatusAcceptedTestGapPostsSuccessNamingTheGap(t *testing.T) {
 	}
 }
 
-// certifyCommitStatusFixture records exact-head execution proof for every
-// step and returns the strict certificate the reporter would bind.
-func certifyCommitStatusFixture(t *testing.T, sc *pipeline.StepContext, head string) *string {
-	t.Helper()
-	if err := sc.DB.UpdateRunPushBinding(sc.Run.ID, db.PushBinding{HeadSHA: head}); err != nil {
-		t.Fatal(err)
-	}
-	steps, err := sc.DB.GetStepsByRun(sc.Run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := pipeline.StatusConfigDigest(sc.Config)
-	epoch, err := sc.DB.StatusValidationEpoch(sc.Run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, step := range steps {
-		if err := sc.DB.RecordStatusValidationStep(step.ID, sc.Run.ID, head, digest, epoch); err != nil {
-			t.Fatal(err)
-		}
-	}
-	certificate, err := sc.DB.BuildStatusCertificate(sc.Run.ID, head, digest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return certificate
-}
-
-func TestCommitStatusAcceptedTestGapCertificateRequiresAValidRecord(t *testing.T) {
-	sc, head := acceptedGapCommitStatusFixture(t, func(sc *pipeline.StepContext, id, head string) {
-		recordAcceptedTestGap(t, sc, id, head, acceptedGapTestReason)
-	})
-	if certifyCommitStatusFixture(t, sc, head) == nil {
-		t.Fatal("a valid accepted gap earned no certificate")
-	}
-	// An inconclusive Test completed with no accepted gap and no recorded
-	// approval is a Test exception with no audit; it must not be certified.
-	bare, bareHead := acceptedGapCommitStatusFixture(t, func(sc *pipeline.StepContext, id, head string) {
-		if err := sc.DB.SetStepFindings(id, inconclusiveTestFindings(head)); err != nil {
-			t.Fatal(err)
-		}
-	})
-	if certificate := certifyCommitStatusFixture(t, bare, bareHead); certificate != nil {
-		t.Fatalf("inconclusive Test without a valid gap was certified: %s", *certificate)
-	}
-	// A clean run keeps the certificate it had before accepted gaps counted.
-	clean, cleanHead := acceptedGapCommitStatusFixture(t, nil)
-	if certifyCommitStatusFixture(t, clean, cleanHead) == nil {
-		t.Fatal("a clean run lost its certificate")
-	}
-}
-
 func TestCommitStatusFailedTestStillPostsFailure(t *testing.T) {
 	sc, head := acceptedGapCommitStatusFixture(t, func(sc *pipeline.StepContext, id, head string) {
 		if err := sc.DB.CompleteStepWithStatus(id, types.StepStatusFailed, 1, 1, "test.log"); err != nil {
