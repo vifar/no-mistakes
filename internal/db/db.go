@@ -21,10 +21,11 @@ var (
 	entropy   = ulid.Monotonic(rand.Reader, 0)
 )
 
-// Bump whenever schemaSQL or migrationStatements changes. Version zero is the
-// historical, unversioned schema; its complete upgrade runs once before the
-// stamp is committed. Current opens execute no DDL or backfill DML.
-const schemaVersion = 4
+// Bump whenever schemaSQL, migrationStatements, statusValidationMigrationStatements,
+// or additiveMigrationStatements changes. Version zero is the historical,
+// unversioned schema; its complete upgrade runs once before the stamp is
+// committed. Current opens execute no DDL or backfill DML.
+const schemaVersion = 5
 
 // DB wraps a SQLite database connection.
 type DB struct {
@@ -91,6 +92,15 @@ func migrateWriteAttempt(sqlDB *sql.DB) error {
 			return fmt.Errorf("migrate db (status validation): %w", err)
 		}
 		for _, stmt := range statusValidationMigrationStatements {
+			if _, err := tx.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
+				return fmt.Errorf("migrate db (%s): %w", stmt, err)
+			}
+		}
+		// Every later schema version adds its own additive statements here, so
+		// an upgraded database receives the columns the current binary reads.
+		// A statement for a version newer than the database's is harmless: it
+		// is additive and idempotent.
+		for _, stmt := range additiveMigrationStatements {
 			if _, err := tx.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
 				return fmt.Errorf("migrate db (%s): %w", stmt, err)
 			}

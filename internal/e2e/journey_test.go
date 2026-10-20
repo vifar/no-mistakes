@@ -1867,15 +1867,23 @@ func assertTestAgentNewTestFileRun(t *testing.T, h *Harness) {
 	if testStep.Status != types.StepStatusCompleted {
 		t.Fatalf("test step status = %s, want completed", testStep.Status)
 	}
-	assertUncommittedTestFileIsPreservedAndReviewed(t, h, run, "agent_test.py")
+	assertUncommittedTestFileIsPreservedAndReReviewed(t, h, run, "agent_test.py", "def test_agent():\n    pass\n")
 }
 
-// assertUncommittedTestFileIsPreservedAndReviewed proves the Test agent's
+// assertUncommittedTestFileIsPreservedAndReReviewed proves the Test agent's
 // uncommitted file is PRESERVED as a pipeline commit and sent through
-// re-review, instead of killing the run. The file must not reach the branch
-// without a review of the head that carries it.
-func assertUncommittedTestFileIsPreservedAndReviewed(t *testing.T, h *Harness, run *ipc.RunInfo, path string) {
+// re-review, instead of killing the run.
+//
+// The oracle is the run's own terminal outcome plus the branch's own content:
+// the run must COMPLETE, the file must be on the published branch with its
+// content intact, and a review must have run against the head that carries
+// the correction. A run that failed after Document, or that published the
+// correction without a review of its head, does not satisfy this.
+func assertUncommittedTestFileIsPreservedAndReReviewed(t *testing.T, h *Harness, run *ipc.RunInfo, path, content string) {
 	t.Helper()
+	if run.Status != types.RunCompleted {
+		t.Fatalf("the run status = %s, want completed: %v", run.Status, deref(run.Error))
+	}
 	document, ok := findStep(run.Steps, types.StepDocument)
 	if !ok {
 		t.Fatal("expected a document step")
@@ -1883,23 +1891,42 @@ func assertUncommittedTestFileIsPreservedAndReviewed(t *testing.T, h *Harness, r
 	if document.Status == types.StepStatusFailed {
 		t.Fatalf("the document step died on the predecessor's uncommitted file: %+v", document)
 	}
+	review, ok := findStep(run.Steps, types.StepReview)
+	if !ok || review.Status != types.StepStatusCompleted {
+		t.Fatalf("the review did not complete: %+v", review)
+	}
+	// The review that completed covered the preserved file, so the file was
+	// reviewed at the head that carries it.
+	if review.FindingsJSON == nil {
+		t.Fatalf("the completed review recorded no findings: %+v", review)
+	}
+	findings, err := types.ParseFindingsJSON(*review.FindingsJSON)
+	if err != nil {
+		t.Fatalf("parse the review findings: %v", err)
+	}
+	covered := false
+	for _, reviewed := range findings.ReviewedPaths {
+		if reviewed == path {
+			covered = true
+		}
+	}
+	if !covered {
+		t.Fatalf("the completed review did not cover the preserved file %s: %+v", path, findings.ReviewedPaths)
+	}
+	// The re-review is what the correction caused: the run reviewed the
+	// file's head before it existed and again after.
+	if review.RoundCount < 2 {
+		t.Fatalf("the run did not re-review after the correction: %+v", review)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	// The file must reach the branch only on a head the pipeline published,
-	// and never as an unreviewed leftover of the Test step.
-	published, err := h.runGit(ctx, h.UpstreamDir, "show-ref", "--verify", "--quiet", "refs/heads/"+strings.TrimPrefix(run.Branch, "refs/heads/"))
+	// The file is on the published branch, with its content intact.
+	published, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/"+strings.TrimPrefix(run.Branch, "refs/heads/")+":"+path)
 	if err != nil {
-		// The branch was not published yet, which is the point: the file is
-		// not published without a review of the head that carries it.
-		return
+		t.Fatalf("the preserved file %s is not on the published branch: %v", path, err)
 	}
-	_ = published
-	listed, err := h.runGit(ctx, h.UpstreamDir, "ls-tree", "-r", "--name-only", "refs/heads/"+strings.TrimPrefix(run.Branch, "refs/heads/"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(listed), path) {
-		t.Fatalf("the preserved file %s never reached the branch: %s", path, listed)
+	if string(published) != content {
+		t.Fatalf("the preserved file %s = %q, want %q", path, published, content)
 	}
 }
 
@@ -1920,7 +1947,7 @@ func assertTestAgentStagedNewTestFileRun(t *testing.T, h *Harness) {
 	if testStep.Status != types.StepStatusCompleted {
 		t.Fatalf("test step status = %s, want completed", testStep.Status)
 	}
-	assertUncommittedTestFileIsPreservedAndReviewed(t, h, run, "agent_staged_test.go")
+	assertUncommittedTestFileIsPreservedAndReReviewed(t, h, run, "agent_staged_test.go", "package main\n")
 }
 
 func assertReviewWarningRun(t *testing.T, h *Harness) {

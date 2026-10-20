@@ -59,6 +59,8 @@ func gitTreeHasDirectory(sctx *pipeline.StepContext, tree, dir string) (bool, er
 	return len(fields) == 3 && fields[1] == "tree", nil
 }
 
+// firstNewScratchComponent returns the first path component of rel that
+// marks tool scratch, or "" when rel is not scratch.
 func firstNewScratchComponent(sctx *pipeline.StepContext, headDirs map[string]bool, rel string, dirPath bool) (string, error) {
 	parts := strings.Split(strings.TrimSuffix(rel, "/"), "/")
 	if !dirPath {
@@ -82,6 +84,47 @@ func firstNewScratchComponent(sctx *pipeline.StepContext, headDirs map[string]bo
 		}
 	}
 	return "", nil
+}
+
+// worktreeDirtyPathsOutsideScratch lists the worktree's dirty paths that are
+// NOT recognized tool scratch. A tracked modification or a new non-scratch
+// file is a real edit; a new hidden scratch directory (a test harness's live
+// database, for example) is not.
+//
+// The scratch identity is the SAME one the automatic staging uses, so the two
+// can never disagree about what belongs in the branch.
+func worktreeDirtyPathsOutsideScratch(sctx *pipeline.StepContext) ([]string, error) {
+	out, err := stepGitRunRaw(sctx, "status", "--porcelain", "--untracked-files=all", "--no-renames", "--ignore-submodules=none")
+	if err != nil {
+		return nil, err
+	}
+	headDirs := map[string]bool{}
+	var paths []string
+	for _, entry := range strings.Split(strings.TrimSuffix(out, "\x00"), "\x00") {
+		if entry == "" {
+			continue
+		}
+		if len(entry) < 4 || entry[2] != ' ' {
+			return nil, fmt.Errorf("invalid git status entry %q", entry)
+		}
+		file := entry[3:]
+		if entry[0] == '?' {
+			// An untracked path is scratch when its first new component marks
+			// scratch, or when it matches a staging exclude.
+			scratch, err := firstNewScratchComponent(sctx, headDirs, file, false)
+			if err != nil {
+				return nil, err
+			}
+			if scratch != "" {
+				continue
+			}
+			if _, excluded := matchesStagingExclude(sctx, file); excluded {
+				continue
+			}
+		}
+		paths = append(paths, file)
+	}
+	return paths, nil
 }
 
 // stageUntrackedChanges stages untracked files individually. Scratch-directory

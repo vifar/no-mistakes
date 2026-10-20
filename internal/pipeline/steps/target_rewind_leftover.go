@@ -61,7 +61,13 @@ func commitLeftoverValidationEdits(c *pipeline.StepContext) (bool, error) {
 	if !allowed {
 		return false, nil
 	}
-	producer := pendingStepName(c, pending.Step)
+	producer, err := lastCompletedValidationStep(c, types.StepRebase)
+	if err != nil {
+		return false, err
+	}
+	if producer == "" {
+		producer = string(types.StepTest)
+	}
 	committed, newHead, err := commitWorktreeEdits(c, producer, "before the target-advance rewind")
 	if err != nil {
 		return false, err
@@ -192,7 +198,7 @@ func commitPredecessorValidationEdits(c *pipeline.StepContext) (bool, error) {
 		// The head already moved: another owner attributes that movement.
 		return false, nil
 	}
-	producer, err := lastCompletedValidationStep(c)
+	producer, err := lastCompletedValidationStep(c, types.StepDocument)
 	if err != nil {
 		return false, err
 	}
@@ -216,10 +222,16 @@ func commitPredecessorValidationEdits(c *pipeline.StepContext) (bool, error) {
 	return true, nil
 }
 
-// lastCompletedValidationStep names the last core validation step that
-// completed in this run. It is the step whose leftover edits the pipeline is
-// about to commit.
-func lastCompletedValidationStep(c *pipeline.StepContext) (string, error) {
+// lastCompletedValidationStep names the last core step that COMPLETED in this
+// run, which is the step whose agent could have left the current worktree
+// edits. It is execution evidence, not the name of the boundary that
+// happened to notice them: a target that advances after Test but before
+// Document still attributes Test's edits to Test.
+//
+// A repository gate is a possible producer too, so the gate's own anchor
+// step counts. The step that is CURRENTLY running is never the producer: it
+// has not left anything behind yet.
+func lastCompletedValidationStep(c *pipeline.StepContext, current types.StepName) (string, error) {
 	rows, err := c.DB.GetStepsByRun(c.Run.ID)
 	if err != nil {
 		return "", err
@@ -229,9 +241,16 @@ func lastCompletedValidationStep(c *pipeline.StepContext) (string, error) {
 		if row.Status != types.StepStatusCompleted {
 			continue
 		}
-		switch row.StepName {
-		case types.StepReview, types.StepTest:
-			producer = string(row.StepName)
+		name := row.StepName
+		if anchor, ok := name.CustomGateAnchor(); ok {
+			name = anchor
+		}
+		if name == current {
+			continue
+		}
+		switch name {
+		case types.StepRebase, types.StepReview, types.StepTest, types.StepDocument, types.StepLint:
+			producer = string(name)
 		}
 	}
 	return producer, nil
@@ -270,25 +289,24 @@ func leftoverValidationEditsRefusal(c *pipeline.StepContext, err error) error {
 	if pending == nil {
 		return err
 	}
+	producer, producerErr := lastCompletedValidationStep(c, types.StepRebase)
+	if producerErr != nil || producer == "" {
+		producer = pendingStepName(c, pending.Step)
+	}
 	paths, pathsErr := leftoverDirtyPaths(c)
 	if pathsErr != nil || len(paths) == 0 {
-		return fmt.Errorf("%w (the %s step left uncommitted edits in the run worktree)", err, pendingStepName(c, pending.Step))
+		return fmt.Errorf("%w (the %s step left uncommitted edits in the run worktree)", err, producer)
 	}
-	return fmt.Errorf("%w (the %s step left uncommitted edits in the run worktree: %s)", err, pendingStepName(c, pending.Step), strings.Join(paths, ", "))
+	return fmt.Errorf("%w (the %s step left uncommitted edits in the run worktree: %s)", err, producer, strings.Join(paths, ", "))
 }
 
-// leftoverDirtyPaths lists the paths that made the worktree dirty.
+// leftoverDirtyPaths lists the paths that made the worktree dirty, excluding
+// recognized tool scratch. Scratch is not an edit, so naming it in a refusal
+// would point the operator at the wrong thing.
 func leftoverDirtyPaths(c *pipeline.StepContext) ([]string, error) {
-	out, err := git.Run(c.Ctx, c.WorkDir, "status", "--porcelain", "--untracked-files=all", "--no-renames", "--ignore-submodules=none")
+	paths, err := worktreeDirtyPathsOutsideScratch(c)
 	if err != nil {
 		return nil, err
-	}
-	var paths []string
-	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-		if len(line) < 4 {
-			continue
-		}
-		paths = append(paths, strings.TrimSpace(line[3:]))
 	}
 	return paths, nil
 }

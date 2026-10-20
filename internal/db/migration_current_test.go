@@ -71,6 +71,52 @@ func TestPreOwnerUpgradePreservesHistory(t *testing.T) {
 	}
 }
 
+// TestUpgradeAddsTheLeftoverValidationBudget proves an EXISTING database
+// receives the new column. A database that does not get it fails every
+// leftover-preservation path with "no such column", so the upgrade is the
+// difference between the feature working and the feature refusing.
+func TestUpgradeAddsTheLeftoverValidationBudget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.sqlite")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := d.InsertRepo("/fixture", "https://example.com/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An existing installation: the column is absent and the schema is the
+	// version before this one.
+	if _, err := d.sql.Exec(fmt.Sprintf("ALTER TABLE runs DROP COLUMN leftover_validation_commits; PRAGMA user_version=%d", schemaVersion-1)); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if !hasColumn(t, d, "runs", "leftover_validation_commits") {
+		t.Fatal("the upgrade did not add the leftover-validation budget column")
+	}
+	allowed, err := d.CanCommitLeftoverValidationEdits(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed {
+		t.Fatal("the upgraded run cannot spend its leftover-validation budget")
+	}
+	// The upgrade preserved the run's history.
+	got, err := d.GetRun(run.ID)
+	if err != nil || got == nil || got.HeadSHA != "head" {
+		t.Fatalf("the upgrade lost history: %+v, %v", got, err)
+	}
+}
+
 func TestMigrationErrorNamesSQL(t *testing.T) {
 	original := migrationStatements
 	const broken = "ALTER TABLE absent_table ADD COLUMN test_value TEXT"

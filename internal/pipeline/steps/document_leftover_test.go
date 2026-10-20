@@ -1,11 +1,13 @@
 package steps
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -154,12 +156,16 @@ func TestDocumentStep_RefusesASecondLeftoverCommit(t *testing.T) {
 	}
 }
 
-// TestDocumentStep_ToolScratchAloneStillRefuses proves the change does not
-// sweep a test harness's scratch into the branch. Scratch is not a
-// validation edit, so there is nothing to commit and the original refusal
-// stands.
-func TestDocumentStep_ToolScratchAloneStillRefuses(t *testing.T) {
+// TestDocumentStep_ToolScratchAloneDoesNotBlockTheStep proves recognized tool
+// scratch is not an edit: a test harness's live database left behind by the
+// Test agent must not stop the documentation pass, and it must never enter
+// the branch.
+func TestDocumentStep_ToolScratchAloneDoesNotBlockTheStep(t *testing.T) {
 	c := documentFixture(t)
+	// The document agent finds nothing to document, so the pass completes.
+	c.Agent = &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: []byte(`{"findings":[],"summary":"nothing to document"}`)}, nil
+	}}
 	scratch := filepath.Join(c.WorkDir, ".journal-live")
 	if err := os.MkdirAll(scratch, 0o700); err != nil {
 		t.Fatal(err)
@@ -167,12 +173,12 @@ func TestDocumentStep_ToolScratchAloneStillRefuses(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(scratch, "postgres.log"), []byte("scratch\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := (&DocumentStep{}).Execute(c)
-	if err == nil {
-		t.Fatal("tool scratch was accepted as a validation edit")
+	outcome, err := (&DocumentStep{}).Execute(c)
+	if err != nil {
+		t.Fatalf("tool scratch stopped the documentation pass: %v", err)
 	}
-	if !strings.Contains(err.Error(), "Document requires a clean worktree") {
-		t.Fatalf("the refusal lost its wording: %v", err)
+	if outcome != nil && outcome.RestartFrom != "" {
+		t.Fatalf("tool scratch caused a restart: %+v", outcome)
 	}
 	tracked := gitCmd(t, c.WorkDir, "ls-files")
 	if strings.Contains(tracked, ".journal-live") {

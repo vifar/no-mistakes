@@ -118,11 +118,14 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if err := assertDocumentIndexVisible(sctx); err != nil {
 		return nil, err
 	}
-	status, err := stepGitRun(sctx, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
+	// The clean-entry contract covers the worktree's real edits. Recognized
+	// tool scratch (a test harness's live database, for example) is not an
+	// edit: it never belongs in the branch, and it must not kill the run.
+	dirtyPaths, err := worktreeDirtyPathsOutsideScratch(sctx)
 	if err != nil {
 		return nil, err
 	}
-	if status != "" {
+	if len(dirtyPaths) > 0 {
 		// A previous step's agent left edits in the worktree. Refusing here
 		// kills the run over work the pipeline can preserve: the edits are
 		// committed as a pipeline correction attributed to the step that left
@@ -137,7 +140,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		if restart {
 			return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
 		}
-		return nil, fmt.Errorf("Document requires a clean worktree so convergence can safely discard only its own edits")
+		return nil, fmt.Errorf("Document requires a clean worktree so convergence can safely discard only its own edits: %s", strings.Join(dirtyPaths, ", "))
 	}
 	observed, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
