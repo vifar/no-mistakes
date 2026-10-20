@@ -3,12 +3,51 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
+
+// The settlement queues are global, and the production code serializes every
+// drain with the commit status lock. The fixtures below do the same, so a
+// drain never races the recovery worker and a teardown never removes an entry
+// that a drain is about to pop.
+//
+// The lock is taken directly rather than through AcquireCommitStatusLock,
+// because that helper DRAINS the queue as part of taking it - and a drain of
+// an unhealthy settlement is exactly what these fixtures are exercising.
+func withSettlementLock(t *testing.T, fn func()) {
+	t.Helper()
+	CommitStatusLock <- struct{}{}
+	defer func() { <-CommitStatusLock }()
+	fn()
+}
+
+// setTerminalSettlements replaces the queued terminal settlements under the
+// lock, so the recovery worker never sees a half-written queue.
+func setTerminalSettlements(t *testing.T, settlements []*publicationSettlement) {
+	t.Helper()
+	withSettlementLock(t, func() {
+		terminalSettlementMu.Lock()
+		terminalSettlements = settlements
+		terminalSettlementMu.Unlock()
+	})
+}
+
+// queuedTerminalSettlements reads the queue length under the lock.
+func queuedTerminalSettlements(t *testing.T) int {
+	t.Helper()
+	count := 0
+	withSettlementLock(t, func() {
+		terminalSettlementMu.Lock()
+		count = len(terminalSettlements)
+		terminalSettlementMu.Unlock()
+	})
+	return count
+}
 
 // A raw publication settlement whose storage is gone for good must leave the
 // queue. While it stayed, every later drain hit it first and returned its
@@ -23,6 +62,7 @@ func TestRawSettlementWithGoneStorageDoesNotBlockTheQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer d.Close()
 	// The raw settlement's write targets storage that is closed, so it can
 	// never land.
 	closed, err := db.OpenReadOnly(p.DB())
@@ -33,41 +73,40 @@ func TestRawSettlementWithGoneStorageDoesNotBlockTheQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	rawDone := make(chan error, 1)
-	rawPublicationSettlements = nil
-	terminalSettlementMu.Lock()
-	rawPublicationSettlements = append(rawPublicationSettlements, &publicationSettlement{
-		write: func() error {
-			// A write against closed storage always fails.
-			_, writeErr := closed.InsertRun("repo", "branch", "head", "base")
-			return writeErr
-		}, done: rawDone,
-		unavailable: closed.Closed,
-	})
-	terminalSettlementMu.Unlock()
-	t.Cleanup(func() {
+	withSettlementLock(t, func() {
 		terminalSettlementMu.Lock()
-		rawPublicationSettlements = nil
+		rawPublicationSettlements = []*publicationSettlement{{
+			write: func() error {
+				// A write against closed storage always fails.
+				_, writeErr := closed.InsertRun("repo", "branch", "head", "base")
+				return writeErr
+			},
+			done:        rawDone,
+			unavailable: closed.Closed,
+		}}
 		terminalSettlementMu.Unlock()
+	})
+	t.Cleanup(func() {
+		withSettlementLock(t, func() {
+			terminalSettlementMu.Lock()
+			rawPublicationSettlements = nil
+			terminalSettlementMu.Unlock()
+		})
 	})
 
 	// A terminal settlement queued behind it must still be attempted.
 	terminalDone := make(chan error, 1)
-	terminalSettlementMu.Lock()
-	terminalSettlements = append(terminalSettlements, &publicationSettlement{
+	setTerminalSettlements(t, []*publicationSettlement{{
 		write:       func() error { return nil },
 		done:        terminalDone,
 		unavailable: d.Closed,
-	})
-	terminalSettlementMu.Unlock()
-	t.Cleanup(func() {
-		terminalSettlementMu.Lock()
-		terminalSettlements = nil
-		terminalSettlementMu.Unlock()
-	})
+	}})
 
 	// The drain moves past the raw settlement and reaches the one behind it.
-	_ = drainPublicationSettlements()
 	// The raw settlement's own caller is told that its write did not land.
+	withSettlementLock(t, func() {
+		_ = drainPublicationSettlements()
+	})
 	select {
 	case err := <-rawDone:
 		if err == nil {
@@ -85,16 +124,18 @@ func TestRawSettlementWithGoneStorageDoesNotBlockTheQueue(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("terminal settlement behind a gone raw settlement was never attempted")
 	}
-	terminalSettlementMu.Lock()
-	queuedRaw := len(rawPublicationSettlements)
-	queuedTerminal := len(terminalSettlements)
-	terminalSettlementMu.Unlock()
-	if queuedRaw != 0 {
-		t.Fatalf("raw settlement with gone storage stayed queued: %d", queuedRaw)
-	}
-	if queuedTerminal != 0 {
-		t.Fatalf("terminal settlement stayed queued: %d", queuedTerminal)
-	}
+	withSettlementLock(t, func() {
+		terminalSettlementMu.Lock()
+		queuedRaw := len(rawPublicationSettlements)
+		queuedTerminal := len(terminalSettlements)
+		terminalSettlementMu.Unlock()
+		if queuedRaw != 0 {
+			t.Fatalf("raw settlement with gone storage stayed queued: %d", queuedRaw)
+		}
+		if queuedTerminal != 0 {
+			t.Fatalf("terminal settlement stayed queued: %d", queuedTerminal)
+		}
+	})
 }
 
 // The drain of a queue whose only settlement is a healthy write leaves the
@@ -109,25 +150,18 @@ func TestDrainOfHealthySettlementsEmptiesTheQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	terminalSettlementMu.Lock()
-	terminalSettlements = append(terminalSettlements, &publicationSettlement{
+	setTerminalSettlements(t, []*publicationSettlement{{
 		write:       func() error { return nil },
 		done:        make(chan error, 1),
 		unavailable: d.Closed,
+	}})
+	t.Cleanup(func() { setTerminalSettlements(t, nil) })
+	withSettlementLock(t, func() {
+		if err := drainPublicationSettlements(); err != nil {
+			t.Fatalf("healthy drain reported an error: %v", err)
+		}
 	})
-	terminalSettlementMu.Unlock()
-	t.Cleanup(func() {
-		terminalSettlementMu.Lock()
-		terminalSettlements = nil
-		terminalSettlementMu.Unlock()
-	})
-	if err := drainPublicationSettlements(); err != nil {
-		t.Fatalf("healthy drain reported an error: %v", err)
-	}
-	terminalSettlementMu.Lock()
-	queued := len(terminalSettlements)
-	terminalSettlementMu.Unlock()
-	if queued != 0 {
+	if queued := queuedTerminalSettlements(t); queued != 0 {
 		t.Fatalf("healthy settlement stayed queued: %d", queued)
 	}
 }
@@ -145,25 +179,18 @@ func TestUnhealthySettlementStaysQueuedForTheRecoveryLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	terminalSettlementMu.Lock()
-	terminalSettlements = append(terminalSettlements, &publicationSettlement{
+	setTerminalSettlements(t, []*publicationSettlement{{
 		write:       func() error { return errors.New("storage is busy") },
 		done:        make(chan error, 1),
 		unavailable: d.Closed,
+	}})
+	t.Cleanup(func() { setTerminalSettlements(t, nil) })
+	withSettlementLock(t, func() {
+		if err := drainPublicationSettlements(); err == nil {
+			t.Fatal("unhealthy settlement reported success")
+		}
 	})
-	terminalSettlementMu.Unlock()
-	t.Cleanup(func() {
-		terminalSettlementMu.Lock()
-		terminalSettlements = nil
-		terminalSettlementMu.Unlock()
-	})
-	if err := drainPublicationSettlements(); err == nil {
-		t.Fatal("unhealthy settlement reported success")
-	}
-	terminalSettlementMu.Lock()
-	queued := len(terminalSettlements)
-	terminalSettlementMu.Unlock()
-	if queued != 1 {
+	if queued := queuedTerminalSettlements(t); queued != 1 {
 		t.Fatalf("unhealthy settlement left the queue: %d", queued)
 	}
 }
@@ -180,29 +207,26 @@ func TestRecoveryLoopRetriesAQueuedSettlement(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	healthy := false
+	// The health flag is shared with the recovery worker, so it is atomic.
+	var healthy atomic.Bool
 	done := make(chan error, 1)
-	terminalSettlementMu.Lock()
-	terminalSettlements = append(terminalSettlements, &publicationSettlement{
+	setTerminalSettlements(t, []*publicationSettlement{{
 		write: func() error {
-			if !healthy {
+			if !healthy.Load() {
 				return errors.New("storage is busy")
 			}
 			return nil
 		},
 		done:        done,
 		unavailable: d.Closed,
+	}})
+	t.Cleanup(func() { setTerminalSettlements(t, nil) })
+	withSettlementLock(t, func() {
+		if err := drainPublicationSettlements(); err == nil {
+			t.Fatal("unhealthy settlement reported success")
+		}
 	})
-	terminalSettlementMu.Unlock()
-	t.Cleanup(func() {
-		terminalSettlementMu.Lock()
-		terminalSettlements = nil
-		terminalSettlementMu.Unlock()
-	})
-	if err := drainPublicationSettlements(); err == nil {
-		t.Fatal("unhealthy settlement reported success")
-	}
-	healthy = true
+	healthy.Store(true)
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		select {

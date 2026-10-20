@@ -3205,7 +3205,13 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		}
 		if revoked {
 			for _, ctx := range ctxs {
-				if CancellationOnly(executionErr, context.Cause(ctx)) {
+				// The same provenance-aware classification as the initial
+				// selection: a command that this context cancelled is
+				// cancelled, and a command that failed on its own keeps its
+				// own outcome even when the cancellation was observed
+				// afterwards.
+				cause := context.Cause(ctx)
+				if cause != nil && cancellationAttributable(executionErr, cause) {
 					errMsg = db.RawShutdownReason
 					runStatus = types.RunFailed
 					explicitCancellation = false

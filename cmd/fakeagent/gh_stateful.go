@@ -140,17 +140,13 @@ func runGhStatefulPRStub(args []string) int {
 			fmt.Println(out)
 			return 0
 		}
-		// A branch with no classic protection answers Not Found, exactly as
-		// GitHub does for an unprotected branch. The check-scope code reads
-		// that as "no required checks from classic protection" and goes on to
-		// the rules read. Without this the stub would refuse the endpoint as
-		// an unimplemented subcommand, and a test whose own gh script
-		// delegates here would fail on a read it never asked for.
-		if parts := strings.Split(endpoint, "/"); len(parts) == 7 &&
-			parts[0] == "repos" && parts[1]+"/"+parts[2] == repo &&
-			parts[3] == "branches" && parts[5] == "protection" && parts[6] == "required_status_checks" {
-			fmt.Fprintln(os.Stderr, "gh: Branch not protected (HTTP 404)")
-			return 1
+		if out, errText, handled := answers.rest(repo, endpoint, args); handled {
+			if errText != "" {
+				fmt.Fprintln(os.Stderr, errText)
+				return 1
+			}
+			fmt.Println(out)
+			return 0
 		}
 		if endpoint == "repos/"+repo+"/pulls" {
 			headFilter := ""
