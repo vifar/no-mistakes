@@ -20,7 +20,7 @@ import (
 func TestMachineLocalPrepareJourney(t *testing.T) {
 	for _, tc := range []struct {
 		name, trusted, pushed, first, final string
-		allow, unmatched, noMachine, fail  bool
+		allow, unmatched, noMachine, fail   bool
 	}{
 		{name: "matching_agent_only", first: "machine", final: "machine"},
 		{name: "unmatched", unmatched: true, first: "absent", final: "absent"},
