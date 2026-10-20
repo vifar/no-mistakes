@@ -68,7 +68,7 @@ func TestCancellationAttributable(t *testing.T) {
 			name: "a subprocess that failed on its own behind a wrapper",
 			err:  fmt.Errorf("fatal gate reconciliation: %w", errors.Join(failedProcessExit(t), context.Canceled)),
 			want: false,
-		},		{
+		}, {
 			name: "an independent failure",
 			err:  independent,
 			want: false,
