@@ -20,6 +20,9 @@ func normalizeRepositoryOverrides(raw RepositoryOverrides) (RepositoryOverrides,
 		if err := validateCommandOverrides(override.Commands); err != nil {
 			return nil, fmt.Errorf("invalid repository_overrides.%s.commands: %w", key, err)
 		}
+		if err := validateMachineLocalPrepare(override.Prepare); err != nil {
+			return nil, fmt.Errorf("invalid repository_overrides.%s.prepare: %w", key, err)
+		}
 		if err := validateGlobalCommitRaw(override.Commit); err != nil {
 			return nil, fmt.Errorf("invalid repository_overrides.%s.commit: %w", key, err)
 		}

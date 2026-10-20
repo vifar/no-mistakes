@@ -1341,6 +1341,20 @@ Repository command selection still comes from the trusted default branch, or the
 Only the operator's global config can supply these local settings, never a repository's `.no-mistakes.yaml`.
 With no matching command override, execution remains unchanged.
 
+A matching `prepare` key is the one exception, and it can only ever fill a gap: it supplies a dependency-preparation command for a repository that configured **none**.
+The repository's own trusted command always wins when it has one, so this can never replace what a maintainer asked to run.
+It exists because a repository with no `.no-mistakes.yaml` could otherwise get [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) from no source at all, which left the operator provisioning dependencies by hand in every run worktree.
+It also supplies the eager preparation trigger, so an agent-only Test prepares its dependencies before its first turn.
+The preparation step log declares a machine-local command, so a reader can tell which policy produced the prepared worktree.
+
+```yaml
+repository_overrides:
+  https://github.com/acme/widget.git:
+    prepare: "pnpm install --frozen-lockfile"
+```
+
+The `commands` block below is a DIFFERENT surface and still refuses a command string: a machine-local **replacement** could neuter what a repository asked to run, while filling an empty value cannot.
+
 ```yaml
 repository_overrides:
   https://github.com/acme/widget.git:
@@ -1360,6 +1374,8 @@ repository_overrides:
 | --- | --- | --- |
 | `additional` | `test`, `lint` | Ordered list of separate shell checks added after the repository check; every check must succeed |
 | `nice` | `prepare`, `test`, `lint`, `format` | POSIX niceness adjustment from `0` to `19`; `0` leaves scheduling unchanged |
+
+The repository's `prepare` command is a separate key on the same override, and it is the only machine-local setting that can supply a command string; see [Machine-local commands](#machine-local-commands) above.
 
 Test runs the committed command first, then each added command in a separate shell, retaining a failure from either source even when another check succeeds.
 Test still performs its unconditional agent-driven end-user scenarios afterwards.

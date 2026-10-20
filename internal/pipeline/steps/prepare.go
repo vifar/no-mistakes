@@ -43,6 +43,12 @@ func ensurePrepared(sctx *pipeline.StepContext, logStep types.StepName) error {
 		} else if !os.IsNotExist(err) {
 			return fmt.Errorf("read preparation marker: %w", err)
 		}
+		// A machine-local preparation command is declared, so a reader knows
+		// the prepared worktree came from the operator's policy and not from
+		// the repository's trusted configuration.
+		if declaration := machineLocalPrepareDeclaration(sctx.Config.MachineLocalPrepare); declaration != "" {
+			sctx.Log(declaration)
+		}
 
 		snapshot, err := snapshotPreparationState(sctx.Ctx, sctx.WorkDir, sctx.GateDir)
 		if err != nil {

@@ -51,6 +51,17 @@ func commandOverrideDeclaration(name string, override config.CommandOverride) st
 	return fmt.Sprintf("machine-local overrides applied to commands.%s: %s", name, strings.Join(parts, "; "))
 }
 
+// machineLocalPrepareDeclaration states that a dependency-preparation command
+// came from the operator's machine-local configuration rather than the
+// repository's trusted one, so a reader knows which policy produced the
+// prepared worktree.
+func machineLocalPrepareDeclaration(command string) string {
+	if strings.TrimSpace(command) == "" {
+		return ""
+	}
+	return fmt.Sprintf("machine-local prepare command applied: %q", command)
+}
+
 // checkResult is one configured check's own outcome, so a machine-local
 // check's failure is never attributed to the repository's command.
 type checkResult struct {

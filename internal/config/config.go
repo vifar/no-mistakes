@@ -369,6 +369,14 @@ type RepositoryOverride struct {
 	Commands map[string]CommandOverride `yaml:"commands"`
 	Review   OperatorReviewRaw          `yaml:"review"`
 	Document DocumentRaw                `yaml:"document"`
+	// Prepare supplies a dependency-preparation command for a repository that
+	// configured NONE. It fills an empty value only: the repository's own
+	// trusted command always wins when it has one, so this can never replace
+	// what a maintainer asked to run. It is a separate field from the
+	// commands surface precisely because that surface refuses a command
+	// string - a machine-local REPLACEMENT could neuter a repository's own
+	// command, while filling an empty one cannot.
+	Prepare string `yaml:"prepare"`
 }
 
 // OperatorReviewRaw is the review block the operator's global config may set,
@@ -934,7 +942,12 @@ type Config struct {
 	Worktree                  Worktree
 	Commands                  Commands
 	CommandOverrides          map[string]CommandOverride
-	AgentStallTimeout         time.Duration
+	// MachineLocalPrepare is the dependency-preparation command the operator
+	// supplied for this repository, when the repository supplied none. It is
+	// recorded so the preparation step can declare that the command came from
+	// the machine rather than from the repository's trusted configuration.
+	MachineLocalPrepare string
+	AgentStallTimeout   time.Duration
 	// Gates are the repository's extra checks, already trusted-only by the
 	// time they reach here (EffectiveRepoConfig sourced them from the trusted
 	// default-branch copy).
@@ -3968,6 +3981,34 @@ func MergeForRemote(global *GlobalConfig, repo *RepoConfig, remote string) *Conf
 	return merge(global, repo, override)
 }
 
+// machineLocalPrepareSupplied reports whether the operator supplied a
+// machine-local prepare command for this repository.
+func machineLocalPrepareSupplied(override *RepositoryOverride) bool {
+	if override == nil {
+		return false
+	}
+	return strings.TrimSpace(override.Prepare) != ""
+}
+
+// resolveCommands fills a command the repository left unset with the
+// operator's machine-local value for it.
+//
+// The repository's trusted value always wins when it has one: the machine-local
+// surface supplements, it never replaces, and a pushed branch can never
+// displace the maintainer's own command. Only a command the repository
+// supplied NOTHING for can be filled, which is what gives a repository with no
+// trusted .no-mistakes.yaml a way to have its dependencies prepared at all.
+func resolveCommands(repo Commands, override *RepositoryOverride) Commands {
+	resolved := repo
+	if override == nil {
+		return resolved
+	}
+	if resolved.Prepare == "" {
+		resolved.Prepare = strings.TrimSpace(override.Prepare)
+	}
+	return resolved
+}
+
 func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride) *Config {
 	af := autoFixDefaults()
 	applyAutoFixOverrides(&af, &global.AutoFix)
@@ -4006,6 +4047,15 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 	// to describe. repo here is the EffectiveRepoConfig result, so this value
 	// is already trusted-only.
 	test.Prepare = repo.Test.Prepare
+	// A machine-local prepare command fills a gap the repository left, so it
+	// also supplies the EAGER trigger the repository's own test.prepare would
+	// have: the operator asked for dependency preparation in a repository that
+	// asked for none, and an eager preparation is the only way that request
+	// ever runs for an agent-only Test. It applies only when the machine-local
+	// command is the one that will actually run.
+	if !test.Prepare && machineLocalPrepareSupplied(override) && repo.Commands.Prepare == "" {
+		test.Prepare = true
+	}
 	test.BaseAttribution = repo.Test.BaseAttribution
 	test.Instructions = strings.TrimSpace(repo.Test.Instructions)
 	test.AllowApproveOverFailure = strings.TrimSpace(repo.Test.AllowApproveOverFailure)
@@ -4109,7 +4159,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		// is global-only for the same reason (see GlobalConfig.Worktree).
 		Eval:             global.Eval,
 		Worktree:         global.Worktree,
-		Commands:         repo.Commands,
+		Commands:         resolveCommands(repo.Commands, override),
 		Gates:            copyGates(repo.Gates),
 		IgnorePatterns:   repo.IgnorePatterns,
 		ProtectedPaths:   repo.ProtectedPaths,
@@ -4145,6 +4195,12 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		cfg.CommandOverrides = copyCommandOverrides(override.Commands)
 		cfg.Review.RepositoryPathInstructions = resolvePathInstructions(override.Review.PathInstructions)
 		cfg.Document.RepositoryInstructions = strings.TrimSpace(override.Document.Instructions)
+		// The machine-local prepare command is recorded only when it is the one
+		// that will run, so the declaration never names a command the
+		// repository's own configuration replaced.
+		if repo.Commands.Prepare == "" {
+			cfg.MachineLocalPrepare = strings.TrimSpace(override.Prepare)
+		}
 	}
 
 	if repo.Agent != "" {

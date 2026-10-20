@@ -9,6 +9,13 @@ import (
 // CommandOverride adds machine-local checks and lowers scheduling priority,
 // never changing the repository's command string or its environment.
 // Additional checks have separate exit statuses.
+//
+// There is deliberately NO way to supply a command string here. A machine-local
+// replacement could neuter what a repository's maintainer asked to run
+// ("exit 0" in place of a real test command), so the whole surface refuses one
+// rather than trying to police it. The gap-filling case - a repository that
+// supplied NO command at all - has its own setting, RepositoryOverride.Prepare,
+// which can only ever fill an empty value.
 type CommandOverride struct {
 	Nice       int      `yaml:"nice" json:"nice,omitempty"`
 	Additional []string `yaml:"additional" json:"additional,omitempty"`
@@ -36,6 +43,19 @@ func validateCommandOverrides(overrides map[string]CommandOverride) error {
 				return fmt.Errorf("commands.%s.additional checks must be nonempty shell commands without NUL", name)
 			}
 		}
+	}
+	return nil
+}
+
+// validateMachineLocalPrepare checks a machine-local dependency-preparation
+// command. It is a shell command like any other configured one, so it must be
+// nonempty and carry no NUL.
+func validateMachineLocalPrepare(command string) error {
+	if command == "" {
+		return nil
+	}
+	if strings.TrimSpace(command) == "" || strings.ContainsRune(command, '\x00') {
+		return fmt.Errorf("must be a nonempty shell command without NUL")
 	}
 	return nil
 }

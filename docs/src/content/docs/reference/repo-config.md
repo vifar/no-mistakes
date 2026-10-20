@@ -376,6 +376,7 @@ A non-zero exit or launch failure fails that step before its command runs.
 Use this for deterministic dependency materialization such as `npm ci --prefer-offline`. The run worktree starts with tracked files only, so ignored dependency directories such as `node_modules` are otherwise absent. no-mistakes keeps ignored files produced by preparation, and keeps any submodule it checks out at the commit the superproject records, while removing its tracked, ordinary untracked, and nested-repository mutations before continuing; a submodule commit the command moved to is reset to the recorded commit. Earlier pending tracked and ordinary untracked pipeline changes are restored exactly, so preparation can run before a later configured command without admitting setup artifacts into a fix commit.
 
 Like every `commands.*` value, `commands.prepare` comes from the trusted default-branch configuration unless that trusted copy explicitly enables `allow_repo_commands: true`. no-mistakes never auto-detects an install command from the pushed branch.
+A repository that supplies no `commands.prepare` can still get one from the operator's machine-local [`repository_overrides.prepare`](/no-mistakes/reference/global-config/#machine-local-commands), which fills that gap and never replaces a repository's own command.
 
 ### commands.test
 
