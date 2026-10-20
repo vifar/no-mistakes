@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -94,16 +97,19 @@ func TestMetadataDiscoveryDeadlineInterruptsHeldHead(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	release := make(chan struct{})
-	finished := make(chan struct{})
-	original := metadataReadHook
-	metadataReadHook = func(string) ([]byte, error) { defer close(finished); <-release; return nil, os.ErrDeadlineExceeded }
-	t.Cleanup(func() { close(release); <-finished; metadataReadHook = original })
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	started := holdMetadataReader(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	_, err := gitHeadPresent(ctx, dir)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("held HEAD lost caller deadline: %v", err)
+	result := make(chan error, 1)
+	go func() { _, err := gitHeadPresent(ctx, dir); result <- err }()
+	awaitMetadataReadStart(t, started)
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("held HEAD lost caller deadline: %v (caller %v)", err, ctx.Err())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("caller remained blocked after its deadline")
 	}
 }
 
@@ -125,7 +131,7 @@ func TestCommonDirectoryNeverInfersAnUnreadablePointer(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(actual, "commondir"), []byte(content), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			common, err := commonDirectoryFor(context.Background(), actual, false)
+			common, err := commonDirectoryFor(context.Background(), actual)
 			if err == nil {
 				t.Fatalf("invalid pointer selected %q", common)
 			}
@@ -142,15 +148,23 @@ func TestCommonDirectoryHeldPointerHonorsContext(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(actual, "commondir"), []byte("../..\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	release, finished := make(chan struct{}), make(chan struct{})
-	original := metadataReadHook
-	metadataReadHook = func(string) ([]byte, error) { defer close(finished); <-release; return []byte("../..\n"), nil }
-	t.Cleanup(func() { close(release); <-finished; metadataReadHook = original })
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	started := holdMetadataReader(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	common, err := commonDirectoryFor(ctx, actual, false)
-	if common != "" || !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("held pointer returned common=%q err=%v", common, err)
+	type outcome struct {
+		common string
+		err    error
+	}
+	result := make(chan outcome, 1)
+	go func() { common, err := commonDirectoryFor(ctx, actual); result <- outcome{common, err} }()
+	awaitMetadataReadStart(t, started)
+	select {
+	case got := <-result:
+		if got.common != "" || !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("held pointer returned common=%q err=%v (caller %v)", got.common, got.err, ctx.Err())
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("caller remained blocked after its deadline")
 	}
 }
 
@@ -174,5 +188,97 @@ func TestNearestMetadataDoesNotSkipAnUnreadableHead(t *testing.T) {
 	actual, _, err := nearestGitMetadata(context.Background(), inner)
 	if actual != "" || !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("unreadable HEAD selected %q, err=%v", actual, err)
+	}
+}
+
+// A content-read timeout before Git starts cannot substitute for a Git answer.
+// The first HEAD read times out; later reads can succeed, which exposed the
+// old fallback admitting a repository without ever querying Git.
+func TestMetadataReadDeadlineCannotEnableFilesystemFallback(t *testing.T) {
+	bare, resolveErr := filepath.EvalSymlinks(t.TempDir())
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
+	for _, entry := range []string{"objects", "refs"} {
+		if err := os.Mkdir(filepath.Join(bare, entry), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(bare, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := metadataReadHook
+	var calls atomic.Int32
+	metadataReadHook = func(path string) ([]byte, error) {
+		if path == filepath.Join(bare, "HEAD") && calls.Add(1) == 1 {
+			return nil, context.DeadlineExceeded
+		}
+		return readBoundedMetadata(path, metadataFileLimit)
+	}
+	t.Cleanup(func() { metadataReadHook = original })
+	got, err := (Inspector{Paths: paths.WithRoot(t.TempDir())}).Inspect(context.Background(), Request{CWD: bare})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("metadata timeout admitted or lost: result=%+v err=%v", got, err)
+	}
+}
+
+// The caller can expire before the reader is scheduled. Cleanup must release
+// either state and must not wait on a completion signal that cannot arrive.
+func holdMetadataReader(t *testing.T) <-chan struct{} {
+	t.Helper()
+	release, started, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	original := metadataReadHook
+	metadataReadHook = func(string) ([]byte, error) {
+		close(started)
+		defer close(finished)
+		<-release
+		return nil, os.ErrDeadlineExceeded
+	}
+	t.Cleanup(func() {
+		close(release)
+		select {
+		case <-started:
+			select {
+			case <-finished:
+			case <-time.After(2 * time.Second):
+				t.Error("released metadata reader did not finish")
+			}
+		default:
+		}
+		metadataReadHook = original
+	})
+	return started
+}
+
+func awaitMetadataReadStart(t *testing.T, started <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("metadata reader did not start")
+	}
+}
+
+func TestIdentityStallRejectsAGitCommandThatNeverStarted(t *testing.T) {
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	_, err := git.RunDiscoveryWithEnv(expired, t.TempDir(), identityLocale, "rev-parse", "--git-common-dir")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Git start error = %v", err)
+	}
+	if identityStalled(context.Background(), err) {
+		t.Fatal("a deadline before Git started enabled fallback")
+	}
+}
+
+func TestIdentityStallPreservesAGitDiagnosticWithALateDeadline(t *testing.T) {
+	_, err := git.RunDiscoveryWithEnv(context.Background(), t.TempDir(), identityLocale, "rev-parse", "--git-common-dir")
+	var commandErr *git.CommandError
+	if !errors.As(err, &commandErr) || !normalGitDiagnostic(err, "fatal: not a git repository (or any of the parent directories): .git") {
+		t.Fatalf("expected real Git absence diagnostic, got %v", err)
+	}
+	late := &git.CommandError{Command: commandErr.Command, Stderr: commandErr.Stderr, Err: errors.Join(commandErr.Err, context.DeadlineExceeded)}
+	if identityStalled(context.Background(), late) {
+		t.Fatal("an answered Git diagnostic was replaced by a late deadline")
 	}
 }

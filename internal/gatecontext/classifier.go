@@ -296,26 +296,10 @@ func (i Inspector) registeredManagedCommonDir(commonDir string) (string, bool, e
 	return repo.ID, true, nil
 }
 
-// discoverCommonDirectory resolves the caller's Git common directory.
-//
-// The Git child is the authority while it works. It can, however, block
-// indefinitely on macOS: a process that a service manager started (launchd)
-// has no responsible application, so an `open()` of a TCC-protected location
-// (~/Documents, ~/Desktop, ~/Downloads) waits for the sandbox approval
-// watchdog to expire before the kernel answers it, and that wait costs
-// several seconds per protected open (issue #120). A `git rev-parse`
-// performs several such opens, so the identity command can outlive any
-// budget and still never answer: measured on the Studio, a launchd-spawned
-// `git rev-parse` failed with exit 128 after 20 s, and a worktree variant
-// was still blocked when its 3 minute budget expired. The same command from
-// an interactive shell answers in milliseconds.
-//
-// A stall therefore falls back to a filesystem resolution with bounded
-// content reads, and the fallback is accepted only when it proves exactly
-// what the Git query would have proved: the same physical metadata boundary,
-// the same common directory, and a common directory whose HEAD is
-// recognizable. A fallback that cannot prove all of that fails closed exactly
-// as it does today.
+// discoverCommonDirectory keeps Git authoritative when it answers. Recorded
+// macOS privacy-approval holds can block the identity child (issue #120). Only
+// a child deadline or the complete interrupted-read diagnostic enables bounded
+// filesystem corroboration. Unreadable required metadata still fails closed.
 func (i Inspector) discoverCommonDirectory(ctx context.Context, identityCtx context.Context, cwd string) (string, error) {
 	common, err := gitCommonDirectory(identityCtx, cwd)
 	if err == nil {
@@ -337,28 +321,31 @@ func (i Inspector) discoverCommonDirectory(ctx context.Context, identityCtx cont
 	return common, nil
 }
 
-// identityStalled reports whether the identity command was cut short by its
-// own execution budget, or was killed by the kernel while it waited on a
-// blocked read.
-//
-// Two outcomes mean the same thing here. A command that outlives its budget
-// is stopped by the deadline. A command the kernel stops because the
-// repository it was reading could not be opened reports an interrupted
-// syscall instead, which is what a TCC-protected location produces when the
-// approval watchdog expires (issue #120). Both mean "the Git child could
-// not answer", and both are answered by the metadata-only fallback.
-//
-// A child that failed with a real diagnostic keeps its own meaning, because
-// that diagnostic carries information the classification depends on: Git
-// reporting that a directory is not a repository is an answer, not a stall.
+// identityStalled requires a failed identity Git child. Metadata and startup
+// timeouts cannot enable fallback; a substantive Git diagnostic remains an
+// answer even when a later command/drain deadline is reported alongside it.
 func identityStalled(ctx context.Context, err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		// A caller deadline is not an identity stall: the caller gave up, and
-		// the identity budget was never the binding constraint.
-		return ctx.Err() == nil
+	var commandErr *git.CommandError
+	if !errors.As(err, &commandErr) {
+		return false
+	}
+	if errors.Is(commandErr, context.DeadlineExceeded) {
+		if ctx.Err() != nil {
+			return false
+		}
+		// A start failure has no child exit. A normal exit 128 or any
+		// substantive stderr is an answer, even if draining later timed out.
+		var exitErr *exec.ExitError
+		if !errors.As(commandErr.Unwrap(), &exitErr) || exitErr.ProcessState == nil {
+			return false
+		}
+		if exitErr.ProcessState.Exited() && exitErr.ExitCode() == 128 {
+			return false
+		}
+		return strings.TrimSpace(commandErr.Stderr) == ""
 	}
 	return blockedIdentityRead(err)
 }
@@ -448,46 +435,29 @@ func runIdentityGit(ctx context.Context, cwd string, args ...string) (string, er
 	return git.RunDiscoveryWithEnv(ctx, cwd, identityLocale, args...)
 }
 
-// filesystemCommonDirectory resolves the common Git directory without running
-// Git, and without ever blocking on a content read that the kernel may hold.
-//
-// It exists for the case the Git child cannot serve: a service-manager
-// process whose `open()` of a TCC-protected location is answered only when
-// the sandbox approval watchdog expires. Measured on the Studio, a
-// launchd-spawned `git rev-parse` failed with exit 128 after 20 s and a
-// worktree variant was still blocked when its 3 minute budget expired, while
-// the same command from an interactive shell answered in milliseconds
-// (issue #120).
-//
-// The distinction that makes this work is that the stall is on the CONTENT
-// read, not on the metadata lookup: `Lstat` and `Stat` of the same paths
-// answer in milliseconds, while `open()` of a file under the protected
-// location blocks. So the resolution is built from metadata operations, and
-// every content read it needs - a worktree's `gitdir:` file and a worktree's
-// `commondir` file - is read under a short deadline.
-//
-// The resolution requires the nearest physical metadata boundary, Git's
-// explicit commondir pointer when present, recognizable HEAD content, and
-// object/reference directories. If any required content is unreadable it
-// fails closed; metadata existence alone cannot prove repository identity.
-//
-// A repository whose metadata cannot be resolved fails closed rather than
-// being admitted, so the fallback never widens what the classifier accepts.
-// It also never proves an absence: a caller with no discoverable metadata is
-// reported as an error, because the Git query never ran to establish that
-// the repository is absent.
+// filesystemCommonDirectory proves the nearest metadata boundary, actual and
+// common HEADs, explicit commondir when present, and object/reference structure.
+// Every required content read is bounded. An unreadable file never becomes an
+// existence-only proof, an inferred directory, or repository absence.
 func filesystemCommonDirectory(ctx context.Context, cwd string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	actual, bare, err := nearestGitMetadata(ctx, cwd)
+	actual, _, err := nearestGitMetadata(ctx, cwd)
 	if err != nil {
 		return "", fmt.Errorf("corroborate Git discovery identity: %w", err)
 	}
 	if actual == "" {
 		return "", fmt.Errorf("Git metadata could not be resolved without the Git query")
 	}
-	common, err := commonDirectoryFor(ctx, actual, bare)
+	head, err := gitHeadPresent(ctx, actual)
+	if err != nil {
+		return "", fmt.Errorf("verify Git actual HEAD: %w", err)
+	}
+	if !head {
+		return "", fmt.Errorf("Git actual directory has invalid HEAD")
+	}
+	common, err := commonDirectoryFor(ctx, actual)
 	if err != nil {
 		return "", err
 	}
@@ -506,7 +476,7 @@ func filesystemCommonDirectory(ctx context.Context, cwd string) (string, error) 
 	}
 	// Existence alone is insufficient. Unreadable or malformed HEAD content
 	// leaves the identity unresolved, including for a registered gate.
-	head, err := gitHeadPresent(ctx, common)
+	head, err = gitHeadPresent(ctx, common)
 	if err != nil {
 		return "", fmt.Errorf("verify Git common HEAD: %w", err)
 	}
@@ -597,10 +567,7 @@ func recognizableHead(head string) bool {
 // commonDirectoryFor reads Git's explicit common-directory pointer. A missing
 // commondir means the actual directory is itself common; every other read error
 // is unresolved identity. A directory name cannot substitute for this evidence.
-func commonDirectoryFor(ctx context.Context, actual string, bare bool) (string, error) {
-	if bare {
-		return actual, ctx.Err()
-	}
+func commonDirectoryFor(ctx context.Context, actual string) (string, error) {
 	pointer := filepath.Join(actual, "commondir")
 	if _, err := os.Lstat(pointer); os.IsNotExist(err) {
 		return actual, ctx.Err()

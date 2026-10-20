@@ -816,14 +816,9 @@ func TestIdentityGitfileGrowsAfterGitDiscovery(t *testing.T) {
 	}
 }
 
-// A repository whose common directory lives under a TCC-protected location
-// cannot be read by a service-manager-spawned process: the kernel holds the
-// open until the sandbox approval watchdog expires, and Git then reports an
-// unreadable working directory and exits with status 128. The classifier
-// must still resolve the caller's identity from the filesystem, because
-// refusing every caller is the same failure as the stall itself.
-//
-// Regressions: issue #120.
+// When the Git child cannot answer but required metadata is readable,
+// filesystem corroboration must still resolve an ordinary caller. Unreadable
+// metadata remains an error. Regressions: issue #120.
 func TestIdentityBlockedGitReadFallsBackToTheFilesystem(t *testing.T) {
 	for _, layout := range []string{"plain", "linked"} {
 		t.Run(layout, func(t *testing.T) {
@@ -1029,5 +1024,61 @@ func TestIdentityFallbackDoesNotInferACommonDirectoryFromADirectoryName(t *testi
 	}
 	if got.Nested {
 		t.Fatalf("an ordinary repository was refused: %+v", got)
+	}
+}
+
+func TestIdentityFallbackRejectsBareCommonPointerDamage(t *testing.T) {
+	for _, damage := range []string{"empty", "missing-target", "directory"} {
+		t.Run(damage, func(t *testing.T) {
+			f := newTopologyFixture(t)
+			bare := filepath.Join(t.TempDir(), "bare.git")
+			run(t, "", "git", "init", "--bare", bare)
+			pointer := filepath.Join(bare, "commondir")
+			if damage == "directory" {
+				if err := os.Mkdir(pointer, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				content := ""
+				if damage == "missing-target" {
+					content = "../missing\n"
+				}
+				if err := os.WriteFile(pointer, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gitfault.Install(t, "blocked-read")
+			if got, err := (gatecontext.Inspector{Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: bare}); err == nil {
+				t.Fatalf("damaged bare commondir admitted: %+v", got)
+			}
+		})
+	}
+}
+
+func TestIdentityFallbackRejectsLinkedActualHeadDamage(t *testing.T) {
+	for _, damage := range []string{"missing", "malformed"} {
+		t.Run(damage, func(t *testing.T) {
+			f := newTopologyFixture(t)
+			linked := filepath.Join(t.TempDir(), "linked")
+			run(t, f.work, "git", "worktree", "add", "--detach", linked, "HEAD")
+			data, err := os.ReadFile(filepath.Join(linked, ".git"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			actual := strings.TrimSpace(strings.TrimPrefix(string(data), "gitdir: "))
+			head := filepath.Join(actual, "HEAD")
+			if damage == "missing" {
+				err = os.Remove(head)
+			} else {
+				err = os.WriteFile(head, []byte("invalid\n"), 0o600)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			gitfault.Install(t, "blocked-read")
+			if got, err := (gatecontext.Inspector{Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: linked}); err == nil {
+				t.Fatalf("damaged linked actual HEAD admitted: %+v", got)
+			}
+		})
 	}
 }

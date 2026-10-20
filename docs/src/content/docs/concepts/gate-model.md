@@ -114,28 +114,24 @@ earlier caller deadline. This is a command budget, not a deadline for the whole
 classifier: filesystem checks, database reads, process-start system calls, and
 authenticated process-ancestry lookup can take longer.
 
-A blocked identity command is answered by a metadata-only resolution, not by a
-longer deadline. On macOS, a process started by a service manager has no
-responsible application, so opening a file under a privacy-protected location
-(the Documents, Desktop, or Downloads folder) is held by the kernel until the
-sandbox approval watchdog expires. Git then reports an unreadable working
-directory and exits with status 128 instead of answering. The metadata-only
-resolution recovers the same physical metadata boundary, the same common
-directory, and the same object and reference structure using metadata
-operations, which are not held. Every metadata content read is bounded, so a
-held read cannot stall the caller past its own deadline. At most eight content
-reads may remain in flight; new callers fail closed within their own budget
-while those reads are still held. A present `commondir` must be read successfully;
-its parent directory name never substitutes for that pointer.
+A blocked identity command can be answered by filesystem corroboration, without
+increasing its deadline. In recorded macOS launchd failures, protected-folder
+content opens waited for privacy approval until the kernel's approval watchdog
+expired; metadata lookups remained fast. Corroboration uses those metadata
+operations and bounded content reads. At most eight content reads may remain in
+flight, and every caller waits under its own context and per-read budget.
 
-The fallback proves nothing weaker than the Git query it replaces. A directory
-is never accepted as a repository on the strength of a HEAD file that merely
-exists, because a directory with a HEAD, an objects directory and a refs
-directory is not evidence of a repository. A HEAD that cannot be read leaves
-the identity unresolved rather than answered, and an unresolved identity is an
-error. The fallback never proves a repository's absence: unresolved metadata
-fails closed, and a managed gate's identity is still proved. Every other Git
-diagnostic is an answer rather than a stall and keeps failing closed.
+The fallback requires the same nearest physical metadata boundary, a recognizable
+actual HEAD and common HEAD, and object/reference directories. A present
+`commondir` must be read and resolved successfully for every layout, including
+bare metadata; a directory name cannot substitute for that pointer. Unreadable
+or malformed metadata leaves identity unresolved and fails closed. The fallback
+never proves repository absence or accepts HEAD existence alone.
+
+Only a deadline from a started identity Git child or Git's complete interrupted
+working-directory diagnostic can enable fallback. Metadata-read and startup
+timeouts remain errors. A substantive Git diagnostic stays fail-closed even
+when a later deadline is reported alongside it.
 
 A Git failure proceeds as repository absence only after a single recognized
 English discovery diagnostic, a normal exit, complete output draining, and
