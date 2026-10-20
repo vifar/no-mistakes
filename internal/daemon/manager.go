@@ -2873,7 +2873,11 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 
 	// Create executor with event broadcast.
 	runCtx, cancel := handle.runCtx, handle.cancel
-	executor := pipeline.NewExecutor(m.db, m.paths, cfg, ag, execSteps, m.broadcast)
+	// Keep final settlement bound to the executor's store. A manager lookup
+	// failure must not strand a cancellation whose executor already persisted
+	// its terminal outcome in the original store.
+	runDB := m.db
+	executor := pipeline.NewExecutor(runDB, m.paths, cfg, ag, execSteps, m.broadcast)
 	executor.SetRunSlot(slot)
 	executor.SetRuntimeInstance(m.runtimeInstance)
 	executor.SetForgeContext(forgeCtx)
@@ -2968,7 +2972,7 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				if !m.releaseShutdownForRecovery(run.ID) {
 					return
 				}
-			} else if !m.terminalRunSettled(run.ID) {
+			} else if !m.terminalRunSettledIn(runDB, run.ID) {
 				return
 			}
 			cancel(nil)
@@ -3571,6 +3575,10 @@ func (m *RunManager) runCancelsLocked() map[string]context.CancelCauseFunc {
 // terminalRunSettled reports whether a run's terminal outcome is durable.
 // Until it is, the run goroutine keeps custody of the run.
 func (m *RunManager) terminalRunSettled(runID string) bool {
+	return m.terminalRunSettledIn(m.db, runID)
+}
+
+func (m *RunManager) terminalRunSettledIn(store *db.DB, runID string) bool {
 	m.mu.Lock()
 	var event *types.RunEndingEvent
 	if owned := m.runs[runID]; owned != nil {
@@ -3583,13 +3591,13 @@ func (m *RunManager) terminalRunSettled(runID string) bool {
 		}
 	}
 	m.mu.Unlock()
-	run, err := pipeline.ReadSettledRun(m.db, runID)
+	run, err := pipeline.ReadSettledRun(store, runID)
 	if err != nil || run == nil || !run.Status.Terminal() {
 		slog.Error("terminal outcome unsettled; retaining run custody", "run_id", runID, "error", err)
 		return false
 	}
 	if event != nil && run.EndingEvent == nil {
-		if err := pipeline.SettleTerminalWrite(m.db, func() error { return m.db.RecordRunEnding(runID, event) }); err != nil {
+		if err := pipeline.SettleTerminalWrite(store, func() error { return store.RecordRunEnding(runID, event) }); err != nil {
 			slog.Error("ending attribution unsettled; retaining run custody", "run_id", runID, "error", err)
 			return false
 		}
