@@ -304,22 +304,6 @@ Use [`agent_config.opencode`](/no-mistakes/reference/global-config/#agent_config
 
 OpenCode 1.x supports native structured output through `json_schema` at `info.format` (OpenCode 1.17 and later), retaining a guarded fallback when native structured output is unavailable. OpenCode 2.x always uses the common prompt-only text fallback described above, validating the answer against the requested schema and allowing `null` for optional fields. See the OpenCode adapter implementation (`internal/agent/opencode*.go`) for the authoritative protocol, tool-choice retry conditions, transient failure boundaries, and prompt-only fallback semantics.
 
-### OpenCode 1.x and 2.x
-
-OpenCode 2.x moved its HTTP API under `/api` and changed several request and event shapes, so no-mistakes detects the server's API generation before the first session is created and speaks the matching protocol. Detection is a `GET /api/info` probe: OpenCode 2.x answers that route with JSON, while OpenCode 1.x answers it with the single-page app, so the response content type identifies the generation. A 2.x server that rejects the credential answers `401` with a JSON error envelope, and a 1.x server answers `401` with an empty body, so the two remain distinguishable.
-
-The generations differ in more than the route names:
-
-- **Session create.** OpenCode 1.x takes `directory` and a `permission` ruleset; OpenCode 2.x takes `location: {directory}`, a `permissions` ruleset of `{action, resource, effect}` entries, and the model as `{id, providerID, variant}`. Each server rejects the other generation's body.
-- **Prompt.** OpenCode 1.x posts to `/session/{id}/message`, which blocks until the turn is over and carries the model, the reasoning effort and the `json_schema` descriptor. OpenCode 2.x posts to `/api/session/{id}/prompt` with a plain `text` field and returns immediately; the turn runs in the background, and the assistant's message is read back from the session's message list.
-- **Events.** OpenCode 1.x streams `/global/event` frames that carry `payload.type`, and a turn ends on `session.idle`. OpenCode 2.x streams `/api/event` frames that carry a top-level `type`, and a turn ends on `session.execution.succeeded` (`session.execution.failed` and `session.execution.interrupted` are the failures). OpenCode 2.x also names tool activity explicitly, so a turn that ran a tool is recorded as such.
-- **Structured output.** OpenCode 2.x exposes no `json_schema` output format on either endpoint, so on 2.x the schema always travels in the prompt and the answer is validated against it. That is the same prompt-only route OpenCode 1.x already uses when its native format is rejected.
-- **Authentication.** OpenCode 2.x requires HTTP basic authentication on every `/api` request, with the fixed username `opencode` and the server's own password. The password comes from `OPENCODE_PASSWORD` or `OPENCODE_SERVER_PASSWORD`; when neither is set, the server generates one at startup and prints it once on stdout, and no-mistakes reads that line so the client and the server always agree on the credential. OpenCode 1.x needs no credential unless `OPENCODE_SERVER_PASSWORD` is set.
-
-### An agent that cannot be set up falls back
-
-A failure while an agent is still being set up - its process never came up, or the request that creates its session was refused - means the agent never held the prompt and no tool of that attempt could have run. no-mistakes treats it as an unavailable agent and moves to the next entry in `agent:`, recording the fallback. A failure after the agent's own turn ran is a different thing: a findings result, a structured-output rejection, or a provider error on a completed turn is that agent's verdict on the work, and no-mistakes reports it instead of re-running the work under a different agent.
-
 ## Pi
 
 Spawns a `pi` subprocess for each invocation with `--mode json`. Cold invocations add `--no-session`; with `session_reuse: true`, review-fixer turns instead create and resume one Pi session per run via `--session <UUID>`.

@@ -164,7 +164,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 		return result, err
 	}
 
-	// OpenCode implements json_schema output as a required StructuredOutput
+	// OpenCode 1.x implements json_schema output as a required StructuredOutput
 	// tool call. Some thinking-enabled models reject that combination, and
 	// some gateways reject every non-auto tool_choice outright. Retry
 	// once without the native format, while keeping the schema in the prompt
