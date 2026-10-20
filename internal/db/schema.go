@@ -577,7 +577,6 @@ var migrationStatements = append(append([]string{
 	`ALTER TABLE run_pr_contexts ADD COLUMN retained_target_sha TEXT`,
 }, statusValidationMigrationStatements...), upstream199MigrationStatements...)
 
-// Version 5 adds upstream retry, release and routing evidence without rewriting history.
 var upstream199MigrationStatements = []string{
 	runRetrySchema,
 	`ALTER TABLE runs ADD COLUMN quota_routing TEXT`,

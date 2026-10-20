@@ -59,7 +59,7 @@ func TestModel_RespondFixKeepsAnAlreadyFixedDeclineOutOfTheRetry(t *testing.T) {
 	// the new finding r2 selected.
 	delete(m.findingSelections[types.StepReview], "r1")
 
-	cmd := m.respondCmd(types.ActionFix)
+	cmd := m.respondCmd(types.ActionFix, types.ResponseOriginInteractive)
 	if cmd == nil {
 		t.Fatal("expected a fix command")
 	}
@@ -71,6 +71,11 @@ func TestModel_RespondFixKeepsAnAlreadyFixedDeclineOutOfTheRetry(t *testing.T) {
 	defer mu.Unlock()
 	if len(calls) != 2 {
 		t.Fatalf("respond calls = %d, want the refused attempt and its correction", len(calls))
+	}
+	for _, call := range calls {
+		if call.Origin != types.ResponseOriginInteractive {
+			t.Fatalf("interactive response origin = %q", call.Origin)
+		}
 	}
 	if strings.Join(calls[0].FindingIDs, ",") != "r2" || strings.Join(calls[0].IgnoreFindingIDs, ",") != "r1" {
 		t.Fatalf("first attempt = %+v, want r2 fixed and r1 declined", calls[0])

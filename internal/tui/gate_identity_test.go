@@ -31,7 +31,7 @@ func TestModel_ResponseBindsTheDisplayedParkEvent(t *testing.T) {
 	g := types.GateIdentity{RunID: run.ID, Step: types.StepReview, StepResultID: "step", RoundID: "round", Nonce: "park-1", Status: types.StepStatusAwaitingApproval}
 	step, status := g.Step, string(g.Status)
 	m.applyEvent(ipc.Event{Type: ipc.EventStepCompleted, RunID: run.ID, StepName: &step, Status: &status, Gate: &g})
-	cmd := m.respondCmd(types.ActionApprove)
+	cmd := m.respondCmd(types.ActionApprove, types.ResponseOriginInteractive)
 	if cmd == nil {
 		t.Fatal("no response command")
 	}

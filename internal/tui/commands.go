@@ -133,13 +133,13 @@ func (m Model) maybeAutoApproveCmd() tea.Cmd {
 	if step.Status != types.StepStatusFixReview && !m.yoloFixed[step.StepName] && m.stepHasActionableFindings(step.StepName) {
 		m.yoloFixed[step.StepName] = true
 		m.resetFindingSelection(step.StepName)
-		return m.respondCmd(types.ActionFix)
+		return m.respondCmd(types.ActionFix, types.ResponseOriginAutoYes)
 	}
 	m.yoloApproved[step.StepName] = true
-	return m.respondCmd(types.ActionApprove)
+	return m.respondCmd(types.ActionApprove, types.ResponseOriginAutoYes)
 }
 
-func (m Model) respondCmd(action types.ApprovalAction) tea.Cmd {
+func (m Model) respondCmd(action types.ApprovalAction, origin types.ResponseOrigin) tea.Cmd {
 	step := awaitingStep(m.steps)
 	if step == nil {
 		return nil
@@ -161,7 +161,7 @@ func (m Model) respondCmd(action types.ApprovalAction) tea.Cmd {
 	}
 	return func() tea.Msg {
 		params := &ipc.RespondParams{
-			Origin:       types.ResponseOriginInteractive,
+			Origin:       origin,
 			ExpectedGate: expectedGate,
 			RunID:        m.runID,
 			Step:         step.StepName,

@@ -268,11 +268,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "a":
-		return m, m.respondCmd(types.ActionApprove)
+		return m, m.respondCmd(types.ActionApprove, types.ResponseOriginInteractive)
 	case "f":
-		return m, m.respondCmd(types.ActionFix)
+		return m, m.respondCmd(types.ActionFix, types.ResponseOriginInteractive)
 	case "s":
-		return m, m.respondCmd(types.ActionSkip)
+		return m, m.respondCmd(types.ActionSkip, types.ResponseOriginInteractive)
 	case "o":
 		if m.run != nil && m.run.PRURL != nil && *m.run.PRURL != "" {
 			return m, openBrowserCmd(*m.run.PRURL)

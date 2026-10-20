@@ -290,7 +290,7 @@ data: {"type":"session.text.ended","data":{"sessionID":"ses_fixture","assistantM
 	}
 }
 
-func TestOpencodeV2_ReportsActivityWhileBufferingDeltas(t *testing.T) {
+func TestOpencodeV2_ReportsProgressWhileBufferingDeltas(t *testing.T) {
 	f := &opencodeV2Fixture{pages: []string{v2Page("hello world")}, events: `data: {"type":"session.text.delta","data":{"sessionID":"ses_fixture","assistantMessageID":"msg_final","ordinal":0,"delta":"hello"}}
 
 data: {"type":"session.text.delta","data":{"sessionID":"ses_fixture","assistantMessageID":"msg_final","ordinal":0,"delta":" world"}}
@@ -301,7 +301,12 @@ data: {"type":"session.text.ended","data":{"sessionID":"ses_fixture","assistantM
 	a := v2Agent(f.server(t))
 	var chunks strings.Builder
 	var lifecycle []LifecycleEvent
-	_, err := a.Run(context.Background(), RunOpts{CWD: t.TempDir(), Prompt: "work", OnChunk: func(text string) { chunks.WriteString(text) }, OnLifecycle: func(event LifecycleEvent) { lifecycle = append(lifecycle, event) }})
+	_, err := a.Run(context.Background(), RunOpts{CWD: t.TempDir(), Prompt: "work", OnChunk: func(text string) { chunks.WriteString(text) }, OnLifecycle: func(event LifecycleEvent) {
+		if event.Phase == LifecyclePhaseProgress && chunks.Len() != 0 {
+			t.Error("buffered progress arrived after text delivery")
+		}
+		lifecycle = append(lifecycle, event)
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,15 +314,14 @@ data: {"type":"session.text.ended","data":{"sessionID":"ses_fixture","assistantM
 	if chunks.String() != "hello world" {
 		t.Fatalf("expected complete text after the end event: %q", chunks.String())
 	}
-	// Activity must be reported while deltas are buffered, before the end.
-	var sawActivity bool
+	var sawProgress bool
 	for _, event := range lifecycle {
-		if event.Phase == LifecyclePhaseActivity {
-			sawActivity = true
+		if event.Phase == LifecyclePhaseProgress {
+			sawProgress = true
 		}
 	}
-	if !sawActivity {
-		t.Fatal("expected LifecyclePhaseActivity while buffering deltas")
+	if !sawProgress {
+		t.Fatal("expected LifecyclePhaseProgress while buffering deltas")
 	}
 }
 

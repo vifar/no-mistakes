@@ -1016,7 +1016,7 @@ func TestTUIOverflow_FailedReconciliationBlocksStaleAwaitingGate(t *testing.T) {
 	m = updated.(Model)
 
 	for _, action := range []types.ApprovalAction{types.ActionApprove, types.ActionFix, types.ActionSkip} {
-		if cmd := m.respondCmd(action); cmd != nil {
+		if cmd := m.respondCmd(action, types.ResponseOriginInteractive); cmd != nil {
 			t.Fatalf("%s response was enabled against stale gate state", action)
 		}
 	}

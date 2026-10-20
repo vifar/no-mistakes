@@ -39,6 +39,72 @@ func TestCurrentOpenWithHeldWriter(t *testing.T) {
 	}
 }
 
+func TestUpstream199UpgradeFromForkSchemas(t *testing.T) {
+	for _, version := range []int{0, 4, 5} {
+		t.Run(fmt.Sprint(version), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.sqlite")
+			d, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo, err := d.InsertRepo("fixture", "https://example.com/repo", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := d.InsertRun(repo.ID, "feature", "head", "base")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.sql.Exec(fmt.Sprintf(`
+DROP TABLE run_retries;
+ALTER TABLE runs DROP COLUMN quota_routing;
+ALTER TABLE runs DROP COLUMN ci_released_at;
+ALTER TABLE step_results DROP COLUMN response_origin;
+ALTER TABLE step_rounds DROP COLUMN response_origin;
+ALTER TABLE step_results DROP COLUMN failure_cause;
+ALTER TABLE step_results DROP COLUMN carried_from;
+PRAGMA user_version=%d`, version)); err != nil {
+				t.Fatal(err)
+			}
+			d.Close()
+			if reader, err := OpenReader(path); err == nil {
+				reader.Close()
+				t.Fatal("reader accepted an outdated schema")
+			}
+			for i := 0; i < 2; i++ {
+				d, err = Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := d.GetRun(run.ID)
+				if err != nil || got == nil || got.HeadSHA != "head" {
+					t.Fatalf("history after upgrade: %+v, %v", got, err)
+				}
+				for table, columns := range map[string][]string{
+					"runs":         {"quota_routing", "ci_released_at"},
+					"step_results": {"response_origin", "failure_cause", "carried_from"},
+					"step_rounds":  {"response_origin"},
+				} {
+					for _, column := range columns {
+						if !hasColumn(t, d, table, column) {
+							t.Fatalf("missing %s.%s", table, column)
+						}
+					}
+				}
+				if retry, err := d.GetRunRetry(run.ID); err != nil || retry != nil {
+					t.Fatalf("retry history after upgrade: %+v, %v", retry, err)
+				}
+				d.Close()
+			}
+			reader, err := OpenReader(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reader.Close()
+		})
+	}
+}
+
 func TestPreOwnerUpgradePreservesHistory(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.sqlite")
 	d, err := Open(path)

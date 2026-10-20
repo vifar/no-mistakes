@@ -337,13 +337,10 @@ func (s *opencodeV2Stream) read(reader io.Reader, opts RunOpts) {
 			// that later turns out not to be a prefix of the complete text
 			// cannot be retracted from the append-only OnChunk interface.
 			s.parts[key] += data.Delta
-			// Report activity for accepted deltas even while their text stays
-			// buffered, so a still-generating response is not mistaken for an
-			// idle one and cancelled past the stall budget.
 			if data.Delta != "" {
 				emitLifecycle(opts, LifecycleEvent{
 					Agent:   "opencode",
-					Phase:   LifecyclePhaseActivity,
+					Phase:   LifecyclePhaseProgress,
 					Message: "opencode producing output",
 				})
 			}

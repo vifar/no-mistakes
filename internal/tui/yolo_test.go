@@ -210,6 +210,9 @@ func TestModel_Yolo_AutoApprovesAwaitingStep(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("expected exactly 1 respond call, got %d", len(calls))
 	}
+	if calls[0].Origin != types.ResponseOriginAutoYes {
+		t.Fatalf("automatic response origin = %q", calls[0].Origin)
+	}
 	if calls[0].Action != types.ActionApprove {
 		t.Fatalf("action = %s, want %s", calls[0].Action, types.ActionApprove)
 	}
@@ -274,6 +277,9 @@ func TestModel_Yolo_FixesActionableFindings(t *testing.T) {
 		t.Fatalf("expected 1 respond call, got %d", len(calls))
 	}
 	t.Logf("yolo response action=%s finding_ids=%v", calls[0].Action, calls[0].FindingIDs)
+	if calls[0].Origin != types.ResponseOriginAutoYes {
+		t.Fatalf("automatic response origin = %q", calls[0].Origin)
+	}
 	if calls[0].Action != types.ActionFix {
 		t.Fatalf("action = %s, want %s", calls[0].Action, types.ActionFix)
 	}
