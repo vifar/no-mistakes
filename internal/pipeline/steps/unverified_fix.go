@@ -1,174 +1,98 @@
 package steps
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// UnverifiedFixError indicates that a fix commit could not be verified by the pipeline
-// (e.g. verification was blocked, missing required tooling, or unverified).
-// The phase must stop at the gate and commit nothing rather than advancing as a normal head.
+// fixVerificationPassed is the only verification outcome that lets a
+// verification-required fix round commit.
+const fixVerificationPassed = "passed"
+
+// verifiedFixSummarySchema is commitSummarySchema plus the fixer's own
+// verification outcome. The outcome is a structured field rather than words
+// read out of the summary: a summary is free text that legitimately names
+// "blocked" or "unverified" things, and a fixer told its wording is policed
+// can simply stop using those words.
+var verifiedFixSummarySchema = json.RawMessage(fmt.Sprintf(`{
+	"type": "object",
+	"properties": {
+		"summary": {"type": "string", "maxLength": %d},
+		"verification": {"type": "string", "enum": ["passed", "blocked", "failed", "not_needed"]}
+	},
+	"required": ["summary", "verification"]
+}`, config.MaxFixMessageSummaryBytes))
+
+// UnverifiedFixError reports a fix round whose changes were discarded because
+// the fixer did not report a passing verification. Nothing was committed, so
+// the code it would have produced is never reviewed as a normal head.
 type UnverifiedFixError struct {
-	Step    types.StepName
-	Commit  string
-	Summary string
-	Reason  string
+	Step types.StepName
+	// Verification is the outcome the fixer reported; empty when its output
+	// carried none.
+	Verification string
+	Summary      string
 }
 
 func (e *UnverifiedFixError) Error() string {
-	if e.Commit != "" {
-		return fmt.Sprintf("%s: unverified fix commit %s %q: %s", e.Step, e.Commit, e.Summary, e.Reason)
+	outcome := "no verification outcome"
+	if e.Verification != "" {
+		outcome = fmt.Sprintf("verification %q", e.Verification)
 	}
+	msg := fmt.Sprintf("%s fix round discarded: the fixer reported %s", e.Step, outcome)
 	if e.Summary != "" {
-		return fmt.Sprintf("%s: fix verification blocked: %q: %s", e.Step, e.Summary, e.Reason)
+		msg += fmt.Sprintf(" for %q", e.Summary)
 	}
-	return fmt.Sprintf("%s: fix verification blocked: %s", e.Step, e.Reason)
+	return msg + "; nothing was committed. Make the repository's checks runnable in the pipeline worktree, then run again"
 }
 
-// CheckUnverifiedFixSummary reports whether a fixer summary indicates that verification
-// was blocked, skipped, or unverified.
-func CheckUnverifiedFixSummary(summary string) string {
-	lower := strings.ToLower(summary)
-	for _, marker := range []string{
-		"tests blocked",
-		"test blocked",
-		"verification blocked",
-		"regression tests unverified",
-		"tests unverified",
-		"test unverified",
-		"verification unverified",
-		"blocked without",
-		"blocked by missing",
-		"blocked by",
-		"unverified",
-	} {
-		if strings.Contains(lower, marker) {
-			return marker
-		}
+// fixVerification reads the verification outcome from a fixer's structured
+// output. Missing or unparseable output reports no outcome, which never passes.
+func fixVerification(result *agent.Result) string {
+	if result == nil || result.Output == nil {
+		return ""
 	}
-	return ""
+	var report struct {
+		Verification string `json:"verification"`
+	}
+	if err := json.Unmarshal(result.Output, &report); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(report.Verification)
 }
 
-// CheckUnverifiedFixCommitMessage checks whether a commit subject represents an unverified
-// fix commit (such as a pipeline fix commit or commit with explicit blocked/unverified testing).
-func CheckUnverifiedFixCommitMessage(subject string) string {
-	lower := strings.ToLower(subject)
-	isPipelineFix := strings.Contains(lower, "no-mistakes(")
-
-	// Process-of-verification blocked indicators (e.g. tests blocked, verification blocked)
-	processMarkers := []string{
-		"tests blocked",
-		"test blocked",
-		"verification blocked",
-		"regression tests unverified",
-		"tests unverified",
-		"test unverified",
-		"verification unverified",
-		"blocked without",
-		"blocked by missing",
-	}
-	for _, m := range processMarkers {
-		if strings.Contains(lower, m) {
-			return m
-		}
-	}
-
-	// For pipeline fix commits (no-mistakes(...)), also check broader markers
-	if isPipelineFix {
-		for _, m := range []string{
-			"unverified",
-			"blocked by",
-		} {
-			if strings.Contains(lower, m) {
-				return m
-			}
-		}
-	}
-	return ""
-}
-
-// checkReviewHeadVerified inspects the commits under review between baseSHA and HEAD
-// (as well as any bound uncertified range) to ensure no unverified review fix commits are reviewed
-// as normal heads.
-func checkReviewHeadVerified(ctx context.Context, sctx *pipeline.StepContext, baseSHA string) error {
-	if sctx == nil || sctx.WorkDir == "" || sctx.Run == nil {
-		return nil
-	}
-	headSHA := strings.TrimSpace(sctx.Run.HeadSHA)
-	if headSHA == "" {
-		var err error
-		headSHA, err = git.HeadSHA(ctx, sctx.WorkDir)
-		if err != nil {
-			return nil
-		}
-	}
-	baseSHA = strings.TrimSpace(baseSHA)
-
-	if baseSHA != "" && headSHA != "" && baseSHA != headSHA {
-		out, err := git.Run(ctx, sctx.WorkDir, "log", "--format=%H %s", baseSHA+".."+headSHA)
-		if err == nil {
-			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
-				}
-				parts := strings.SplitN(line, " ", 2)
-				if len(parts) == 2 {
-					if marker := CheckUnverifiedFixCommitMessage(parts[1]); marker != "" {
-						return &UnverifiedFixError{
-							Step:    types.StepReview,
-							Commit:  parts[0],
-							Summary: parts[1],
-							Reason:  fmt.Sprintf("unverified review fix commit cannot be reviewed as a normal head (%s)", marker),
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Check any bound uncertified pipeline range
-	if sctx.UncertifiedFromSHA != "" && sctx.UncertifiedToSHA != "" {
-		out, err := git.Run(ctx, sctx.WorkDir, "log", "--format=%H %s", sctx.UncertifiedFromSHA+".."+sctx.UncertifiedToSHA)
-		if err == nil {
-			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
-				}
-				parts := strings.SplitN(line, " ", 2)
-				if len(parts) == 2 {
-					if marker := CheckUnverifiedFixCommitMessage(parts[1]); marker != "" {
-						return &UnverifiedFixError{
-							Step:    types.StepReview,
-							Commit:  parts[0],
-							Summary: parts[1],
-							Reason:  fmt.Sprintf("uncertified fixer commit was unverified (%s)", marker),
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-// resetWorktreeToHead discards any working tree modifications and untracked files
-// so that a stopped/blocked fix round leaves no unverified changes in the worktree.
-func resetWorktreeToHead(sctx *pipeline.StepContext) error {
-	if sctx == nil || sctx.WorkDir == "" {
+// refuseUnverifiedFix discards a fix round's changes, including any commits
+// the fixer made itself, unless the fixer reported a passing verification. A
+// round that changed nothing has nothing to discard and continues as before.
+func refuseUnverifiedFix(sctx *pipeline.StepContext, stepName types.StepName, startingHead, summary string, result *agent.Result) error {
+	verification := fixVerification(result)
+	if verification == fixVerificationPassed {
 		return nil
 	}
 	ctx := sctx.Ctx
-	if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", "HEAD"); err != nil {
-		return err
+	head, err := git.HeadSHA(ctx, sctx.WorkDir)
+	if err != nil {
+		return fmt.Errorf("resolve head after %s fix: %w", stepName, err)
 	}
-	_, _ = git.Run(ctx, sctx.WorkDir, "clean", "-fd")
-	return nil
+	status, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+	if err != nil {
+		return fmt.Errorf("check %s changes: %w", stepName, err)
+	}
+	if head == startingHead && strings.TrimSpace(status) == "" {
+		return nil
+	}
+	if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", startingHead); err != nil {
+		return fmt.Errorf("discard unverified %s fix: %w", stepName, err)
+	}
+	if _, err := git.Run(ctx, sctx.WorkDir, "clean", "-fd"); err != nil {
+		return fmt.Errorf("discard unverified %s fix: %w", stepName, err)
+	}
+	return &UnverifiedFixError{Step: stepName, Verification: verification, Summary: summary}
 }

@@ -39,6 +39,12 @@ type fixExecutionOptions struct {
 	// Workload records the bounded size of the change under fix for local
 	// telemetry. Optional; nil leaves the invocation's workload unknown.
 	Workload *agent.InvocationWorkload
+	// RequireVerification makes the fixer report its verification outcome and
+	// commits its changes only when that outcome is "passed" (issue #81). The
+	// Review fixer sets it because nothing between its commit and the next
+	// review turn checks the code; Test, Lint and custom gates rerun their own
+	// check on every fix round.
+	RequireVerification bool
 }
 
 type commitSummary struct {
@@ -417,14 +423,6 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if summary == "" {
 		summary = "apply fixes"
 	}
-	if marker := CheckUnverifiedFixSummary(summary); marker != "" {
-		_ = resetWorktreeToHead(sctx)
-		return false, &UnverifiedFixError{
-			Step:    stepName,
-			Summary: summary,
-			Reason:  fmt.Sprintf("fixer reported verification was blocked or unverified (%s)", marker),
-		}
-	}
 	commitMessage, err := sctx.Config.Commit.RenderFixMessageForBranch(stepName, summary, sctx.Run.Branch)
 	if err != nil {
 		return false, fmt.Errorf("render %s fix commit message: %w", stepName, err)
@@ -589,6 +587,15 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		Purpose:    purpose,
 		Workload:   opts.Workload,
 	}
+	var startingHead string
+	if opts.RequireVerification {
+		head, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+		if err != nil {
+			return "", fmt.Errorf("resolve head before %s fix: %w", stepName, err)
+		}
+		startingHead = head
+		runOpts.JSONSchema = verifiedFixSummarySchema
+	}
 	var result *agent.Result
 	var err error
 	result, err = runPipelineCorrectionAgent(sctx, func() (*agent.Result, error) {
@@ -615,12 +622,9 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		}
 		sctx.Log(fmt.Sprintf("warning: could not parse fix summary: %v", err))
 	}
-	if marker := CheckUnverifiedFixSummary(summary); marker != "" {
-		_ = resetWorktreeToHead(sctx)
-		return "", &UnverifiedFixError{
-			Step:    stepName,
-			Summary: summary,
-			Reason:  fmt.Sprintf("fixer reported verification was blocked or unverified (%s)", marker),
+	if opts.RequireVerification {
+		if err := refuseUnverifiedFix(sctx, stepName, startingHead, summary, result); err != nil {
+			return "", err
 		}
 	}
 	committed, err := commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result)

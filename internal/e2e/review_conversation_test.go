@@ -975,6 +975,7 @@ func reviewFixRoundRetractionScenario(t *testing.T) string {
         new: "flag = false\n"
     structured:
       summary: "flipped the default"
+      verification: passed
   - match: "Review the code changes and return structured findings"
     text: "one finding for the operator"
     structured:

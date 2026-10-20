@@ -49,6 +49,7 @@ metadata:
 **Review Fixer Verification Discipline (`internal/pipeline/steps/review.go`)**
 
 - The review-fix prompt requires all fixes before one focused verification limited to the changed area and forbids the whole repository test/lint suite during the fix round.
+- The Review fixer alone reports a structured `verification` outcome (`verifiedFixSummarySchema`, `fixExecutionOptions.RequireVerification`, issue #81); `refuseUnverifiedFix` commits nothing unless it is `passed`, restoring the fixer's starting head (including its own commits) and failing the step with `*UnverifiedFixError`. Keep the outcome structured: matching "blocked"/"unverified" words in summaries or branch commit subjects is unsound (it blocks domain wording and user commits forever, and the fixer can avoid the words). Regressions: `internal/pipeline/steps/unverified_fix_test.go`.
   The dedicated Test and Lint steps are the authoritative gates, although their coverage may be focused when commands are unconfigured.
   This is a prompt contract, not an enforced sandbox.
   Regression: `TestReviewStep_FixMode_FocusedVerificationContract`.

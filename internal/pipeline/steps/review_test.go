@@ -898,7 +898,7 @@ func TestReviewStep_FixMode(t *testing.T) {
 			callCount++
 			if callCount == 1 {
 				os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
-				return &agent.Result{Output: json.RawMessage(`{"summary":"  'address review findings.'  "}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"  'address review findings.'  ","verification":"passed"}`)}, nil
 			}
 			// Review call — return clean findings
 			findings := Findings{Items: []Finding{}, Summary: "all clear", RiskLevel: "low", RiskRationale: "all clear", RiskScope: types.FindingsRiskScopeSourceOrExternal, ReviewedPaths: fullReviewCoverage(t, dir, baseSHA)}
@@ -1019,7 +1019,7 @@ func TestReviewStep_SourceContentFindingFollowsNormalFixFlow(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, "semantic_test.go"), []byte("package app\n"), 0o644); err != nil {
 					return nil, err
 				}
-				return &agent.Result{Output: json.RawMessage(`{"summary":"replace source test"}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"replace source test","verification":"passed"}`)}, nil
 			case 3:
 				assertTestQualityRulePrompt(t, opts.Prompt)
 				assertTestQualityReviewerAction(t, opts.Prompt)
@@ -1105,7 +1105,7 @@ func TestReviewStep_FixMode_FocusedVerificationContract(t *testing.T) {
 			callCount++
 			if callCount == 1 {
 				os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
-				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings","verification":"passed"}`)}, nil
 			}
 			// Review call — full coverage of both changed files (the fixer
 			// added review-fix.txt), so the rereview completes in one turn.
@@ -1425,7 +1425,7 @@ func TestReviewStep_RereviewTreatsFixRoundsAsPipelineAuthoredCode(t *testing.T) 
 				callCount++
 				if callCount == 1 {
 					os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
-					return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
+					return &agent.Result{Output: json.RawMessage(`{"summary":"address findings","verification":"passed"}`)}, nil
 				}
 				// The fixer added review-fix.txt, so the rereview's coverage
 				// record spans both changed files and completes in one turn.
@@ -1764,7 +1764,7 @@ func TestReviewStep_RereviewFlagsIntentContradictionAsAskUser(t *testing.T) {
 				// Fixer turn: "resolve" the race finding by deleting the
 				// required guarded removal (retry-only).
 				os.WriteFile(filepath.Join(dir, "fleet-sync.txt"), []byte("retry-only\n"), 0o644)
-				return &agent.Result{Output: json.RawMessage(`{"summary":"leave persistent refs locks intact"}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"leave persistent refs locks intact","verification":"passed"}`)}, nil
 			}
 			// Rereview: the change now contradicts the authoritative criteria,
 			// so the reviewer emits an ask-user finding even though retry-only
@@ -2051,7 +2051,7 @@ func TestReviewStep_FixPromptPrefersSimplificationOverMachinery(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			callCount++
 			if callCount == 1 {
-				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings","verification":"passed"}`)}, nil
 			}
 			j, _ := json.Marshal(cleanReviewFindings())
 			return &agent.Result{Output: j}, nil
@@ -2106,7 +2106,7 @@ func TestReviewStep_RereviewOffersRevertExitFromPriorRoundMachinery(t *testing.T
 				callCount++
 				if callCount == 1 {
 					os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
-					return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
+					return &agent.Result{Output: json.RawMessage(`{"summary":"address findings","verification":"passed"}`)}, nil
 				}
 				// The fixer added review-fix.txt, so the rereview's coverage
 				// record spans both changed files and completes in one turn.
@@ -2343,7 +2343,7 @@ func TestReviewStep_FixPromptPrefersRemovalOfUnrequiredPaths(t *testing.T) {
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			callCount++
 			if callCount == 1 {
-				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings","verification":"passed"}`)}, nil
 			}
 			j, _ := json.Marshal(cleanReviewFindings())
 			return &agent.Result{Output: j}, nil
@@ -2409,7 +2409,7 @@ func TestRereviewProvenanceIsNotContradictedByThePreviousRunsRounds(t *testing.T
 			callCount++
 			if callCount == 1 {
 				os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
-				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings","verification":"passed"}`)}, nil
 			}
 			// The fixer added review-fix.txt, so the rereview's coverage
 			// record spans both changed files and completes in one turn.

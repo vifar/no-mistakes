@@ -57,6 +57,7 @@ func TestTargetAdvanceReviewCarryLiveJourney(t *testing.T) {
     structured:
       findings: []
       summary: "fixed A"
+      verification: passed
   - match: "- review scope: current worktree and HEAD changes relative to base commit"
     structured:
       findings: []
