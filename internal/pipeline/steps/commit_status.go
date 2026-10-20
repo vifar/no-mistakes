@@ -325,6 +325,14 @@ func commitStatusReporter(sctx *pipeline.StepContext, publication *db.CommitStat
 		switch state {
 		case "success":
 			description = "no-mistakes validation passed"
+			steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil {
+				statusWarning(log, "read accepted test gap", err)
+				return
+			}
+			if gap := acceptedTestGap(steps); gap != nil {
+				description = acceptedTestGapStatusDescription(gap)
+			}
 		case "failure":
 			description = "no-mistakes pipeline failed or cancelled"
 		}
@@ -362,9 +370,42 @@ func (*PushStep) ReportPublishedHeadStatus(sctx *pipeline.StepContext, state, va
 	}
 }
 
+// maxCommitStatusDescriptionRunes is GitHub's commit-status description limit.
+const maxCommitStatusDescriptionRunes = 140
+
+const acceptedTestGapStatusPrefix = "passed with accepted test gap: "
+
+// acceptedTestGap returns the owner-accepted gap a completed Test step holds,
+// or nil. db.StepResult.ValidAcceptedGaps re-validates the durable record
+// against the step's own findings, so a forged, stale, or widened record (a
+// failed command, a no-go verdict, an extra actionable finding, or any
+// recorded override or ordinary approval) yields nil.
+func acceptedTestGap(steps []*db.StepResult) *db.AcceptedGaps {
+	for _, step := range steps {
+		if step.StepName != types.StepTest || step.Status != types.StepStatusCompleted || step.OverrideReason != nil || step.TestOverrideReason() == "" {
+			continue
+		}
+		if gap := step.ValidAcceptedGaps(); gap != nil {
+			return gap
+		}
+	}
+	return nil
+}
+
+// acceptedTestGapStatusDescription names the accepted gap in the success
+// status, so the green check is never mistaken for a clean live validation.
+// The reason crosses the same publication redaction as the PR-body audit.
+func acceptedTestGapStatusDescription(gap *db.AcceptedGaps) string {
+	budget := maxCommitStatusDescriptionRunes - len([]rune(acceptedTestGapStatusPrefix)) - len("...")
+	return acceptedTestGapStatusPrefix + singleLineText(safeurl.RedactText(canonicalAcceptedGapText(gap.Reason)), budget)
+}
+
 // A skipped or overridden local gate cannot claim that all local validation
 // passed. CI repairs published without revalidation therefore stay pending
-// until exact-head CI readiness proves completion.
+// until exact-head CI readiness proves completion. The one Test exception
+// that counts is an owner-accepted gap recorded at the gate (issue #78): it
+// is an explicit, audited decision rather than an unresolved failure, and the
+// success status names it.
 func localValidationPassed(sctx *pipeline.StepContext, head string) bool {
 	if head != "" {
 		run, err := sctx.DB.GetRun(sctx.Run.ID)
@@ -379,7 +420,7 @@ func localValidationPassed(sctx *pipeline.StepContext, head string) bool {
 	for _, name := range []types.StepName{types.StepReview, types.StepTest, types.StepDocument, types.StepLint} {
 		passed := false
 		for _, step := range steps {
-			if step.StepName == name && step.Status == types.StepStatusCompleted && step.OverrideReason == nil && step.TestOverrideReason() == "" {
+			if step.StepName == name && step.Status == types.StepStatusCompleted && step.OverrideReason == nil && (step.TestOverrideReason() == "" || acceptedTestGap([]*db.StepResult{step}) != nil) {
 				if name == types.StepTest && head != "" {
 					if step.FindingsJSON == nil {
 						return false

@@ -1194,6 +1194,11 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		if err := completeRecoveredGate(); err != nil {
 			return failRecoveredGate(fmt.Errorf("complete recovered step %s: %w", gate.step.Name(), err))
 		}
+		if gate.step.Name() == types.StepTest {
+			if err := e.recordRecoveredAcceptedGapProof(ctx, gate.stepResult.ID, run.ID, workDir); err != nil {
+				return failRecoveredGate(err)
+			}
+		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", &duration)
 		// A recovered CI gate may carry a Test restart from a prior approval.
 		// The live path approves with the parked outcome's restart in hand; a
@@ -2319,6 +2324,15 @@ rounds:
 				e.recordDeclinedRound(currentRoundID, effectiveFindings, stepName, roundNum)
 				if err := e.applyApprovalOverride(step, sctx, sr.ID, response.approvalReason, response.acceptedGaps); err != nil {
 					return false, "", err
+				}
+				if stepName == types.StepTest {
+					row, err := e.db.GetStepResult(sr.ID)
+					if err != nil {
+						return false, "", err
+					}
+					if row != nil && row.ValidAcceptedGaps() != nil && row.OverrideReason == nil && row.ApprovalReason == nil {
+						executionPassed = true
+					}
 				}
 				phaseStart = time.Now()
 				goto done
