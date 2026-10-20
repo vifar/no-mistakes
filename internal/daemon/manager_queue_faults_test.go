@@ -482,7 +482,12 @@ func TestClaimedCancellationDoesNotRequireDatabaseAccess(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					t.Cleanup(func() { f.mgr.Shutdown(); readonly.Close() })
+					t.Cleanup(func() {
+						// End the injected fault before teardown records a raw shutdown.
+						f.mgr.db = f.d
+						f.mgr.Shutdown()
+						readonly.Close()
+					})
 					if _, err := readonly.CancelQueuedRun(id, types.RunCancelReasonAbortedByUser); err == nil {
 						t.Fatal("fixture allowed a write on the read-only connection")
 					}
@@ -502,7 +507,13 @@ func TestClaimedCancellationDoesNotRequireDatabaseAccess(t *testing.T) {
 						reason = types.RunCancelReasonSuperseded
 						err = f.mgr.cancelActiveRuns("fault-repo", branch)
 					}
-					if err != nil {
+					if action == "supersede" && fault == "closed" {
+						// The workload must stop without database access, but
+						// supersession cannot acknowledge unreadable settlement.
+						if err == nil || !strings.Contains(err.Error(), "timed out waiting for cancelled runs") {
+							t.Fatalf("supersede with unreadable settlement: %v", err)
+						}
+					} else if err != nil {
 						t.Fatalf("cancel claimed run: %v", err)
 					}
 					f.waitFor("claimed run to stop", func() bool { return f.status(id) == types.RunCancelled })

@@ -157,6 +157,7 @@ func TestCLIReadersWithLiveDaemonAndHeldWriter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupSyntheticRun(t, database, parked.ID)
 	if err := database.UpdateRunStatus(parked.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
