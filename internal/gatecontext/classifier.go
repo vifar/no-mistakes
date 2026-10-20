@@ -29,19 +29,18 @@ const ErrorCode = "nested_gate_context"
 // database queries and authenticated process ancestry keep their own owners.
 const identityCommandBudget = 10 * time.Second
 
-// identityFilesystemBudget bounds the metadata-only fallback that runs when
-// the identity Git command is blocked. The fallback uses metadata operations
-// and bounded reads of tiny Git metadata files, so it finishes in
-// milliseconds even in the contexts where the Git child stalls. The budget
-// exists to bound a genuinely wedged filesystem, not to express impatience.
+// identityFilesystemBudget supplies the metadata-only fallback context when
+// the identity Git command is blocked. It gives corroboration its own context
+// derived from the caller, rather than reusing the expired Git command context.
+// Content reads honor this context; filesystem metadata syscalls may take longer.
 const identityFilesystemBudget = 5 * time.Second
 
 // metadataReadWait bounds one Git metadata content read.
 //
 // The read runs on its own goroutine, so a kernel-held open cannot block the
 // caller: when the wait expires the read is abandoned and the caller is told
-// the content is unavailable. The abandoned goroutine ends when the kernel
-// answers the open, which it does once the sandbox approval watchdog expires.
+// the content is unavailable. The abandoned goroutine ends only when the kernel
+// releases the read; metadataReaders caps these outstanding readers.
 const metadataReadWait = 250 * time.Millisecond
 
 var identityLocale = []string{"LC_ALL=C", "LANG=C"}
@@ -490,8 +489,8 @@ func filesystemCommonDirectory(ctx context.Context, cwd string) (string, error) 
 // and reference structure.
 //
 // This is the metadata half of the bare-repository recognizer: the object
-// directories and the reference directories. It never reads a file, so it
-// answers in milliseconds where a HEAD read would block.
+// directories and the reference directories. It avoids content opens, which
+// were held while metadata lookups remained responsive in issue #120.
 func gitCommonStructurePresent(dir string) (bool, error) {
 	for _, entry := range []string{"objects", "refs"} {
 		info, err := os.Stat(filepath.Join(dir, entry))
@@ -515,7 +514,12 @@ var metadataReadHook = func(path string) ([]byte, error) {
 // stopped waiting. Saturation fails closed within the same caller budget.
 var metadataReaders = make(chan struct{}, 8)
 
-func readMetadataWithin(ctx context.Context, path string, wait time.Duration) ([]byte, error) {
+func readMetadataWithin(ctx context.Context, path string, wait time.Duration) (data []byte, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("read Git metadata (check daemon access to repository files): %w", err)
+		}
+	}()
 	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	if err := ctx.Err(); err != nil {

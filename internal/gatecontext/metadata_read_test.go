@@ -8,6 +8,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -108,6 +109,9 @@ func TestMetadataDiscoveryDeadlineInterruptsHeldHead(t *testing.T) {
 		if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			t.Fatalf("held HEAD lost caller deadline: %v (caller %v)", err, ctx.Err())
 		}
+		if !strings.Contains(err.Error(), "check daemon access to repository files") {
+			t.Fatalf("held HEAD omitted access guidance: %v", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("caller remained blocked after its deadline")
 	}
@@ -162,6 +166,9 @@ func TestCommonDirectoryHeldPointerHonorsContext(t *testing.T) {
 	case got := <-result:
 		if got.common != "" || !errors.Is(got.err, context.DeadlineExceeded) || !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			t.Fatalf("held pointer returned common=%q err=%v (caller %v)", got.common, got.err, ctx.Err())
+		}
+		if !strings.Contains(got.err.Error(), "check daemon access to repository files") {
+			t.Fatalf("held pointer omitted access guidance: %v", got.err)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("caller remained blocked after its deadline")
@@ -219,6 +226,38 @@ func TestMetadataReadDeadlineCannotEnableFilesystemFallback(t *testing.T) {
 	got, err := (Inspector{Paths: paths.WithRoot(t.TempDir())}).Inspect(context.Background(), Request{CWD: bare})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("metadata timeout admitted or lost: result=%+v err=%v", got, err)
+	}
+	if !strings.Contains(err.Error(), "check daemon access to repository files") {
+		t.Fatalf("metadata timeout omitted access guidance: %v", err)
+	}
+}
+
+func TestMetadataDiscoveryHeldGitfileReportsDaemonAccess(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: missing\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	started := holdMetadataReader(t)
+	result := make(chan error, 1)
+	go func() {
+		_, err := (Inspector{Paths: paths.WithRoot(dir)}).Inspect(context.Background(), Request{CWD: dir})
+		result <- err
+	}()
+	awaitMetadataReadStart(t, started)
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("held gitfile admitted or lost deadline: %v", err)
+		}
+		if !strings.Contains(err.Error(), "check daemon access to repository files") {
+			t.Fatalf("held gitfile omitted access guidance: %v", err)
+		}
+		var commandErr *git.CommandError
+		if errors.As(err, &commandErr) || identityStalled(context.Background(), err) {
+			t.Fatalf("held gitfile enabled Git fallback: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("held gitfile blocked discovery past its read budget")
 	}
 }
 
