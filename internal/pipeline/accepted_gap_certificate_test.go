@@ -212,6 +212,27 @@ func TestExecutor_AcceptedGapCertificate(t *testing.T) {
 				if err != nil || next == nil || *next == *certificate {
 					t.Fatalf("push generation did not change certificate: %v, %v", next, err)
 				}
+				if scenario == "accepted" {
+					// A gap record that no longer re-validates against the Test
+					// findings (here widened by an unaccepted error finding)
+					// loses the certificate even with every binding intact.
+					rows, err := database.GetStepsByRun(run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					for _, row := range rows {
+						if row.StepName != types.StepTest {
+							continue
+						}
+						widened := fmt.Sprintf(`{"findings":[{"id":"test-verdict","severity":"warning","action":"ask-user","category":"test-verdict","description":"live validation verdict: inconclusive"},{"id":"broken","severity":"error","action":"auto-fix","description":"scenario failed"}],"verdict":"inconclusive","tested_head_sha":%q}`, run.HeadSHA)
+						if err := database.SetStepFindings(row.ID, widened); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if stale, err := database.BuildStatusCertificate(run.ID, run.HeadSHA, digest); err != nil || stale != nil {
+						t.Fatalf("invalidated gap certified: %v, %v", stale, err)
+					}
+				}
 				if err := database.InvalidateStatusValidation(run.ID); err != nil {
 					t.Fatal(err)
 				}

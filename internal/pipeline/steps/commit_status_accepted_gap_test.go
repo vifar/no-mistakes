@@ -141,6 +141,23 @@ func TestCommitStatusAcceptedTestGapPostsSuccessNamingTheGap(t *testing.T) {
 	}
 }
 
+func TestCommitStatusAcceptedTestGapDescriptionTruncatesUnicodeByRune(t *testing.T) {
+	reason := strings.Repeat("Größe 検証 🚀 ", 40)
+	description := acceptedTestGapStatusDescription(&db.AcceptedGaps{Reason: reason})
+	if !utf8.ValidString(description) {
+		t.Fatalf("description is not valid UTF-8: %q", description)
+	}
+	if n := utf8.RuneCountInString(description); n > maxCommitStatusDescriptionRunes {
+		t.Fatalf("description has %d runes, over GitHub's %d", n, maxCommitStatusDescriptionRunes)
+	}
+	if !strings.HasPrefix(description, acceptedTestGapStatusPrefix+"Größe 検証 🚀") || !strings.HasSuffix(description, "...") {
+		t.Fatalf("description does not name the visibly truncated gap: %q", description)
+	}
+	if short := acceptedTestGapStatusDescription(&db.AcceptedGaps{Reason: "owner approved in #78"}); short != acceptedTestGapStatusPrefix+"owner approved in #78" {
+		t.Fatalf("short reason was altered: %q", short)
+	}
+}
+
 func TestCommitStatusFailedTestStillPostsFailure(t *testing.T) {
 	sc, head := acceptedGapCommitStatusFixture(t, func(sc *pipeline.StepContext, id, head string) {
 		if err := sc.DB.CompleteStepWithStatus(id, types.StepStatusFailed, 1, 1, "test.log"); err != nil {
