@@ -195,12 +195,13 @@ func TestRefusedRewriteRecoveryLeavesTheMirrorRefusal(t *testing.T) {
 func TestRecoverRewrittenRemoteDistinguishesAbsentAndUninspectableGates(t *testing.T) {
 	t.Parallel()
 
-	for _, kind := range []string{"unconfigured", "absent", "symlink-loop", "file", "not-repository"} {
+	for _, kind := range []string{"unconfigured", "absent", "symlink-loop", "file", "not-repository", "checkout", "nested-checkout"} {
 		t.Run(kind, func(t *testing.T) {
 			t.Parallel()
 			f, rebased := newHandRebasedFixture(t)
 			gateDir := f.service.GateDir
 			path := filepath.Join(t.TempDir(), "gate")
+			ancestor := ""
 			wantRecovery := false
 			switch kind {
 			case "unconfigured":
@@ -217,6 +218,15 @@ func TestRecoverRewrittenRemoteDistinguishesAbsentAndUninspectableGates(t *testi
 			case "not-repository":
 				if err := os.Mkdir(path, 0700); err != nil {
 					t.Fatal(err)
+				}
+			case "checkout", "nested-checkout":
+				mustRun(t, filepath.Dir(path), "clone", gateDir, path)
+				ancestor = path
+				if kind == "nested-checkout" {
+					path = filepath.Join(ancestor, "state", "repos", "gate.git")
+					if err := os.MkdirAll(path, 0700); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			f.service.GateDir = path
@@ -244,6 +254,11 @@ func TestRecoverRewrittenRemoteDistinguishesAbsentAndUninspectableGates(t *testi
 				t.Fatalf("failed recovery moved HEAD to %s, want %s", got, rebased)
 			}
 			anchor := rewrittenAnchorRef(f.run.ID, value(f.run.PushGeneration))
+			if ancestor != "" {
+				if _, err := gitRunOptional(f, ancestor, "rev-parse", "--verify", anchor); err == nil {
+					t.Fatal("recovery wrote a gate anchor into the unrelated checkout")
+				}
+			}
 			if note := f.service.rewrittenMirrorNote(f.ctx, "feature/sync", anchor); !strings.Contains(note, "could not be inspected") {
 				t.Fatalf("gate inspection failure was hidden: %q", note)
 			}

@@ -1666,7 +1666,7 @@ func (s *Service) anchorSupersededPushHead(ctx context.Context, runID string, ge
 		proof = "worktree"
 	}
 	gateDir := strings.TrimSpace(s.GateDir)
-	exists, err := gateExists(gateDir)
+	exists, err := gateExists(ctx, gateDir)
 	if err != nil {
 		return ref, "", false
 	}
@@ -1700,7 +1700,7 @@ func preserveAnchorAt(ctx context.Context, dir, ref, head string) bool {
 	return err == nil && anchored == head
 }
 
-func gateExists(gateDir string) (bool, error) {
+func gateExists(ctx context.Context, gateDir string) (bool, error) {
 	if gateDir == "" {
 		return false, nil
 	}
@@ -1713,6 +1713,9 @@ func gateExists(gateDir string) (bool, error) {
 	}
 	if !info.IsDir() {
 		return false, fmt.Errorf("local gate %s is not a directory", gateDir)
+	}
+	if err := git.ValidateBareRepository(ctx, gateDir); err != nil {
+		return false, err
 	}
 	return true, nil
 }
@@ -1728,7 +1731,7 @@ func (s *Service) rewrittenMirrorNote(ctx context.Context, branch, anchorRef str
 	if branch == "" {
 		return ""
 	}
-	gatePresent, err := gateExists(gateDir)
+	gatePresent, err := gateExists(ctx, gateDir)
 	if err != nil {
 		return fmt.Sprintf("the local gate could not be inspected: %v; the next `no-mistakes axi run` still guards any private mirror", err)
 	}
