@@ -16,19 +16,19 @@ func (a *opencodeAgent) ensureServer(ctx context.Context, cwd string, env []stri
 	}
 	port, err := getAvailablePort()
 	if err != nil {
-		return "", fmt.Errorf("opencode port: %w", err)
+		return "", agentSetupFailure(fmt.Errorf("opencode port: %w", err))
 	}
 	args := buildOpencodeServeArgs(a.extraArgs, port)
 	// The credential is read from the SAME environment the server is
 	// started with, so the server and the client always agree on it.
-	auth := resolveOpencodeAuth(env)
+	auth := resolveOpencodeAuth(gitSafeEnvWithOverlay(cwd, a.overlay(), env))
 	// A 2.x server generates a random password at startup unless one is
 	// configured, and prints it once on stdout. The client watches the
 	// output for that line, so the two always agree on the credential.
 	capture, sink := newOpencodePasswordCapture()
 	srv, err := startServerWithPortOutput(ctx, "opencode", a.bin, args, cwd, "/global/health", port, a.overlay(), sink, env)
 	if err != nil {
-		return "", fmt.Errorf("opencode server: %w", err)
+		return "", agentSetupFailure(fmt.Errorf("opencode server: %w", err))
 	}
 	a.server = srv
 	if auth.password == "" {
@@ -48,7 +48,7 @@ func (a *opencodeAgent) ensureServer(ctx context.Context, cwd string, env []stri
 	if err != nil {
 		srv.shutdown()
 		a.server = nil
-		return "", fmt.Errorf("opencode api version: %w", err)
+		return "", agentSetupFailure(fmt.Errorf("opencode api version: %w", err))
 	}
 	a.apiVersion = version
 	slog.Info("opencode api detected", "version", version.String())

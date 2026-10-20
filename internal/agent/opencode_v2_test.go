@@ -3,14 +3,17 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
+	"github.com/kunchenguid/no-mistakes/internal/runenv"
 )
 
 // opencodeV2Fake is a fake OpenCode 2.x server: the /api routes, the
@@ -46,6 +49,12 @@ type opencodeV2FakeOptions struct {
 	// sessionCreateStatus, when non-zero, is the status the session-create
 	// route answers with.
 	sessionCreateStatus int
+	promptStatus        int
+	promptDisconnect    bool
+	incompleteStream    bool
+	eventStatus         int
+	messageList         string
+	extraEvents         []string
 }
 
 // newOpencodeV2Fake starts a fake 2.x server.
@@ -72,10 +81,17 @@ func newOpencodeV2Fake(t *testing.T, opts opencodeV2FakeOptions) *opencodeV2Fake
 			fmt.Fprintf(w, `{"data":{"id":%q,"projectID":"p1","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1,"updated":1},"location":{"directory":"/tmp"}}}`, id)
 
 		case r.URL.Path == "/api/event" && r.Method == http.MethodGet:
+			if opts.eventStatus != 0 {
+				w.WriteHeader(opts.eventStatus)
+				return
+			}
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.WriteHeader(http.StatusOK)
 			flusher, _ := w.(http.Flusher)
 			writeV2Event(w, `{"type":"server.connected","data":{}}`)
+			for _, event := range opts.extraEvents {
+				writeV2Event(w, event)
+			}
 			if opts.toolRan {
 				writeV2Event(w, `{"type":"session.tool.called","data":{"sessionID":"v2s1","assistantMessageID":"m1","id":"call1","name":"shell"}}`)
 			}
@@ -84,6 +100,14 @@ func newOpencodeV2Fake(t *testing.T, opts opencodeV2FakeOptions) *opencodeV2Fake
 			writeV2Event(w, fmt.Sprintf(`{"type":"session.text.ended","data":{"sessionID":"v2s1","assistantMessageID":"m1","ordinal":0,"text":%q}}`, opts.answer))
 			if opts.assistantTokens != "" {
 				writeV2Event(w, fmt.Sprintf(`{"type":"session.step.ended","data":{"sessionID":"v2s1","assistantMessageID":"m1","finish":"stop","tokens":%s}}`, opts.assistantTokens))
+			}
+			if opts.incompleteStream {
+				return
+			}
+			if opts.promptStatus != 0 {
+				flusher.Flush()
+				<-r.Context().Done()
+				return
 			}
 			if opts.execError != nil {
 				errJSON, _ := json.Marshal(opts.execError)
@@ -99,18 +123,38 @@ func newOpencodeV2Fake(t *testing.T, opts opencodeV2FakeOptions) *opencodeV2Fake
 			body, _ := readAllBody(r)
 			fake.lastPromptBody.Store(string(body))
 			fake.prompts.Add(1)
+			if opts.promptStatus != 0 {
+				w.WriteHeader(opts.promptStatus)
+				return
+			}
+			if opts.promptDisconnect {
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err == nil {
+					_ = conn.Close()
+				}
+				return
+			}
 			// The 2.x prompt endpoint does NOT block: it admits the prompt.
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"data":{"id":"msg1","sessionID":"v2s1","time":{"created":1},"type":"user","payload":{"text":"hi"},"delivery":"steer"}}`)
 
 		case strings.HasPrefix(r.URL.Path, "/api/session/") && strings.HasSuffix(r.URL.Path, "/message") && r.Method == http.MethodGet:
 			fake.messages.Add(1)
+			if r.URL.Query().Get("order") != "desc" {
+				http.Error(w, "expected explicit descending order", http.StatusBadRequest)
+				return
+			}
+			if opts.messageList != "" {
+				w.Header().Set("Content-Type", "application/json")
+				fmt.Fprint(w, opts.messageList)
+				return
+			}
 			tokens := opts.assistantTokens
 			if tokens == "" {
 				tokens = `{"input":100,"output":50,"reasoning":0,"cache":{"read":0,"write":0}}`
 			}
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"data":[{"id":"m1","time":{"created":1},"type":"user","text":"hi"},{"id":"m2","time":{"created":2,"completed":3},"type":"assistant","agent":"build","model":{"id":"minimax-m3.1-flash","providerID":"ollama-cloud"},"content":[{"type":"text","text":%q}],"finish":"stop","tokens":%s}],"cursor":{}}`, opts.answer, tokens)
+			fmt.Fprintf(w, `{"data":[{"id":"m2","time":{"created":2,"completed":3},"type":"assistant","agent":"build","model":{"id":"minimax-m3.1-flash","providerID":"ollama-cloud"},"content":[{"type":"text","text":%q}],"finish":"stop","tokens":%s},{"id":"m1","time":{"created":1},"type":"user","text":"hi"}],"cursor":{}}`, opts.answer, tokens)
 
 		case strings.HasPrefix(r.URL.Path, "/api/session/") && strings.HasSuffix(r.URL.Path, "/interrupt"):
 			fake.interrupts.Add(1)
@@ -457,5 +501,193 @@ func TestOpencodeAgent_V2OtherSessionsAreIgnored(t *testing.T) {
 	}
 	if state.lastText != "mine" {
 		t.Fatalf("lastText = %q, want mine", state.lastText)
+	}
+}
+
+func TestOpencodeAgent_V2PromptAndStreamFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts opencodeV2FakeOptions
+	}{
+		{"rejected prompt with open stream", opencodeV2FakeOptions{promptStatus: http.StatusBadRequest}},
+		{"lost admission response after tools", opencodeV2FakeOptions{promptDisconnect: true, toolRan: true}},
+		{"unfinished stream with partial answer", opencodeV2FakeOptions{incompleteStream: true, answer: "partial"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newOpencodeV2Fake(t, tc.opts)
+			a := opencodeV2AgentFor(fake)
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_, err := a.Run(ctx, RunOpts{Prompt: "do work", CWD: t.TempDir()})
+			if err == nil || !opencodeReplayUnsafe(err) || isAgentUnavailableError(err) {
+				t.Fatalf("Run error = %v, want an unsafe turn failure without fallback", err)
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("Run waited for invocation deadline: %v", err)
+			}
+			if fake.sessions.Load() != 1 || fake.prompts.Load() != 1 || fake.messages.Load() != 0 {
+				t.Fatalf("sessions/prompts/messages = %d/%d/%d, want 1/1/0", fake.sessions.Load(), fake.prompts.Load(), fake.messages.Load())
+			}
+		})
+	}
+}
+
+func TestOpencodeAgent_EventConnectionFailureIsSetup(t *testing.T) {
+	for _, version := range []opencodeAPIVersion{opencodeAPIVersion1, opencodeAPIVersion2} {
+		t.Run(version.String(), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}))
+			defer server.Close()
+			a := &opencodeAgent{}
+			a.setAPI(version, opencodeAuth{})
+			_, err := a.connectEventStream(context.Background(), server.URL)
+			if !errors.Is(err, errAgentSetupFailure) {
+				t.Fatalf("connect error = %v, want setup failure", err)
+			}
+		})
+	}
+}
+
+func TestOpencodeAuthUsesEffectiveServerEnvironment(t *testing.T) {
+	t.Setenv("OPENCODE_PASSWORD", "ambient")
+	t.Setenv("OPENCODE_SERVER_PASSWORD", "ambient-server")
+	for _, tc := range []struct {
+		env     []string
+		overlay runenv.Overlay
+		want    string
+	}{
+		{env: []string{"OPENCODE_SERVER_PASSWORD=extra"}, want: "ambient"},
+		{env: []string{"OPENCODE_PASSWORD=first", "OPENCODE_PASSWORD=last"}, want: "last"},
+		{env: []string{"OPENCODE_PASSWORD=", "OPENCODE_SERVER_PASSWORD=extra"}, want: "extra"},
+		{overlay: runenv.Overlay{Set: map[string]string{"OPENCODE_PASSWORD": "overlay"}}, want: "overlay"},
+		{overlay: runenv.Overlay{Unset: []string{"OPENCODE_PASSWORD"}}, want: "ambient-server"},
+	} {
+		env := gitSafeEnvWithOverlay(t.TempDir(), tc.overlay, tc.env)
+		if got := resolveOpencodeAuth(env).password; got != tc.want {
+			t.Fatalf("password = %q, want %q", got, tc.want)
+		}
+	}
+}
+
+func TestOpencodeAgent_V2FinalMessagePreservesAllTextBlocks(t *testing.T) {
+	for _, streamed := range []string{"stale intermediate output", ""} {
+		t.Run(streamed, func(t *testing.T) {
+			fake := newOpencodeV2Fake(t, opencodeV2FakeOptions{
+				answer: streamed,
+				messageList: `{"data":[
+					{"id":"idle","type":"idle","outcome":"succeeded"},
+					{"id":"latest","type":"assistant","content":[
+						{"type":"text","text":"{\"summary\":"},
+						{"type":"reasoning","text":"hidden"},
+						{"type":"text","text":"\"complete\"}"}]},
+					{"id":"earlier","type":"assistant","error":{"type":"provider.error","message":"previous attempt failed"},"content":[{"type":"text","text":"old"}]}
+				]}`,
+			})
+			result, err := opencodeV2AgentFor(fake).Run(context.Background(), RunOpts{
+				Prompt: "review", CWD: t.TempDir(), JSONSchema: json.RawMessage(`{"type":"object"}`),
+			})
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if result.Text != `{"summary":"complete"}` || string(result.Output) != `{"summary":"complete"}` {
+				t.Fatalf("result = %+v, want the latest assistant's complete JSON", result)
+			}
+		})
+	}
+}
+
+func TestOpencodeAgent_V2UsageCountsEveryStepOnce(t *testing.T) {
+	for _, failed := range []bool{false, true} {
+		for _, firstStepEvent := range []string{"session.step.ended", "session.step.failed"} {
+			t.Run(fmt.Sprintf("failed=%t/first=%s", failed, firstStepEvent), func(t *testing.T) {
+				opts := opencodeV2FakeOptions{
+					answer:          "done",
+					assistantTokens: `{"input":200,"output":20,"cache":{"read":0,"write":0}}`,
+					extraEvents: []string{
+						fmt.Sprintf(`{"type":%q,"data":{"sessionID":"v2s1","assistantMessageID":"previous","tokens":{"input":100,"output":10,"cache":{"read":0,"write":0}}}}`, firstStepEvent),
+						`{"type":"session.usage.updated","data":{"sessionID":"v2s1","tokens":{"input":300,"output":30,"cache":{"read":0,"write":0}}}}`,
+					},
+				}
+				if failed {
+					opts.execError = &opencodeV2Error{Type: "provider.error", Message: "turn failed"}
+				}
+				fake := newOpencodeV2Fake(t, opts)
+				result, err := opencodeV2AgentFor(fake).Run(context.Background(), RunOpts{Prompt: "work", CWD: t.TempDir()})
+				if (err != nil) != failed {
+					t.Fatalf("Run error = %v, want failure %t", err, failed)
+				}
+				if result == nil || result.Usage.InputTokens != 300 || result.Usage.OutputTokens != 30 || !result.UsageReported {
+					t.Fatalf("result = %+v, want reported usage 300/30", result)
+				}
+			})
+		}
+	}
+}
+
+func TestOpencodeAgent_V2EffortRequiresExplicitModel(t *testing.T) {
+	for _, model := range []string{"", "openai/gpt-5"} {
+		t.Run(model, func(t *testing.T) {
+			fake := newOpencodeV2Fake(t, opencodeV2FakeOptions{answer: "done"})
+			a := opencodeV2AgentFor(fake)
+			a.profile = agentcfg.Profile{Model: model, Effort: agentcfg.EffortHigh}
+			result, err := a.Run(context.Background(), RunOpts{Prompt: "work", CWD: t.TempDir()})
+			if model == "" {
+				if err == nil || !strings.Contains(err.Error(), "requires an explicit provider/model") || isAgentUnavailableError(err) {
+					t.Fatalf("Run = %v, want an explicit profile error without fallback", err)
+				}
+				if fake.sessions.Load() != 0 || fake.prompts.Load() != 0 {
+					t.Fatalf("sessions/prompts = %d/%d, want 0/0", fake.sessions.Load(), fake.prompts.Load())
+				}
+				return
+			}
+			if err != nil || result == nil || result.Text != "done" {
+				t.Fatalf("Run = %+v, %v", result, err)
+			}
+			var body struct {
+				Model struct {
+					ProviderID string `json:"providerID"`
+					ID         string `json:"id"`
+					Variant    string `json:"variant"`
+				} `json:"model"`
+			}
+			if err := json.Unmarshal([]byte(fake.lastCreateBody.Load().(string)), &body); err != nil {
+				t.Fatal(err)
+			}
+			if body.Model.ProviderID != "openai" || body.Model.ID != "gpt-5" || body.Model.Variant != "high" {
+				t.Fatalf("session model = %+v, want openai/gpt-5 with high effort", body.Model)
+			}
+		})
+	}
+}
+
+func TestOpencodeAgent_V1EffortWithoutModelRemainsSupported(t *testing.T) {
+	var prompts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/session":
+			fmt.Fprint(w, `{"id":"s1"}`)
+		case "/session/s1/message":
+			prompts.Add(1)
+			var body struct {
+				Variant string `json:"variant"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Variant != "high" {
+				http.Error(w, "expected high effort", http.StatusBadRequest)
+				return
+			}
+			fmt.Fprint(w, `{"info":{"id":"m1","role":"assistant"},"parts":[{"type":"text","text":"done"}]}`)
+		}
+	}))
+	defer server.Close()
+	a := &opencodeAgent{profile: agentcfg.Profile{Effort: agentcfg.EffortHigh}}
+	a.setAPI(opencodeAPIVersion1, opencodeAuth{})
+	session, err := a.createSession(context.Background(), server.URL, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := a.sendMessage(context.Background(), server.URL, session, "work", nil)
+	if err != nil || resp == nil || prompts.Load() != 1 {
+		t.Fatalf("sendMessage = %+v, %v; prompts = %d", resp, err, prompts.Load())
 	}
 }

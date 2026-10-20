@@ -312,7 +312,7 @@ type Options struct {
 	// Profile is the harness-neutral model/effort selection (see
 	// internal/agentcfg). NewWithOptions maps it down to whatever mechanism the
 	// named harness actually uses - injected argv flags for most CLIs, the
-	// session-message body for opencode, acpx's own --model for ACP targets -
+	// HTTP request bodies for opencode, acpx's own --model for ACP targets -
 	// and refuses a knob the harness cannot express. A zero Profile leaves every
 	// harness on its own defaults, which is what every configuration that
 	// predates the common layer resolves to.

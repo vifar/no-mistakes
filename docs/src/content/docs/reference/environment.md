@@ -208,6 +208,19 @@ Disable background update checks.
 
 Update checks run on every CLI invocation except `update` itself and version queries (`--version` / `-v`, which stay side-effect-free), fetch the GitHub release-asset channel manifest, cache the result in `$NM_HOME/update-check.json`, and print a one-line notification to stderr when a newer version is available. Dev builds (non-semver versions) and binaries that resolve into `/nix/store` suppress the check automatically.
 
+## `OPENCODE_PASSWORD` / `OPENCODE_SERVER_PASSWORD`
+
+Password for the managed OpenCode server's HTTP basic authentication, using the username `opencode`.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+The adapter reads credentials from the effective environment used to launch the server, including invocation overrides. The last assignment to each variable wins; a nonempty `OPENCODE_PASSWORD` takes precedence over `OPENCODE_SERVER_PASSWORD`.
+
+OpenCode 2.x requires authentication on its `/api` requests. When neither variable supplies a password, the server generates one at startup and no-mistakes captures it from the server's output. OpenCode 1.x can run without authentication unless `OPENCODE_SERVER_PASSWORD` is set.
+
 ## `XDG_DATA_HOME`
 
 Data directory used to discover OpenCode transcripts for intent extraction.

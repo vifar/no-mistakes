@@ -112,7 +112,7 @@ type opencodeAgent struct {
 	// profile is the harness-neutral model/effort selection resolved by
 	// internal/agentcfg. `opencode serve` rejects model and variant flags
 	// outright, so unlike every other native adapter these two knobs cannot ride
-	// argv: they belong to the session-message body (see sendMessage).
+	// argv: the adapter maps them to version-specific HTTP request bodies.
 	profile agentcfg.Profile
 	subprocessContext
 	mu     sync.Mutex
@@ -208,7 +208,7 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 	// completion signal all changed. It runs its own path so the 1.x path
 	// stays exactly as it was.
 	if a.version() == opencodeAPIVersion2 {
-		return a.runOnceV2(ctx, opts, baseURL, nativeFormat)
+		return a.runOnceV2(ctx, opts, baseURL)
 	}
 
 	// Create session with blanket permissions

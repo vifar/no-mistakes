@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -59,14 +57,6 @@ func (v opencodeAPIVersion) String() string {
 	}
 }
 
-// opencodeServerInfo is the subset of GET /api/info this adapter reads. The
-// endpoint is the version probe: on 2.x it answers JSON with a version, and
-// on 1.x it answers the single-page app's HTML (the route does not exist
-// there), so the response CONTENT TYPE is the discriminator.
-type opencodeServerInfo struct {
-	Version string `json:"version"`
-}
-
 // opencodeAuth is the credential the 2.x server requires on every /api
 // request.
 //
@@ -76,14 +66,12 @@ type opencodeServerInfo struct {
 // at startup. The 1.x server had no such protection unless
 // OPENCODE_SERVER_PASSWORD was set.
 //
-// The password is therefore supplied BY THE OPERATOR through the agent's
-// environment, never invented here: an adapter that guessed one would only
-// produce a 401 that looks like a broken model. When no password is
-// configured, the adapter tries the request unauthenticated, which is what
-// an unsecured 1.x server accepts.
-//
-// The credential is read from the SAME environment the server was started
-// with, so the two always agree: the server and the client read one source.
+// The adapter must use the server's credential, never invent one: an
+// independent password would only produce a 401 that looks like a broken
+// model. ensureServer resolves it from the effective child environment or
+// captures the generated password from startup output. Only an unsecured
+// 1.x server needs no credential. Operator-facing environment semantics are
+// owned by docs/src/content/docs/reference/environment.md.
 type opencodeAuth struct {
 	username string
 	password string
@@ -101,12 +89,9 @@ var opencodePasswordEnvVars = []string{"OPENCODE_PASSWORD", "OPENCODE_SERVER_PAS
 //
 // The environment is the one the agent server process was started with, so
 // the server and the client read the same value. An environment without a
-// password yields an empty credential, and the adapter then tries the
-// request unauthenticated - which is what an unsecured 1.x server accepts.
+// password yields an empty credential; ensureServer then attempts to capture
+// a generated password from startup output before making API requests.
 func resolveOpencodeAuth(env []string) opencodeAuth {
-	if len(env) == 0 {
-		env = os.Environ()
-	}
 	for _, name := range opencodePasswordEnvVars {
 		if value, ok := lookupEnvValue(env, name); ok && value != "" {
 			return opencodeAuth{username: opencodeAuthUsername, password: value}
@@ -118,7 +103,8 @@ func resolveOpencodeAuth(env []string) opencodeAuth {
 // lookupEnvValue reads a variable out of an environment slice.
 func lookupEnvValue(env []string, name string) (string, bool) {
 	prefix := name + "="
-	for _, entry := range env {
+	for i := len(env) - 1; i >= 0; i-- {
+		entry := env[i]
 		if strings.HasPrefix(entry, prefix) {
 			return strings.TrimPrefix(entry, prefix), true
 		}
@@ -248,6 +234,11 @@ type opencodeSessionInfo struct {
 // whose entries are {action, resource, effect}. 2.x REJECTS the 1.x body
 // (additionalProperties is false), so the two cannot share one shape.
 func (a *opencodeAgent) createSession(ctx context.Context, baseURL, cwd string) (string, error) {
+	if a.version() == opencodeAPIVersion2 && a.profile.Effort != "" {
+		if _, _, ok := agentcfg.SplitProviderModel(a.profile.Model); !ok {
+			return "", errors.New("opencode 2.x requires an explicit provider/model to apply reasoning effort")
+		}
+	}
 	body := a.sessionCreateBody(cwd)
 	resp, err := a.doJSON(ctx, http.MethodPost, baseURL+a.routes().sessionCreate, body)
 	if err != nil {
@@ -334,9 +325,6 @@ func (a *opencodeAgent) sessionIDFromCreate(resp []byte) (string, error) {
 // the prompt-only route, which is the same route 1.x already uses when its
 // native structured output is rejected.
 func (a *opencodeAgent) messageBody(prompt string, schema json.RawMessage) map[string]any {
-	if a.version() == opencodeAPIVersion2 {
-		return map[string]any{"text": prompt}
-	}
 	body := map[string]any{
 		"role":  "user",
 		"parts": []map[string]string{{"type": "text", "text": prompt}},
@@ -421,7 +409,7 @@ type opencodeV2Error struct {
 
 // readAssistantMessage reads the newest assistant message of a 2.x session.
 func (a *opencodeAgent) readAssistantMessage(ctx context.Context, baseURL, sessionID string) (*opencodeMessageResponse, error) {
-	respBytes, err := a.doJSON(ctx, http.MethodGet, baseURL+"/api/session/"+sessionID+"/message", nil)
+	respBytes, err := a.doJSON(ctx, http.MethodGet, baseURL+"/api/session/"+sessionID+"/message?order=desc", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -429,8 +417,7 @@ func (a *opencodeAgent) readAssistantMessage(ctx context.Context, baseURL, sessi
 	if err := json.Unmarshal(respBytes, &list); err != nil {
 		return nil, fmt.Errorf("opencode message parse: %w", err)
 	}
-	for i := len(list.Data) - 1; i >= 0; i-- {
-		msg := list.Data[i]
+	for _, msg := range list.Data {
 		if msg.Type != "assistant" {
 			continue
 		}
@@ -468,7 +455,7 @@ func v2MessageToResponse(msg opencodeV2Message) *opencodeMessageResponse {
 func (a *opencodeAgent) connectEventStream(ctx context.Context, baseURL string) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+a.routes().eventStream, nil)
 	if err != nil {
-		return nil, fmt.Errorf("opencode event stream request: %w", err)
+		return nil, agentSetupFailure(fmt.Errorf("opencode event stream request: %w", err))
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	if header := a.auth().header(); header != "" {
@@ -477,13 +464,13 @@ func (a *opencodeAgent) connectEventStream(ctx context.Context, baseURL string) 
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("opencode event stream: %w", err)
+		return nil, agentSetupFailure(fmt.Errorf("opencode event stream: %w", err))
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		return nil, fmt.Errorf("opencode event stream failed with %d: %s", resp.StatusCode, string(body))
+		return nil, agentSetupFailure(fmt.Errorf("opencode event stream failed with %d: %s", resp.StatusCode, string(body)))
 	}
 
 	return resp.Body, nil
@@ -551,19 +538,4 @@ func (a *opencodeAgent) setAPI(version opencodeAPIVersion, auth opencodeAuth) {
 	defer a.mu.Unlock()
 	a.apiVersion = version
 	a.apiAuth = auth
-}
-
-// opencodeVersionFromString reports the major version of an opencode version
-// string ("2.0.32" -> 2). It returns 0 when the string carries no version.
-func opencodeVersionFromString(version string) int {
-	version = strings.TrimSpace(version)
-	if version == "" {
-		return 0
-	}
-	major, _, _ := strings.Cut(version, ".")
-	parsed, err := strconv.Atoi(major)
-	if err != nil {
-		return 0
-	}
-	return parsed
 }

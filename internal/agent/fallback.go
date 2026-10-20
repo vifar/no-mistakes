@@ -159,15 +159,8 @@ func (a *fallbackAgent) Close() error {
 // findings result, a structured-output rejection, a provider error on a
 // completed turn. Those are the agent's verdict on the work, and re-running
 // them under a different agent would discard a real answer.
-//
-// The line is drawn by WHERE the failure happened, not by how it reads. A
-// setup failure is raised before the prompt is sent, so the call site tags it
-// (agentSetupFailure). The text patterns below are the fallback for an
-// adapter that cannot tag its own failure; they are deliberately narrow, and
-// each names a step that happens before any work: creating the session, or
-// reaching the server at all.
 func isAgentUnavailableError(err error) bool {
-	if err == nil {
+	if err == nil || IsStructuredOutputRejected(err) || opencodeReplayUnsafe(err) {
 		return false
 	}
 	if errors.Is(err, errAgentSetupFailure) {
@@ -180,12 +173,6 @@ func isAgentUnavailableError(err error) bool {
 		" server: start server ",
 		" exited:",
 		" reported exit code ",
-		// Issue #112: the session-create request is the last thing that
-		// happens before the prompt is sent, so a failure there is a setup
-		// failure. The HTTP status that follows is the agent server's own
-		// verdict on the request.
-		"create session:",
-		"create session parse:",
 	}
 	for _, needle := range unavailable {
 		if strings.Contains(msg, needle) {

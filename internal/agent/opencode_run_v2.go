@@ -27,7 +27,7 @@ import (
 //     route (schema in the prompt, JSON validated on the way out) is the
 //     only structured-output path, and it is the same route 1.x already
 //     uses when its native format is rejected.
-func (a *opencodeAgent) runOnceV2(ctx context.Context, opts RunOpts, baseURL string, nativeFormat bool) (*Result, error) {
+func (a *opencodeAgent) runOnceV2(ctx context.Context, opts RunOpts, baseURL string) (*Result, error) {
 	sessionID, err := a.createSession(ctx, baseURL, opts.CWD)
 	if err != nil {
 		return nil, err
@@ -69,20 +69,28 @@ func (a *opencodeAgent) runOnceV2(ctx context.Context, opts RunOpts, baseURL str
 		msgCh <- opencodeMessageResult{err: err, settled: true}
 	}()
 
-	streamErr := parseOpencodeV2SSE(eventBody, state)
-	streamCancel()
-
-	// The prompt request is the only thing that could have failed on its
-	// own; the turn itself is reported through the stream.
-	mr := pollOpencodeMessage(msgCh)
-	if !mr.settled {
+	streamCh := make(chan error, 1)
+	go func() {
+		streamCh <- parseOpencodeV2SSE(eventBody, state)
+	}()
+	var streamErr error
+	var mr opencodeMessageResult
+	select {
+	case mr = <-msgCh:
+		if mr.err != nil {
+			streamCancel()
+			_ = eventBody.Close()
+		}
+		streamErr = <-streamCh
+	case streamErr = <-streamCh:
 		mr = awaitOpencodeMessage(msgCh, opencodeEvidenceWait)
 	}
+	streamCancel()
+	if !mr.settled {
+		return resultFromUsage(state.usage), opencodeTurnFailure(state.v2ToolEvidence(), errors.New("opencode prompt admission was not confirmed"))
+	}
 	if mr.err != nil {
-		// The prompt never reached opencode, so no tool of this turn can
-		// have run: the turn is safe to report as failed without the
-		// replay gate.
-		return resultFromUsage(state.usage), fmt.Errorf("opencode message: %w", mr.err)
+		return resultFromUsage(state.usage), opencodeTurnFailure(state.v2ToolEvidence(), fmt.Errorf("opencode message: %w", mr.err))
 	}
 
 	if streamErr != nil {
@@ -115,39 +123,14 @@ func (a *opencodeAgent) runOnceV2(ctx context.Context, opts RunOpts, baseURL str
 		return resultFromUsage(state.usage), opencodeTurnFailure(evidence, newOpencodeMessageFailure(resp.Info.Error, evidence == opencodeToolsRan))
 	}
 
-	// Prefer the message's own text; the stream already emitted the deltas
-	// as they arrived.
-	outputText := state.lastFinalText
-	if outputText == "" {
-		outputText = state.lastText
-	}
-	if outputText == "" {
-		for _, part := range resp.Parts {
-			if part.Type == "text" && strings.TrimSpace(part.Text) != "" {
-				outputText = part.Text
-				break
-			}
+	var output strings.Builder
+	for _, part := range resp.Parts {
+		if part.Type == "text" {
+			output.WriteString(part.Text)
 		}
-	}
-	if outputText == "" {
-		for _, part := range resp.Parts {
-			if part.Type == "text" {
-				outputText = part.Text
-				break
-			}
-		}
-	}
-	if resp.Info != nil && resp.Info.Tokens != nil {
-		// The 2.x stream already reported the turn's usage on
-		// session.step.ended, and the message reports the same tokens. The
-		// message is the authoritative final record, so it REPLACES the
-		// stream's figure rather than adding to it: the two describe the
-		// same turn, and adding them would double-count it.
-		state.usageByMsg = map[string]TokenUsage{resp.Info.ID: opencodeTokensToUsage(resp.Info.Tokens)}
-		state.usage = accumulateUsage(state.usageByMsg)
 	}
 
-	result, err := finalizeTextResult("opencode", outputText, opts.JSONSchema, state.usage)
+	result, err := finalizeTextResult("opencode", output.String(), opts.JSONSchema, state.usage)
 	if err != nil {
 		return result, opencodeTurnFailure(state.v2ToolEvidence(), err)
 	}

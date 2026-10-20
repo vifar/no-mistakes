@@ -37,6 +37,7 @@ func TestOpencodeAgent_LiveServer2x(t *testing.T) {
 
 	dir := t.TempDir()
 	a := &opencodeAgent{bin: bin}
+	t.Cleanup(func() { _ = a.Close() })
 	a.profile = agentcfg.Profile{Model: model}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
@@ -49,6 +50,9 @@ func TestOpencodeAgent_LiveServer2x(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	if a.version() != opencodeAPIVersion2 {
+		t.Fatalf("detected API generation = %s, want 2.x", a.version())
 	}
 	var output map[string]any
 	if err := json.Unmarshal(result.Output, &output); err != nil {
@@ -70,19 +74,19 @@ func TestOpencodeAgent_LiveServer2xDetectsTheVersion(t *testing.T) {
 	}
 	dir := t.TempDir()
 	a := &opencodeAgent{bin: bin}
+	t.Cleanup(func() { _ = a.Close() })
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	baseURL, err := a.ensureServer(ctx, dir, nil)
+	_, err := a.ensureServer(ctx, dir, nil)
 	if err != nil {
 		t.Fatalf("ensureServer: %v", err)
 	}
 	t.Logf("detected opencode API version: %s", a.version().String())
-	if a.version() == opencodeAPIVersionUnknown {
-		t.Fatal("the API version was never detected")
+	if a.version() != opencodeAPIVersion2 {
+		t.Fatalf("detected API generation = %s, want 2.x", a.version())
 	}
-	_ = baseURL
 }
 
 // TestOpencodeAgent_LivePasswordCapture proves the adapter learns the

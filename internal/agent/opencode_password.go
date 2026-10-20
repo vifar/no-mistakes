@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bufio"
 	"context"
 	"io"
 	"regexp"
@@ -88,19 +87,12 @@ func (c *opencodePasswordCapture) Password() string {
 	return c.password
 }
 
-// Found reports whether the server printed a password.
-func (c *opencodePasswordCapture) Found() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.found
-}
-
 // Wait blocks until the server printed its password, or until the deadline
 // passes. It reports the password, which is empty when none arrived.
 //
-// The wait is bounded because the line may never come: a 1.x server prints
-// no password at all, and a 2.x server that was given one in the
-// environment does not print it either.
+// The wait is bounded because the line may never come, for example from
+// an unsecured 1.x server. ensureServer only waits when the effective child
+// environment supplied no password.
 func (c *opencodePasswordCapture) Wait(ctx context.Context, d time.Duration) string {
 	deadline := time.After(d)
 	ticker := time.NewTicker(25 * time.Millisecond)
@@ -116,16 +108,6 @@ func (c *opencodePasswordCapture) Wait(ctx context.Context, d time.Duration) str
 			return c.Password()
 		case <-ticker.C:
 		}
-	}
-}
-
-// scanLines reads the output line by line and looks for the password. It is
-// used for the case where the sink is a line-buffered writer and the
-// password arrives on its own line.
-func (c *opencodePasswordCapture) scanLines(r io.Reader) {
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		c.scan(scanner.Text() + "\n")
 	}
 }
 

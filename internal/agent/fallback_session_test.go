@@ -52,7 +52,7 @@ func TestFallbackAgent_FallsBackOnSessionCreateFailure(t *testing.T) {
 			first := &fallbackTestAgent{
 				name: "opencode",
 				run: func() (*Result, error) {
-					return nil, tc.err
+					return nil, agentSetupFailure(tc.err)
 				},
 			}
 			second := &fallbackTestAgent{
@@ -92,6 +92,14 @@ func TestFallbackAgent_DoesNotFallBackOnAWorkedTurn(t *testing.T) {
 		name string
 		err  error
 	}{
+		{
+			name: "quoted setup error in structured output",
+			err:  rejectStructuredOutput(errors.New("opencode create session: HTTP 405; agent start: failed")),
+		},
+		{
+			name: "unsafe turn containing setup text",
+			err:  opencodeTurnFailure(opencodeToolsRan, errors.New("opencode create session parse: agent exited: failed")),
+		},
 		{
 			name: "structured output error after a real turn",
 			err:  errors.New("opencode structured output failed after 2 internal retries: the model returned prose"),
@@ -146,9 +154,10 @@ func TestFallbackAgent_SessionCreateFailureOverHTTP(t *testing.T) {
 	first := &fallbackTestAgent{
 		name: "opencode",
 		run: func() (*Result, error) {
-			_, err := doJSON(context.Background(), http.MethodPost, server.URL+"/session", nil, map[string]any{"directory": "/tmp"})
+			a := &opencodeAgent{}
+			_, err := a.createSession(context.Background(), server.URL, t.TempDir())
 			if err != nil {
-				return nil, fmt.Errorf("opencode create session: %w", err)
+				return nil, err
 			}
 			return &Result{Text: "should not run"}, nil
 		},

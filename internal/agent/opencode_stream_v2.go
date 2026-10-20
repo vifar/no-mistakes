@@ -2,8 +2,8 @@ package agent
 
 import (
 	"encoding/json"
+	"io"
 	"strconv"
-	"strings"
 )
 
 // opencodeV2Event is one frame of the 2.x event stream.
@@ -96,7 +96,7 @@ func parseOpencodeV2SSE(r interface{ Read([]byte) (int, error) }, state *opencod
 			// which is the durable evidence the replay gate reads.
 			state.toolInvoked = true
 
-		case "session.step.ended":
+		case "session.step.ended", "session.step.failed":
 			if data.Tokens != nil {
 				msgID := data.AssistantMessageID
 				if msgID == "" {
@@ -106,13 +106,6 @@ func parseOpencodeV2SSE(r interface{ Read([]byte) (int, error) }, state *opencod
 				state.usage = accumulateUsage(state.usageByMsg)
 			}
 			state.pendingStepSeparator = true
-
-		case "session.usage.updated":
-			if data.Tokens != nil {
-				msgID := "v2-usage"
-				state.usageByMsg[msgID] = opencodeTokensToUsage(data.Tokens)
-				state.usage = accumulateUsage(state.usageByMsg)
-			}
 		}
 		return true
 	})
@@ -124,8 +117,7 @@ func parseOpencodeV2SSE(r interface{ Read([]byte) (int, error) }, state *opencod
 		return streamErr
 	}
 	if !sawDone {
-		// The stream ended without a completion signal. That is not an
-		// error by itself: the message list still holds the turn's record.
+		return io.ErrUnexpectedEOF
 	}
 	return nil
 }
@@ -218,14 +210,4 @@ func (s *opencodeStreamState) markV2Assistant(messageID string) {
 // stream identifies a text block by the pair, where 1.x used a part id.
 func v2TextPartID(messageID string, ordinal int) string {
 	return messageID + "#" + strconv.Itoa(ordinal)
-}
-
-// v2ErrorText renders a 2.x structured error as text, so the thinking and
-// tool-choice detectors can scan it the way they scan the 1.x error shape.
-func v2ErrorText(e *opencodeV2Error) string {
-	if e == nil {
-		return ""
-	}
-	parts := []string{e.Type, e.Message}
-	return strings.Join(parts, " ")
 }
