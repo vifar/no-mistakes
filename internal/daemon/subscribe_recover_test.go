@@ -1084,7 +1084,7 @@ exit 0
 	}
 }
 
-func TestRecoverOnStartup_FinalizesCommittedCI(t *testing.T) {
+func TestRecoverOnStartup_ReleasedCIWithoutTerminalProofFailsClosed(t *testing.T) {
 	for _, state := range []string{"open"} {
 		t.Run(state, func(t *testing.T) {
 			root, err := os.MkdirTemp("", "dtest")
@@ -1129,8 +1129,8 @@ func TestRecoverOnStartup_FinalizesCommittedCI(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got.Status != types.RunChecksPassed || got.PRState == nil || *got.PRState != state {
-				t.Fatalf("startup reconciliation = status %s pr_state %v, want checks_passed/%s", got.Status, got.PRState, state)
+			if got.Status != types.RunFailed || got.Error == nil || got.TerminalHeadVerifiedAt != nil || got.PRState == nil || *got.PRState != state {
+				t.Fatalf("unverified CI release recovered as success: %+v", got)
 			}
 			gotCI, err := database.GetStepResult(ci.ID)
 			if err != nil {

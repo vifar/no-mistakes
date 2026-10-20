@@ -1535,26 +1535,9 @@ func (d *DB) recoverStaleRunsExceptWriteAttempt(writeCtx context.Context, errMsg
 			return 0, err
 		}
 	}
-	readyArgs := []any{types.RunChecksPassed, ts, types.RunPending, types.RunRunning, types.StepCI, types.StepStatusCompleted}
-	readyArgs = append(readyArgs, args...)
-	readyResult, err := tx.Exec(
-		`UPDATE runs SET status = ?, error = NULL, push_active = 0,
-		 awaiting_agent_since = NULL, updated_at = ?
-		 WHERE status IN (?, ?) AND ci_ready_at IS NOT NULL AND ci_released_at IS NOT NULL
-		   AND lower(trim(pr_state)) = 'open'
-		   AND EXISTS (
-		       SELECT 1 FROM step_results ci
-		       WHERE ci.run_id = runs.id AND ci.step_name = ? AND ci.status = ?
-		   )`+placeholders,
-		readyArgs...,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("recover completed CI runs: %w", err)
-	}
-	readyCount, err := readyResult.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("completed CI rows affected: %w", err)
-	}
+	// A completed CI/release marker is not terminal-head proof. Only the
+	// executor's verified completion may record checks_passed; a crash before
+	// that atomic terminal write follows the ordinary fail-closed recovery.
 
 	// A daemon restart during the long-lived CI monitor should not turn an
 	// already-pushed PR into a failed run. Recover those runs before the broad
@@ -1647,7 +1630,7 @@ func (d *DB) recoverStaleRunsExceptWriteAttempt(writeCtx context.Context, errMsg
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit transaction: %w", err)
 	}
-	return int(readyCount + ciCount + count), nil
+	return int(ciCount + count), nil
 }
 
 // ciMonitorRunCondition matches an active run whose only active step is the CI

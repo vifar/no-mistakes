@@ -842,6 +842,12 @@ Reruns are skipped when:
 - The check's details link names nothing the provider can re-run, for example a third-party status pointing at an external dashboard, or a link under a workflow run that names no job the API accepts. A link naming one job re-runs that job; a cancelled check naming only the workflow run re-runs the whole workflow, while other run-only links re-run failed jobs; an unrecognized link is widened into neither.
 - The published branch head no longer equals the commit the run delivered. That case terminates with the expected and observed commits instead: re-running checks against a different head would certify a revision this run never produced. See [pipeline steps: CI](/no-mistakes/reference/pipeline-steps/#ci).
 
+### `ci.release_after_checks_pass`
+
+Defaults to `false`. The global setting or trusted repository configuration may opt into finishing a run once its checks pass. The run then records `checks_passed`, releases its worktree and stops monitoring the PR. The human merge decision remains separate. When disabled, the existing monitor stays active until merge, closure or its idle timeout. Readiness and final comparison checks still apply.
+
+If the daemon stops after recording CI completion but before the verified terminal write, recovery fails the unfinished run and requires revalidation. A CI completion marker never replaces the fork’s terminal-head proof.
+
 ### ci.revalidate_repairs
 
 Whether every CI repair must re-pass the pipeline before it is published, or only the ones whose continuity with the reviewed head cannot be proven.
@@ -1319,7 +1325,3 @@ Override the [global Cursor Origin draft setting](/no-mistakes/reference/global-
 |---|---|
 | Type | `bool` |
 | Default | Inherits from global (default `false`) |
-
-### `ci.release_after_checks_pass`
-
-Defaults to `false`. The global setting or trusted repository configuration may opt into finishing a run once its checks pass. The run then records `checks_passed`, releases its worktree and stops monitoring the PR. The human merge decision remains separate. When disabled, the existing monitor stays active until merge, closure or its idle timeout. Readiness and final comparison checks still apply.

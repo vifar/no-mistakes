@@ -3040,6 +3040,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.AgentStallTimeout = d
+		configuredTimeout = configuredTimeout || d != DefaultAgentStallTimeout
 	}
 	if raw.ReviewAgentTimeout != "" {
 		d, err := parsePositiveDuration("review_agent_timeout", raw.ReviewAgentTimeout)

@@ -617,6 +617,12 @@ This is a global-only proof bound, independent of `ci_timeout` even when that ti
 
 Queued or running checks never spend this budget. A poll that cannot establish the live target, checks, mergeability, or other comparison facts resets it, as does a changed run head or a successful comparison. Default-branch movement does not extend a missing-receipt wait. Increase the duration if comparison receipt persistence needs a longer recovery window; zero, negative values, and unlimited keywords are rejected. Strict shipping retains its existing comparison validation.
 
+### `ci.release_after_checks_pass`
+
+Defaults to `false`. The global setting or trusted repository configuration may opt into finishing a run once its checks pass. The run then records `checks_passed`, releases its worktree and stops monitoring the PR. The human merge decision remains separate. When disabled, the existing monitor stays active until merge, closure or its idle timeout. Readiness and final comparison checks still apply.
+
+If the daemon stops after recording CI completion but before the verified terminal write, recovery fails the unfinished run and requires revalidation. A CI completion marker never replaces the fork’s terminal-head proof.
+
 ### step_quiet_warning
 
 How long a running or fixing step can go without recorded step-log or native-agent lifecycle activity before AXI status marks the step as quiet.
@@ -650,7 +656,7 @@ Eligible validation steps also pin their freshly resolved diff base across the l
 
 Before retrying, the executor proves that the run and worktree head SHA, recorded base SHA, effective configuration, completed-step records/rounds and evidence-file hashes still match their pre-attempt snapshot. The worktree must be clean before and after the attempt, including untracked and ignored files. Missing or changed proof refuses the retry and fails normally: no in-run restart is attempted; start a fresh run for full validation from step 1. Partial edits, commits or evidence from a crashed attempt are never silently discarded or certified. The log records the `agent_invocation` retry or proof refusal; an exhausted retry still fails with its agent diagnostic.
 
-A hang cut by the default invocation budget can qualify. A non-default agent timeout, or any still-working cap, disables timeout-based crash retries; the shipped timeout values count as unconfigured even when the generated config writes them explicitly. Process exits can still qualify. Test budget cuts that already park for an operator decision remain parked, not automatically retried.
+A hang cut by the default invocation budget can qualify. A non-default agent timeout or `agent_stall_timeout`, or any still-working cap, disables timeout-based crash retries; the shipped timeout values count as unconfigured even when the generated config writes them explicitly. Process exits can still qualify. Test budget cuts that already park for an operator decision remain parked, not automatically retried.
 
 Fix rounds, review-answer/coverage continuations, conflict resolution, custom gates, Intent and Push/PR/CI delivery are not replayed or retried. This budget is separate from `auto_fix`, is not replenished by approval rounds, and is disabled for the remainder of a run resumed after daemon recovery; a later agent crash fails that step normally. It does not continue a terminal run: [`axi retry`](/reference/cli/#axi-retry) is the separate manual continuation, using the shared `agent_invocation` cause and its own checkpoint proofs. Timeout cuts do not acquire that cause, and parser rejections remain terminal. It is global-only: repository config and environment variables cannot enable it.
 
@@ -1632,7 +1638,3 @@ This is a global default. Per-repo config can override it via `providers.origin.
 ## Environment variables
 
 See [Environment Variables](/no-mistakes/reference/environment/) for `NM_HOME`, `NM_DAEMON_CONNECT_TIMEOUT`, Forgejo host and token settings, Bitbucket Cloud credentials, and update-check suppression.
-
-### `ci.release_after_checks_pass`
-
-Defaults to `false`. The global setting or trusted repository configuration may opt into finishing a run once its checks pass. The run then records `checks_passed`, releases its worktree and stops monitoring the PR. The human merge decision remains separate. When disabled, the existing monitor stays active until merge, closure or its idle timeout. Readiness and final comparison checks still apply.

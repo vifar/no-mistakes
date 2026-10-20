@@ -1910,8 +1910,9 @@ func TestRecoverStaleRunsCompletedCI(t *testing.T) {
 		unmarked  bool
 		want      types.RunStatus
 	}{
-		{"committed verdict", types.RunRunning, true, true, false, false, types.RunChecksPassed},
-		{"pending run", types.RunPending, true, true, false, false, types.RunChecksPassed},
+		{"completed CI without terminal proof", types.RunRunning, true, true, false, false, types.RunFailed},
+		{"pending run", types.RunPending, true, true, false, false, types.RunFailed},
+		{"already finalized", types.RunChecksPassed, true, true, false, false, types.RunChecksPassed},
 		{"default mode ready without release marker", types.RunRunning, true, true, false, true, types.RunFailed},
 		{"no readiness", types.RunRunning, false, true, false, false, types.RunFailed},
 		{"live monitor", types.RunRunning, true, false, false, false, types.RunCIMonitorInterrupted},
@@ -1983,6 +1984,11 @@ func TestRecoverStaleRunsCompletedCI(t *testing.T) {
 				}
 				if tc.want == types.RunChecksPassed && got.Error != nil {
 					t.Fatalf("successful run error = %v", got.Error)
+				}
+				if (tc.status == types.RunPending || tc.status == types.RunRunning) && tc.ready && tc.completed && !tc.preserved {
+					if got.Error == nil || *got.Error != "daemon crashed" || got.TerminalHeadVerifiedAt != nil {
+						t.Fatalf("CI marker manufactured terminal proof: %+v", got)
+					}
 				}
 				if tc.completed {
 					after, err := d.GetStepResult(ci.ID)

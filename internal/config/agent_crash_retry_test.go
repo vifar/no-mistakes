@@ -43,6 +43,7 @@ func TestAgentCrashRetryExplicitTimeouts(t *testing.T) {
 		value string
 	}{
 		{"agent_timeout", "31m"},
+		{"agent_stall_timeout", "31m"},
 		{"review_agent_timeout", "31m"},
 		{"test_agent_timeout", "31m"},
 		{"agent_working_timeout", "30m"},
