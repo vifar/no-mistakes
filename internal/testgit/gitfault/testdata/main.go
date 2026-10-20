@@ -65,6 +65,14 @@ func main() {
 		if common {
 			stall("common")
 		}
+	case "blocked-read":
+		// Reproduces a kernel-held read: macOS answers a blocked open on a
+		// TCC-protected location by interrupting the read, which Git reports
+		// as an unreadable working directory and exits with status 128.
+		if common {
+			fmt.Fprintln(os.Stderr, "fatal: Unable to read current working directory: Interrupted system call")
+			os.Exit(128)
+		}
 	case "top-error":
 		if top {
 			fmt.Fprintln(os.Stderr, os.Getenv("NM_GIT_FAULT_STDERR"))
