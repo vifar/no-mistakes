@@ -79,6 +79,18 @@ func TestReadMetadataWithinRefusesANonRegularFile(t *testing.T) {
 	}
 }
 
+// Following a metadata symlink must still reject a non-regular target.
+func TestReadMetadataWithinRefusesSymlinkToDirectory(t *testing.T) {
+	dir := t.TempDir()
+	pointer := filepath.Join(dir, "metadata")
+	if err := os.Symlink(dir, pointer); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := readMetadataWithin(context.Background(), pointer, time.Second); err == nil {
+		t.Fatal("directory symlink accepted as metadata")
+	}
+}
+
 // A caller that has already cancelled must not start or accept a metadata read.
 func TestMetadataDiscoveryHonorsCallerCancellation(t *testing.T) {
 	dir := t.TempDir()

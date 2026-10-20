@@ -614,7 +614,7 @@ func normalGitDiagnostic(err error, diagnostic string) bool {
 const metadataFileLimit = 1 << 20
 
 // readBoundedMetadata reads a Git metadata file, refusing anything that is not
-// a regular file and anything larger than the limit.
+// a regular file target and anything larger than the limit.
 //
 // The file type is checked BEFORE the open, so a FIFO or a device is refused
 // without being opened: opening one can block, because a reader waits for a
@@ -624,7 +624,7 @@ const metadataFileLimit = 1 << 20
 // from holding the reader. It does not shorten a privacy approval hold; the
 // context-aware wait above bounds that case.
 func readBoundedMetadata(path string, limit int64) ([]byte, error) {
-	kind, statErr := os.Lstat(path)
+	kind, statErr := os.Stat(path)
 	if statErr != nil {
 		return nil, statErr
 	}

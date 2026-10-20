@@ -1082,3 +1082,49 @@ func TestIdentityFallbackRejectsLinkedActualHeadDamage(t *testing.T) {
 		})
 	}
 }
+
+// Git accepts regular-file symlink targets for gitfiles and commondir. The
+// classifier must retain that compatibility in both normal and fallback reads.
+func TestIdentityReadableSymlinkMetadata(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native Windows symlink privileges are not available in this validation")
+	}
+	for _, entry := range []string{"gitfile", "commondir"} {
+		for _, mode := range []string{"normal", "blocked-read"} {
+			t.Run(entry+"/"+mode, func(t *testing.T) {
+				f := newTopologyFixture(t)
+				work := filepath.Join(t.TempDir(), "work")
+				var pointer string
+				if entry == "gitfile" {
+					metadata := filepath.Join(t.TempDir(), "metadata")
+					run(t, "", "git", "init", "--separate-git-dir", metadata, work)
+					pointer = filepath.Join(work, ".git")
+				} else {
+					run(t, f.work, "git", "worktree", "add", "--detach", work, "HEAD")
+					data, err := os.ReadFile(filepath.Join(work, ".git"))
+					if err != nil {
+						t.Fatal(err)
+					}
+					actual := strings.TrimSpace(strings.TrimPrefix(string(data), "gitdir: "))
+					pointer = filepath.Join(actual, "commondir")
+				}
+				backing := pointer + "-target"
+				if err := os.Rename(pointer, backing); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(filepath.Base(backing), pointer); err != nil {
+					t.Fatal(err)
+				}
+				// Real Git is the compatibility oracle, before fault injection.
+				run(t, work, "git", "rev-parse", "--path-format=absolute", "--git-common-dir", "--absolute-git-dir")
+				if mode == "blocked-read" {
+					gitfault.Install(t, mode)
+				}
+				got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: work})
+				if err != nil || got.Nested {
+					t.Fatalf("valid symlinked metadata rejected: %+v, %v", got, err)
+				}
+			})
+		}
+	}
+}
