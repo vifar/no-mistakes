@@ -123,6 +123,27 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 			if err := recordPipelineHeadRange(sctx, headBeforeCommit, headSHA); err != nil {
 				return nil, err
 			}
+			if err := recordAgentFixHead(sctx, s.Name(), headSHA); err != nil {
+				return nil, err
+			}
+			// The comparison receipt follows the run's own head, exactly as
+			// it does for every other forward commit. Without this the
+			// attestation's own comparison would refuse the head the pipeline
+			// just committed.
+			receipt, err := sctx.DB.GetRunPRContext(sctx.Run.ID)
+			if err != nil {
+				return nil, err
+			}
+			if receipt != nil {
+				own, err := prComparisonAtTarget(sctx, receipt.TargetBranch, receipt.TargetSHA, headSHA)
+				if err != nil {
+					return nil, err
+				}
+				own.PRURL, own.SourceRepo, own.SourceBranch, own.ForgeHeadSHA = receipt.PRURL, receipt.SourceRepo, receipt.SourceBranch, receipt.ForgeHeadSHA
+				if _, err := sctx.DB.AdvanceRunPRContext(sctx.Run.ID, own); err != nil {
+					return nil, err
+				}
+			}
 			newHeadSHA = headSHA
 		}
 	}

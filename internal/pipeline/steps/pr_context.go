@@ -254,24 +254,9 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 	// Attribute that movement before classifying drift, using the commit edges
 	// recorded by commitChanges, never mutable runs.head_sha alone.
 	if targetChanged && eligible && previous.LocalHeadSHA != candidate.LocalHeadSHA &&
-		sctx.PRContextAfterStep && step.Order() >= types.StepReview.Order() && step.Order() <= types.StepLint.Order() &&
+		sctx.PRContextAfterStep && step.Order() >= types.StepReview.Order() && step.Order() <= types.StepPush.Order() &&
 		sameRewindIdentity(previous, candidate) && candidate.LocalHeadSHA == sctx.Run.HeadSHA {
-		if err := sctx.DB.ValidatePipelineHeadForward(sctx.Run.ID, previous.LocalHeadSHA, candidate.LocalHeadSHA); err != nil {
-			return pipeline.PRContextDecision{}, fmt.Errorf("target advance with unexplained local head: %w", err)
-		}
-		if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", previous.LocalHeadSHA, candidate.LocalHeadSHA); err != nil {
-			return pipeline.PRContextDecision{}, fmt.Errorf("target advance with non-descendant pipeline head: %w", err)
-		}
-		// Keep the old target until the rewind transaction records the advance.
-		own, err := prComparisonAtTarget(sctx, previous.TargetBranch, previous.TargetSHA, candidate.LocalHeadSHA)
-		if err != nil {
-			return pipeline.PRContextDecision{}, err
-		}
-		own.PRURL, own.SourceRepo, own.SourceBranch, own.ForgeHeadSHA = previous.PRURL, previous.SourceRepo, previous.SourceBranch, previous.ForgeHeadSHA
-		if _, err := sctx.DB.AdvanceRunPRContext(sctx.Run.ID, own); err != nil {
-			return pipeline.PRContextDecision{}, err
-		}
-		previous, err = sctx.DB.GetRunPRContext(sctx.Run.ID)
+		previous, err = attributeTargetAdvanceHead(sctx, previous, candidate)
 		if err != nil {
 			return pipeline.PRContextDecision{}, err
 		}
