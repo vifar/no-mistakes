@@ -43,7 +43,7 @@ func TestRecoveredRewriteLetsTheNextSubmissionRetireThePrivateMirror(t *testing.
 
 	f, rebased := newHandRebasedFixture(t)
 	gateDir := f.service.GateDir
-	if _, err := gate.PlanSupersededSubmissionReconciliation(f.ctx, gateDir, f.local, "feature/sync", rebased, gate.SupersessionSource{}); !isStaleBranchRefusal(err) {
+	if _, err := gate.PlanSupersededSubmissionReconciliation(f.ctx, gateDir, f.local, "feature/sync", rebased, f.source()); !isStaleBranchRefusal(err) {
 		t.Fatalf("unrecovered rewrite must keep today's mirror refusal, got %v", err)
 	}
 
@@ -73,7 +73,7 @@ func TestRecoveredRewriteLetsTheNextSubmissionRetireThePrivateMirror(t *testing.
 		}
 	}
 
-	result, err := gate.ReconcileSupersededSubmission(f.ctx, gateDir, f.local, "feature/sync", rebased, gate.SupersessionSource{})
+	result, err := gate.ReconcileSupersededSubmission(f.ctx, gateDir, f.local, "feature/sync", rebased, f.source())
 	if err != nil {
 		t.Fatalf("submission after a recovered rewrite was refused: %v", err)
 	}
@@ -111,7 +111,7 @@ func TestRecoveredRewriteNeverRetiresMirrorCommitsTheAnchorMisses(t *testing.T) 
 		t.Fatalf("recovery note missing %q:\n%s", want, recovered.Error)
 	}
 
-	_, err := gate.ReconcileSupersededSubmission(f.ctx, gateDir, f.local, "feature/sync", rebased, gate.SupersessionSource{})
+	_, err := gate.ReconcileSupersededSubmission(f.ctx, gateDir, f.local, "feature/sync", rebased, f.source())
 	var refusal *gate.StaleBranchRefusal
 	if !errors.As(err, &refusal) || len(refusal.AtRisk) != 1 || !strings.HasPrefix(refusal.AtRisk[0], late+" ") {
 		t.Fatalf("unarchived mirror commit %s was not refused alone: %v", late, err)
@@ -164,4 +164,29 @@ func TestRecoverRewrittenRemoteRefusesWhenTheGateAnchorConflicts(t *testing.T) {
 func isStaleBranchRefusal(err error) bool {
 	var refusal *gate.StaleBranchRefusal
 	return errors.As(err, &refusal)
+}
+
+func (f *syncFixture) source() gate.SupersessionSource {
+	return gate.SupersessionSource{DB: f.db, RepoID: f.repo.ID, Branch: "feature/sync"}
+}
+
+// A recovery that anchors in the gate and then refuses (here the remote is
+// rewritten again before the rebind) recovered nothing: the leftover anchor
+// must not let the next submission retire the mirror.
+func TestRefusedRewriteRecoveryLeavesTheMirrorRefusal(t *testing.T) {
+	t.Parallel()
+
+	f, rebased := newHandRebasedFixture(t)
+	f.service.beforeRecoverRebind = func() { forceRewriteRemote(t, f, "second-rewrite") }
+	state := f.service.Recover(f.ctx, false)
+	if state.Recovered || state.Safety != "blocked_recover_remote_changed" {
+		t.Fatalf("recover across a second rewrite = %#v", state)
+	}
+	anchor := rewrittenAnchorRef(f.run.ID, value(f.run.PushGeneration))
+	if got := mustRun(t, f.service.GateDir, "rev-parse", anchor+"^{commit}"); got != f.pushed {
+		t.Fatalf("fixture expects the refused recovery to leave its gate anchor, got %s", got)
+	}
+	if _, err := gate.PlanSupersededSubmissionReconciliation(f.ctx, f.service.GateDir, f.local, "feature/sync", rebased, f.source()); !isStaleBranchRefusal(err) {
+		t.Fatalf("a refused recovery let the mirror retire: %v", err)
+	}
 }

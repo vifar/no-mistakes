@@ -189,10 +189,20 @@ rebind when a gate that exists cannot take the anchor). The private mirror
 usually still holds exactly that head, so without the credit every later
 submission of the verified rewrite was refused. Now the next `axi run`
 archives and retires the mirror, and its output names the archive tag and
-each anchor that preserves a retired commit. Mirror commits the anchor does
-not reach were never archived by the recovery, so they stay at risk and are
-still refused; a rewrite that was never recovered has no anchor and keeps the
-ordinary refusal. No other `refs/no-mistakes/` namespace earns the credit.
+each anchor that preserves a retired commit.
+
+Because that anchor is written before the rebind is attempted, its existence
+alone proves nothing was recovered: a recovery that anchors and then refuses
+(the live head moved again, the worktree changed, the binding raced) leaves it
+behind. A rewritten anchor therefore earns the credit only when the run it
+names is this repository's terminal run on this branch and its own record shows
+the rebind committed - its push generation is past the one the anchor names
+and its push binding no longer names the anchored head. The check reads the
+same run records as recorded supersession, so pipeline publication (which
+supplies none) never earns it. Mirror commits the anchor does not reach were
+never archived by the recovery, so they stay at risk and are still refused; a
+rewrite that was never recovered keeps the ordinary refusal. No other
+`refs/no-mistakes/` namespace earns the credit.
 
 This is a **preservation credit, not containment evidence**. It says nothing
 about whether the content lands in the published tree; ancestry and

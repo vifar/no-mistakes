@@ -307,7 +307,7 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 		// surviving content still has to be proven by the checks above for any
 		// commit no anchor holds.
 		satisfiers := reconcileSatisfiers(runOwnedHeads)
-		preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, atRiskCommits)
+		preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, atRiskCommits, source.rewriteRecovered)
 		if err != nil {
 			return plan, fmt.Errorf("inspect recovery anchors for %s: %w", branchRef, err)
 		}
@@ -483,17 +483,23 @@ func ArchivedHeadRecorded(ctx context.Context, gateDir, branch, head string) boo
 	return err == nil && objectType == "commit"
 }
 
-// recoveryAnchorPrefixes are the ref namespaces the guarded recovery paths pin
-// preserved pipeline heads to: terminalization pins a run's unpublished head
-// at refs/no-mistakes/recover/<run> (custody.RecoveryRef), and the
-// recover_remote_rewritten rebind pins the pipeline push head a remote rewrite
-// superseded at refs/no-mistakes/recover-rewritten/<run>/<generation> (issue
-// #97). Both are created only through PreserveRecoveryAnchor, never replaced:
-// it creates the ref with an expected-old-value of the zero ID and fails
-// closed on any conflicting existing ref, so a commit reachable from one is
-// held by deliberate, immutable preservation evidence rather than by accident.
-// The trailing slash keeps each pattern to its own namespace.
-var recoveryAnchorPrefixes = []string{"refs/no-mistakes/recover/", "refs/no-mistakes/recover-rewritten/"}
+// recoveryAnchorPrefix is the ref namespace terminalization pins a run's
+// unpublished head to (custody.RecoveryRef); rewrittenAnchorPrefix is where
+// the recover_remote_rewritten rebind pins the pipeline push head a remote
+// rewrite superseded, as refs/no-mistakes/recover-rewritten/<run>/<generation>
+// (issue #97). Both are created only through PreserveRecoveryAnchor, never
+// replaced: it creates the ref with an expected-old-value of the zero ID and
+// fails closed on any conflicting existing ref, so a commit reachable from one
+// is held by deliberate, immutable preservation evidence rather than by
+// accident. The trailing slash keeps each pattern to its own namespace.
+//
+// A rewritten anchor is written before the rebind commits, so its existence
+// alone does not mean the rewrite was recovered: it earns the credit only
+// through SupersessionSource.rewriteRecovered.
+const (
+	recoveryAnchorPrefix  = "refs/no-mistakes/recover/"
+	rewrittenAnchorPrefix = "refs/no-mistakes/recover-rewritten/"
+)
 
 type recoveryAnchor struct {
 	ref  string
@@ -507,8 +513,7 @@ type recoveryAnchor struct {
 // it contributes no preservation evidence, and skipping is the conservative
 // direction (nothing gets credited).
 func listRecoveryAnchors(ctx context.Context, gateDir string) ([]recoveryAnchor, error) {
-	args := append([]string{"for-each-ref", "--format=%(refname) %(objectname) %(objecttype) %(symref)"}, recoveryAnchorPrefixes...)
-	out, err := git.Run(ctx, gateDir, args...)
+	out, err := git.Run(ctx, gateDir, "for-each-ref", "--format=%(refname) %(objectname) %(objecttype) %(symref)", recoveryAnchorPrefix, rewrittenAnchorPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -538,7 +543,7 @@ func reconcileSatisfiers(runOwnedHeads []string) []string {
 	if hasRunOwnedHead(runOwnedHeads) {
 		satisfiers = append(satisfiers, "the private head being exactly the publishing run's Run.SubmittedHeadSHA or Run.LastPushedSHA (Decision 41-A)")
 	}
-	return append(satisfiers, "a refs/no-mistakes/recover/<run> or refs/no-mistakes/recover-rewritten/<run>/<generation> recovery anchor reaching the commit")
+	return append(satisfiers, "a refs/no-mistakes/recover/<run> recovery anchor, or the refs/no-mistakes/recover-rewritten/<run>/<generation> anchor of a completed `no-mistakes axi sync --recover` of a remote rewrite, reaching the commit")
 }
 
 func joinSatisfiers(satisfiers []string) string {
@@ -571,14 +576,23 @@ const maxRecoveryCandidates = 512
 // checks are responsible for proving. It exists so that the sanctioned
 // recover -> rerun -> push loop cannot deadlock against the very anchor that
 // loop wrote to declare the work preserved.
-func preservedByRecoveryAnchors(ctx context.Context, gateDir, liveHead string, commits []string) (map[string]string, error) {
+func preservedByRecoveryAnchors(ctx context.Context, gateDir, liveHead string, commits []string, rewriteRecovered func(ref, head string) bool) (map[string]string, error) {
 	preserved := make(map[string]string)
 	if len(commits) == 0 {
 		return preserved, nil
 	}
-	anchors, err := listRecoveryAnchors(ctx, gateDir)
+	listed, err := listRecoveryAnchors(ctx, gateDir)
 	if err != nil {
 		return nil, err
+	}
+	// A rewritten anchor counts only once its recovery committed; anything
+	// else is skipped, which is the conservative direction.
+	anchors := listed[:0]
+	for _, anchor := range listed {
+		if strings.HasPrefix(anchor.ref, rewrittenAnchorPrefix) && (rewriteRecovered == nil || !rewriteRecovered(anchor.ref, anchor.head)) {
+			continue
+		}
+		anchors = append(anchors, anchor)
 	}
 	if len(anchors) == 0 {
 		return preserved, nil

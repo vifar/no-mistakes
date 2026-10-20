@@ -2,6 +2,7 @@ package gate
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -118,4 +119,39 @@ func acceptedSurvivesIn(ctx context.Context, gateDir, accepted, liveHead string)
 	}
 	_, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", accepted, liveHead)
 	return err == nil
+}
+
+// rewriteRecovered reports whether the refs/no-mistakes/recover-rewritten
+// anchor ref names a remote rewrite whose recovery COMMITTED, so the anchor
+// may credit preservation (issue #97). The anchor is written before the rebind
+// is attempted, so a recovery that then refused (the live head moved again,
+// the worktree changed, the binding raced) leaves an anchor behind without
+// having recovered anything; that divergence must keep refusing.
+//
+// The proof is the run's own record: the named run belongs to this repository
+// and branch, is terminal, and its push binding has been rebound past the
+// generation the anchor names (RebindRunPushedHead increments the generation
+// in the same compare-and-swap that moves the binding off the anchored head),
+// so it no longer binds the anchored head. A zero source, a malformed ref, or
+// any mismatch yields false.
+func (s SupersessionSource) rewriteRecovered(ref, head string) bool {
+	if s.DB == nil || strings.TrimSpace(s.RepoID) == "" || strings.TrimSpace(s.Branch) == "" {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(ref, rewrittenAnchorPrefix), "/")
+	if !strings.HasPrefix(ref, rewrittenAnchorPrefix) || len(parts) != 2 || parts[0] == "" {
+		return false
+	}
+	generation, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || generation < 0 || strconv.FormatInt(generation, 10) != parts[1] {
+		return false
+	}
+	run, err := s.DB.GetRun(parts[0])
+	if err != nil || run == nil || run.RepoID != s.RepoID || run.Branch != s.Branch || !run.Status.Terminal() {
+		return false
+	}
+	if run.PushGeneration == nil || *run.PushGeneration <= generation {
+		return false
+	}
+	return run.LastPushedSHA != nil && *run.LastPushedSHA != "" && *run.LastPushedSHA != strings.TrimSpace(head)
 }
