@@ -208,13 +208,6 @@ func annotateRunView(env *axiEnv, rv *runView) {
 	for i := range rv.Steps {
 		step := &rv.Steps[i]
 		step.QuietWarning = quietWarning
-		if step.ID != "" {
-			if stats, err := env.d.StepRoundStats(step.ID); err == nil {
-				step.RoundCount = stats.TotalRounds
-				step.FixRoundCount = stats.FixRounds
-				step.PendingFixSource = stats.PendingFixSource
-			}
-		}
 		if step.LastActivityAt == nil {
 			logPath := filepath.Join(env.p.RunLogDir(rv.ID), step.Name+".log")
 			if info, err := os.Stat(logPath); err == nil {

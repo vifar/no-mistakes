@@ -271,6 +271,12 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 		ExternalCIOwner:      r.ExternalCIOwner,
 	}
 	if database != nil {
+		if link, err := database.GetRunRetry(r.ID); err == nil && link != nil {
+			rv.RetryOf = &ipc.RunRetryInfo{RunID: link.SourceRunID, Step: link.StepName, Round: link.SourceRound, Error: link.SourceError, CheckpointHeadSHA: link.CheckpointHeadSHA}
+		}
+		if link, err := database.GetRunRetryBySource(r.ID); err == nil && link != nil {
+			rv.RetriedBy = link.RunID
+		}
 		var err error
 		rv.OwnerAdmission, err = database.GetOwnerAdmission(r.ID)
 		if err != nil {
@@ -311,6 +317,13 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 			RoundStartedAt: s.RoundStartedAt,
 			LastActivityAt: s.LastActivityAt,
 			AgentPID:       s.AgentPID,
+		}
+		if database != nil {
+			if stats, err := database.StepRoundStats(s.RoundsStepID()); err == nil {
+				sv.RoundCount = stats.TotalRounds
+				sv.FixRoundCount = stats.FixRounds
+				sv.PendingFixSource = stats.PendingFixSource
+			}
 		}
 		if s.GateNonce != nil {
 			identity := s.GateIdentity()
