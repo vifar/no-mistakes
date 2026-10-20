@@ -193,7 +193,7 @@ func TestMissingChecksDoNotCountAsExecutingOrVerifyRepairs(t *testing.T) {
 				t.Fatal("pending requirements must block readiness")
 			}
 			for _, targets := range [][]scm.CheckTarget{nil, {{Name: "lint"}}} {
-				lastFixed := encodeLastFixedChecks(targets, true)
+				lastFixed := encodeLastFixedChecks(targets, true, "")
 				if got := pendingCheckMatchesLastFixed(checks, lastFixed); got != tc.wantExecuting {
 					t.Fatalf("pending repair evidence = %v, want %v", got, tc.wantExecuting)
 				}

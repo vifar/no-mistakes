@@ -210,7 +210,7 @@ func TestExecutor_RecoveredIgnoreOnlyResponseUpdatesDeclinedRoundOrigin(t *testi
 	if err := database.SetStepFindings(stepResult.ID, declinedTestFindings); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(stepResult.ID, types.StepStatusAwaitingApproval, 25); err != nil {
+	if err := database.ParkStepForApproval(run.ID, stepResult.ID, types.StepStatusAwaitingApproval, 0, 25, &findings); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
@@ -221,12 +221,13 @@ func TestExecutor_RecoveredIgnoreOnlyResponseUpdatesDeclinedRoundOrigin(t *testi
 		t.Fatal(err)
 	}
 
+	workDir := completionFixture(t, database, run)
 	exec := NewExecutor(database, p, nil, nil, []Step{newPassStep(types.StepTest)}, nil)
 	events := collectEvents(exec)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- exec.Resume(ctx, run, repo, t.TempDir()) }()
+	go func() { done <- exec.Resume(ctx, run, repo, workDir) }()
 	waitForStepEvent(t, events, ipc.EventStepCompleted, types.StepTest)
 
 	if _, err := exec.RespondWithOverrides(

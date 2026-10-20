@@ -47,7 +47,7 @@ func attestedAcceptedGaps(sr *db.StepResult) *pipelineAttestationAcceptedGaps {
 // change it. Rendering also escapes text and neutralizes reserved markers and
 // closing references; those presentation rewrites are not part of the digest.
 func canonicalAcceptedGapText(text string) string {
-	return safepath.RedactText(text)
+	return safepath.RedactText(neutralizePRControls(text))
 }
 
 func acceptedGapTextDigest(text string) string {

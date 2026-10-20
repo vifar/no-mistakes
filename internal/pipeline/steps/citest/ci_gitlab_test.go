@@ -873,6 +873,7 @@ func TestCIStep_GitLabExternalStatusCheckRouteAbsentStillPasses(t *testing.T) {
 	sctx.Env = env
 	sctx.Repo.UpstreamURL = "https://gitlab.com/test/repo.git"
 	sctx.Run.PRURL = &prURL
+	stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
 	sctx.Config.CITimeout = 5 * time.Second
 
 	var logs []string

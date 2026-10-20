@@ -176,6 +176,8 @@ func TestAttachTracksTUIPageview(t *testing.T) {
 	}
 	cleanupSyntheticRun(t, d, run.ID)
 
+	settleUnmanagedRunOnCleanup(t, d, run.ID)
+
 	recorder := &telemetryRecorder{}
 	restore := telemetry.SetDefaultForTesting(recorder)
 	defer restore()

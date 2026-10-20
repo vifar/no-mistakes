@@ -20,7 +20,7 @@ import (
 // still reaches the step log, and the switch never touches activity.
 func TestExecutor_QuotaSwitchAmendsTheRunsRecord(t *testing.T) {
 	database, p, run, repo := setupTest(t)
-	workDir := t.TempDir()
+	workDir := completionFixture(t, database, run)
 
 	record := quotarouting.NewRecord(true,
 		[]types.AgentName{types.AgentClaude, types.AgentCodex},
@@ -105,7 +105,7 @@ func TestExecutor_QuotaSwitchAmendsTheRunsRecord(t *testing.T) {
 // create one and must not fail the run.
 func TestExecutor_QuotaSwitchWithoutARecordIsOnlyLogged(t *testing.T) {
 	database, p, run, repo := setupTest(t)
-	workDir := t.TempDir()
+	workDir := completionFixture(t, database, run)
 
 	switchingAgent := &lifecycleEmittingAgent{
 		events: []agent.LifecycleEvent{

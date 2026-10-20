@@ -47,6 +47,7 @@ func TestExecutor_ResponseOrigin(t *testing.T) {
 				if err := database.UpdateRunHeadSHA(run.ID, head); err != nil {
 					t.Fatal(err)
 				}
+				bindCompletionFixture(t, database, run, workDir)
 				go func() { done <- exec.Execute(ctx, run, repo, workDir) }()
 				select {
 				case <-parked:

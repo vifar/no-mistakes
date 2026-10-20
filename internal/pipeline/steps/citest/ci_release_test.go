@@ -17,7 +17,7 @@ import (
 // ci.release_after_checks_pass: the green observation finishes the step there,
 // so it never waits another poll interval (the recorded step duration is the CI
 // window) and it leaves the checks verdict for the executor to complete
-// atomically. Reading the PR state exactly once pins the other half: with no
+// atomically. The fork additionally reads the exact PR comparison before release. With no
 // further poll, a merge that happens afterwards cannot be observed and cannot
 // change what this run records.
 func TestCIStep_GreenChecksReleaseWithoutWaitingForTheMerge(t *testing.T) {
@@ -37,6 +37,7 @@ func TestCIStep_GreenChecksReleaseWithoutWaitingForTheMerge(t *testing.T) {
 	}
 	sctx.Env = env
 	sctx.Run.PRURL = &prURL
+	stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
 	sctx.Config.CITimeout = 10 * time.Minute
 	sctx.Config.CI.ReleaseAfterChecksPass = true
 
@@ -80,8 +81,8 @@ func TestCIStep_GreenChecksReleaseWithoutWaitingForTheMerge(t *testing.T) {
 		t.Fatalf("logs = %v, must not claim the monitor is still watching", logs)
 	}
 
-	if got := countGHStateReads(t, logFile); got != 1 {
-		t.Fatalf("PR state reads = %d, want the single observation the release is made on", got)
+	if got := countGHStateReads(t, logFile); got != 3 {
+		t.Fatalf("PR state reads = %d, want one poll plus the fork comparison checks", got)
 	}
 }
 
@@ -104,6 +105,7 @@ func TestCIStep_TrustedNoCIReleasesWithoutWaiting(t *testing.T) {
 	}
 	sctx.Env = env
 	sctx.Run.PRURL = &prURL
+	stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
 	sctx.Config.CITimeout = 10 * time.Minute
 	sctx.Config.NoCI = true
 	sctx.Config.CI.ReleaseAfterChecksPass = true
@@ -154,6 +156,7 @@ func TestCIStep_DefaultKeepsMonitoringAfterGreenChecks(t *testing.T) {
 	sctx := stepstest.NewTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.Run.PRURL = &prURL
+	stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
 	sctx.Config.CITimeout = 10 * time.Minute
 
 	var logs []string

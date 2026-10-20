@@ -1283,7 +1283,8 @@ func TestGetChecksPreservesProviderCommitForNamedProof(t *testing.T) {
 	const current = "2222222222222222222222222222222222222222"
 	const old = "1111111111111111111111111111111111111111"
 	host := New(gitlabTestCmdFactory(map[string]gitlabTestResponse{
-		"glab ci status --mr 123 --output json": {
+		"glab mr view 123 --output json": {stdout: `{"iid":123,"head_pipeline":{"id":77,"status":"success"}}`},
+		"glab ci get --pipeline-id 77 --output json --with-job-details": {
 			stdout: `{"sha":"` + current + `","jobs":[{"id":1,"name":"test","status":"success","commit":{"id":"` + old + `"}},{"id":2,"name":"test","status":"failed","commit":{"id":"` + current + `"}},{"id":3,"name":"lint","status":"success"}]}`,
 		},
 	}), nil, "", "")
@@ -1302,18 +1303,19 @@ func TestGetChecksRejectsConflictingJobAndPipelineCommitEvidence(t *testing.T) {
 	const current = "2222222222222222222222222222222222222222"
 	const old = "1111111111111111111111111111111111111111"
 	responses := map[string]gitlabTestResponse{
-		"glab ci status --mr 123 --output json": {
+		"glab mr view 123 --output json": {stdout: `{"iid":123,"head_pipeline":{"id":77,"status":"success"}}`},
+		"glab ci get --pipeline-id 77 --output json --with-job-details": {
 			stdout: `[{"id":1,"name":"build","status":"success","commit":{"id":"` + current + `"},"pipeline":{"sha":"` + old + `"}}]`,
 		},
 	}
 	host := New(gitlabTestCmdFactory(withEmptyCoverageRoutes(responses)), nil, "", "")
-	bad := responses["glab ci status --mr 123 --output json"]
-	responses["glab ci status --mr 123 --output json"] = gitlabTestResponse{stdout: `[{"id":1,"name":"build","status":"success","commit":{"id":"` + current + `"},"pipeline":{"sha":"` + current + `"}}]`}
+	bad := responses["glab ci get --pipeline-id 77 --output json --with-job-details"]
+	responses["glab ci get --pipeline-id 77 --output json --with-job-details"] = gitlabTestResponse{stdout: `[{"id":1,"name":"build","status":"success","commit":{"id":"` + current + `"},"pipeline":{"sha":"` + current + `"}}]`}
 	baseline, baselineErr := host.GetChecks(context.Background(), &scm.PR{Number: "123"})
 	if baselineErr != nil || len(baseline) != 1 || baseline[0].HeadSHA != current {
 		t.Fatalf("valid baseline failed: %v", baselineErr)
 	}
-	responses["glab ci status --mr 123 --output json"] = bad
+	responses["glab ci get --pipeline-id 77 --output json --with-job-details"] = bad
 	checks, err := host.GetChecks(context.Background(), &scm.PR{Number: "123"})
 	if err != nil || len(checks) != 1 || checks[0].HeadSHA != "" {
 		t.Fatalf("ambiguous job commit = %+v, %v", checks, err)
@@ -1748,6 +1750,8 @@ func TestGetChecksRejectsAMoveOfTheSourceCommitDuringCheckDiscovery(t *testing.T
 	// adapter rejects, because the observation no longer describes the commit
 	// that will be certified.
 	valid := New(gitlabSequenceCmdFactory(t, map[string][]gitlabTestResponse{
+		"glab api --paginate projects/group%2Fproject/pipelines/77/trigger_jobs":        {{stdout: "[]"}},
+		"glab api --paginate projects/group%2Fproject/merge_requests/123/status_checks": {{stdout: "[]"}},
 		"glab mr view 123 --output json": {
 			gitlabMRAtHead(deliveredSHA, deliveredSHA, "refs/heads/feature"),
 			gitlabMRAtHead(deliveredSHA, deliveredSHA, "refs/heads/feature"),
@@ -2195,11 +2199,13 @@ func TestGetChecksRejectsAHeadPipelineStrandedByAHeadMoveWithoutAPipeline(t *tes
 	// The delivered commit has no pipeline; the head pipeline belongs to the
 	// commit before it, where one job passed and one failed.
 	responses := map[string]gitlabTestResponse{
+		"glab api --paginate projects/group%2Fproject/pipelines/174/trigger_jobs":     {stdout: "[]"},
+		"glab api --paginate projects/group%2Fproject/merge_requests/1/status_checks": {stdout: "[]"},
 		"glab ci status --mr 1 --output json": {
 			stdout: `[{"id":646,"name":"green-on-head","status":"success"},{"id":647,"name":"fails-on-purpose","status":"failed"}]` + "\n",
 		},
 		"glab mr view 1 --output json": {
-			stdout: fmt.Sprintf(`{"iid":1,"sha":%q,"head_pipeline":{"id":174,"sha":%q,"ref":"refs/merge-requests/1/head"}}`+"\n", deliveredSHA, otherSHA),
+			stdout: fmt.Sprintf(`{"iid":1,"sha":%q,"head_pipeline":{"id":174,"sha":%q,"ref":"refs/merge-requests/1/head","status":"failed"}}`+"\n", deliveredSHA, otherSHA),
 		},
 		"glab api --paginate projects/group%2Fproject/pipelines/174/jobs": {
 			stdout: `[{"id":646,"name":"green-on-head","status":"success"},{"id":647,"name":"fails-on-purpose","status":"failed"}]` + "\n",

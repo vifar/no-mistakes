@@ -61,6 +61,7 @@ func coverageWorkdir(t *testing.T, database *db.DB, run *db.Run) string {
 		t.Fatal(err)
 	}
 	run.HeadSHA = head
+	bindCompletionFixture(t, database, run, dir)
 	return dir
 }
 
@@ -215,7 +216,7 @@ func TestExecutor_PersistedFixReviewContinuesCoverageWithoutReplacingItsRun(t *t
 	if _, err := database.InsertReviewStepRound(sr.ID, 1, "auto_fix", &body, nil, run.HeadSHA, 12); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateStepStatusWithDuration(sr.ID, types.StepStatusFixReview, 12); err != nil {
+	if err := database.ParkStepForApproval(run.ID, sr.ID, types.StepStatusFixReview, 0, 12, &body); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
@@ -255,7 +256,7 @@ func TestExecutor_PersistedFixReviewContinuesCoverageWithoutReplacingItsRun(t *t
 		if err == nil {
 			break
 		}
-		if !strings.Contains(err.Error(), "no step awaiting approval") || time.Now().After(deadline) {
+		if (!strings.Contains(err.Error(), "no step awaiting approval") && !strings.Contains(err.Error(), "gate already resolved or superseded")) || time.Now().After(deadline) {
 			t.Fatalf("persisted gate did not accept bound static continuation: %v", err)
 		}
 		time.Sleep(time.Millisecond)
@@ -329,7 +330,7 @@ func TestExecutor_CoverageContinuationDoesNotCertifyAnotherPartialReview(t *test
 		if err == nil {
 			break
 		}
-		if !strings.Contains(err.Error(), "no step awaiting approval") || time.Now().After(deadline) {
+		if (!strings.Contains(err.Error(), "no step awaiting approval") && !strings.Contains(err.Error(), "gate already resolved or superseded")) || time.Now().After(deadline) {
 			t.Fatalf("partial review did not return a real gate: %v", err)
 		}
 		time.Sleep(time.Millisecond)

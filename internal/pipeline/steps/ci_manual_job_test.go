@@ -61,10 +61,10 @@ func TestManualJobHoldIsAWaitNotAFailure(t *testing.T) {
 	if checkFailedTerminally(held) {
 		t.Error("a blocking manual job has not failed terminally")
 	}
-	if !hasPendingChecks(checks) {
+	if !held.Pending() {
 		t.Error("a blocking manual job must keep the PR pending")
 	}
-	if allChecksPassed(checks) {
+	if (scm.ScopedChecks{Relevant: checks}).Ready() {
 		t.Error("a blocking manual job must never read as passed")
 	}
 

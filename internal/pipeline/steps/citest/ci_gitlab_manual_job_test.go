@@ -32,6 +32,7 @@ func TestCIStep_GitLabBlockingManualJobNeverReportsChecksPassed(t *testing.T) {
 	sctx.Env = env
 	sctx.Repo.UpstreamURL = "https://gitlab.com/test/repo.git"
 	sctx.Run.PRURL = &prURL
+	stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
 	sctx.Config.CITimeout = 5 * time.Second
 
 	var logs []string
@@ -83,6 +84,7 @@ func TestCIStep_GitLabOptionalManualJobStaysGreen(t *testing.T) {
 	sctx.Env = env
 	sctx.Repo.UpstreamURL = "https://gitlab.com/test/repo.git"
 	sctx.Run.PRURL = &prURL
+	stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
 	sctx.Config.CITimeout = 5 * time.Second
 
 	var logs []string
@@ -131,6 +133,7 @@ func TestCIStep_GitLabFailureBesideBlockingManualJobEscalates(t *testing.T) {
 	sctx.Env = env
 	sctx.Repo.UpstreamURL = "https://gitlab.com/test/repo.git"
 	sctx.Run.PRURL = &prURL
+	stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
 	sctx.Config.CITimeout = 5 * time.Second
 	sctx.Config.AutoFix = config.AutoFix{CI: 0}
 

@@ -429,3 +429,22 @@ func startTestDaemon(t *testing.T, p *paths.Paths, d *db.DB) {
 		}
 	})
 }
+
+// settleUnmanagedRunOnCleanup retires a record seeded directly by a reader/UI
+// fixture. No executor owns these records; leaving one active makes the real
+// daemon correctly refuse its certified shutdown as an unsettled run.
+func settleUnmanagedRunOnCleanup(t *testing.T, d *db.DB, id string) {
+	t.Helper()
+	t.Cleanup(func() {
+		run, err := d.GetRun(id)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if run != nil && !run.Status.Terminal() {
+			if err := d.UpdateRunStatus(id, types.RunCancelled); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+}

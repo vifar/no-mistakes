@@ -65,8 +65,17 @@ func TestCIStep_SecondMergeConflictUsesBaseCommit(t *testing.T) {
 			prURL := "https://github.com/test/repo/pull/42"
 			sctx.Run.PRURL = &prURL
 			sctx.Run.Branch = "refs/heads/feature"
-			sctx.Repo.UpstreamURL = upstream
+			sctx.Repo.UpstreamURL = "https://github.com/test/repo"
+			stepstest.GitCmd(t, dir, "config", "url."+upstream+".insteadOf", sctx.Repo.UpstreamURL)
+			stepstest.GitCmd(t, dir, "remote", "set-url", "origin", sctx.Repo.UpstreamURL)
 			sctx.Env = stepstest.FakeCIGHMergeable(t, "OPEN", "[]", "CONFLICTING")
+			stepstest.GitCmd(t, dir, "fetch", "origin", "main")
+			stepstest.GitCmd(t, dir, "update-ref", "refs/heads/main", tip)
+			stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
+			if err := sctx.DB.UpdateRunReviewApprovedHeadSHA(sctx.Run.ID, headSHA); err != nil {
+				t.Fatal(err)
+			}
+			sctx.Run.ReviewApprovedHeadSHA = &headSHA
 			sctx.Config.CITimeout = time.Minute
 			if tc.unlimited {
 				sctx.Config.CITimeout = -1
@@ -81,11 +90,22 @@ func TestCIStep_SecondMergeConflictUsesBaseCommit(t *testing.T) {
 			if err != nil || first == nil || first.RestartFrom != types.StepReview || len(ag.Calls) != 1 {
 				t.Fatalf("first repair: outcome=%+v err=%v calls=%d", first, err, len(ag.Calls))
 			}
-			stepstest.GitCmd(t, dir, "remote", "set-url", "origin", upstream)
+			stepstest.GitCmd(t, dir, "remote", "set-url", "origin", sctx.Repo.UpstreamURL)
 			sctx.EvalReplay = false
 			if tc.advance {
 				tip = advanceBase("second base advance")
 			}
+			// Simulate the required full revalidation and publication before
+			// observing this run at a later comparison.
+			stepstest.GitCmd(t, dir, "fetch", "origin", "main")
+			stepstest.GitCmd(t, dir, "update-ref", "refs/heads/main", tip)
+			stepstest.GitCmd(t, dir, "push", "--force", "origin", "feature")
+			stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
+			if err := sctx.DB.UpdateRunReviewApprovedHeadSHA(sctx.Run.ID, sctx.Run.HeadSHA); err != nil {
+				t.Fatal(err)
+			}
+			approved := sctx.Run.HeadSHA
+			sctx.Run.ReviewApprovedHeadSHA = &approved
 			sctx.Fixing = false
 			sctx.PreviousFindings = ""
 			second, err := stepstest.ExecuteWithAutoFix(t, step, sctx, 1)

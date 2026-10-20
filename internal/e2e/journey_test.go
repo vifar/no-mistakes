@@ -2048,7 +2048,7 @@ func waitForRunIDStatus(t *testing.T, h *Harness, runID string, status types.Run
 	}
 	h.dumpDebugState()
 	if lastRun != nil {
-		t.Fatalf("run %s did not reach %s in %v (last status=%s)", runID, status, timeout, lastRun.Status)
+		t.Fatalf("run %s did not reach %s in %v (last status=%s error=%s)", runID, status, timeout, lastRun.Status, deref(lastRun.Error))
 	}
 	t.Fatalf("run %s did not appear while waiting for %s in %v", runID, status, timeout)
 	return nil

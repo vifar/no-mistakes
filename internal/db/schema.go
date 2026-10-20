@@ -314,7 +314,10 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
     PRIMARY KEY (repo_id, branch)
 );
 
--- One row per run that continues a failed run from its failed step (axi
+
+` + runRetrySchema
+
+const runRetrySchema = `-- One row per run that continues a failed run from its failed step (axi
 -- retry): the audit trail from the original failure to the continuation,
 -- whose own status is the outcome. source_run_id is UNIQUE because a failed
 -- run is continued at most once; it is not a foreign key, so the trail
@@ -338,7 +341,7 @@ var statusValidationMigrationStatements = []string{
 // migrationStatements hold additive schema changes applied to databases that
 // were created before the referenced columns existed. Each statement must be
 // idempotent via its error being tolerated when the column already exists.
-var migrationStatements = append([]string{
+var migrationStatements = append(append([]string{
 	`CREATE TABLE IF NOT EXISTS run_pr_contexts (
 		run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
 		pr_url TEXT, source_repo TEXT, source_branch TEXT, forge_head_sha TEXT,
@@ -351,10 +354,6 @@ var migrationStatements = append([]string{
 	`CREATE TRIGGER IF NOT EXISTS runs_verification_plan_immutable BEFORE UPDATE OF verification_plan ON runs WHEN NEW.verification_plan IS NOT OLD.verification_plan BEGIN SELECT RAISE(ABORT, 'run verification plan is immutable'); END`,
 	`ALTER TABLE runs ADD COLUMN shipping_options TEXT`,
 	`ALTER TABLE runs ADD COLUMN pi_profile TEXT`,
-	// quota_routing records one run's quota-aware agent ordering (the
-	// quotarouting.Record JSON). Unlike pi_profile it is intentionally
-	// mutable: a mid-run quota switch appends to the record's switch list.
-	`ALTER TABLE runs ADD COLUMN quota_routing TEXT`,
 	`CREATE TRIGGER IF NOT EXISTS runs_pi_profile_immutable BEFORE UPDATE OF pi_profile ON runs WHEN NEW.pi_profile IS NOT OLD.pi_profile BEGIN SELECT RAISE(ABORT, 'run Pi profile is immutable'); END`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
@@ -413,13 +412,6 @@ var migrationStatements = append([]string{
 	`ALTER TABLE runs ADD COLUMN pr_state_observed_at INTEGER`,
 	`ALTER TABLE runs ADD COLUMN ci_ready_at INTEGER`,
 	`ALTER TABLE runs ADD COLUMN ci_ready_no_ci INTEGER NOT NULL DEFAULT 0`,
-	// The CI step's opt-in release verdict (ci.release_after_checks_pass). NULL
-	// means the step never released the run there, so its terminal status can
-	// never claim checks_passed for a run that merely monitored the PR.
-	`ALTER TABLE runs ADD COLUMN ci_released_at INTEGER`,
-	// Custody return is nullable: NULL means the pipeline still owns any
-	// unpublished head this run produced; a timestamp means an explicit
-	// guarded recovery ended that ownership (internal/branchsync).
 	`ALTER TABLE runs ADD COLUMN custody_returned_at INTEGER`,
 	// Proof bindings remain nullable for ordinary and historical rows. The
 	// partial unique index is the cross-process duplicate defense.
@@ -583,18 +575,18 @@ var migrationStatements = append([]string{
         AND r.review_approved_head_sha=local_head_sha)`,
 	// Separate observation: never replace the original qualification comparison.
 	`ALTER TABLE run_pr_contexts ADD COLUMN retained_target_sha TEXT`,
+}, statusValidationMigrationStatements...), upstream199MigrationStatements...)
+
+// Version 5 adds upstream retry, release and routing evidence without rewriting history.
+var upstream199MigrationStatements = []string{
+	runRetrySchema,
+	`ALTER TABLE runs ADD COLUMN quota_routing TEXT`,
+	`ALTER TABLE runs ADD COLUMN ci_released_at INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN response_origin TEXT NOT NULL DEFAULT 'unknown'`,
 	`ALTER TABLE step_rounds ADD COLUMN response_origin TEXT NOT NULL DEFAULT 'unknown'`,
-	// Why a failed step failed, when the executor could tell. NULL means no
-	// recorded cause, which is every historical row and every failure that is
-	// not an agent invocation's own error; only a recorded cause makes a
-	// failed run eligible for axi retry.
 	`ALTER TABLE step_results ADD COLUMN failure_cause TEXT`,
-	// The source run's step row a retried run carried instead of executing.
-	// The carried row has no rounds of its own; readers that render what the
-	// step did follow this to the source row's rounds.
 	`ALTER TABLE step_results ADD COLUMN carried_from TEXT`,
-}, statusValidationMigrationStatements...)
+}
 
 // additiveMigrationStatements hold the additive schema changes that a
 // database created before the referenced column existed must receive. They

@@ -65,7 +65,7 @@ func TestExecutor_GreenCIRunRecordsChecksPassedAndReleases(t *testing.T) {
 	events := &eventCollector{}
 	exec := NewExecutor(database, p, nil, nil, []Step{releasingCIStep{}}, events.handler)
 
-	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+	if err := exec.Execute(context.Background(), run, repo, completionFixture(t, database, run)); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 
@@ -120,7 +120,7 @@ func TestExecutor_MergedCIRunStillRecordsCompleted(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	exec := NewExecutor(database, p, nil, nil, []Step{mergedCIStep{}}, nil)
 
-	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+	if err := exec.Execute(context.Background(), run, repo, completionFixture(t, database, run)); err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
 	got, err := database.GetRun(run.ID)
@@ -158,7 +158,7 @@ func TestExecutor_CIReadinessWriteFailureFailsRun(t *testing.T) {
 	}
 	events := &eventCollector{}
 	exec := NewExecutor(database, p, nil, nil, []Step{releasingCIStep{}}, events.handler)
-	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err == nil || !strings.Contains(err.Error(), "injected readiness failure") {
+	if err := exec.Execute(context.Background(), run, repo, completionFixture(t, database, run)); err == nil || !strings.Contains(err.Error(), "injected readiness failure") {
 		t.Fatalf("Execute = %v", err)
 	}
 	assertDurableFailedRunAndEvent(t, database, run.ID, events)
@@ -238,7 +238,7 @@ func TestExecutor_CIReleaseReadinessFollowsStepCompletion(t *testing.T) {
 					t.Error("persisted readiness exposed an active release step")
 				}
 			})
-			if err := exec.Execute(context.Background(), run, repo, t.TempDir()); err != nil {
+			if err := exec.Execute(context.Background(), run, repo, completionFixture(t, database, run)); err != nil {
 				t.Fatal(err)
 			}
 			if !readyEvent {

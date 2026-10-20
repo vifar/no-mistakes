@@ -39,6 +39,7 @@ func TestExecutor_AgentCrashRetryDoesNotRetryGitExit(t *testing.T) {
 		_, err := git.Run(sctx.Ctx, sctx.WorkDir, "fetch", "missing-remote", "main")
 		return &StepOutcome{}, err
 	}}
+	bindCompletionFixture(t, database, run, work)
 	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, ag, []Step{step}, nil)
 	if err := executor.Execute(context.Background(), run, repo, work); err == nil || calls != 0 {
 		t.Fatalf("git failure retried as an agent crash: calls=%d error=%v", calls, err)
@@ -72,6 +73,7 @@ func TestExecutor_AgentCrashRetryFirstPushUsesResolvedBase(t *testing.T) {
 		_, err := sctx.RunAgent(agent.RunOpts{})
 		return &StepOutcome{}, err
 	}}
+	bindCompletionFixture(t, database, run, work)
 	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, ag, []Step{step}, nil)
 	if err := executor.Execute(context.Background(), run, repo, work); err != nil || calls != 2 {
 		t.Fatalf("first-push crash retry = %v, calls=%d; want success after one retry", err, calls)
@@ -124,6 +126,7 @@ func TestExecutor_AgentCrashRetry(t *testing.T) {
 				_, err := call(agent.RunOpts{})
 				return &StepOutcome{}, err
 			}}
+			bindCompletionFixture(t, database, run, work)
 			executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: tc.retries}, ag, []Step{before, crash, after}, nil)
 			events := collectEvents(executor)
 			execErr := executor.Execute(context.Background(), run, repo, work)
@@ -207,6 +210,7 @@ func main() {
 		_, err := sctx.RunAgent(agent.RunOpts{CWD: work, Prompt: "test", Env: []string{"NM_TEST_CLAUDE_ATTEMPTS=" + attempts}})
 		return &StepOutcome{}, err
 	}}
+	bindCompletionFixture(t, database, run, work)
 	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, ag, []Step{step}, nil)
 	execErr := executor.Execute(context.Background(), run, repo, work)
 	const diagnostic = "step test failed: claude exited: exit status 1: API error status 503: service unavailable"
@@ -293,6 +297,7 @@ func TestExecutor_AgentCrashRetryRefusesChangedProof(t *testing.T) {
 			if change == "initial dirty" {
 				writeTestFile(t, work, "README.md", "already dirty")
 			}
+			bindCompletionFixture(t, database, run, work)
 			executor := NewExecutor(database, p, cfg, nil, []Step{before, crash}, nil)
 			if change == "evidence contents" {
 				evidence := executor.runEvidenceDir(run.ID)
@@ -315,9 +320,11 @@ func TestExecutor_AgentCrashRetryDoesNotRetryVerdicts(t *testing.T) {
 	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 3}, nil, []Step{step}, nil)
 	executor.onEvent = func(event ipc.Event) {
 		if event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
-			if err := executor.Respond(types.StepTest, types.ActionAbort, nil, gateSnapshot(executor)); err != nil {
-				t.Error(err)
-			}
+			go func() {
+				if err := executor.Respond(types.StepTest, types.ActionAbort, nil, gateSnapshot(executor)); err != nil {
+					t.Error(err)
+				}
+			}()
 		}
 	}
 	if err := executor.Execute(context.Background(), run, repo, t.TempDir()); err == nil || step.callCount() != 1 {
@@ -402,10 +409,10 @@ func seedRecoveredTestGate(t *testing.T, database *db.DB, run *db.Run) *db.Run {
 		t.Fatal(err)
 	}
 	findings := `{"findings":[{"id":"test-1","severity":"warning","description":"operator decision","action":"ask-user"}]}`
-	if err := database.ParkStepForApproval(run.ID, testStep.ID, types.StepStatusAwaitingApproval, 0, 0, &findings); err != nil {
+	if _, err := database.InsertStepRound(testStep.ID, 1, "initial", &findings, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := database.InsertStepRound(testStep.ID, 1, "initial", &findings, nil, 0); err != nil {
+	if err := database.ParkStepForApproval(run.ID, testStep.ID, types.StepStatusAwaitingApproval, 0, 0, &findings); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := database.InsertStepResult(run.ID, types.StepDocument); err != nil {
@@ -428,12 +435,15 @@ func TestExecutor_AgentCrashRetryDisabledAfterRecovery(t *testing.T) {
 		calls++
 		return nil, &agentInvocationFailure{err: processExitError{"agent crashed"}}
 	}}
+	bindCompletionFixture(t, database, run, work)
 	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, nil, []Step{newPassStep(types.StepReview), newPassStep(types.StepTest), document}, nil)
 	executor.onEvent = func(event ipc.Event) {
 		if event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
-			if err := executor.Respond(types.StepTest, types.ActionApprove, nil, gateSnapshot(executor)); err != nil {
-				t.Error(err)
-			}
+			go func() {
+				if err := executor.Respond(types.StepTest, types.ActionApprove, nil, gateSnapshot(executor)); err != nil {
+					t.Error(err)
+				}
+			}()
 		}
 	}
 	err := executor.Resume(context.Background(), run, repo, work)
@@ -452,12 +462,15 @@ func TestExecutor_RecoveredContinuationDoesNotFalseFailBaseFence(t *testing.T) {
 		calls++
 		return &StepOutcome{}, nil
 	}}
+	bindCompletionFixture(t, database, run, work)
 	executor := NewExecutor(database, p, &config.Config{AgentCrashRetries: 1}, nil, []Step{newPassStep(types.StepReview), newPassStep(types.StepTest), document}, nil)
 	executor.onEvent = func(event ipc.Event) {
 		if event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
-			if err := executor.Respond(types.StepTest, types.ActionApprove, nil, gateSnapshot(executor)); err != nil {
-				t.Error(err)
-			}
+			go func() {
+				if err := executor.Respond(types.StepTest, types.ActionApprove, nil, gateSnapshot(executor)); err != nil {
+					t.Error(err)
+				}
+			}()
 		}
 	}
 	if err := executor.Resume(context.Background(), run, repo, work); err != nil || calls != 1 {
@@ -595,6 +608,7 @@ func TestExecutor_AgentCrashRetryUsesGeneratedDefaultConfig(t *testing.T) {
 		_, err := sctx.RunAgent(agent.RunOpts{})
 		return &StepOutcome{}, err
 	}}
+	bindCompletionFixture(t, database, run, work)
 	executor := NewExecutor(database, p, cfg, ag, []Step{step}, nil)
 	if err := executor.Execute(context.Background(), run, repo, work); err != nil || calls != 2 {
 		t.Fatalf("generated default-budget hang = %v, calls=%d; want one retry and two calls", err, calls)
@@ -630,6 +644,7 @@ func TestExecutor_AgentCrashRetryHang(t *testing.T) {
 				return &StepOutcome{}, err
 			}}
 			cfg := &config.Config{AgentCrashRetries: 1, AgentTimeout: time.Second, AgentTimeoutsConfigured: configured}
+			bindCompletionFixture(t, database, run, work)
 			executor := NewExecutor(database, p, cfg, ag, []Step{step}, nil)
 			err = executor.Execute(context.Background(), run, repo, work)
 			if (err != nil) != configured || calls != 2-boolInt(configured) {

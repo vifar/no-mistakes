@@ -47,6 +47,9 @@ func TestResponseOriginMigratesOldRowsAsUnknown(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if _, err := legacy.Exec(`DROP TABLE run_retries; ALTER TABLE runs DROP COLUMN quota_routing; ALTER TABLE runs DROP COLUMN ci_released_at; ALTER TABLE step_results DROP COLUMN failure_cause; ALTER TABLE step_results DROP COLUMN carried_from; PRAGMA user_version=4`); err != nil {
+		t.Fatal(err)
+	}
 	if err := legacy.Close(); err != nil {
 		t.Fatal(err)
 	}

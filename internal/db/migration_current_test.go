@@ -175,7 +175,7 @@ func TestMigrationErrorNamesSQL(t *testing.T) {
 }
 
 func TestWatcherStatusUpgrade(t *testing.T) {
-	for version := 0; version <= 3; version++ {
+	for version := 0; version <= 4; version++ {
 		t.Run(fmt.Sprint(version), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.sqlite")
 			d, err := Open(path)

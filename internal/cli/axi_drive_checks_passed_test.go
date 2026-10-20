@@ -55,7 +55,7 @@ func TestRenderDriveResult_TerminalChecksPassed(t *testing.T) {
 	}
 	// The released run must not carry the still-monitoring contract, whose
 	// first instruction is that the CI monitor will rebase and re-push.
-	if strings.Contains(got, "the CI monitor rebases onto the base") {
+	if strings.Contains(got, "The monitor does not automatically repair or revalidate that changed comparison") {
 		t.Errorf("a released run must not claim a live monitor:\n%s", got)
 	}
 }
@@ -108,10 +108,10 @@ func TestDriveRun_ReleaseAndWatchGuidance(t *testing.T) {
 				t.Fatal(err)
 			}
 			if watch {
-				if !strings.Contains(out.String(), "the CI monitor rebases onto the base") || strings.Contains(out.String(), "nothing is left watching the PR") {
+				if !strings.Contains(out.String(), "The monitor does not automatically repair or revalidate that changed comparison") || strings.Contains(out.String(), "nothing is left watching the PR") {
 					t.Fatalf("wrong watch guidance: %s", &out)
 				}
-			} else if !strings.Contains(out.String(), "nothing is left watching the PR") || strings.Contains(out.String(), "the CI monitor rebases onto the base") {
+			} else if !strings.Contains(out.String(), "nothing is left watching the PR") || strings.Contains(out.String(), "The monitor does not automatically repair or revalidate that changed comparison") {
 				t.Fatalf("wrong release guidance: %s", &out)
 			}
 		})

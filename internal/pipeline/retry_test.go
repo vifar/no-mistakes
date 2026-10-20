@@ -257,7 +257,7 @@ func TestExecutor_RetryCarriesTheStepsBeforeTheFailedOneAndRestartsIt(t *testing
 	}
 	exec := NewExecutor(database, p, &config.Config{}, nil, pipelineSteps, nil)
 	exec.SetRetrySource(source.ID)
-	if err := exec.Execute(context.Background(), continuation, repo, t.TempDir()); err != nil {
+	if err := exec.Execute(context.Background(), continuation, repo, completionFixture(t, database, continuation)); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
 
@@ -301,7 +301,7 @@ func TestExecutor_RetryFailsClosedWhenTheSourceNoLongerMatchesThePipeline(t *tes
 	review := newPassStep(types.StepReview)
 	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{newPassStep(types.StepRebase), review, newPassStep(types.StepTest), newPassStep(types.StepDocument)}, nil)
 	exec.SetRetrySource(source.ID)
-	err = exec.Execute(context.Background(), continuation, repo, t.TempDir())
+	err = exec.Execute(context.Background(), continuation, repo, completionFixture(t, database, continuation))
 	if err == nil || !strings.Contains(err.Error(), "retry run "+source.ID) {
 		t.Fatalf("execute = %v, want a refusal naming the source run", err)
 	}
@@ -310,5 +310,51 @@ func TestExecutor_RetryFailsClosedWhenTheSourceNoLongerMatchesThePipeline(t *tes
 	}
 	if rows, _ := database.GetStepsByRun(continuation.ID); len(rows) != 0 {
 		t.Fatalf("refused continuation recorded %d steps", len(rows))
+	}
+}
+
+// A checkpoint carries the comparison that Review actually certified, so a
+// later live guard can reject or restart a moved target rather than binding
+// the old approval to a fresh comparison.
+func TestRetryCarriesTheCertifiedComparison(t *testing.T) {
+	for _, recorded := range []bool{false, true} {
+		t.Run(fmt.Sprint(recorded), func(t *testing.T) {
+			database, p, _, repo := setupTest(t)
+			source := failedSourceRun(t, database, repo, []types.StepName{types.StepReview, types.StepTest}, types.StepTest)
+			head := strings.Repeat("a", 40)
+			if err := database.UpdateRunHeadSHA(source.ID, head); err != nil {
+				t.Fatal(err)
+			}
+			candidate := db.PRContextCandidate{LocalHeadSHA: head, TargetBranch: "main", TargetSHA: strings.Repeat("b", 40), MergeBaseSHA: strings.Repeat("c", 40), DiffDigest: strings.Repeat("d", 64)}
+			if recorded {
+				if _, err := database.BindRunPRContext(source.ID, candidate, types.StepRebase); err != nil {
+					t.Fatal(err)
+				}
+			}
+			continuation, err := database.InsertRun(repo.ID, "feature", head, source.BaseSHA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			executor := NewExecutor(database, p, nil, nil, stepsNamed(types.StepReview, types.StepTest), nil)
+			executor.SetRetrySource(source.ID)
+			executor.SetPRContextGuard(func(*StepContext, types.StepName) (PRContextDecision, error) {
+				t.Fatal("planning must not invent a new comparison")
+				return PRContextDecision{}, nil
+			})
+			_, err = executor.planRetry(continuation)
+			if !recorded {
+				if err == nil {
+					t.Fatal("missing source comparison accepted")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := database.GetRunPRContext(continuation.ID)
+			if err != nil || got == nil || got.PRContextCandidate != candidate {
+				t.Fatalf("carried comparison = %+v, %v", got, err)
+			}
+		})
 	}
 }

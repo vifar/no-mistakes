@@ -22,7 +22,8 @@ var (
 )
 
 // Bump whenever schemaSQL, migrationStatements, statusValidationMigrationStatements,
-// or additiveMigrationStatements changes. Version zero is the historical,
+// upstream199MigrationStatements, or additiveMigrationStatements changes.
+// Version zero is the historical,
 // unversioned schema; its complete upgrade runs once before the stamp is
 // committed. Current opens execute no DDL or backfill DML.
 // Version 6 is allocated by the parallel upstream-sync migration. Keep this
@@ -103,6 +104,11 @@ func migrateWriteAttempt(sqlDB *sql.DB) error {
 		// A statement for a version newer than the database's is harmless: it
 		// is additive and idempotent.
 		for _, stmt := range additiveMigrationStatements {
+			if _, err := tx.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
+				return fmt.Errorf("migrate db (%s): %w", stmt, err)
+			}
+		}
+		for _, stmt := range upstream199MigrationStatements {
 			if _, err := tx.Exec(stmt); err != nil && !isDuplicateColumnErr(err) {
 				return fmt.Errorf("migrate db (%s): %w", stmt, err)
 			}

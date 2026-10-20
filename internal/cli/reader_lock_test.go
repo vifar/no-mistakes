@@ -161,6 +161,7 @@ func TestCLIReadersWithLiveDaemonAndHeldWriter(t *testing.T) {
 	if err := database.UpdateRunStatus(parked.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
 	}
+	settleUnmanagedRunOnCleanup(t, database, parked.ID)
 	step, err := database.InsertStepResult(parked.ID, types.StepReview)
 	if err != nil {
 		t.Fatal(err)

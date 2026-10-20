@@ -406,3 +406,37 @@ func TestBitbucketStyleRestampAddsReplacesAndRemovesTheAcceptedGapAudit(t *testi
 		t.Fatalf("foreign body touched: %q %v %v", foreign, rebound, err)
 	}
 }
+
+func TestAcceptedGapDigestsCoverPublishedControlSanitization(t *testing.T) {
+	t.Parallel()
+	steps := acceptedGapStepsForTest(t)
+	var gaps map[string]any
+	if err := json.Unmarshal([]byte(*steps[1].AcceptedGapsJSON), &gaps); err != nil {
+		t.Fatal(err)
+	}
+	gaps["reason"] = "\x1b[31mowner approved via first mate\x1b[0m \x01"
+	gaps["covered_by"] = "\x1b[32mTestBrokerTimeoutMocked\x1b[0m"
+	data, err := json.Marshal(gaps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(data)
+	steps[1].AcceptedGapsJSON = &raw
+	md, _ := buildPipelineSummaryFor(steps, nil, testPipelineHeadSHA, scm.ProviderGitHub, pipelineAttestationPolicy{})
+	published := redactPRContent(prContent{Body: md}).Body
+	const reason = "owner approved via first mate \ufffd"
+	const covered = "TestBrokerTimeoutMocked"
+	if !strings.Contains(published, "Approved: "+reason) || !strings.Contains(published, "Covered by: "+covered) {
+		t.Fatalf("published audit = %s", published)
+	}
+	attestation := parsePipelineAttestationForTest(t, published)
+	for _, step := range attestation.Steps {
+		if step.Step == types.StepTest {
+			if step.AcceptedGaps == nil || step.AcceptedGaps.ReasonDigest != fmt.Sprintf("%x", sha256.Sum256([]byte(reason))) || step.AcceptedGaps.CoveredByDigest != fmt.Sprintf("%x", sha256.Sum256([]byte(covered))) {
+				t.Fatalf("digest does not certify the visible audit: %+v", step.AcceptedGaps)
+			}
+			return
+		}
+	}
+	t.Fatal("Test attestation missing")
+}

@@ -627,6 +627,8 @@ That cancels the pipeline's in-flight work and forces a full re-validation; use 
 
 Continue a run that failed because an agent invocation itself failed, instead of starting the whole pipeline again.
 
+Strict shipping requires a full rerun and refuses checkpoint retry. Ordinary retries retain the source comparison receipt, so a moved target cannot inherit its Review approval. A queued retry records its source before admission and rechecks configuration when its execution slot becomes available.
+
 ```sh
 no-mistakes axi retry --run <id>
 ```

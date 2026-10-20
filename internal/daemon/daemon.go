@@ -1856,11 +1856,14 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 }
 
 func stepToInfo(d *db.DB, s *db.StepResult) ipc.StepResultInfo {
-	rounds, err := d.GetRoundsByStep(s.ID)
+	rounds, err := d.GetRoundsByStep(s.RoundsStepID())
 	return stepToInfoWithRounds(d, s, rounds, err)
 }
 
 func stepToInfoWithRounds(d *db.DB, s *db.StepResult, rounds []*db.StepRound, roundsErr error) ipc.StepResultInfo {
+	if s.RoundsStepID() != s.ID {
+		rounds, roundsErr = d.GetRoundsByStep(s.RoundsStepID())
+	}
 	info := ipc.StepResultInfo{
 		ID:             s.ID,
 		RunID:          s.RunID,
