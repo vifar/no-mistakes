@@ -101,22 +101,7 @@ func newStatusJourney(t *testing.T, provider string) (*Harness, *journeyStatusSe
 	}
 	if provider != "local" {
 		setupStatefulGitHub(t, h)
-		// An insteadOf rewrite changes `remote get-url` to file:// on recovery,
-		// losing the forge identity. Keep the actual GitHub URL stable and route
-		// only the SSH transport to this harness's disposable bare upstream.
-		ssh := filepath.Join(h.BinDir, "local-git-ssh")
-		script := "#!/bin/sh\ncase \"$*\" in\n" +
-			"*git-upload-pack*) exec git upload-pack " + shellQuote(h.UpstreamDir) + ";;\n" +
-			"*git-receive-pack*) exec git receive-pack " + shellQuote(h.UpstreamDir) + ";;\n" +
-			"*) exit 1;;\nesac\n"
-		if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("GIT_SSH_COMMAND", shellQuote(ssh))
-		t.Setenv("GIT_SSH_VARIANT", "ssh")
-		if out, err := h.runGit(t.Context(), h.WorkDir, "remote", "set-url", "origin", "git@github.com:example/closes.git"); err != nil {
-			t.Fatalf("set stable forge identity: %v\n%s", err, out)
-		}
+		configureLocalGitHubSSH(t, h)
 	}
 	t.Setenv("FAKE_CLI_STATUS_API_URL", server.URL)
 	t.Setenv("FAKE_CLI_MODE", "gh")
@@ -149,6 +134,26 @@ func newStatusJourney(t *testing.T, provider string) (*Harness, *journeyStatusSe
 	}
 	statusCommand(t, h, h.WorkDir, "init")
 	return h, forge
+}
+
+// An insteadOf rewrite changes `remote get-url` to file:// on recovery,
+// losing the forge identity. Keep the actual GitHub URL stable and route
+// only the SSH transport to this harness's disposable bare upstream.
+func configureLocalGitHubSSH(t *testing.T, h *Harness) {
+	t.Helper()
+	ssh := filepath.Join(h.BinDir, "local-git-ssh")
+	script := "#!/bin/sh\ncase \"$*\" in\n" +
+		"*git-upload-pack*) exec git upload-pack " + shellQuote(h.UpstreamDir) + ";;\n" +
+		"*git-receive-pack*) exec git receive-pack " + shellQuote(h.UpstreamDir) + ";;\n" +
+		"*) exit 1;;\nesac\n"
+	if err := os.WriteFile(ssh, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_SSH_COMMAND", shellQuote(ssh))
+	t.Setenv("GIT_SSH_VARIANT", "ssh")
+	if out, err := h.runGit(t.Context(), h.WorkDir, "remote", "set-url", "origin", "git@github.com:example/closes.git"); err != nil {
+		t.Fatalf("set stable forge identity: %v\n%s", err, out)
+	}
 }
 
 func statusCommand(t *testing.T, h *Harness, dir string, args ...string) string {
