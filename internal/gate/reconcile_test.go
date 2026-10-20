@@ -948,7 +948,7 @@ func TestPreservedByRecoveryAnchorsWithoutAnchorsCreditsNothing(t *testing.T) {
 	ctx := context.Background()
 	_, gateDir, privateHead, _, liveHead := setupAnchoredPrivateBranch(t)
 
-	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, []string{privateHead})
+	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, []string{privateHead}, nil)
 	if err != nil {
 		t.Fatalf("preservedByRecoveryAnchors: %v", err)
 	}
@@ -962,7 +962,7 @@ func TestPreservedByRecoveryAnchorsWithoutAnchorsCreditsNothing(t *testing.T) {
 	for i := range candidates {
 		candidates[i] = fmt.Sprintf("%040d", i)
 	}
-	preserved, err = preservedByRecoveryAnchors(ctx, gateDir, liveHead, candidates)
+	preserved, err = preservedByRecoveryAnchors(ctx, gateDir, liveHead, candidates, nil)
 	if err != nil || len(preserved) != 0 {
 		t.Fatalf("oversized scan without anchors = %+v, %v; want no credit and no error", preserved, err)
 	}
@@ -984,7 +984,7 @@ func TestPreservedByRecoveryAnchorsScansOversizedCandidateSetsInBatches(t *testi
 	for i := range candidates {
 		candidates[i] = privateHead
 	}
-	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, candidates)
+	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, candidates, nil)
 	if err != nil {
 		t.Fatalf("oversized anchored scan refused instead of batching: %v", err)
 	}
@@ -1006,7 +1006,7 @@ func TestPreservedByRecoveryAnchorsIsBoundedToTheCandidateCommits(t *testing.T) 
 	anchor := "refs/no-mistakes/recover/01MUNRELATEDANCHOR0000000000000"
 	reconcileGit(t, gateDir, "update-ref", anchor, reconcileGit(t, gateDir, "rev-parse", "refs/heads/unrelated"))
 
-	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, []string{privateHead})
+	preserved, err := preservedByRecoveryAnchors(ctx, gateDir, liveHead, []string{privateHead}, nil)
 	if err != nil {
 		t.Fatalf("preservedByRecoveryAnchors: %v", err)
 	}

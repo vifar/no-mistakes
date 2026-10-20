@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +64,10 @@ type axiEnv struct {
 	cfg             *config.GlobalConfig
 	globalConfigErr error
 	client          *ipc.Client
+	// notices receives operator-facing notes a submission produces on its
+	// way to the gate, such as a retired private mirror and the refs that
+	// preserve it. Nil discards them.
+	notices io.Writer
 }
 
 type axiEnvOptions struct {
