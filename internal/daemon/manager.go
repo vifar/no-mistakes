@@ -1617,7 +1617,7 @@ func (m *RunManager) handleRetainedPushLocked(ctx context.Context, params *ipc.P
 		baseSHA = strings.TrimSpace(params.ReconciledPreviousHead)
 	}
 	if params.LaunchNonce != "" {
-		receipt, err := m.startFreshLaunchLocked(ctx, repo, branch, params.New, baseSHA, params.Gate, params.SkipSteps, params.Intent, params.LaunchNonce, params.ValidationGeneration, params.PRBaseBranch, params.OmitIntent, params.ExternalCIOwner, "push", params.VerificationPlanID, params.ClosingIssueRefs, nil, params.PiProfile)
+		receipt, err := m.startFreshLaunchLocked(ctx, repo, branch, params.New, baseSHA, params.Gate, params.SkipSteps, params.Intent, params.LaunchNonce, params.ValidationGeneration, params.PRBaseBranch, params.OmitIntent, params.ExternalCIOwner, "push", params.VerificationPlanID, params.ClosingIssueRefs, params.PiProfile)
 		if err != nil {
 			return "", err
 		}
@@ -1641,7 +1641,7 @@ func (m *RunManager) HandleStartFreshRun(ctx context.Context, params *ipc.StartF
 	if repo == nil {
 		return ipc.LaunchReceipt{}, fmt.Errorf("unknown repo %s", params.RepoID)
 	}
-	return m.startFreshLaunch(ctx, repo, params.Branch, params.HeadSHA, "", m.paths.RepoDir(repo.ID), params.SkipSteps, params.Intent, params.LaunchNonce, params.ValidationGeneration, params.PRBaseBranch, params.OmitIntent, params.ExternalCIOwner, "fresh", params.VerificationPlanID, params.ClosingIssueRefs, nil, params.PiProfile)
+	return m.startFreshLaunch(ctx, repo, params.Branch, params.HeadSHA, "", m.paths.RepoDir(repo.ID), params.SkipSteps, params.Intent, params.LaunchNonce, params.ValidationGeneration, params.PRBaseBranch, params.OmitIntent, params.ExternalCIOwner, "fresh", params.VerificationPlanID, params.ClosingIssueRefs, params.PiProfile)
 }
 
 // startFreshLaunch owns proof identity under the branch lock. A nonce may
