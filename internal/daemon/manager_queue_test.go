@@ -33,9 +33,10 @@ import (
 //
 // started records the order in which runs began executing.
 type schedStep struct {
-	mu      sync.Mutex
-	started []string
-	gates   map[string]chan struct{}
+	mu        sync.Mutex
+	started   []string
+	cancelled []string
+	gates     map[string]chan struct{}
 }
 
 func TestQueuedSetupAbortCancelsStalledFetchAndReleasesSlot(t *testing.T) {
@@ -150,6 +151,9 @@ func (s *schedStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, 
 	select {
 	case <-s.gate(sctx.Run.ID):
 	case <-sctx.Ctx.Done():
+		s.mu.Lock()
+		s.cancelled = append(s.cancelled, sctx.Run.ID)
+		s.mu.Unlock()
 		return nil, context.Cause(sctx.Ctx)
 	}
 	switch {

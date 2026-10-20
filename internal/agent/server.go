@@ -77,11 +77,22 @@ func getAvailablePort() (int, error) {
 // ctx is only used for the health check timeout.
 // agentName tags the PID tracking file so crash-recovery can identify orphans.
 func startServerWithPort(ctx context.Context, agentName, bin string, args []string, cwd string, healthPath string, port int, environment runenv.Overlay, extraEnv ...[]string) (*managedServer, error) {
+	return startServerWithPortOutput(ctx, agentName, bin, args, cwd, healthPath, port, environment, nil, extraEnv...)
+}
+
+// startServerWithPortOutput is startServerWithPort with an explicit output
+// writer. A non-nil writer receives stdout and stderr instead of the global
+// sink, allowing callers to capture startup data such as OpenCode's generated
+// password.
+func startServerWithPortOutput(ctx context.Context, agentName, bin string, args []string, cwd string, healthPath string, port int, environment runenv.Overlay, output io.Writer, extraEnv ...[]string) (*managedServer, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
 	cmd.Stdin = nil
 	cmd.Env = gitSafeEnvWithOverlay(cwd, environment, extraEnv...)
-	out := currentManagedServerOutput()
+	out := output
+	if out == nil {
+		out = currentManagedServerOutput()
+	}
 	cmd.Stdout = out // server stdout goes to the configured sink for debugging
 	cmd.Stderr = out
 	configureManagedServerCmd(cmd)

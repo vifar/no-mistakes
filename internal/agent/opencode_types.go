@@ -61,7 +61,9 @@ type opencodeOpenAI struct {
 	Phase string `json:"phase,omitempty"`
 }
 
-// opencodeMessageResponse is the JSON body from POST /session/{id}/message.
+// opencodeMessageResponse is the adapter's common assistant-message shape.
+// It decodes the 1.x message response directly; v2MessageToResponse converts
+// the 2.x message-list entry into this shape.
 type opencodeMessageResponse struct {
 	Info  *opencodeMessageInfo  `json:"info,omitempty"`
 	Parts []opencodeMessagePart `json:"parts,omitempty"`

@@ -59,6 +59,7 @@ func TestOwnerObservationOnRealBinary(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		cleanupSyntheticRun(t, database, r.ID)
 		if err := database.UpdateRunStatus(r.ID, types.RunRunning); err != nil {
 			t.Fatal(err)
 		}

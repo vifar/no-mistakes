@@ -482,7 +482,12 @@ func TestClaimedCancellationDoesNotRequireDatabaseAccess(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					t.Cleanup(func() { f.mgr.Shutdown(); readonly.Close() })
+					t.Cleanup(func() {
+						// End the injected fault before teardown records a raw shutdown.
+						f.mgr.db = f.d
+						f.mgr.Shutdown()
+						readonly.Close()
+					})
 					if _, err := readonly.CancelQueuedRun(id, types.RunCancelReasonAbortedByUser); err == nil {
 						t.Fatal("fixture allowed a write on the read-only connection")
 					}
@@ -502,7 +507,13 @@ func TestClaimedCancellationDoesNotRequireDatabaseAccess(t *testing.T) {
 						reason = types.RunCancelReasonSuperseded
 						err = f.mgr.cancelActiveRuns("fault-repo", branch)
 					}
-					if err != nil {
+					if action == "supersede" && fault == "closed" {
+						// The workload must stop without database access, but
+						// supersession cannot acknowledge unreadable settlement.
+						if err == nil || !strings.Contains(err.Error(), "timed out waiting for cancelled runs") {
+							t.Fatalf("supersede with unreadable settlement: %v", err)
+						}
+					} else if err != nil {
 						t.Fatalf("cancel claimed run: %v", err)
 					}
 					f.waitFor("claimed run to stop", func() bool { return f.status(id) == types.RunCancelled })
@@ -788,11 +799,17 @@ func TestClaimedCancelRPCStopsWorkWhenDatabaseReadsFail(t *testing.T) {
 	if _, err := raw.Exec("ALTER TABLE runs RENAME TO unreadable_runs"); err != nil {
 		t.Fatal(err)
 	}
-	defer func() {
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
 		if _, err := raw.Exec("ALTER TABLE unreadable_runs RENAME TO runs"); err != nil {
 			t.Errorf("restore disposable database: %v", err)
 		}
-	}()
+		restored = true
+	}
+	defer restore()
 	// A real child of this in-process daemon remains forbidden from controlling
 	// the pipeline, even though the same SQLite fault must not block an operator.
 	child := exec.Command(os.Args[0], "-test.run=^TestClaimedCancelRPCStopsWorkWhenDatabaseReadsFail$", "-test.timeout=10s")
@@ -810,9 +827,24 @@ func TestClaimedCancelRPCStopsWorkWhenDatabaseReadsFail(t *testing.T) {
 		t.Fatalf("claimed abort must reach its cancellation handle before database access: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
+	for {
+		f.step.mu.Lock()
+		stopped := len(f.step.cancelled) == 1 && f.step.cancelled[0] == id
+		f.step.mu.Unlock()
+		if stopped {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("claimed workload kept running after abort with an unreadable database")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// Terminal persistence retains custody until the database is readable.
+	restore()
+	deadline = time.Now().Add(30 * time.Second)
 	for f.slots().InUse != 0 {
 		if time.Now().After(deadline) {
-			t.Fatal("claimed workload kept its slot after abort with an unreadable database")
+			t.Fatal("claimed workload kept its slot after database recovery")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

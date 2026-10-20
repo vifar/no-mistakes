@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func init() {
@@ -376,6 +377,17 @@ func makeSocketSafeTempDir(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	return dir
+}
+
+// cleanupSyntheticRun settles a row inserted without a RunManager executor.
+// Unlike a real run, it has no goroutine to terminalize it during shutdown.
+func cleanupSyntheticRun(t *testing.T, d *db.DB, id string) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := d.UpdateRunStatus(id, types.RunCancelled); err != nil {
+			t.Errorf("settle synthetic run: %v", err)
+		}
+	})
 }
 
 // startTestDaemon starts an in-process daemon for integration tests.

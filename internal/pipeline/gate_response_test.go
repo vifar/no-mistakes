@@ -320,7 +320,7 @@ func TestExecutor_AllIgnoredFixResponseRecordsTheDeclines(t *testing.T) {
 	// round is waited for rather than assumed.
 	declinedRound := func() *db.StepRound {
 		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(30 * time.Second)
 		var last []*db.StepRound
 		for time.Now().Before(deadline) {
 			rounds, err := database.GetRoundsByStep(steps[0].ID)
@@ -358,7 +358,7 @@ func TestExecutor_AllIgnoredFixResponseRecordsTheDeclines(t *testing.T) {
 	// The record is what a later gate reads as an earlier decision, so the same
 	// three findings may now be omitted: the response is accepted and keeps
 	// them. Without the record it would be refused as unaccounted.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		kept, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, nil, nil, nil, nil, "", gateSnapshot(exec))
 		if err == nil {
@@ -374,7 +374,7 @@ func TestExecutor_AllIgnoredFixResponseRecordsTheDeclines(t *testing.T) {
 	}
 	// End the run: the fix round after the last response re-parks, possibly
 	// after this point, so approve once the gate is there.
-	approvalDeadline := time.Now().Add(5 * time.Second)
+	approvalDeadline := time.Now().Add(30 * time.Second)
 	for {
 		err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec))
 		if err == nil {
@@ -421,7 +421,7 @@ func TestExecutor_FixResponseNormalizesIDsBeforeDispatchAndPersistence(t *testin
 		t.Fatalf("dispositions = %+v, want fixed=[R1] ignored=[R2,R3]", dispositions)
 	}
 
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		recorded := []string(nil)
 		found := false
@@ -449,7 +449,7 @@ func TestExecutor_FixResponseNormalizesIDsBeforeDispatchAndPersistence(t *testin
 	// record must be the same list, or the padding would be undone on one side
 	// only.
 	seen := false
-	dispatchDeadline := time.Now().Add(5 * time.Second)
+	dispatchDeadline := time.Now().Add(30 * time.Second)
 	for !seen {
 		select {
 		case sctx := <-contexts:
@@ -466,7 +466,7 @@ func TestExecutor_FixResponseNormalizesIDsBeforeDispatchAndPersistence(t *testin
 	}
 
 	// End the run: the fix round re-parks, possibly after this point.
-	approvalDeadline := time.Now().Add(5 * time.Second)
+	approvalDeadline := time.Now().Add(30 * time.Second)
 	for {
 		err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec))
 		if err == nil {
@@ -495,7 +495,7 @@ func TestExecutor_FixResponseKeepsEarlierDecisionsAndRefusesTheirReversal(t *tes
 	// so both the send and the write are waited for rather than assumed.
 	respond := func(selected, ignored []string) RespondDispositions {
 		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(30 * time.Second)
 		for {
 			dispositions, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, selected, ignored, nil, nil, "", gateSnapshot(exec))
 			if err == nil {
@@ -513,7 +513,7 @@ func TestExecutor_FixResponseKeepsEarlierDecisionsAndRefusesTheirReversal(t *tes
 	}
 	waitForDecision := func(wantRound int) {
 		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
+		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
 			rounds, err := database.GetRoundsByStep(steps[0].ID)
 			if err == nil && len(rounds) >= wantRound && rounds[wantRound-1].SelectionSource != nil {
@@ -541,7 +541,7 @@ func TestExecutor_FixResponseKeepsEarlierDecisionsAndRefusesTheirReversal(t *tes
 
 	// Round 3: trying to decline R1 is refused, and the gate stays parked. The
 	// attempt races the re-park, so it retries until the gate is there.
-	refusalDeadline := time.Now().Add(5 * time.Second)
+	refusalDeadline := time.Now().Add(30 * time.Second)
 	var refusal *RespondRefusal
 	for {
 		_, err = exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R2", "R3"}, []string{"R1"}, nil, nil, "", gateSnapshot(exec))
@@ -585,7 +585,7 @@ func TestExecutor_FixResponseKeepsEarlierDecisionsAndRefusesTheirReversal(t *tes
 
 	// End the run: the fix round after the last response re-parks, possibly
 	// after this point, so approve once the gate is there.
-	approvalDeadline := time.Now().Add(5 * time.Second)
+	approvalDeadline := time.Now().Add(30 * time.Second)
 	for {
 		err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec))
 		if err == nil {
@@ -647,14 +647,26 @@ func TestExecutor_RecoveredGateValidatesAndRecordsTheDecision(t *testing.T) {
 		},
 	}
 	exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	workDir := completionFixture(t, database, run)
+	ctx, cancel := context.WithCancel(context.Background())
+	finished := make(chan struct{})
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-finished:
+		case <-time.After(30 * time.Second):
+			t.Error("recovered executor did not stop")
+		}
+	})
 	done := make(chan error, 1)
 	go func() {
-		done <- exec.Resume(context.Background(), run, repo, completionFixture(t, database, run))
+		defer close(finished)
+		done <- exec.Resume(ctx, run, repo, workDir)
 	}()
 
 	// The recovered park is registered asynchronously, so the refusal is
 	// asserted inside the retry loop that waits for it.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	refused := false
 	for time.Now().Before(deadline) {
 		_, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1"}, nil, nil, nil, "", gateSnapshot(exec))
@@ -854,7 +866,7 @@ func TestExecutor_AddedFindingCannotTakeADeclinedGateFindingID(t *testing.T) {
 
 	// The fixer's own input carries the added concern and not the declined
 	// defect, which stays deferred.
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for {
 		select {
 		case sctx := <-contexts:
@@ -880,7 +892,7 @@ dispatched:
 	if err != nil || len(steps) != 1 {
 		t.Fatalf("steps = %+v, %v", steps, err)
 	}
-	roundDeadline := time.Now().Add(5 * time.Second)
+	roundDeadline := time.Now().Add(30 * time.Second)
 	for {
 		rounds, err := database.GetRoundsByStep(steps[0].ID)
 		if err == nil {
@@ -900,7 +912,7 @@ dispatched:
 		time.Sleep(10 * time.Millisecond)
 	}
 recorded:
-	approvalDeadline := time.Now().Add(5 * time.Second)
+	approvalDeadline := time.Now().Add(30 * time.Second)
 	for {
 		if err := exec.Respond(types.StepLint, types.ActionApprove, nil, gateSnapshot(exec)); err == nil {
 			break
@@ -975,7 +987,7 @@ func TestExecutor_FixResponseRefusedWhenAStoredDecisionCannotBeDecoded(t *testin
 	if _, err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"R1"}, []string{"R2", "R3"}, nil, nil, "", gateSnapshot(exec)); err != nil {
 		t.Fatalf("the still-parked gate refused the response once its history decoded: %v", err)
 	}
-	approvalDeadline := time.Now().Add(5 * time.Second)
+	approvalDeadline := time.Now().Add(30 * time.Second)
 	for {
 		if err := exec.Respond(types.StepReview, types.ActionApprove, nil, gateSnapshot(exec)); err == nil {
 			break

@@ -4,12 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"log/slog"
 	"strings"
-	"time"
-
-	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 )
 
 func (a *opencodeAgent) ensureServer(ctx context.Context, cwd string, env []string) (string, error) {
@@ -20,14 +16,42 @@ func (a *opencodeAgent) ensureServer(ctx context.Context, cwd string, env []stri
 	}
 	port, err := getAvailablePort()
 	if err != nil {
-		return "", fmt.Errorf("opencode port: %w", err)
+		return "", agentSetupFailure(fmt.Errorf("opencode port: %w", err))
 	}
 	args := buildOpencodeServeArgs(a.extraArgs, port)
-	srv, err := startServerWithPort(ctx, "opencode", a.bin, args, cwd, "/global/health", port, a.overlay(), env)
+	// The credential is read from the SAME environment the server is
+	// started with, so the server and the client always agree on it.
+	auth := resolveOpencodeAuth(gitSafeEnvWithOverlay(cwd, a.overlay(), env))
+	// A 2.x server generates a random password at startup unless one is
+	// configured, and prints it once on stdout. The client watches the
+	// output for that line, so the two always agree on the credential.
+	capture, sink := newOpencodePasswordCapture()
+	srv, err := startServerWithPortOutput(ctx, "opencode", a.bin, args, cwd, "/global/health", port, a.overlay(), sink, env)
 	if err != nil {
-		return "", fmt.Errorf("opencode server: %w", err)
+		return "", agentSetupFailure(fmt.Errorf("opencode server: %w", err))
 	}
 	a.server = srv
+	if auth.password == "" {
+		// Nothing was configured, so the server generated one and printed
+		// it. Wait briefly for that line: it is printed as the server
+		// comes up, and the health check above already waited for it.
+		auth = opencodeAuth{username: opencodeAuthUsername, password: capture.Wait(ctx, opencodePasswordWait)}
+	}
+	a.apiAuth = auth
+
+	// The API generation decides every route this adapter uses, so it is
+	// detected as soon as the server is up, before the first session is
+	// created. A 2.x server answers the 1.x session route with 405, which
+	// reads as a broken model rather than a version mismatch; detecting the
+	// version is what turns that into a working request.
+	version, err := detectOpencodeAPIVersion(ctx, srv.baseURL(), a.apiAuth)
+	if err != nil {
+		srv.shutdown()
+		a.server = nil
+		return "", agentSetupFailure(fmt.Errorf("opencode api version: %w", err))
+	}
+	a.apiVersion = version
+	slog.Info("opencode api detected", "version", version.String())
 	return srv.baseURL(), nil
 }
 
@@ -41,109 +65,10 @@ func buildOpencodeServeArgs(extraArgs []string, port int) []string {
 	return args
 }
 
-func (a *opencodeAgent) createSession(ctx context.Context, baseURL, cwd string) (string, error) {
-	body := map[string]any{
-		"directory": cwd,
-		"permission": []map[string]string{
-			{"permission": "*", "pattern": "*", "action": "allow"},
-		},
-	}
-	resp, err := doJSON(ctx, http.MethodPost, baseURL+"/session", nil, body)
-	if err != nil {
-		return "", fmt.Errorf("opencode create session: %w", err)
-	}
-
-	var result struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(resp, &result); err != nil {
-		return "", fmt.Errorf("opencode create session parse: %w", err)
-	}
-	return result.ID, nil
-}
-
-func (a *opencodeAgent) connectEventStream(ctx context.Context, baseURL string) (io.ReadCloser, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/global/event", nil)
-	if err != nil {
-		return nil, fmt.Errorf("opencode event stream request: %w", err)
-	}
-	req.Header.Set("Accept", "text/event-stream")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("opencode event stream: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		return nil, fmt.Errorf("opencode event stream failed with %d: %s", resp.StatusCode, string(body))
-	}
-
-	return resp.Body, nil
-}
-
-func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, prompt string, schema json.RawMessage) (*opencodeMessageResponse, error) {
-	respBytes, err := doJSON(ctx, http.MethodPost, baseURL+"/session/"+sessionID+"/message", nil, a.messageBody(prompt, schema))
-	if err != nil {
-		return nil, err
-	}
-
-	var resp opencodeMessageResponse
-	if err := json.Unmarshal(respBytes, &resp); err != nil {
-		return nil, fmt.Errorf("opencode message parse: %w", err)
-	}
-	return &resp, nil
-}
-
-// messageBody builds the POST /session/{id}/message payload.
-//
-// Model and reasoning effort ride the body rather than argv because `opencode
-// serve` has no flag for either: it exits with usage on an unknown option, so an
-// argv-based pin would take the whole server down instead of tuning it. The
-// provider/model split is validated at construction by agentcfg, so a non-empty
-// model always yields the two fields opencode requires; opencode calls reasoning
-// effort a provider-specific "variant".
-func (a *opencodeAgent) messageBody(prompt string, schema json.RawMessage) map[string]any {
-	body := map[string]any{
-		"role":  "user",
-		"parts": []map[string]string{{"type": "text", "text": prompt}},
-	}
-	if provider, modelID, ok := agentcfg.SplitProviderModel(a.profile.Model); ok {
-		body["model"] = map[string]string{"providerID": provider, "modelID": modelID}
-	}
-	if a.profile.Effort != "" {
-		body["variant"] = string(a.profile.Effort)
-	}
-	if len(schema) > 0 {
-		body["info"] = map[string]any{
-			"format": map[string]any{
-				"type":       "json_schema",
-				"schema":     json.RawMessage(schema),
-				"retryCount": 2,
-			},
-		}
-	}
-	return body
-}
-
-func (a *opencodeAgent) abortSession(baseURL, sessionID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	doJSON(ctx, http.MethodPost, baseURL+"/session/"+sessionID+"/abort", nil, nil)
-}
-
-func (a *opencodeAgent) deleteSession(baseURL, sessionID string) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, baseURL+"/session/"+sessionID, nil)
-	if req != nil {
-		resp, err := http.DefaultClient.Do(req)
-		if err == nil && resp != nil {
-			resp.Body.Close()
-		}
-	}
-}
+// The session, message, event-stream and teardown calls live in
+// opencode_api.go: they are the parts of the adapter that differ between the
+// OpenCode 1.x and 2.x API generations, and keeping them together makes the
+// two shapes readable side by side.
 
 // buildOpencodePrompt appends schema instructions to the prompt.
 func buildOpencodePrompt(prompt string, schema json.RawMessage) string {

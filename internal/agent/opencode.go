@@ -112,11 +112,18 @@ type opencodeAgent struct {
 	// profile is the harness-neutral model/effort selection resolved by
 	// internal/agentcfg. `opencode serve` rejects model and variant flags
 	// outright, so unlike every other native adapter these two knobs cannot ride
-	// argv: they belong to the session-message body (see sendMessage).
+	// argv: the adapter maps them to version-specific HTTP request bodies.
 	profile agentcfg.Profile
 	subprocessContext
 	mu     sync.Mutex
 	server *managedServer
+	// apiVersion is the detected wire generation of the server API
+	// (1.x root-level routes, 2.x /api routes). It is detected once, when
+	// the server comes up, and every request path is derived from it.
+	apiVersion opencodeAPIVersion
+	// apiAuth is the credential the 2.x server requires on every /api
+	// request. It comes from the agent's own environment, never guessed.
+	apiAuth opencodeAuth
 }
 
 func (a *opencodeAgent) Name() string { return "opencode" }
@@ -157,7 +164,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 		return result, err
 	}
 
-	// OpenCode implements json_schema output as a required StructuredOutput
+	// OpenCode 1.x implements json_schema output as a required StructuredOutput
 	// tool call. Some thinking-enabled models reject that combination, and
 	// some gateways reject every non-auto tool_choice outright. Retry
 	// once without the native format, while keeping the schema in the prompt
@@ -194,6 +201,14 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 	baseURL, err := a.ensureServer(ctx, opts.CWD, opts.Env)
 	if err != nil {
 		return nil, err
+	}
+
+	// The 2.x API is a different protocol, not a different route list: the
+	// session body, the prompt endpoint, the event frames and the
+	// completion signal all changed. It runs its own path so the 1.x path
+	// stays exactly as it was.
+	if a.version() == opencodeAPIVersion2 {
+		return a.runOnceV2(ctx, opts, baseURL)
 	}
 
 	// Create session with blanket permissions

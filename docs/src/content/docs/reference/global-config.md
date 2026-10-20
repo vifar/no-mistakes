@@ -174,9 +174,9 @@ agent: [codex, grok]
 The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
 After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` (or `devin` and `acp:devin`) provide one fallback and preserve whichever spelling appears first.
 If no entry is available, the gate fails before its first pipeline step.
-If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
+If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback. OpenCode and Rovo Dev server-startup and session-creation failures also count as unavailable agents. For OpenCode, a failed API-generation probe or event-stream connection before submitting the prompt counts the same way.
 Fallback candidates share the invocation's existing bounded context and use only its remaining time; once that context expires or is cancelled, no further candidate is announced or started.
-Structured findings and schema/output validation problems do not trigger fallback.
+Structured findings and schema/output validation problems do not trigger fallback. An OpenCode failure from a turn that ran tools, or whose tool activity cannot be established, does not trigger agent fallback.
 
 ### acpx_path
 
@@ -288,12 +288,12 @@ How each field maps:
 | `copilot`         | `--model`                                     | `--effort`                        | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`  |
 | `pi`              | `--model`                                     | `--thinking`                      | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`  |
 | `omp`             | `--model`                                     | `--thinking`                      | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`  |
-| `opencode`        | session-message `model` (needs `provider/model`) | session-message `variant`      | provider-specific                                   |
+| `opencode`        | HTTP API `model` (needs `provider/model`)       | HTTP API `variant`                | provider-specific                                   |
 | `cursor`, `devin`, `acp:*` | `acpx --model`                       | not expressible                   | -                                                   |
 | `rovodev`         | not expressible                               | not expressible                   | -                                                   |
 | `antigravity`     | not expressible                               | not expressible                   | -                                                   |
 
-`opencode` needs the `provider/model` form (for example `openai/gpt-5`) because its session API takes the provider and the model as separate fields; a bare model name is refused at config load rather than dropped. Both of its knobs travel in the session message, not in the launch command, because `opencode serve` exits with usage on an unknown flag.
+`opencode` needs the `provider/model` form (for example `openai/gpt-5`) because its session API takes the provider and the model as separate fields; a bare model name is refused at config load rather than dropped. OpenCode 1.x receives `model: {providerID, modelID}` and a separate `variant` in the session message. OpenCode 2.x receives `model: {id, providerID, variant}` when creating the session. On 2.x, setting `effort` also requires an explicit `model`; an effort-only profile fails before prompt submission rather than silently using the default effort. Both knobs travel through the HTTP API because `opencode serve` exits with usage on an unknown flag.
 
 `rovodev` and `antigravity` have no mechanism no-mistakes can set - `acli rovodev serve` plus its REST session API take no model parameter, and the `agy` CLI parses flags strictly - so `agent_config` for them is a config error rather than a request that quietly does nothing. Reach for [`agent_args_override`](#agent_args_override) there if your build of the CLI accepts a flag. Reasoning effort is likewise unavailable for ACP targets: no-mistakes drives them through `acpx`, which exposes `--model` but no effort surface. acpx also accepts only the model ids a target advertises over ACP; for `devin` that is a subset of `devin models list`, and [`acp_registry_overrides`](#acp_registry_overrides) is the escape hatch for the rest.
 

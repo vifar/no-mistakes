@@ -3,7 +3,7 @@
 // Reasoning effort and model selection vary across the supported harnesses:
 // codex takes `-m` plus a TOML config override, copilot and claude take
 // `--effort`, pi and omp call the same idea `--thinking`, opencode has no
-// launch flag and carries both in the session-message body, ACP targets are
+// launch flag and carries both through its HTTP API, ACP targets are
 // driven through acpx rather than the vendor CLI, and some harnesses expose
 // neither knob.
 // Before this package the only pipeline configuration lever was
@@ -130,7 +130,7 @@ const (
 	// MechanismRequest means the adapter carries the value in its own
 	// protocol rather than in argv, because the launch command cannot express
 	// it (opencode runs as `opencode serve`, which rejects model flags; the
-	// knob belongs to the session message body).
+	// knob belongs to an HTTP request body).
 	MechanismRequest Mechanism = "request"
 )
 
@@ -208,7 +208,7 @@ func codexConfigPinned(key string, flags ...string) func([]string) bool {
 func unsupported() knob { return knob{mechanism: MechanismUnsupported} }
 
 // requireProviderModel enforces opencode's provider/model spelling, which the
-// session-message body requires as two separate fields. Catching it at
+// HTTP API requires as two separate fields. Catching it at
 // validation time is what keeps a bare "gpt-5" from being silently dropped.
 func requireProviderModel(value string) error {
 	if _, _, ok := SplitProviderModel(value); !ok {
@@ -218,7 +218,7 @@ func requireProviderModel(value string) error {
 }
 
 // SplitProviderModel splits a provider/model spelling into the providerID and
-// modelID. Opencode's session-message body requires that form, and eval replay
+// modelID. Opencode's HTTP API requires that form, and eval replay
 // uses the same split to compare a qualified candidate against adapters that
 // report model and provider as separate fields.
 func SplitProviderModel(model string) (provider, id string, ok bool) {
@@ -284,7 +284,7 @@ var harnesses = map[types.AgentName]harness{
 	types.AgentOpenCode: {
 		// `opencode serve` rejects model and variant flags outright, so raw
 		// args can never reach either knob and there is nothing to defer to.
-		// Both ride the session-message body instead.
+		// Both use HTTP request bodies, mapped by the adapter's API generation.
 		model:  knob{mechanism: MechanismRequest, validate: requireProviderModel},
 		effort: knob{mechanism: MechanismRequest},
 	},

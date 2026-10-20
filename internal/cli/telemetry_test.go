@@ -174,6 +174,7 @@ func TestAttachTracksTUIPageview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cleanupSyntheticRun(t, d, run.ID)
 
 	recorder := &telemetryRecorder{}
 	restore := telemetry.SetDefaultForTesting(recorder)

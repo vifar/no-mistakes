@@ -179,6 +179,9 @@ func EnsureGitRepoTemplate(t *testing.T) {
 		}
 
 		run("init")
+		// The shared template must stay immutable while other tests copy it.
+		run("config", "maintenance.auto", "false")
+		run("config", "gc.auto", "0")
 		run("config", "user.name", "test")
 		run("config", "user.email", "test@test.com")
 		run("checkout", "-b", "main")
