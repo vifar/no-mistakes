@@ -93,6 +93,7 @@ func branchSyncScenario(t *testing.T) string {
         new: "safe"
     structured:
       summary: "guard unsafe value"
+      verification: passed
   - match: "Review the code changes and return structured findings"
     text: "review found a warning"
     structured:
@@ -628,6 +629,7 @@ func rebaseCustodyScenario(t *testing.T) string {
         new: "guard helper\n"
     structured:
       summary: "add a guard helper alongside the feature"
+      verification: passed
   - match: "Review the code changes and return structured findings"
     text: "review found a warning"
     structured:

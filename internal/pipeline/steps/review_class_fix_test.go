@@ -87,7 +87,7 @@ func TestReviewStep_FixPromptClosesTheInvariantAcrossSiblingSites(t *testing.T) 
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			callCount++
 			if callCount == 1 {
-				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"address findings","verification":"passed"}`)}, nil
 			}
 			j, _ := json.Marshal(cleanReviewFindings())
 			return &agent.Result{Output: j}, nil
@@ -183,7 +183,7 @@ func TestReviewStep_ReviewPromptReportsTheClassOnce(t *testing.T) {
 				callCount++
 				if callCount == 1 {
 					os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
-					return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
+					return &agent.Result{Output: json.RawMessage(`{"summary":"address findings","verification":"passed"}`)}, nil
 				}
 				// The fixer added review-fix.txt, so the rereview's coverage
 				// record spans both changed files and completes in one turn.
@@ -237,7 +237,7 @@ func TestReviewStep_RereviewNamesFollowOnsOfPriorFixRounds(t *testing.T) {
 				callCount++
 				if callCount == 1 {
 					os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
-					return &agent.Result{Output: json.RawMessage(`{"summary":"address findings"}`)}, nil
+					return &agent.Result{Output: json.RawMessage(`{"summary":"address findings","verification":"passed"}`)}, nil
 				}
 				// The fixer added review-fix.txt, so the rereview's coverage
 				// record spans both changed files and completes in one turn.

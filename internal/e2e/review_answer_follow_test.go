@@ -195,6 +195,7 @@ func TestAxiAnswerFollowsAQuestionParkedInsideAFixRound(t *testing.T) {
     structured:
       findings: []
       summary: "fix applied"
+      verification: passed
   - match: "Review the code changes and return structured findings"
     text: "one finding"
     structured:

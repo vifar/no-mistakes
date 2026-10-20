@@ -33,6 +33,7 @@ func TestSelectedFixFollowedByDocumentEditDoesNotRestartReview(t *testing.T) {
     structured:
       findings: []
       summary: "fixed"
+      verification: passed
   - match: "Review the code changes and return structured findings"
     structured:
       findings:

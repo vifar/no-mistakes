@@ -52,6 +52,7 @@ metadata:
   The dedicated Test and Lint steps are the authoritative gates, although their coverage may be focused when commands are unconfigured.
   This is a prompt contract, not an enforced sandbox.
   Regression: `TestReviewStep_FixMode_FocusedVerificationContract`.
+- `verifiedFixSummarySchema` and `fixExecutionOptions.RequireVerification` apply only to the Review fixer (issue #81). `refuseUnverifiedFix` uses `discardUnverifiedFix` to reject changed rounds without `passed` via `*UnverifiedFixError`; a successful no-change turn still rereviews. `executeFixMode` also defers cleanup on every error after the fixer runs, preserving the original error and joining any cleanup failure, including after cancellation. Keep the outcome structured: summary or commit-subject keywords cannot establish verification. User-facing semantics are owned by [Review](../../../docs/src/content/docs/reference/pipeline-steps.md#review). Regressions: `internal/pipeline/steps/unverified_fix_test.go`, including `TestExecuteFixMode_ErrorsDiscardVerificationRequiredChanges`.
 
 **Remedy-Scope Discipline in the Review Prompts (`internal/pipeline/steps/review.go`)**
 

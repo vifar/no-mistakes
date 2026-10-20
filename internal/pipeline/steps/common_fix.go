@@ -39,6 +39,12 @@ type fixExecutionOptions struct {
 	// Workload records the bounded size of the change under fix for local
 	// telemetry. Optional; nil leaves the invocation's workload unknown.
 	Workload *agent.InvocationWorkload
+	// RequireVerification makes the fixer report its verification outcome and
+	// commits its changes only when that outcome is "passed" (issue #81). The
+	// Review fixer sets it because nothing between its commit and the next
+	// review turn checks the code; Test, Lint and custom gates rerun their own
+	// check on every fix round.
+	RequireVerification bool
 }
 
 type commitSummary struct {
@@ -559,7 +565,7 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 	return cleaned, nil
 }
 
-func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fixExecutionOptions) (string, error) {
+func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fixExecutionOptions) (summaryResult string, returnErr error) {
 	if !sctx.Fixing {
 		return "", nil
 	}
@@ -580,6 +586,23 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		OnChunk:    sctx.LogChunk,
 		Purpose:    purpose,
 		Workload:   opts.Workload,
+	}
+	var startingHead string
+	if opts.RequireVerification {
+		head, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+		if err != nil {
+			return "", fmt.Errorf("resolve head before %s fix: %w", stepName, err)
+		}
+		startingHead = head
+		runOpts.JSONSchema = verifiedFixSummarySchema
+	}
+	if opts.RequireVerification {
+		defer func() {
+			if returnErr != nil {
+				_, discardErr := discardUnverifiedFix(sctx, stepName, startingHead)
+				returnErr = errors.Join(returnErr, discardErr)
+			}
+		}()
 	}
 	var result *agent.Result
 	var err error
@@ -606,6 +629,11 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 			return "", fmt.Errorf("validate %s fix summary: %w", stepName, err)
 		}
 		sctx.Log(fmt.Sprintf("warning: could not parse fix summary: %v", err))
+	}
+	if opts.RequireVerification {
+		if err := refuseUnverifiedFix(sctx, stepName, startingHead, summary, result); err != nil {
+			return "", err
+		}
 	}
 	committed, err := commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result)
 	if err != nil {

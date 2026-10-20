@@ -120,7 +120,7 @@ func TestSecondAutomaticReviewFixUsesAdvancedReceipt(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte(fmt.Sprintf("feature code\nfix %d\n", fixes)), 0644); err != nil {
 				return nil, err
 			}
-			return &agent.Result{Output: []byte(`{"summary":"fix reported issue"}`)}, nil
+			return &agent.Result{Output: []byte(`{"summary":"fix reported issue","verification":"passed"}`)}, nil
 		}
 		reviews++
 		f := cleanReviewFindings()
