@@ -758,6 +758,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		}
 		receiptMissingObserved := false
+		pollBaseTip := ""
 		botCommentReadFailed := false
 		behindObserved := false
 
@@ -826,6 +827,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			tip, resolved := baseBranchTip(tipCtx)
 			cancel()
 			if resolved && tip != "" {
+				pollBaseTip = tip
 				if lastBaseTip == "" {
 					lastBaseTip = tip
 				} else if tip != lastBaseTip {
@@ -1099,7 +1101,14 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				sctx.Log("issues detected but checks still pending, waiting for all checks to complete...")
 			} else if hasIssues {
 				lastMonitorLog = ""
-				if s.lastRepairStillUnverified(checks, mergeConflict) {
+				if mergeConflict && unlimited {
+					tipCtx, cancel := context.WithTimeout(ctx, defaultBaseBranchTipResolveWindow)
+					if tip, resolved := baseBranchTip(tipCtx); resolved {
+						pollBaseTip = tip
+					}
+					cancel()
+				}
+				if s.lastRepairStillUnverified(checks, mergeConflict, pollBaseTip) {
 					// The provider has not re-run the checks the last
 					// published repair targeted: the failures on screen are
 					// the ones that repair was for, not a verdict on it.

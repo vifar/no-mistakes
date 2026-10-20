@@ -611,8 +611,8 @@ func TestWaitForProcessExitRetriesTransientInspectionErrors(t *testing.T) {
 	// Allow scheduling pauses while checking the retry sequence.
 	waitForProcessExit(4242, time.Second)
 
-	if checks < 3 {
-		t.Fatalf("waitForProcessExit stopped after %d checks, want at least 3", checks)
+	if checks != 3 {
+		t.Fatalf("waitForProcessExit stopped after %d checks, want 3", checks)
 	}
 }
 
