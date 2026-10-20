@@ -276,3 +276,72 @@ func TestAdvancePendingTargetRewindHeadRefusesAnUnrelatedHead(t *testing.T) {
 		t.Fatalf("the pending rewind's head did not follow the proven descendant: %+v %v", after, err)
 	}
 }
+
+func TestTargetRewindSpentBudgetStillUnstagesScratch(t *testing.T) {
+	for _, strategy := range []string{"rebase", "merge"} {
+		for _, realEdits := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/real_edits_%t", strategy, realEdits), func(t *testing.T) {
+				c, selected := rewindFixture(t)
+				c.Config.Rebase.Strategy = strategy
+				if err := c.DB.RecordLeftoverValidationCommit(c.Run.ID, c.Run.HeadSHA); err != nil {
+					t.Fatal(err)
+				}
+				target := advanceRewindTarget(t, c)
+				c.PRContextAfterStep = true
+				decision, err := guardPRContextWithSelection(c, types.StepTest, selected, false)
+				if err != nil || decision.RestartFrom != types.StepRebase {
+					t.Fatalf("target advance did not rewind: %+v %v", decision, err)
+				}
+				path := ".journal-live/postgres.log"
+				full := filepath.Join(c.WorkDir, path)
+				if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(full, []byte("live scratch\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, c.WorkDir, "add", path)
+				if realEdits {
+					if err := os.WriteFile(filepath.Join(c.WorkDir, "feature.txt"), []byte("second real edit\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+					gitCmd(t, c.WorkDir, "add", "feature.txt")
+				}
+				head := gitCmd(t, c.WorkDir, "rev-parse", "HEAD")
+				c.PRContextAfterStep = false
+				out, err := (&RebaseStep{}).Execute(c)
+				if realEdits {
+					if err == nil && (out == nil || !out.NeedsApproval) {
+						t.Fatalf("second real edits were accepted: %+v", out)
+					}
+					if got := gitCmd(t, c.WorkDir, "rev-parse", "HEAD"); got != head {
+						t.Fatalf("refused edits moved head: %s", got)
+					}
+					if got, err := os.ReadFile(filepath.Join(c.WorkDir, "feature.txt")); err != nil || string(got) != "second real edit\n" {
+						t.Fatalf("refused edits lost: %q %v", got, err)
+					}
+				} else {
+					if err != nil || out == nil || out.NeedsApproval {
+						t.Fatalf("scratch blocked integration: %+v %v", out, err)
+					}
+					if _, err := git.Run(c.Ctx, c.WorkDir, "merge-base", "--is-ancestor", target, "HEAD"); err != nil {
+						t.Fatalf("target was not integrated: %v", err)
+					}
+				}
+				if got, err := os.ReadFile(full); err != nil || string(got) != "live scratch\n" {
+					t.Fatalf("scratch lost: %q %v", got, err)
+				}
+				if got := gitCmd(t, c.WorkDir, "ls-files", "--", path); got != "" {
+					t.Fatalf("scratch remains indexed: %s", got)
+				}
+				if got := gitCmd(t, c.WorkDir, "ls-tree", "-r", "--name-only", "HEAD", "--", path); got != "" {
+					t.Fatalf("scratch was committed: %s", got)
+				}
+				allowed, err := c.DB.CanCommitLeftoverValidationEdits(c.Run.ID)
+				if err != nil || allowed {
+					t.Fatalf("budget changed: allowed=%t err=%v", allowed, err)
+				}
+			})
+		}
+	}
+}

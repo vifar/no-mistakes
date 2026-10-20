@@ -54,6 +54,9 @@ func commitLeftoverValidationEdits(c *pipeline.StepContext) (bool, error) {
 	if head != pending.LocalHeadSHA {
 		return false, nil
 	}
+	if err := unstageIndexedScratch(c); err != nil {
+		return false, err
+	}
 	allowed, err := c.DB.CanCommitLeftoverValidationEdits(c.Run.ID)
 	if err != nil {
 		return false, err
