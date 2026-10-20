@@ -70,6 +70,10 @@ type statusStepProof struct {
 	Name        types.StepName
 	Findings    *string
 	CompletedAt *int64
+	// AcceptedGaps binds an owner-accepted Test gap into the proof. It is
+	// omitted for every other step, so certificates without a gap keep the
+	// digest they had before accepted gaps could be certified.
+	AcceptedGaps *string `json:",omitempty"`
 }
 
 func rawShutdownSuperseded(q statusQuery, runID string) (bool, error) {
@@ -101,7 +105,7 @@ func buildStatusCertificate(q statusQuery, runID, head, configDigest string) (*s
 	if err != nil {
 		return nil, err
 	}
-	rows, err := q.Query(`SELECT s.id,s.step_name,s.status,s.exit_code,s.findings_json,s.completed_at,s.override_reason,s.approval_reason,v.head_sha,v.epoch,v.config_digest
+	rows, err := q.Query(`SELECT s.id,s.step_name,s.status,s.exit_code,s.findings_json,s.completed_at,s.override_reason,s.approval_reason,s.accepted_gaps_json,v.head_sha,v.epoch,v.config_digest
 	 FROM step_results s LEFT JOIN status_validation_steps v ON v.step_id=s.id WHERE s.run_id=? ORDER BY s.step_order,s.id`, runID)
 	if err != nil {
 		return nil, err
@@ -113,9 +117,9 @@ func buildStatusCertificate(q statusQuery, runID, head, configDigest string) (*s
 		var p statusStepProof
 		var status string
 		var exit *int
-		var override, approval, executedHead, digest *string
+		var override, approval, gaps, executedHead, digest *string
 		var stepEpoch *int64
-		if err := rows.Scan(&p.ID, &p.Name, &status, &exit, &p.Findings, &p.CompletedAt, &override, &approval, &executedHead, &stepEpoch, &digest); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &status, &exit, &p.Findings, &p.CompletedAt, &override, &approval, &gaps, &executedHead, &stepEpoch, &digest); err != nil {
 			return nil, err
 		}
 		core := p.Name == types.StepReview || p.Name == types.StepTest || p.Name == types.StepDocument || p.Name == types.StepLint
@@ -151,6 +155,15 @@ func buildStatusCertificate(q statusQuery, runID, head, configDigest string) (*s
 				f, err := types.ParseFindingsJSON(*p.Findings)
 				if err != nil || f.TestedHeadSHA != head {
 					return nil, nil
+				}
+				// A Test exception is certified only as a valid accepted gap,
+				// the one exception commit-status validation admits.
+				row := StepResult{StepName: p.Name, Status: types.StepStatusCompleted, ExitCode: exit, FindingsJSON: p.Findings, AcceptedGapsJSON: gaps}
+				if row.TestOverrideReason() != "" {
+					if row.ValidAcceptedGaps() == nil {
+						return nil, nil
+					}
+					p.AcceptedGaps = gaps
 				}
 			}
 		}
