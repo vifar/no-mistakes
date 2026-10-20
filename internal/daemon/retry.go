@@ -456,14 +456,26 @@ func (r *retryLaunch) proveAtLaunch(ctx context.Context, m *RunManager, globalCf
 	return nil
 }
 
+func (m *RunManager) prepareRetryDiscard(runID string, handle *runHandle) error {
+	link, err := m.db.GetRunRetry(runID)
+	if err != nil {
+		return fmt.Errorf("read retry cleanup ownership: %w", err)
+	}
+	handle.discardRetry = link != nil
+	return nil
+}
+
 // discardRefusedRetryRun deletes the continuation run row and the evidence
 // directory a refused retry created, so the failed run stays the branch's
 // latest run and can be retried again once the cause is fixed.
-func (m *RunManager) discardRefusedRetryRun(runID string, cfg *config.Config) {
+func (m *RunManager) discardRefusedRetryRun(runID, evidenceDir string) {
 	if err := m.db.DeleteRun(runID); err != nil {
 		m.db.UpdateRunError(runID, fmt.Sprintf("discard refused retry: %s", err))
+		return
 	}
-	os.RemoveAll(m.paths.RunEvidenceDir(cfg.Test.Evidence.LocalRoot, runID))
+	if evidenceDir != "" {
+		os.RemoveAll(evidenceDir)
+	}
 }
 
 // RetryProofConversation names the proof that a carried Review's question

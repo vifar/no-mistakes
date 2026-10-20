@@ -382,13 +382,21 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 			m.mu.Unlock()
 			handle.cancel(nil)
 			close(handle.done)
-			if handle.discardRetryConfig != nil {
-				m.discardRefusedRetryRun(runID, handle.discardRetryConfig)
+			if handle.discardRetry {
+				m.discardRefusedRetryRun(runID, handle.discardRetryEvidenceDir)
 			}
 			// Once consumed, the run goroutine owns the slot and frees it.
 			slot.Release()
 		}
 	}()
+	fail := func(err error) {
+		slog.Error("queued run cannot start", "run_id", runID, "error", err)
+		m.failRunSetup(handle.runCtx, runID, false, err)
+	}
+	if err := m.prepareRetryDiscard(runID, handle); err != nil {
+		fail(err)
+		return
+	}
 	if cause := context.Cause(handle.runCtx); cause != nil {
 		m.failRunSetup(handle.runCtx, runID, false, cause)
 		return
@@ -401,10 +409,6 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		}
 		m.failRunSetup(handle.runCtx, runID, false, fmt.Errorf("queued run is unreadable: %w", err))
 		return
-	}
-	fail := func(err error) {
-		slog.Error("queued run cannot start", "run_id", runID, "error", err)
-		m.failRunSetup(handle.runCtx, runID, false, err)
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil || repo == nil {
@@ -2350,7 +2354,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		if err != nil {
 			return "", err
 		}
-		if active == nil && launchNonce == "" && agentcfg.OptionalPiProfile(profiles) == nil && types.ShippingFromContext(ctx) == nil && planID == "" {
+		if retry == nil && active == nil && launchNonce == "" && agentcfg.OptionalPiProfile(profiles) == nil && types.ShippingFromContext(ctx) == nil && planID == "" {
 			creation := db.RunCreation{DiagnosticError: fmt.Sprintf("load config: %s", globalCfgErr)}
 			var diagnostic *db.Run
 			if retained != nil {
@@ -2548,8 +2552,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 
 	if retry != nil {
 		if err := retry.record(m.db, run); err != nil {
-			m.db.DeleteRun(run.ID)
-			return "", err
+			settlementErr := m.failUnadmittedRunSetup(ctx, run, err)
+			if settlementErr == nil {
+				m.discardRefusedRetryRun(run.ID, "")
+			}
+			return "", errors.Join(err, settlementErr)
 		}
 	}
 	// Admission. The run row is durable from here on. A run that fits under
@@ -2563,6 +2570,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		// shared setup-failure path (conditional, and it tells subscribers), so no
 		// orphan is left to block the branch's active-run lookup.
 		settlementErr := m.failUnadmittedRunSetup(ctx, run, fmt.Errorf("queue run: %w", err))
+		if retry != nil && settlementErr == nil {
+			m.discardRefusedRetryRun(run.ID, "")
+		}
 		trackStartFailure("queue_run")
 		return "", fmt.Errorf("queue run: %w", errors.Join(err, settlementErr))
 	}
@@ -2603,7 +2613,8 @@ type runHandle struct {
 	consumed bool
 	// A retry refused before executor start is deleted only after its failed
 	// setup settles and its ownership handle has been released.
-	discardRetryConfig *config.Config
+	discardRetry            bool
+	discardRetryEvidenceDir string
 }
 
 // admitRun decides a new run's admission and, when it does not fit, queues it.
@@ -2660,8 +2671,8 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				m.mu.Unlock()
 				handle.cancel(nil)
 				close(handle.done)
-				if handle.discardRetryConfig != nil {
-					m.discardRefusedRetryRun(run.ID, handle.discardRetryConfig)
+				if handle.discardRetry {
+					m.discardRefusedRetryRun(run.ID, handle.discardRetryEvidenceDir)
 				}
 			}
 		}()
@@ -2704,6 +2715,10 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 			slot.Release()
 		}
 	}()
+
+	if err := m.prepareRetryDiscard(run.ID, handle); err != nil {
+		return "", err
+	}
 
 	// Create worktree from the gate bare repo, where this repository's
 	// worktree placement says it belongs (see internal/worktrees). This is the
@@ -2799,13 +2814,19 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		trackStartFailure("review_path_instructions_budget")
 		return "", err
 	}
+	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
+		trackStartFailure("evidence_root")
+		return "", err
+	}
+	if handle.discardRetry {
+		handle.discardRetryEvidenceDir = m.paths.RunEvidenceDir(cfg.Test.Evidence.LocalRoot, run.ID)
+	}
 	retry, retryErr := m.retryForLaunch(run)
 	if retryErr != nil {
 		return "", retryErr
 	}
 	if retry != nil {
 		if err := retry.proveAtLaunch(ctx, m, globalCfg, cfg, effectiveRepoCfg, run.ID, run.HeadSHA); err != nil {
-			handle.discardRetryConfig = cfg
 			trackStartFailure("retry_proof")
 			return "", err
 		}
@@ -2817,10 +2838,6 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		if err := cfg.ApplyPiProfile(run.PiProfile); err != nil {
 			return "", err
 		}
-	}
-	if err := m.paths.ValidateEvidenceRoot(cfg.Test.Evidence.LocalRoot); err != nil {
-		trackStartFailure("evidence_root")
-		return "", err
 	}
 	cfg.TrustedConfigSHA = trustedSHA
 	if globalCfg.Eval.CaptureProvenance {
