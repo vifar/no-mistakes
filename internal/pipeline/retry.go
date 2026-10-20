@@ -143,3 +143,14 @@ func PlanRetryCheckpoint(database *db.DB, run *db.Run, steps []Step) (*RetryChec
 	}
 	return &RetryCheckpoint{Index: failed, Steps: rows, Round: len(rounds) + 1}, nil
 }
+
+func RetryComparisonReceipt(database *db.DB, source *db.Run, headSHA string) (*db.PRContext, error) {
+	receipt, err := database.GetRunPRContext(source.ID)
+	if err != nil {
+		return nil, err
+	}
+	if receipt == nil || receipt.LocalHeadSHA != headSHA || source.HeadSHA != headSHA {
+		return nil, fmt.Errorf("retry source has no exact comparison receipt; use a full rerun")
+	}
+	return receipt, nil
+}

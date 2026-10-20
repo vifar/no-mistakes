@@ -178,6 +178,11 @@ func (m *RunManager) proveRetry(ctx context.Context, repo *db.Repo, branch, runI
 		}
 		return nil, err
 	}
+	if hasRebaseCoreStep(m.steps()) {
+		if _, err := pipeline.RetryComparisonReceipt(m.db, source, source.HeadSHA); err != nil {
+			return nil, refuseRetry(runID, "exact comparison", "%v", err)
+		}
+	}
 	if err := m.provePreservedHead(ctx, repo, source); err != nil {
 		return nil, refuseRetry(runID, "preserved head", "%v", err)
 	}
@@ -435,7 +440,12 @@ func cfgForInvocation(cfg *config.Config, inv db.AgentInvocation) *config.Config
 // continuation run loaded, then carries the failed run's Review conversation
 // into the run's own evidence directory. It refuses, naming the proof, before
 // the audit link or any carried step exists.
-func (r *retryLaunch) proveAtLaunch(ctx context.Context, m *RunManager, globalCfg *config.GlobalConfig, cfg *config.Config, repoCfg *config.RepoConfig, runID string) error {
+func (r *retryLaunch) proveAtLaunch(ctx context.Context, m *RunManager, globalCfg *config.GlobalConfig, cfg *config.Config, repoCfg *config.RepoConfig, runID, headSHA string) error {
+	if hasRebaseCoreStep(m.steps()) {
+		if _, err := pipeline.RetryComparisonReceipt(m.db, r.source, headSHA); err != nil {
+			return refuseRetry(r.source.ID, "exact comparison", "%v", err)
+		}
+	}
 	launched := *cfg
 	if err := m.proveConfigurationMatches(ctx, r.source, globalCfg, &launched, repoCfg, r.gates, r.checkpoint); err != nil {
 		return refuseRetry(r.source.ID, "compatible configuration", "%v", err)

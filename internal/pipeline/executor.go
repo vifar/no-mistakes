@@ -866,12 +866,9 @@ func (e *Executor) planRetry(run *db.Run) (*RetryCheckpoint, error) {
 	}
 
 	if e.prContextGuard != nil {
-		receipt, err := e.db.GetRunPRContext(source.ID)
+		receipt, err := RetryComparisonReceipt(e.db, source, run.HeadSHA)
 		if err != nil {
 			return nil, err
-		}
-		if receipt == nil || receipt.LocalHeadSHA != run.HeadSHA {
-			return nil, fmt.Errorf("retry source has no exact comparison receipt; use a full rerun")
 		}
 		if _, err := e.db.BindRunPRContext(run.ID, receipt.PRContextCandidate, types.StepRebase); err != nil {
 			return nil, err

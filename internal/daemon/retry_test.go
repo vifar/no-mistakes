@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -867,5 +869,131 @@ func (f *retryFixture) requireNothingLaunched(t *testing.T) {
 	}
 	if got := f.executions.Load(); got != 0 {
 		t.Errorf("refusal executed %d steps", got)
+	}
+}
+
+func TestRetryComparisonRefusalDoesNotConsumeContinuation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the agent stand-ins are POSIX shell scripts")
+	}
+	for _, phase := range []string{"admission", "inline launch", "queued launch"} {
+		t.Run(phase, func(t *testing.T) {
+			f := newRetryFixture(t, retryFixtureOptions{beforeSource: func(t *testing.T, f *retryFixture) {
+				writeFakeAgents(t, f.p, "claude", "", "claude")
+			}})
+			m := NewRunManager(f.d, f.p, func() []pipeline.Step {
+				return []pipeline.Step{&steps.RebaseStep{}, &countingStep{name: types.StepReview, count: f.executions}, &countingStep{name: types.StepTest, count: f.executions}}
+			})
+			t.Cleanup(m.Shutdown)
+			receipt, err := f.d.GetRunPRContext(f.source.ID)
+			if err != nil || receipt == nil {
+				t.Fatalf("source receipt: %+v %v", receipt, err)
+			}
+			if err := os.WriteFile(filepath.Join(f.repo.WorkingPath, "correction.txt"), []byte("review correction"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, f.repo.WorkingPath, "add", "correction.txt")
+			gitCmd(t, f.repo.WorkingPath, "commit", "-m", "review correction")
+			h2 := gitOutput(t, f.repo.WorkingPath, "rev-parse", "HEAD")
+			gateDir := f.p.RepoDir(f.repo.ID)
+			gitCmd(t, gateDir, "fetch", f.repo.WorkingPath, h2)
+			if phase == "admission" {
+				gitCmd(t, gateDir, "update-ref", custody.RecoveryRef(f.source.ID), h2)
+				if err := f.d.UpdateRunHeadSHA(f.source.ID, h2); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.d.UpdateRunErrorStatusWithVerifiedHead(f.source.ID, "rereviewer crashed after correction", types.RunFailed, h2); err != nil {
+					t.Fatal(err)
+				}
+				f.source, err = f.d.GetRun(f.source.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.callerHead = h2
+			} else {
+				gitCmd(t, f.repo.WorkingPath, "reset", "--hard", f.submitted)
+			}
+			refs := gitOutput(t, gateDir, "for-each-ref", "--format=%(refname) %(objectname)")
+			moveSourceHead := func() {
+				gitCmd(t, gateDir, "update-ref", custody.RecoveryRef(f.source.ID), h2)
+				if err := f.d.UpdateRunHeadSHA(f.source.ID, h2); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.d.UpdateRunErrorStatusWithVerifiedHead(f.source.ID, "rereviewer crashed after correction", types.RunFailed, h2); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if phase == "inline launch" {
+				m.afterRetryProof = moveSourceHead
+			}
+			var holder *runSlot
+			if strings.HasPrefix(phase, "queued") {
+				m.sched.limits = func() (int, bool) { return 1, false }
+				var ok bool
+				holder, ok = m.sched.tryAdmit("capacity-holder")
+				if !ok {
+					t.Fatal("could not hold capacity")
+				}
+				defer holder.Release()
+			}
+			before, err := f.d.GetRun(f.source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeSteps, err := f.d.GetStepsByRun(f.source.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			link, retryErr := m.HandleRetry(context.Background(), f.repo.ID, "main", f.source.ID, f.callerHead)
+			if strings.HasPrefix(phase, "queued") {
+				if retryErr != nil {
+					t.Fatalf("queue retry: %v", retryErr)
+				}
+				queued, err := f.d.GetRun(link.RunID)
+				if err != nil || queued == nil || queued.Status != types.RunQueued {
+					t.Fatalf("retry did not queue: %+v %v", queued, err)
+				}
+				moveSourceHead()
+				holder.Release()
+				waitForSchedCondition(t, func() bool {
+					run, err := f.d.GetRun(link.RunID)
+					return err == nil && run == nil
+				})
+				m.wg.Wait()
+			} else if retryErr == nil || !strings.Contains(retryErr.Error(), "exact comparison proof failed") {
+				t.Fatalf("ineligible retry was not refused: %+v %v", link, retryErr)
+			}
+			f.requireNothingLaunched(t)
+			m.mu.Lock()
+			owners, active := len(m.runs), m.sched.active
+			m.mu.Unlock()
+			if owners != 0 || active != 0 {
+				t.Fatalf("orphan ownership: owners=%d slots=%d", owners, active)
+			}
+			expectedHead := h2
+			latest, err := f.d.GetRunsByRepo(f.repo.ID)
+			if err != nil || len(latest) != 1 || latest[0].ID != f.source.ID || latest[0].HeadSHA != expectedHead || latest[0].Status != types.RunFailed {
+				t.Fatalf("source/latest changed: %+v %v", latest, err)
+			}
+			current, err := f.d.GetRunPRContext(f.source.ID)
+			wantHead := f.submitted
+			if err != nil || current == nil || current.LocalHeadSHA != wantHead {
+				t.Fatalf("receipt rewritten: %+v %v", current, err)
+			}
+			if phase == "admission" && gitOutput(t, gateDir, "for-each-ref", "--format=%(refname) %(objectname)") != refs {
+				t.Fatal("admission refusal changed refs")
+			}
+			if phase == "admission" {
+				after, err := f.d.GetRun(f.source.ID)
+				if err != nil || !reflect.DeepEqual(before, after) {
+					t.Fatalf("source mutated by initial refusal: before=%+v after=%+v err=%v", before, after, err)
+				}
+				afterSteps, err := f.d.GetStepsByRun(f.source.ID)
+				if err != nil || !reflect.DeepEqual(beforeSteps, afterSteps) {
+					t.Fatalf("source steps changed: before=%+v after=%+v err=%v", beforeSteps, afterSteps, err)
+				}
+			}
+		})
 	}
 }

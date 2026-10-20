@@ -2804,7 +2804,7 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		return "", retryErr
 	}
 	if retry != nil {
-		if err := retry.proveAtLaunch(ctx, m, globalCfg, cfg, effectiveRepoCfg, run.ID); err != nil {
+		if err := retry.proveAtLaunch(ctx, m, globalCfg, cfg, effectiveRepoCfg, run.ID, run.HeadSHA); err != nil {
 			handle.discardRetryConfig = cfg
 			trackStartFailure("retry_proof")
 			return "", err
