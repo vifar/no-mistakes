@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
-	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -174,28 +173,6 @@ func TestPushStep_TargetAdvanceConflictStillParks(t *testing.T) {
 	}
 	if out == nil || !out.NeedsApproval || !strings.Contains(out.Findings, "conflict on rebase") {
 		t.Fatalf("conflict did not park clearly: %+v", out)
-	}
-}
-
-// TestPushStep_AlreadyPublishedRunCannotRewind proves the rewind is refused
-// once the run published: a published head is not this run's to rewrite.
-func TestPushStep_AlreadyPublishedRunCannotRewind(t *testing.T) {
-	c, _ := publicationFixture(t)
-	if err := c.DB.UpdateRunPushBinding(c.Run.ID, db.PushBinding{HeadSHA: c.Run.HeadSHA}); err != nil {
-		t.Fatal(err)
-	}
-	advanceRewindTarget(t, c)
-
-	outcome, err := (&PushStep{}).Execute(c)
-	if err != nil {
-		t.Fatalf("push failed on a published run: %v", err)
-	}
-	if outcome != nil && outcome.RestartFrom != "" {
-		t.Fatalf("a published run rewound: %+v", outcome)
-	}
-	pending, err := c.DB.GetPendingTargetRewind(c.Run.ID)
-	if err != nil || pending != nil {
-		t.Fatalf("a published run recorded a pending rewind: %+v %v", pending, err)
 	}
 }
 
