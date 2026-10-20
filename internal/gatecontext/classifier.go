@@ -718,7 +718,7 @@ func nearestGitMetadata(ctx context.Context, cwd string) (string, bool, error) {
 	}
 }
 
-// gitHeadPresent reports whether a Git common directory carries a recognizable
+// gitHeadPresent reports whether a Git metadata directory carries a recognizable
 // HEAD.
 //
 // The HEAD content read is bounded, so a metadata file whose open the kernel

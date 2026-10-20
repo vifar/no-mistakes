@@ -83,9 +83,10 @@ Pipeline-control commands check the caller's Git common and actual metadata
 directories in one command first. Physical-ancestor checks corroborate successful
 discovery too: incomplete metadata skipped by Git cannot select an enclosing
 repository. Gitfile targets are compared with the actual metadata directory so
-linked and separate Git directories remain supported. Reopened gitfiles are limited
-to 1 MiB and must still be regular files. The independently resolved actual metadata
-path frames the raw common/actual command output, preserving embedded newlines and
+linked and separate Git directories remain supported. Gitfiles and `commondir`
+files may be symlinks to readable regular files; nonregular targets are refused,
+and the regular-file check is repeated after opening. The independently resolved
+actual metadata path frames the raw common/actual command output, preserving embedded newlines and
 terminal whitespace without shell evaluation. The framing boundary converts native
 Windows separators to Git's forward slashes; Unix backslashes remain literal
 filename bytes. Optional top-level attribution also
@@ -128,7 +129,8 @@ the still-live caller, without extending the identity Git budget.
 The fallback requires the same nearest physical metadata boundary, a recognizable
 actual HEAD and common HEAD, and object/reference directories. A present
 `commondir` must be read and resolved successfully for every layout, including
-bare metadata; a directory name cannot substitute for that pointer. Unreadable
+bare metadata. If `commondir` is absent, the actual metadata directory itself is
+common; a directory name cannot substitute for that pointer. Unreadable
 or malformed metadata leaves identity unresolved and fails closed. The fallback
 never proves repository absence or accepts HEAD existence alone.
 
