@@ -129,7 +129,8 @@ func stringValue(value *string) string {
 
 // A stop or forced restart while a run monitors CI for an open PR must keep
 // that run as ci_monitor_interrupted across the restart, not fail it, while a
-// parked run still resumes and a run cut off mid-step still fails.
+// parked run still resumes and a planned stop cancels mid-step work with
+// the captured daemon identity (raw shutdowns remain failures).
 func TestShutdown_CIMonitorRunSurvivesRestartAsInterrupted(t *testing.T) {
 	p, d := newParkedRunEnv(t)
 	repo, headSHA := setupTestGitRepo(t, p, d, "shutdown-ci-monitor")
@@ -156,7 +157,7 @@ func TestShutdown_CIMonitorRunSurvivesRestartAsInterrupted(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	stopParkedRunDaemon(t, p, errCh)
+	shutdown := stopParkedRunDaemon(t, p, errCh)
 
 	stopped, err := d.GetRun(ciRun)
 	if err != nil {
@@ -172,8 +173,12 @@ func TestShutdown_CIMonitorRunSurvivesRestartAsInterrupted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if agent.Status != types.RunFailed || stringValue(agent.Error) != pipeline.ErrDaemonShutdown.Error() {
-		t.Errorf("mid-step run after stop = %s (%q), want failed with %q", agent.Status, stringValue(agent.Error), pipeline.ErrDaemonShutdown)
+	const plannedReason = "cancelled: planned daemon shutdown"
+	if agent.Status != types.RunCancelled || stringValue(agent.Error) != plannedReason {
+		t.Errorf("mid-step run after planned stop = %s (%q), want bound cancellation", agent.Status, stringValue(agent.Error))
+	}
+	if bound, err := d.ControlledShutdownMatches(agentRun, shutdown.Instance, shutdown.Lifecycle, plannedReason); err != nil || !bound {
+		t.Fatalf("mid-step cancellation lacks the acknowledged shutdown identity: bound=%t error=%v", bound, err)
 	}
 
 	// The next start records the CI-monitor run as interrupted and resumes the

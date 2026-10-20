@@ -40,14 +40,19 @@ func (shutdownApprovalStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepO
 	return &pipeline.StepOutcome{NeedsApproval: true, Findings: `{"findings":[],"summary":"needs review"}`}, nil
 }
 
-func stopParkedRunDaemon(t *testing.T, p *paths.Paths, errCh chan error) {
+func stopParkedRunDaemon(t *testing.T, p *paths.Paths, errCh chan error) ipc.ShutdownResult {
 	t.Helper()
 	client, err := ipc.Dial(p.Socket())
 	if err != nil {
 		t.Fatalf("dial daemon: %v", err)
 	}
-	if err := client.Call(ipc.MethodShutdown, testShutdownParams(t, p), nil); err != nil {
+	expected := testShutdownParams(t, p)
+	var result ipc.ShutdownResult
+	if err := client.Call(ipc.MethodShutdown, expected, &result); err != nil {
 		t.Fatalf("shutdown daemon: %v", err)
+	}
+	if !result.OK || result.PID != expected.ExpectedPID || result.StartedAt != expected.ExpectedStartedAt || result.Instance != expected.ExpectedInstance || result.Lifecycle == "" {
+		t.Fatalf("shutdown acknowledgement does not match captured daemon: %+v", result)
 	}
 	_ = client.Close()
 	select {
@@ -55,6 +60,7 @@ func stopParkedRunDaemon(t *testing.T, p *paths.Paths, errCh chan error) {
 	case <-time.After(35 * time.Second):
 		t.Fatal("daemon did not stop")
 	}
+	return result
 }
 
 func newParkedRunEnv(t *testing.T) (*paths.Paths, *db.DB) {

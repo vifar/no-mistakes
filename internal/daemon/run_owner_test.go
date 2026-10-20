@@ -43,6 +43,13 @@ func TestLaunchOwner(t *testing.T) {
 				if err := d.UpdateRunStatus(activeID, types.RunRunning); err != nil {
 					t.Fatal(err)
 				}
+				// This active record has no executor. Keep it untouched for the
+				// refusal assertions, then retire it before certified shutdown.
+				t.Cleanup(func() {
+					if err := d.UpdateRunStatus(activeID, types.RunCancelled); err != nil {
+						t.Error(err)
+					}
+				})
 			}
 			var result ipc.StartFreshRunResult
 			err = client.Call(ipc.MethodStartFreshRun, map[string]any{"repo_id": repo.ID, "branch": "main", "head_sha": head, "intent": "record responsibility", "launch_nonce": "owner-nonce", "validation_generation": "owner-gen", "owner": tc.owner}, &result)
