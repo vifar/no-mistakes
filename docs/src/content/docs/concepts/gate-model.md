@@ -121,8 +121,19 @@ responsible application, so opening a file under a privacy-protected location
 sandbox approval watchdog expires. Git then reports an unreadable working
 directory and exits with status 128 instead of answering. The metadata-only
 resolution recovers the same physical metadata boundary, the same common
-directory, and the same structural validity using metadata operations, which
-are not held. It never proves a repository's absence: unresolved metadata
+directory, and the same object and reference structure using metadata
+operations, which are not held. Every metadata content read is bounded, so a
+held read cannot stall the caller past its own deadline. At most eight content
+reads may remain in flight; new callers fail closed within their own budget
+while those reads are still held. A present `commondir` must be read successfully;
+its parent directory name never substitutes for that pointer.
+
+The fallback proves nothing weaker than the Git query it replaces. A directory
+is never accepted as a repository on the strength of a HEAD file that merely
+exists, because a directory with a HEAD, an objects directory and a refs
+directory is not evidence of a repository. A HEAD that cannot be read leaves
+the identity unresolved rather than answered, and an unresolved identity is an
+error. The fallback never proves a repository's absence: unresolved metadata
 fails closed, and a managed gate's identity is still proved. Every other Git
 diagnostic is an answer rather than a stall and keeps failing closed.
 

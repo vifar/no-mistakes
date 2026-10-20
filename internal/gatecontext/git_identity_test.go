@@ -823,7 +823,7 @@ func TestIdentityGitfileGrowsAfterGitDiscovery(t *testing.T) {
 // must still resolve the caller's identity from the filesystem, because
 // refusing every caller is the same failure as the stall itself.
 //
-// Regressions: issue #1301.
+// Regressions: issue #120.
 func TestIdentityBlockedGitReadFallsBackToTheFilesystem(t *testing.T) {
 	for _, layout := range []string{"plain", "linked"} {
 		t.Run(layout, func(t *testing.T) {
@@ -916,17 +916,73 @@ func TestIdentityBlockedReadDiagnosticIsMatchedWhole(t *testing.T) {
 	}
 }
 
-// The fallback must not accept a directory that merely carries a HEAD file
-// and object and reference basenames as the MANAGED GATE. A directory inside
-// a managed gate that looks like a bare repository to a metadata-only reader
-// must not be classified as the registered gate itself, because the gate's
-// refusal is what the managed-gate proof exists to provide.
+// A common directory whose HEAD is malformed is rejected by the Git query
+// itself, so it never reaches the blocked-read fallback.
 //
-// Regressions: issue #1301 review finding on the managed-gate proof.
+// Git reports a malformed HEAD as "not a git repository", which is an answer
+// rather than a stall, and the fallback is reached only for a stall.
+//
+// Regressions: issue #120 review finding on the weaker HEAD acceptance.
+func TestIdentityMalformedCommonHeadIsRejectedByTheGitQuery(t *testing.T) {
+	f := newTopologyFixture(t)
+	work := f.work
+	head := filepath.Join(work, ".git", "HEAD")
+	original, err := os.ReadFile(head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(head, []byte("invalid\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.WriteFile(head, original, 0o644) })
+	got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: work})
+	if err == nil {
+		t.Fatalf("a common directory with a malformed HEAD was admitted: %+v", got)
+	}
+}
+
+// The fallback must not accept a directory as a repository on the strength of
+// a HEAD file that merely exists, and it must not accept a malformed HEAD.
+//
+// A directory with a HEAD file, an objects directory and a refs directory is
+// not evidence of a repository when its HEAD is not a recognizable one.
+// Accepting such a directory would let an ordinary directory inside a
+// managed gate pass for the gate itself, which is exactly what the
+// managed-gate proof exists to prevent.
+//
+// A directory whose HEAD IS recognizable is a bare repository to Git itself,
+// so it is admitted as one - but it is never the registered managed gate.
+//
+// Regressions: issue #120 review finding on the managed-gate proof.
+func TestIdentityFallbackDoesNotAcceptAnOrdinaryDirectoryAsARepository(t *testing.T) {
+	f := newTopologyFixture(t)
+	// A directory that a metadata-only reader would take for a bare
+	// repository: a HEAD file, an objects directory and a refs directory.
+	decoy := filepath.Join(f.managed, "decoy")
+	if err := os.MkdirAll(decoy, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range []string{"objects/info", "objects/pack", "refs/heads", "refs/tags"} {
+		if err := os.MkdirAll(filepath.Join(decoy, filepath.FromSlash(entry)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A HEAD that is not a reference and not an object name.
+	if err := os.WriteFile(filepath.Join(decoy, "HEAD"), []byte("invalid\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitfault.Install(t, "blocked-read")
+	got, err := (gatecontext.Inspector{DB: f.d, Paths: f.p}).Inspect(context.Background(), gatecontext.Request{CWD: decoy})
+	if err == nil {
+		t.Fatalf("an ordinary directory was admitted as a repository: %+v", got)
+	}
+}
+
+// A directory whose HEAD is recognizable is a bare repository to Git itself,
+// so the fallback may admit it - but it is never the registered managed gate,
+// and the gate's refusal must not extend to it either.
 func TestIdentityFallbackDoesNotAcceptAnOrdinaryDirectoryAsTheManagedGate(t *testing.T) {
 	f := newTopologyFixture(t)
-	// A directory inside the managed worktree that looks like a bare
-	// repository to a metadata-only reader.
 	decoy := filepath.Join(f.managed, "decoy")
 	if err := os.MkdirAll(decoy, 0o755); err != nil {
 		t.Fatal(err)
@@ -944,8 +1000,6 @@ func TestIdentityFallbackDoesNotAcceptAnOrdinaryDirectoryAsTheManagedGate(t *tes
 	if err != nil {
 		t.Fatalf("blocked identity read was fatal: %+v, %v", got, err)
 	}
-	// The decoy is not the registered gate, so it must not carry the gate's
-	// managed identity.
 	if got.ManagedGit {
 		t.Fatalf("an ordinary directory was admitted as the managed gate: %+v", got)
 	}
@@ -956,7 +1010,7 @@ func TestIdentityFallbackDoesNotAcceptAnOrdinaryDirectoryAsTheManagedGate(t *tes
 // sits under a directory named `worktrees` must not have that name treated
 // as the linked-worktree layout.
 //
-// Regressions: issue #1301 review finding on the basename inference.
+// Regressions: issue #120 review finding on the basename inference.
 func TestIdentityFallbackDoesNotInferACommonDirectoryFromADirectoryName(t *testing.T) {
 	f := newTopologyFixture(t)
 	root := t.TempDir()
