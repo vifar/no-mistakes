@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
@@ -84,19 +85,32 @@ func TestTestStep_AgentCrashRetryRefusesMovedEffectiveBase(t *testing.T) {
 
 func TestTestStep_AgentCrashRetryKeepsCommandFailureTerminal(t *testing.T) {
 	t.Parallel()
-	dir, base, head := setupGitRepo(t)
-	calls := 0
-	ag := &mockAgent{name: "crashed-evidence-agent", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-		calls++
-		return nil, processExitError{"agent exited: exit status 1"}
-	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{
-		Test: "git diff --exit-code --no-index base.txt feature.txt",
-	})
-	sctx.Config.AgentCrashRetries = 1
-	executor := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&TestStep{}}, nil)
-	if err := executor.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err == nil || calls != 1 {
-		t.Fatalf("known command failure retried: calls=%d error=%v", calls, err)
+	for _, retries := range []int{0, 1} {
+		t.Run(fmt.Sprint(retries), func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			calls := 0
+			ag := &mockAgent{name: "crashed-evidence-agent", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				calls++
+				return nil, processExitError{"agent exited: exit status 1"}
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{
+				Test: "git diff --exit-code --no-index base.txt feature.txt",
+			})
+			sctx.Config.AgentCrashRetries = retries
+			executor := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&TestStep{}}, nil)
+			if err := executor.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err == nil || calls != 1 {
+				t.Fatalf("known command failure retried: calls=%d error=%v", calls, err)
+			}
+			rows, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil || len(rows) != 1 || rows[0].FailureCause != nil {
+				t.Fatalf("command failure misclassified: rows=%+v err=%v", rows, err)
+			}
+			_, err = pipeline.PlanRetryCheckpoint(sctx.DB, sctx.Run, []pipeline.Step{&TestStep{}})
+			var refusal *pipeline.RetryRefusal
+			if !errors.As(err, &refusal) || refusal.Proof != pipeline.RetryProofCause {
+				t.Fatalf("known command failure allowed checkpoint retry: %v", err)
+			}
+		})
 	}
 }
 

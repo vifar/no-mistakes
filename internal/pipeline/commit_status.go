@@ -312,7 +312,7 @@ func (e *Executor) ReportRecoveredPublishedHeadStatus(ctx context.Context, run *
 		e.workDir = repo.WorkingPath
 	}
 	state := "failure"
-	if run.Status == types.RunCompleted {
+	if run.Status == types.RunCompleted || run.Status == types.RunChecksPassed {
 		state = "success"
 	}
 	e.reportPublishedHeadStatus(ctx, run, repo, state)

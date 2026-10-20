@@ -276,7 +276,7 @@ func commitStatusReporter(sctx *pipeline.StepContext, publication *db.CommitStat
 			state = "failure"
 		case types.RunFailed, types.RunCIMonitorInterrupted:
 			state = "failure"
-		case types.RunCompleted:
+		case types.RunCompleted, types.RunChecksPassed:
 			if publication.Validated {
 				state = "success"
 			} else {
@@ -299,7 +299,7 @@ func commitStatusReporter(sctx *pipeline.StepContext, publication *db.CommitStat
 			}
 		}
 		if state == "success" && !publication.Validated {
-			if durableRun.Status != types.RunCompleted {
+			if durableRun.Status != types.RunCompleted && durableRun.Status != types.RunChecksPassed {
 				return
 			}
 			state = "failure"

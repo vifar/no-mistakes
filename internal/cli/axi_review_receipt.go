@@ -119,7 +119,7 @@ func newAxiReviewReceiptCmd() *cobra.Command {
 }
 
 func buildReviewReceipt(database *db.DB, run *db.Run) (reviewReceipt, error) {
-	if run == nil || run.Status != types.RunCompleted || run.TerminalHeadVerifiedAt == nil {
+	if run == nil || (run.Status != types.RunCompleted && run.Status != types.RunChecksPassed) || run.TerminalHeadVerifiedAt == nil {
 		return reviewReceipt{}, fmt.Errorf("run has no verified terminal result")
 	}
 	context, err := database.GetRunPRContext(run.ID)

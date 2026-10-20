@@ -137,7 +137,7 @@ func TestDaemonPanic_SerializesPausedSuccessAndRecoversFailure(t *testing.T) {
 }
 
 func TestRecoverOnStartup_ReplacesPublishedSuccessWithFailure(t *testing.T) {
-	for _, scenario := range []string{"active", "terminal failed", "terminal missing clone", "terminal cancelled", "CI interrupted", "CI crash", "CI planned crash", "CI raw rollback crash", "terminal uncertified", "terminal certified", "plugin"} {
+	for _, scenario := range []string{"active", "terminal failed", "terminal missing clone", "terminal cancelled", "CI interrupted", "CI crash", "CI planned crash", "CI raw rollback crash", "terminal uncertified", "terminal certified", "checks passed uncertified", "checks passed certified", "plugin"} {
 		for _, profileOnly := range []bool{false, true} {
 			if scenario == "plugin" && profileOnly {
 				continue
@@ -287,9 +287,12 @@ func TestRecoverOnStartup_ReplacesPublishedSuccessWithFailure(t *testing.T) {
 					if err := d.UpdateRunStatus(run.ID, wantStatus); err != nil {
 						t.Fatal(err)
 					}
-				case "terminal uncertified", "terminal certified":
+				case "terminal uncertified", "terminal certified", "checks passed uncertified", "checks passed certified":
 					wantStatus = types.RunCompleted
-					publication.Validated = scenario == "terminal certified"
+					if strings.HasPrefix(scenario, "checks passed") {
+						wantStatus = types.RunChecksPassed
+					}
+					publication.Validated = scenario == "terminal certified" || scenario == "checks passed certified"
 					publication.LastState = "pending"
 					if err := d.PutCommitStatusPublication(run.ID, *publication); err != nil {
 						t.Fatal(err)

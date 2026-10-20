@@ -846,6 +846,8 @@ Reruns are skipped when:
 
 Defaults to `false`. The global setting or trusted repository configuration may opt into finishing a run once its checks pass. The run then records `checks_passed`, releases its worktree and stops monitoring the PR. The human merge decision remains separate. When disabled, the existing monitor stays active until merge, closure or its idle timeout. Readiness and final comparison checks still apply.
 
+Strict shipping runs in both `full` and `immutable-source` modes ignore this setting and keep monitoring, retaining the worktree and live `ci-ready` receipt lifecycle.
+
 If the daemon stops after recording CI completion but before the verified terminal write, recovery fails the unfinished run and requires revalidation. A CI completion marker never replaces the fork’s terminal-head proof.
 
 ### ci.revalidate_repairs

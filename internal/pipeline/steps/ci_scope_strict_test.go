@@ -16,18 +16,18 @@ import (
 
 // strictCIRun drives one CI step execution of a strict full-shipping run whose
 // head carries checksJSON, with the target branch protected as protection says.
-func strictCIRun(t *testing.T, checksJSON, protection string, ci config.CI, noCI ...bool) (*pipeline.StepOutcome, error, []string, *db.Run, string) {
+func strictCIRun(t *testing.T, mode string, checksJSON, protection string, ci config.CI, noCI ...bool) (*pipeline.StepOutcome, error, []string, *db.Run, string) {
 	t.Helper()
 	dir, base, head := setupGitRepo(t)
 	remote := t.TempDir()
 	gitCmd(t, remote, "init", "--bare")
-	gitCmd(t, dir, "push", remote, "main")
+	gitCmd(t, dir, "push", remote, "main", "feature")
 	url := "https://github.com/test/repo.git"
 	gitCmd(t, dir, "config", "url."+remote+".insteadOf", url)
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
 	sctx.Repo.UpstreamURL = url
-	run, err := sctx.DB.InsertRunWithShipping(sctx.Repo.ID, "feature", head, base, nil, "", "", "", "main", false, nil, &types.ShippingOptions{Mode: types.ShippingFull, TargetBranch: "main"})
+	run, err := sctx.DB.InsertRunWithShipping(sctx.Repo.ID, "feature", head, base, nil, "", "", "", "main", false, nil, &types.ShippingOptions{Mode: mode, TargetBranch: "main", TargetSHA: base})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestStrictCIExternalOnlyReadiness(t *testing.T) {
 		{"declared no_ci still needs observed checks in strict shipping", `[]`, "", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			outcome, err, logs, run, scope := strictCIRun(t, tc.checks, tc.protection, config.CI{ExternalChecks: []string{"approval-status"}}, tc.noCI)
+			outcome, err, logs, run, scope := strictCIRun(t, types.ShippingFull, tc.checks, tc.protection, config.CI{ExternalChecks: []string{"approval-status"}}, tc.noCI)
 			if !errors.Is(err, context.Canceled) || outcome != nil {
 				t.Fatalf("Execute=%+v %v logs=%v", outcome, err, logs)
 			}
@@ -124,7 +124,7 @@ func TestStrictCIReachesReadyWhileExternalApprovalChecksAreRed(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			outcome, err, logs, run, _ := strictCIRun(t, strictChecks, tc.protection, tc.ci)
+			outcome, err, logs, run, _ := strictCIRun(t, types.ShippingFull, strictChecks, tc.protection, tc.ci)
 			if !errors.Is(err, context.Canceled) || outcome != nil {
 				t.Fatalf("Execute() = %+v, %v; want a monitor that kept running. logs: %v", outcome, err, logs)
 			}
@@ -145,7 +145,7 @@ func TestStrictCIReachesReadyWhileExternalApprovalChecksAreRed(t *testing.T) {
 func TestStrictCIStillParksOnAFailingRequiredCheck(t *testing.T) {
 	t.Parallel()
 	failing := strings.Replace(strictChecks, `{"name":"build","state":"SUCCESS","bucket":"pass"}`, `{"name":"build","state":"FAILURE","bucket":"fail"}`, 1)
-	outcome, err, logs, run, _ := strictCIRun(t, failing, `{"contexts":["build"]}`, config.CI{})
+	outcome, err, logs, run, _ := strictCIRun(t, types.ShippingFull, failing, `{"contexts":["build"]}`, config.CI{})
 	if err != nil || outcome == nil || !outcome.NeedsApproval || !strings.Contains(outcome.Findings, `"check":"build"`) {
 		t.Fatalf("Execute() = %+v, %v; want a finding for build. logs: %v", outcome, err, logs)
 	}
@@ -159,7 +159,7 @@ func TestStrictCIStillParksOnAFailingRequiredCheck(t *testing.T) {
 
 func TestStrictCIWithoutScopeParksOnEveryFailingCheck(t *testing.T) {
 	t.Parallel()
-	outcome, err, logs, run, _ := strictCIRun(t, strictChecks, "", config.CI{RequiredChecks: "all"})
+	outcome, err, logs, run, _ := strictCIRun(t, types.ShippingFull, strictChecks, "", config.CI{RequiredChecks: "all"})
 	if err != nil || outcome == nil || !outcome.NeedsApproval || !strings.Contains(outcome.Findings, `"check":"approve"`) {
 		t.Fatalf("Execute() = %+v, %v; want ci.required_checks: all to keep today's behavior. logs: %v", outcome, err, logs)
 	}
@@ -171,11 +171,30 @@ func TestStrictCIWithoutScopeParksOnEveryFailingCheck(t *testing.T) {
 func TestCIStepRecordsTheScopeItEvaluatedUnder(t *testing.T) {
 	t.Parallel()
 	ci := config.CI{RequiredChecks: "auto", MustPass: []string{"lint*"}, ExternalChecks: []string{"approve"}}
-	_, _, _, _, scope := strictCIRun(t, strictChecks, `{"contexts":["build"]}`, ci)
+	_, _, _, _, scope := strictCIRun(t, types.ShippingFull, strictChecks, `{"contexts":["build"]}`, ci)
 	// The record carries the required set the scope resolved, so approval and
 	// the receipt rebuild exactly this scope.
 	want := `{"required_checks":"auto","must_pass":["lint*"],"external_checks":["approve"],"resolved":{"required":[{"context":"build"}],"derived":true}}`
 	if scope != want {
 		t.Fatalf("recorded scope = %s, want %s", scope, want)
+	}
+}
+
+func TestStrictCIReleaseOptionKeepsMonitoring(t *testing.T) {
+	for _, mode := range []string{types.ShippingFull, types.ShippingImmutableSource} {
+		t.Run(mode, func(t *testing.T) {
+			outcome, err, logs, run, _ := strictCIRun(t, mode,
+				`[{"name":"build","state":"SUCCESS","bucket":"pass"}]`,
+				`{"contexts":["build"]}`, config.CI{ReleaseAfterChecksPass: true})
+			if !errors.Is(err, context.Canceled) || outcome != nil {
+				t.Fatalf("strict CI released instead of monitoring: outcome=%+v err=%v logs=%v", outcome, err, logs)
+			}
+			if run.CIReadyAt == nil || run.CIReleasedAt != nil || run.Status.Terminal() {
+				t.Fatalf("strict CI lost live readiness lifecycle: %+v logs=%v", run, logs)
+			}
+			if !strings.Contains(strings.Join(logs, "\n"), cimonitor.ChecksPassedMsg) {
+				t.Fatalf("strict CI never reached green monitoring: %v", logs)
+			}
+		})
 	}
 }

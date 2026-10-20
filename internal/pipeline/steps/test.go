@@ -328,7 +328,7 @@ Rules:
 		}
 		// Keep a known command failure terminal even when the evidence agent
 		// also crashed. Retrying that step would replay a verdict failure.
-		if baselineExitCode != 0 && sctx.Config.AgentCrashRetries > 0 {
+		if baselineExitCode != 0 {
 			return &pipeline.StepOutcome{ExitCode: baselineExitCode}, err
 		}
 		return nil, err

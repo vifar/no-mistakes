@@ -1397,7 +1397,7 @@ func ciReadyMessage(message string) (ready, declaredNoCI bool) {
 // run at the checks verdict. The default is off: the monitor keeps watching the
 // PR until it is merged or closed, exactly as it always has.
 func ciReleaseAfterChecksPass(sctx *pipeline.StepContext) bool {
-	return sctx != nil && sctx.Config != nil && sctx.Config.CI.ReleaseAfterChecksPass
+	return sctx != nil && sctx.Run != nil && sctx.Run.Shipping == nil && sctx.Config != nil && sctx.Config.CI.ReleaseAfterChecksPass
 }
 
 func clearCIMonitorReady(sctx *pipeline.StepContext) {
