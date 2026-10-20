@@ -565,7 +565,7 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 	return cleaned, nil
 }
 
-func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fixExecutionOptions) (string, error) {
+func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fixExecutionOptions) (summaryResult string, returnErr error) {
 	if !sctx.Fixing {
 		return "", nil
 	}
@@ -595,6 +595,14 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		}
 		startingHead = head
 		runOpts.JSONSchema = verifiedFixSummarySchema
+	}
+	if opts.RequireVerification {
+		defer func() {
+			if returnErr != nil {
+				_, discardErr := discardUnverifiedFix(sctx, stepName, startingHead)
+				returnErr = errors.Join(returnErr, discardErr)
+			}
+		}()
 	}
 	var result *agent.Result
 	var err error

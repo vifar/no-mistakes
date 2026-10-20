@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -172,9 +173,7 @@ func TestReviewStep_FixTurnAsksForTheVerificationOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixer := ag.calls[0]
-	if string(fixer.JSONSchema) != string(verifiedFixSummarySchema) {
-		t.Fatalf("fixer schema = %s, want the verification schema", fixer.JSONSchema)
-	}
+	assertFixSchema(t, fixer.JSONSchema, true)
 	for _, want := range []string{
 		"run that verification with the repository's own commands",
 		"a PATH probe is not a dependency check",
@@ -196,9 +195,7 @@ func TestExecuteFixMode_VerificationIsOptIn(t *testing.T) {
 	ag := &mockAgent{
 		name: "test",
 		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			if string(opts.JSONSchema) != string(commitSummarySchema) {
-				t.Errorf("schema = %s, want the plain summary schema", opts.JSONSchema)
-			}
+			assertFixSchema(t, opts.JSONSchema, false)
 			if err := editFeature(dir); err != nil {
 				return nil, err
 			}
@@ -214,5 +211,120 @@ func TestExecuteFixMode_VerificationIsOptIn(t *testing.T) {
 	}
 	if summary != changesAppliedSummary {
 		t.Fatalf("summary = %q, want %q", summary, changesAppliedSummary)
+	}
+}
+
+func assertFixSchema(t *testing.T, raw json.RawMessage, verificationRequired bool) {
+	t.Helper()
+	var schema struct {
+		Type       string   `json:"type"`
+		Required   []string `json:"required"`
+		Properties map[string]struct {
+			Type string   `json:"type"`
+			Enum []string `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		t.Fatal(err)
+	}
+	if schema.Type != "object" || schema.Properties["summary"].Type != "string" {
+		t.Fatalf("schema must describe an object with a string summary: %s", raw)
+	}
+	wantRequired := []string{"summary"}
+	if verificationRequired {
+		wantRequired = append(wantRequired, "verification")
+		property := schema.Properties["verification"]
+		wantOutcomes := []string{"blocked", "failed", "not_needed", "passed"}
+		slices.Sort(property.Enum)
+		if property.Type != "string" || !slices.Equal(property.Enum, wantOutcomes) {
+			t.Fatalf("verification must allow exactly the four specified outcomes: %s", raw)
+		}
+	} else if _, exists := schema.Properties["verification"]; exists {
+		t.Fatalf("ordinary fixer schema exposes verification: %s", raw)
+	}
+	slices.Sort(schema.Required)
+	if !slices.Equal(schema.Required, wantRequired) {
+		t.Fatalf("required = %v, want %v", schema.Required, wantRequired)
+	}
+}
+
+func TestExecuteFixMode_ErrorsDiscardVerificationRequiredChanges(t *testing.T) {
+	t.Parallel()
+	agentErr := errors.New("adapter rejected structured output")
+	hookErr := errors.New("post-agent hook failed")
+	for _, failure := range []string{"agent", "timeout", "hook", "summary"} {
+		for _, committed := range []bool{false, true} {
+			for _, requireVerification := range []bool{false, true} {
+				name := failure
+				if committed {
+					name += "/committed"
+				} else {
+					name += "/edited"
+				}
+				if requireVerification {
+					name += "/review"
+				} else {
+					name += "/ordinary"
+				}
+				t.Run(name, func(t *testing.T) {
+					t.Parallel()
+					dir, baseSHA, headSHA := setupGitRepo(t)
+					gitCmd(t, dir, "checkout", "--detach", headSHA)
+					sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+					sctx.Fixing = true
+					ctx, cancel := context.WithCancel(sctx.Ctx)
+					defer cancel()
+					sctx.Ctx = ctx
+					wantErr := agentErr
+					switch failure {
+					case "timeout":
+						wantErr = context.DeadlineExceeded
+					case "hook":
+						wantErr = hookErr
+					case "summary":
+						wantErr = errRejectedCommitSummary
+					}
+					opts := fixExecutionOptions{
+						RequireVerification: requireVerification,
+						RunAgent: func(agent.RunOpts) (*agent.Result, error) {
+							if err := editFeature(dir); err != nil {
+								t.Fatal(err)
+							}
+							if committed {
+								gitCmd(t, dir, "add", "feature.txt")
+								gitCmd(t, dir, "commit", "-m", "fixer commit")
+							}
+							if err := os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("new"), 0o644); err != nil {
+								t.Fatal(err)
+							}
+							switch failure {
+							case "agent":
+								return nil, agentErr
+							case "timeout":
+								cancel()
+								return nil, context.DeadlineExceeded
+							case "summary":
+								output, err := json.Marshal(map[string]string{"summary": strings.Repeat("x", config.MaxFixMessageSummaryBytes+1), "verification": "blocked"})
+								return &agent.Result{Output: output}, err
+							}
+							return &agent.Result{Output: json.RawMessage(`{"summary":"fix","verification":"passed"}`)}, nil
+						},
+					}
+					if failure == "hook" {
+						opts.AfterAgentRun = func(*agent.Result) error { return hookErr }
+					}
+					_, err := executeFixMode(sctx, types.StepReview, opts)
+					if !errors.Is(err, wantErr) {
+						t.Fatalf("error = %v, want %v", err, wantErr)
+					}
+					if got := gitCmd(t, dir, "rev-parse", "HEAD"); (got == headSHA) != (requireVerification || !committed) {
+						t.Fatalf("HEAD = %s, starting head = %s, verification required = %v", got, headSHA, requireVerification)
+					}
+					if status := gitStatusPorcelain(t, dir); (status == "") != requireVerification {
+						t.Fatalf("status = %q, verification required = %v", status, requireVerification)
+					}
+				})
+			}
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -76,23 +77,34 @@ func refuseUnverifiedFix(sctx *pipeline.StepContext, stepName types.StepName, st
 	if verification == fixVerificationPassed {
 		return nil
 	}
-	ctx := sctx.Ctx
+	changed, err := discardUnverifiedFix(sctx, stepName, startingHead)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	return &UnverifiedFixError{Step: stepName, Verification: verification, Summary: summary}
+}
+
+func discardUnverifiedFix(sctx *pipeline.StepContext, stepName types.StepName, startingHead string) (bool, error) {
+	ctx := context.WithoutCancel(sctx.Ctx)
 	head, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
-		return fmt.Errorf("resolve head after %s fix: %w", stepName, err)
+		return false, fmt.Errorf("resolve head after %s fix: %w", stepName, err)
 	}
 	status, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
 	if err != nil {
-		return fmt.Errorf("check %s changes: %w", stepName, err)
+		return false, fmt.Errorf("check %s changes: %w", stepName, err)
 	}
 	if head == startingHead && strings.TrimSpace(status) == "" {
-		return nil
+		return false, nil
 	}
 	if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", startingHead); err != nil {
-		return fmt.Errorf("discard unverified %s fix: %w", stepName, err)
+		return false, fmt.Errorf("discard unverified %s fix: %w", stepName, err)
 	}
 	if _, err := git.Run(ctx, sctx.WorkDir, "clean", "-fd"); err != nil {
-		return fmt.Errorf("discard unverified %s fix: %w", stepName, err)
+		return false, fmt.Errorf("discard unverified %s fix: %w", stepName, err)
 	}
-	return &UnverifiedFixError{Step: stepName, Verification: verification, Summary: summary}
+	return true, nil
 }
