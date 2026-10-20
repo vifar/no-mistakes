@@ -78,8 +78,10 @@ if [[ "$#" -eq 0 ]]; then
   #
   # The shard count is deliberately small: each shard is a whole go test
   # process with its own daemon slots, and the daemon cap is shared, so more
-  # shards than the cap supports only adds contention.
-  shard_count="${NM_E2E_SHARDS:-3}"
+  # shards than the cap supports only adds contention. It is a measured
+  # count, not a knob: an unsupported value could skip shards or break the
+  # arithmetic that places the long poles.
+  shard_count=3
   # Bash puts each asynchronous job in its own process group while monitor
   # mode is enabled. A group contains go test and its test binary descendants.
   set -m
@@ -174,7 +176,22 @@ if [[ "$#" -eq 0 ]]; then
     TestEvalJourney
   )
 
-  all_tests="$(go test -tags=e2e -count=1 -timeout 60s -list '.*' ./internal/e2e/ 2>/dev/null | grep '^Test')"
+  # Discover the test names of EVERY package the shards run, not just the e2e
+  # package. A shard's -run pattern selects the tests that run in it, so a
+  # package whose names are missing from the pattern would silently run
+  # nothing at all - the step tests would stop running without a single
+  # failure. A discovery that fails is fatal: continuing with an incomplete
+  # list would drop tests the same way, only less visibly.
+  all_tests=""
+  for package in ./internal/e2e/... ./internal/pipeline/steps/...; do
+    listed="$(go test -tags=e2e -count=1 -timeout 60s -list '.*' "$package" 2>/dev/null | grep '^Test')"
+    if [[ -z "$listed" ]]; then
+      echo "e2e suite could not discover the tests of $package" >&2
+      exit 1
+    fi
+    all_tests="${all_tests}${listed}
+"
+  done
 
   # Every measured long pole is placed, round robin over the shards, so a
   # shard count that does not match the number of long poles still places each

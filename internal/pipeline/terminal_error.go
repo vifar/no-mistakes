@@ -148,12 +148,47 @@ func isCancellationLeaf(err, cause error) bool {
 }
 
 // isProcessNoise reports whether an error is a subprocess's exit rather than a
-// failure of its own. A process killed by a cancellation reports its exit
+// failure of its own. A process KILLED by a cancellation reports its exit
 // alongside the cancellation, and that exit says what the process was doing
 // when it was stopped, not that it failed on its own.
+//
+// Only a process that was stopped by a signal qualifies. A process that
+// exited on its own with a failure code - git refusing a ref, 128 - failed for
+// its own reasons, and the cancellation that happened to be observed
+// afterwards does not change that.
+//
+// A wrapper adds a message around the exit, so the question is asked of the
+// cause it wraps. A composite error that merely CONTAINS an exit alongside an
+// independent failure is not noise: every part of it is inspected.
 func isProcessNoise(err error) bool {
-	var exit *exec.ExitError
-	return errors.As(err, &exit)
+	if err == nil {
+		return false
+	}
+	if exit, ok := err.(*exec.ExitError); ok {
+		return processWasSignaled(exit)
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		// Every part must be noise: one independent part among the exits
+		// makes the whole thing an independent failure.
+		children := joined.Unwrap()
+		if len(children) == 0 {
+			return false
+		}
+		for _, child := range children {
+			if !isProcessNoise(child) {
+				return false
+			}
+		}
+		return true
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		inner := wrapped.Unwrap()
+		if inner == nil {
+			return false
+		}
+		return isProcessNoise(inner)
+	}
+	return false
 }
 
 func watcherCancellation(err error) bool {

@@ -365,15 +365,16 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 	defer func() {
 		// launchRun transfers the handle to the run goroutine once the
 		// executor exists; any earlier exit must unregister it here.
+		//
+		// The queued run's workload never started, so it is already over.
+		// Report that FIRST, before the custody bookkeeping below, which can
+		// still be waiting on storage to record the terminal outcome.
+		handle.reportWorkloadStopped()
 		if r := recover(); r != nil {
 			slog.Error("panic launching queued run", "run_id", runID, "panic", r)
 			m.failRunSetup(handle.runCtx, runID, false, fmt.Errorf("internal panic: %v", r))
 		}
 		if !handle.consumed {
-			// The queued run's workload never started, so it is already over.
-			// Report that before the custody bookkeeping, which can still be
-			// waiting on storage to record the terminal outcome.
-			handle.reportWorkloadStopped()
 			if !m.terminalRunSettled(runID) {
 				return
 			}
@@ -1062,11 +1063,25 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	}
 	workloadDone := make(chan struct{})
 	workloadOnce := sync.Once{}
+	// reportWorkload runs the slot-release/signal transition exactly once,
+	// whether the run decided its outcome inside Resume or the resume itself
+	// returned.
+	//
+	// A recovered run is NOT marked finishing here. A recovered run that is
+	// parked again - at a gate, or monitoring CI - must keep its ownership
+	// and its recoverability, so the state transition stays where it was:
+	// after Resume returns.
+	reportWorkload := func() {
+		workloadOnce.Do(func() {
+			slot.Release()
+			close(workloadDone)
+		})
+	}
 	executor.SetOnWorkloadDone(func() {
-		// The recovered run's work is decided. Tell a waiting caller that the
-		// run stopped, so it is never held hostage by storage that cannot
-		// record the terminal outcome yet.
-		workloadOnce.Do(func() { close(workloadDone) })
+		// The recovered run's work is decided. Free the slot and tell a
+		// waiting caller that the run stopped, so it is never held hostage to
+		// storage that cannot record the outcome yet.
+		reportWorkload()
 	})
 	// Registration inspects step implementations before the background panic
 	// handler owns this run. Convert a panic here into the same durable failure
@@ -1104,6 +1119,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		defer slot.Release()
 		defer func() {
 			if recovered := recover(); recovered != nil {
+				// A panic is the recovered run's work ending, so the workload
+				// boundary is reported here too.
+				reportWorkload()
 				errMsg := fmt.Sprintf("internal panic: %v", recovered)
 				if err := pipeline.RecordRunFailure(context.Background(), m.db, plan.run.ID, errMsg, nil, runCtx); err != nil {
 					slog.Error("failed to update recovered run after panic", "run_id", plan.run.ID, "error", err)
@@ -1153,16 +1171,15 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		if resumeErr == nil {
 			resumeErr = executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
 		}
-		// The recovered run's work is over. Report that to a caller waiting
-		// for the run to stop, so it is never held hostage by storage that
-		// cannot record the terminal outcome yet. The hook already reported it
-		// when the run decided its outcome inside Resume.
-		workloadOnce.Do(func() { close(workloadDone) })
-		// Mark finishing before releasing: Release dispatches queued runs
-		// synchronously, and a push landing in that window must not treat
+		// The recovered run's work is over UNLESS it parked again for the next
+		// start, in which case the run is still live and still holds its
+		// slot. Report the workload boundary after the parking check, so a
+		// run that is left for recovery is not reported as stopped.
+		//
+		// Mark finishing before the parking check: Release dispatches queued
+		// runs synchronously, and a push landing in that window must not treat
 		// this already-decided run as a claimed one to cancel and wait on.
 		m.markFinishing(plan.run.ID)
-		slot.Release()
 		if pipeline.LeftForRecoveryAtShutdown(resumeErr) {
 			parkedAtShutdown = true
 			slog.Info("recovered run left for recovery after daemon restart", "run_id", plan.run.ID, "reason", resumeErr)
@@ -1180,6 +1197,11 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", err)
 			}
 		}
+		// The recovered run really did stop. Report that to a caller waiting
+		// for the run to stop, so it is never held hostage by storage that
+		// cannot record the terminal outcome yet. The hook already reported it
+		// when the run decided its outcome inside Resume.
+		reportWorkload()
 		fields := telemetry.Fields{
 			"action":      "finished",
 			"trigger":     "recovery",
@@ -2662,6 +2684,10 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 			if r := recover(); r != nil {
 				err = fmt.Errorf("internal panic: %v", r)
 			}
+			// The run's workload never started, so it is already over. Report
+			// that FIRST, before the settlement below, which can still be
+			// waiting on storage to record the terminal outcome.
+			handle.reportWorkloadStopped()
 			if err != nil {
 				err = errors.Join(err, m.failRunSetup(setupCtx, run.ID, started, err))
 			}
@@ -2899,6 +2925,14 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		defer slot.Release()
 		defer func() {
 			if r := recover(); r != nil {
+				// A panic is the run's work ending, so the workload boundary
+				// is reported here too. A waiter must not be left on the
+				// signal because the pipeline panicked instead of deciding.
+				workloadOnce.Do(func() {
+					m.markFinishing(run.ID)
+					slot.Release()
+					close(handle.workloadDone)
+				})
 				errMsg := fmt.Sprintf("internal panic: %v", r)
 				slog.Error("panic in pipeline goroutine", "run_id", run.ID, "panic", r)
 				run.Status = types.RunFailed

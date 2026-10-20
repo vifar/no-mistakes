@@ -88,12 +88,11 @@ func drainPublicationSettlements() error {
 				// settlement queued, because the recovery loop retries it.
 				if pending.unavailable != nil && pending.unavailable() {
 					rawPublicationSettlements = rawPublicationSettlements[1:]
-					for _, owned := range rawPublicationSettlements {
-						select {
-						case owned.done <- err:
-						default:
-						}
-					}
+					// Only the removed settlement is told. A settlement that
+					// survives behind it reports its own result, so it must
+					// not receive this one's error: a healthy raw shutdown
+					// behind a gone one would report failure even though it
+					// persisted its own shutdown.
 					select {
 					case pending.done <- err:
 					default:
