@@ -185,6 +185,37 @@ if [[ "$#" -eq 0 ]]; then
     exit 1
   fi
 
+  # Discover the test names of EVERY package the shards run, not just the e2e
+  # package. A shard's -run pattern selects the tests that run in it, so a
+  # package whose names are missing from the pattern would silently run
+  # nothing at all - the step tests would stop running without a single
+  # failure.
+  #
+  # A discovery that fails is fatal, and the failure is the EXIT STATUS of go
+  # test, not whether the output happens to be empty. One package under
+  # steps/... can list successfully while another times out during
+  # discovery, and an empty check would let the shards succeed without ever
+  # running the omitted tests.
+  #
+  # The discovery runs BEFORE any worker starts, so a failure here leaves no
+  # worker behind to report a result the discovery already invalidated.
+  all_tests=""
+  for package in ./internal/e2e/... ./internal/pipeline/steps/...; do
+    listed="$(go test -tags=e2e -count=1 -timeout 120s -list '.*' "$package" 2>/dev/null)"
+    status=$?
+    if (( status != 0 )); then
+      echo "e2e suite could not discover the tests of $package (exit $status)" >&2
+      exit 1
+    fi
+    listed="$(printf '%s\n' "$listed" | grep '^Test')"
+    if [[ -z "$listed" ]]; then
+      echo "e2e suite discovered no tests in $package" >&2
+      exit 1
+    fi
+    all_tests="${all_tests}${listed}
+"
+  done
+
   # The terminal-merge and retained-target journeys keep their own worker: they
   # are the two slowest live journeys, and sharing a worker with the rest of
   # the bucket is what made that worker the suite's long pole.
