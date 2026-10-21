@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -8,6 +9,60 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestBuildPipelineSummary_R4ReviewSummaryOutcomeContract(t *testing.T) {
+	t.Parallel()
+	findings := `{"findings":[{"id":"r1","severity":"warning","description":"unsafe value"}]}`
+	type expectedOutcome struct{ heading, detail string }
+	reviewApplied := expectedOutcome{"Fix applied", "🔧 Fix applied."}
+	otherApplied := expectedOutcome{"auto-fixed", "🔧 Fix applied."}
+	noChange := expectedOutcome{"no changes applied", "🔧 No changes applied."}
+	unreported := expectedOutcome{"fix attempted; result not reported", "🔧 Fix attempted; result not reported."}
+	for _, step := range []struct {
+		name  types.StepName
+		label string
+	}{
+		{types.StepReview, "Review"},
+		{types.StepDocument, "Document"},
+		{types.StepLint, "Lint"},
+	} {
+		for _, tc := range []struct {
+			name, summary string
+			review, other expectedOutcome
+		}{
+			{"missing", "", unreported, unreported},
+			{"empty", "", unreported, unreported},
+			{"whitespace", " \n\t", unreported, unreported},
+			{"no change", "no changes applied", noChange, noChange},
+			{"canonical applied", "changes applied", reviewApplied, otherApplied},
+			{"descriptive", "guard unsafe value", reviewApplied, unreported},
+			{"misleading prose", "no changes applied: checked formatting", reviewApplied, unreported},
+			{"unavailable rationale", "body: unavailable - fixer returned no summary", reviewApplied, unreported},
+		} {
+			for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+				t.Run(fmt.Sprintf("%s/%s/%s", step.name, tc.name, provider), func(t *testing.T) {
+					var summary *string
+					if tc.name != "missing" {
+						summary = &tc.summary
+					}
+					rounds := map[string][]*db.StepRound{"s1": {
+						{Round: 1, Trigger: "initial", FindingsJSON: &findings},
+						{Round: 2, Trigger: "auto_fix", FixSummary: summary},
+					}}
+					md, _ := BuildPipelineSummaryFor([]*db.StepResult{{ID: "s1", StepName: step.name, Status: types.StepStatusCompleted}}, rounds, testPipelineHeadSHA, provider)
+					want := tc.other
+					if step.name == types.StepReview {
+						want = tc.review
+					}
+					wantHeading := "🔧 **" + step.label + "** - 1 issue found → " + want.heading + " ✅"
+					if !strings.Contains(md, wantHeading) || !strings.Contains(md, want.detail) {
+						t.Fatalf("want heading %q and detail %q, got:\n%s", wantHeading, want.detail, md)
+					}
+				})
+			}
+		}
+	}
+}
 
 func TestBuildPipelineSummary_AutoFix(t *testing.T) {
 	t.Parallel()

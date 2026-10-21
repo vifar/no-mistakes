@@ -1192,6 +1192,60 @@ func TestExecuteFixMode_NoWorktreeChangesCanonicalizesAgentSummary(t *testing.T)
 	}
 }
 
+func TestExecuteFixMode_ReviewCommitR4ReportsApplied(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		writeAgentChange(t, dir)
+		return &agent.Result{Output: json.RawMessage(`{"summary":"guard unsafe value","verification":"passed"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	sctx.Fixing = true
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"unsafe value"}]}`
+	sctx.PreviousFindings = findings
+	summary, err := executeFixMode(sctx, types.StepReview, fixExecutionOptions{FallbackSummary: "apply review fix", RequireVerification: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary != "guard unsafe value" {
+		t.Fatalf("fix summary = %q, want the committed Review rationale", summary)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got == head {
+		t.Fatal("expected committed Review fix to advance HEAD")
+	}
+	if body := gitCmd(t, dir, "show", "-s", "--format=%b"); body != "guard unsafe value\n\nRound findings:\n- unsafe value" {
+		t.Fatalf("commit body = %q", body)
+	}
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", &findings, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertStepRound(step.ID, 2, "auto_fix", nil, &summary, 0); err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := sctx.DB.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step.Status = types.StepStatusCompleted
+	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+		md, _ := BuildPipelineSummaryFor(
+			[]*db.StepResult{step}, map[string][]*db.StepRound{step.ID: rounds}, testPipelineHeadSHA, provider,
+		)
+		for _, want := range []string{"🔧 **Review** - 1 issue found → Fix applied ✅", "🔧 Fix applied."} {
+			if !strings.Contains(md, want) {
+				t.Errorf("provider %s: missing %q in PR rendering:\n%s", provider, want, md)
+			}
+		}
+		if strings.Contains(md, "result not reported") {
+			t.Errorf("provider %s: committed Review repair reported as missing:\n%s", provider, md)
+		}
+	}
+}
+
 func TestExecuteFixMode_NonReviewChangesCanonicalizeMisleadingAgentSummary(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

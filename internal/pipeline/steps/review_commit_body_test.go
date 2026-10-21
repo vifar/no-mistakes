@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -113,7 +114,7 @@ func TestReviewFixCommitBodySanitizesFindingsAndTrailers(t *testing.T) {
 	}
 }
 
-func TestReviewFixCommitAttributionBoundary(t *testing.T) {
+func TestReviewFixCommitR2ConfiguredAttribution(t *testing.T) {
 	t.Parallel()
 	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
 	const human = "Co-Authored-By: Claude Smith <claude@example.com>"
@@ -138,6 +139,7 @@ func TestReviewFixCommitAttributionBoundary(t *testing.T) {
 		`"Reviewed-By: gpt-5.5"`,
 		"Build-Agent: private-identifier",
 		"Co-Authored-By: configured-identity <noreply@example.com>",
+		"Co-Authored-By: acp:cursor:model <noreply@example.com>",
 	}
 	noise := strings.Join(attribution, "\n")
 	cleanSummary := "Guard receipts\n\n" + disclosure + "\n\n" + human + "\n" + humanWithAIEmail
@@ -161,6 +163,7 @@ func TestReviewFixCommitAttributionBoundary(t *testing.T) {
 		"Build-Agent: private-identifier",
 		"Co-Authored-By: configured-identity <noreply@example.com>",
 		"Codex-Session: configured",
+		"Co-Authored-By: acp:cursor:model <noreply@example.com>",
 	}
 	findings, err := json.Marshal(Findings{Items: []Finding{
 		{File: "receipt.go\n" + noise, Description: disclosure + "\n" + noise},
@@ -179,6 +182,7 @@ func TestReviewFixCommitAttributionBoundary(t *testing.T) {
 	if gotSummary != cleanSummary {
 		t.Errorf("persisted summary = %q, want %q", gotSummary, cleanSummary)
 	}
+	assertPersistedReviewFixSummary(t, sctx.DB, sctx.Run.ID, gotSummary, cleanSummary)
 	wantBody := cleanSummary + "\n\nRound findings:\n- receipt.go: " + disclosure + "\n- " + human + "\n- " + humanWithAIEmail + ": Keep the human attribution\n- " + disclosure + ": Keep ordinary prose"
 	if body := gitCmd(t, dir, "show", "-s", "--format=%b"); body != wantBody {
 		t.Errorf("body = %q, want %q", body, wantBody)
@@ -189,6 +193,92 @@ func TestReviewFixCommitAttributionBoundary(t *testing.T) {
 	}
 	if trailers := gitTrailers(t, dir); trailers != "" {
 		t.Errorf("trailers = %q, want no configured attribution", trailers)
+	}
+}
+
+func TestReviewFixCommitR1DisclosureAndHumanAttribution(t *testing.T) {
+	t.Parallel()
+	assertUnconfiguredReviewAttributionFiltered(t, "Generated with Codex\n> Co-Authored-By: Claude <noreply@anthropic.com>\nAssisted-by: pi:local\nCodex-Session: abc")
+}
+
+func TestReviewFixCommitR3UnconfiguredAIIdentities(t *testing.T) {
+	t.Parallel()
+	t.Run("model coauthor with default empty trailers", func(t *testing.T) {
+		assertUnconfiguredReviewAttributionFiltered(t, "Co-Authored-By: gpt-5.5 <model@example.com>")
+	})
+	t.Run("quoted model coauthor with default empty trailers", func(t *testing.T) {
+		assertUnconfiguredReviewAttributionFiltered(t, `> "Co-Authored-By: gpt-5.5 <model@example.com>"`)
+	})
+	for _, identity := range []string{
+		"claude", "codex", "grok", "rovodev", "opencode", "pi", "omp", "copilot",
+		"cursor", "devin", "antigravity", "acp:cursor", "acp:devin", "acp:custom-target",
+	} {
+		t.Run(identity, func(t *testing.T) {
+			noise := "Co-Authored-By: " + identity + " <model@example.com>\n" +
+				"Assisted-by: " + identity + ":model\n" +
+				"> " + identity + "-Session: abc"
+			assertUnconfiguredReviewAttributionFiltered(t, noise)
+		})
+	}
+}
+
+func assertUnconfiguredReviewAttributionFiltered(t *testing.T, attribution string) {
+	t.Helper()
+	const human = "Co-Authored-By: Claude Smith <claude@example.com>"
+	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
+	const cleanSummary = "guard unsafe value\n\n" + disclosure + "\n\n" + human
+	dir, base, head := setupGitRepo(t)
+	output, err := json.Marshal(map[string]string{"summary": cleanSummary + "\n" + attribution, "verification": "passed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		writeAgentChange(t, dir)
+		return &agent.Result{Output: output}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	if len(sctx.Config.Commit.Trailers) != 0 {
+		t.Fatal("identity classification requires default empty commit trailers")
+	}
+	findings, err := json.Marshal(Findings{Items: []Finding{{File: "receipt.go\n" + attribution, Description: disclosure + "\n" + human + "\n" + attribution}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Fixing = true
+	sctx.PreviousFindings = string(findings)
+	summary, err := executeFixMode(sctx, types.StepReview, fixExecutionOptions{FallbackSummary: "address review findings", RequireVerification: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary != cleanSummary {
+		t.Errorf("returned summary = %q, want %q", summary, cleanSummary)
+	}
+	wantSubject := "no-mistakes(review): guard unsafe value " + disclosure + " " + human
+	if subject := lastCommitMessage(t, dir); subject != wantSubject {
+		t.Errorf("subject = %q, want %q", subject, wantSubject)
+	}
+	wantBody := cleanSummary + "\n\nRound findings:\n- receipt.go: " + disclosure + " " + human
+	if body := gitCmd(t, dir, "show", "-s", "--format=%b"); body != wantBody {
+		t.Errorf("body = %q, want %q", body, wantBody)
+	}
+	assertPersistedReviewFixSummary(t, sctx.DB, sctx.Run.ID, summary, cleanSummary)
+}
+
+func assertPersistedReviewFixSummary(t *testing.T, database *db.DB, runID, summary, want string) {
+	t.Helper()
+	step, err := database.InsertStepResult(runID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertStepRound(step.ID, 1, "auto_fix", nil, &summary, 0); err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := database.GetRoundsByStep(step.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].FixSummary == nil || *rounds[0].FixSummary != want {
+		t.Fatalf("persisted round did not retain the cleaned summary: %+v", rounds)
 	}
 }
 

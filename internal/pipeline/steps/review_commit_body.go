@@ -11,7 +11,9 @@ import (
 
 // Strip even quoted attribution before normalizing summary whitespace: once
 // flattened into a subject, a trailer can no longer be removed line by line.
-var reviewAIAttribution = regexp.MustCompile(`(?i)^[\s>"'\x60*-]*(?:generated\s+with\b|assisted-by\s*:|(?:claude|codex|chatgpt|openai|anthropic|copilot|gemini|grok|pi|omp|opencode|antigravity|rovodev|acp|no-mistakes)-session\s*:|co-authored-by\s*:\s*(?:no-mistakes(?:\s|:|$)|(?:claude(?: code)?|codex|chatgpt|openai|anthropic|(?:github )?copilot|gemini|grok|pi|omp|opencode|antigravity|rovodev|acp)(?:\[bot\])?(?:\s*<|:|[\s>"'\x60]*$)))`)
+const reviewAIIdentity = `(?:claude(?: code)?|codex|chatgpt|openai|anthropic|(?:github )?copilot|gemini|grok|pi|omp|opencode|antigravity|rovodev|cursor|devin|acp(?::[^\s<>]+)?|no-mistakes|(?:gpt|gemini|grok)-[0-9][a-z0-9._-]*|o[1-9](?:-[a-z0-9._-]+)?|claude-(?:sonnet|opus|haiku)[a-z0-9._-]*)`
+
+var reviewAIAttribution = regexp.MustCompile(`(?i)^[\s>"'\x60*-]*(?:generated\s+with\b|assisted-by\s*:|` + reviewAIIdentity + `-session\s*:|co-authored-by\s*:\s*(?:no-mistakes(?:\s|:|$)|` + reviewAIIdentity + `(?:\[bot\])?(?:\s*<|:|[\s>"'\x60]*$)))`)
 
 func stripReviewAIAttribution(text string, configuredTrailers []string) string {
 	var kept []string
