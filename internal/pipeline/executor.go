@@ -637,7 +637,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		return e.FailRun(run, repo, startErr, ctx)
 	}
 	if err := e.clearStorageFailure(run.ID); err != nil {
-		return e.FailRun(run, repo, err)
+		return e.FailRun(run, repo, err, ctx)
 	}
 	run.Status = types.RunRunning
 	e.emitRunEvent(ipc.EventRunUpdated, run, repo)
@@ -645,11 +645,11 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	// Create log directory for this run
 	logDir := e.paths.RunLogDir(run.ID)
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		return e.FailRun(run, repo, fmt.Errorf("create log dir: %w", err))
+		return e.FailRun(run, repo, fmt.Errorf("create log dir: %w", err), ctx)
 	}
 
 	if err := recordCommandConfiguration(logDir, "start", e.config); err != nil {
-		return e.FailRun(run, repo, err)
+		return e.FailRun(run, repo, err, ctx)
 	}
 	e.initializeRunScopes(run.ID)
 	e.attachPublishedHeadStatus(ctx, run, repo)
@@ -661,7 +661,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 	for _, step := range e.steps {
 		sr, err := e.db.InsertStepResult(run.ID, step.Name())
 		if err != nil {
-			return e.FailRun(run, repo, fmt.Errorf("insert step result: %w", err))
+			return e.FailRun(run, repo, fmt.Errorf("insert step result: %w", err), ctx)
 		}
 		stepRecords[step.Name()] = sr
 		if e.skips[step.Name()] {
@@ -769,7 +769,7 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 		if run.Status.Terminal() {
 			return err
 		}
-		return e.FailRun(run, repo, fmt.Errorf("update run status: %w", err))
+		return e.FailRun(run, repo, fmt.Errorf("update run status: %w", err), ctx)
 	}
 	return nil
 }
@@ -1474,20 +1474,20 @@ func (e *Executor) executeRecoveredRemainder(ctx context.Context, run *db.Run, r
 func (e *Executor) skipRecoveredRemainder(ctx context.Context, run *db.Run, repo *db.Repo, workDir string, start int) error {
 	results, err := e.db.GetStepsByRun(run.ID)
 	if err != nil {
-		return e.FailRun(run, repo, fmt.Errorf("get recovered steps: %w", err))
+		return e.FailRun(run, repo, fmt.Errorf("get recovered steps: %w", err), ctx)
 	}
 	for index := start; index < len(e.steps); index++ {
 		if index >= len(results) || results[index].StepName != e.steps[index].Name() || (results[index].Status != types.StepStatusPending && results[index].Status != types.StepStatusSkipped) {
-			return e.FailRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index))
+			return e.FailRun(run, repo, fmt.Errorf("recovered step plan changed at %d", index), ctx)
 		}
 		if results[index].Status == types.StepStatusSkipped {
 			continue
 		}
 		if err := e.refuseSkippedPRWithClosingIssues(run, repo, e.steps[index].Name(), results[index].ID); err != nil {
-			return e.FailRun(run, repo, err)
+			return e.FailRun(run, repo, err, ctx)
 		}
 		if err := e.db.CompleteStepWithStatus(results[index].ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
-			return e.FailRun(run, repo, fmt.Errorf("skip recovered step %s: %w", e.steps[index].Name(), err))
+			return e.FailRun(run, repo, fmt.Errorf("skip recovered step %s: %w", e.steps[index].Name(), err), ctx)
 		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, e.steps[index].Name(), string(types.StepStatusSkipped), "", "", nil)
 	}
@@ -1495,13 +1495,13 @@ func (e *Executor) skipRecoveredRemainder(ctx context.Context, run *db.Run, repo
 		return e.FailRun(run, repo, err, ctx)
 	}
 	if err := e.validateReviewSupportOwners(run.ID, types.StepCI); err != nil {
-		return e.FailRun(run, repo, err)
+		return e.FailRun(run, repo, err, ctx)
 	}
 	if err := e.completeRun(ctx, run, repo); err != nil {
 		if run.Status.Terminal() {
 			return err
 		}
-		return e.FailRun(run, repo, fmt.Errorf("complete recovered run: %w", err))
+		return e.FailRun(run, repo, fmt.Errorf("complete recovered run: %w", err), ctx)
 	}
 	return nil
 }
@@ -3139,6 +3139,9 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
 	executionErr := err
 	writeTerminal := func() error {
+		if err := RecordCancellationAttribution(e.db, run.ID, ctxs...); err != nil {
+			return err
+		}
 		if infrastructure {
 			// Revoke cancellation eligibility before settling the canonical storage
 			// outcome and active steps through the shared infrastructure path.

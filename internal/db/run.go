@@ -20,12 +20,13 @@ import (
 
 // Run represents a pipeline run.
 type Run struct {
-	Shipping *types.ShippingOptions
-	ID       string
-	RepoID   string
-	Branch   string
-	HeadSHA  string
-	BaseSHA  string
+	EndingEvent *types.RunEndingEvent
+	Shipping    *types.ShippingOptions
+	ID          string
+	RepoID      string
+	Branch      string
+	HeadSHA     string
+	BaseSHA     string
 	// WorktreeDir pins placement when an admitted run creates its worktree (see
 	// internal/worktrees). Consumers read it instead of re-deriving placement,
 	// so later configuration edits cannot retarget that worktree. It is nil
@@ -130,12 +131,13 @@ func (r *Run) Owner() string {
 	return strings.TrimSpace(*r.LaunchOwner)
 }
 
-const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_owner, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, COALESCE(pr_base_branch_requested, 0), COALESCE(retarget_attempted, 0), target_advance_rewinds, pending_target_rewind_id, COALESCE(omit_intent, 0), COALESCE(external_ci_owner, ''), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, shipping_options, created_at, updated_at`
+const runColumns = `id, repo_id, branch, head_sha, base_sha, worktree_dir, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, review_approved_head_sha, status, pr_url, pr_state, pr_state_observed_at, ci_ready_at, COALESCE(ci_ready_no_ci, 0), last_pushed_sha, push_target_kind, push_target_fingerprint, push_ref, last_pushed_at, push_generation, COALESCE(push_active, 0), terminal_head_verified_at, custody_returned_at, error, awaiting_agent_since, COALESCE(parked_ms, 0), intent, intent_source, intent_session_id, intent_score, launch_owner, launch_nonce, launch_validation_generation, launch_intent_digest, launch_receipt_claimed_at, pr_base_branch, COALESCE(pr_base_branch_requested, 0), COALESCE(retarget_attempted, 0), target_advance_rewinds, pending_target_rewind_id, COALESCE(omit_intent, 0), COALESCE(external_ci_owner, ''), pi_profile, verification_plan, closing_issue_refs, closing_issue_refs_locked_at, shipping_options, ending_event, created_at, updated_at`
 
 func scanRun(row interface {
 	Scan(...any) error
 }, r *Run) error {
 	var storedClosingIssues sql.NullString
+	var storedEnding sql.NullString
 	err := row.Scan(
 		&r.ID, &r.RepoID, &r.Branch, &r.HeadSHA, &r.BaseSHA, &r.WorktreeDir, &r.SubmittedHeadSHA, &r.NoMistakesVersion, &r.NoMistakesBuildSHA, &r.ReviewApprovedHeadSHA, &r.Status,
 		&r.PRURL, &r.PRState, &r.PRStateObservedAt, &r.CIReadyAt, &r.CIReadyNoCI,
@@ -145,11 +147,16 @@ func scanRun(row interface {
 		&r.Intent, &r.IntentSource, &r.IntentSessionID, &r.IntentScore, &r.LaunchOwner,
 		&r.LaunchNonce, &r.LaunchValidationGeneration, &r.LaunchIntentDigest, &r.LaunchReceiptClaimedAt,
 		&r.PRBaseBranch, &r.PRBaseBranchRequested, &r.RetargetAttempted, &r.TargetAdvanceRewinds, &r.PendingTargetRewindID, &r.OmitIntent, &r.ExternalCIOwner, &r.PiProfile, &r.VerificationPlan,
-		&storedClosingIssues, &r.ClosingIssueRefsLockedAt, &r.Shipping,
+		&storedClosingIssues, &r.ClosingIssueRefsLockedAt, &r.Shipping, &storedEnding,
 		&r.CreatedAt, &r.UpdatedAt,
 	)
 	if err != nil {
 		return err
+	}
+	if storedEnding.Valid {
+		if err := json.Unmarshal([]byte(storedEnding.String), &r.EndingEvent); err != nil {
+			return fmt.Errorf("decode run ending event: %w", err)
+		}
 	}
 	r.ClosingIssueRefs, err = closingissues.Decode(storedClosingIssues.String)
 	if err != nil {
@@ -1827,8 +1834,22 @@ func (d *DB) TerminateActiveRun(id, errMsg string, status types.RunStatus) (bool
 
 // CancelQueuedRun terminalizes a run that never started. It reports false when
 // the run is not queued any more, so a start that won the race is left alone.
-func (d *DB) CancelQueuedRun(id, reason string) (bool, error) {
-	return d.terminateUnstartedRun(id, reason, types.RunCancelled, types.RunQueued)
+func (d *DB) CancelQueuedRun(id, reason string, events ...*types.RunEndingEvent) (bool, error) {
+	var payload any
+	if len(events) > 0 && events[0] != nil {
+		raw, err := json.Marshal(events[0])
+		if err != nil {
+			return false, err
+		}
+		payload = string(raw)
+	}
+	ts := now()
+	result, err := sqlitewrite.Exec(context.Background(), d.sql, "CancelQueuedRun", `UPDATE runs SET status=?,error=?,push_active=0,terminal_head_verified_at=?,updated_at=?,ending_event=COALESCE(ending_event,?) WHERE id=? AND status=?`, types.RunCancelled, reason, ts, ts, payload, id, types.RunQueued)
+	if err != nil {
+		return false, fmt.Errorf("cancel queued run: %w", err)
+	}
+	n, err := result.RowsAffected()
+	return n == 1, err
 }
 
 func (d *DB) TerminateUnstartedRun(id, reason string, status types.RunStatus) (bool, error) {

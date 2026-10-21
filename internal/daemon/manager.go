@@ -436,14 +436,16 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 func (m *RunManager) failRunSetup(ctx context.Context, runID string, started bool, setupErr error) error {
 	err := pipeline.SettleTerminalWrite(m.db, func() error {
 		m.mu.Lock()
-		defer m.mu.Unlock()
 		status, message := types.RunFailed, setupErr.Error()
-		cause := context.Cause(ctx)
+		attributionCtx := ctx
+		cause := context.Cause(attributionCtx)
 		if owned := m.runs[runID]; owned != nil && owned.handle != nil {
 			if original := context.Cause(owned.handle.runCtx); original != nil {
 				cause = original
+				attributionCtx = owned.handle.runCtx
 			}
 		}
+		m.mu.Unlock()
 		cancelled := pipeline.CancellationOnly(setupErr, cause)
 		if cancelled {
 			status, message = types.RunCancelled, cause.Error()
@@ -451,6 +453,9 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 			if errors.Is(cause, pipeline.ErrDaemonShutdown) && !errors.As(cause, &planned) {
 				status = types.RunFailed
 			}
+		}
+		if err := pipeline.RecordCancellationAttribution(m.db, runID, attributionCtx); err != nil {
+			return err
 		}
 		revoked, err := m.db.RawShutdownSuperseded(runID)
 		if err != nil {
@@ -628,16 +633,50 @@ func (m *RunManager) releaseQueue() {
 // hold of the ownership lock, so the channel is always the handle that was
 // actually signalled: a queued run that dispatch claimed a moment earlier is
 // cancelled as claimed, with its new handle and completion channel returned.
-func (m *RunManager) cancelManagedRun(runID, reason string) (<-chan struct{}, error) {
+func (m *RunManager) cancelManagedRun(runID, reason string, events ...*types.RunEndingEvent) (<-chan struct{}, error) {
 	m.mu.Lock()
 	owned := m.runs[runID]
 	if owned == nil {
 		m.mu.Unlock()
 		return nil, nil
 	}
+	var event *types.RunEndingEvent
+	if len(events) > 0 && events[0] != nil {
+		copyEvent := *events[0]
+		event = &copyEvent
+	} else {
+		event = &types.RunEndingEvent{}
+	}
+	event.CreatedAt = time.Now().Unix()
+	if reason == types.RunCancelReasonSuperseded {
+		event.Event = "run_superseded"
+		if event.AttributionSource == "" {
+			event.AttributionSource = "unavailable"
+		}
+	} else {
+		event.Event = "run_cancel_requested"
+		owner := ""
+		if owned.run != nil {
+			owner = owned.run.Owner()
+		}
+		if event.Caller != "" {
+			event.AttributionSource = "caller"
+		} else if owner != "" {
+			event.Caller = owner
+			event.AttributionSource = "launch_owner"
+		} else {
+			event.AttributionSource = "unavailable"
+		}
+	}
+	if event.Reason == "" {
+		event.Reason = reason
+	}
+	logEvent := func() {
+		slog.Info("run ending requested", "event", event.Event, "run_id", runID, "caller", event.Caller, "client", event.Client, "reason", event.Reason, "attribution_source", event.AttributionSource, "peer_pid", event.PeerPID, "ending_event", event)
+	}
 	switch owned.state {
 	case ownershipQueued:
-		cancelled, err := m.db.CancelQueuedRun(runID, reason)
+		cancelled, err := m.db.CancelQueuedRun(runID, reason, event)
 		if err != nil {
 			m.mu.Unlock()
 			return nil, err
@@ -649,13 +688,19 @@ func (m *RunManager) cancelManagedRun(runID, reason string) (<-chan struct{}, er
 		m.sched.removeQueuedLocked(runID)
 		delete(m.runs, runID)
 		m.mu.Unlock()
+		logEvent()
 		m.broadcastTerminal(owned.run, types.RunCancelled, reason)
 		return nil, nil
 	case ownershipFinishing:
 		m.mu.Unlock()
 		return nil, nil
 	}
-	owned.handle.cancel(errors.New(reason))
+	// Only the first context cancellation takes effect; a duplicate cannot
+	// overwrite its audit record or claim to have stopped the work.
+	if owned.handle.runCtx == nil || context.Cause(owned.handle.runCtx) == nil {
+		owned.handle.cancel(&pipeline.RunCancelCause{Reason: reason, Event: event})
+		logEvent()
+	}
 	done := owned.handle.done
 	m.mu.Unlock()
 	return done, nil
@@ -1042,7 +1087,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				errMsg := fmt.Sprintf("internal panic: %v", recovered)
-				if err := pipeline.RecordRunFailure(context.Background(), m.db, plan.run.ID, errMsg, nil); err != nil {
+				if err := pipeline.RecordRunFailure(context.Background(), m.db, plan.run.ID, errMsg, nil, runCtx); err != nil {
 					slog.Error("failed to update recovered run after panic", "run_id", plan.run.ID, "error", err)
 				} else {
 					plan.run.Status = types.RunFailed
@@ -2419,7 +2464,15 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
-	if err := m.cancelRunIDs(predecessors); err != nil {
+	supersession := &types.RunEndingEvent{AttributionSource: trigger, SupersedingRunID: run.ID, SupersedingGeneration: run.PushGeneration, SupersedingValidationGeneration: run.LaunchValidationGeneration}
+	if retained != nil {
+		supersession.AttributionSource = "push"
+		supersession.SupersedingSHA = retained.Record.Params.New
+		supersession.SupersedingRef = retained.Record.Params.Ref
+		supersession.PushNotificationID = retained.ID
+		supersession.SupersedingOldSHA = retained.Record.Params.Old
+	}
+	if err := m.cancelRunIDs(predecessors, supersession); err != nil {
 		settlementErr := m.failUnadmittedRunSetup(ctx, run, fmt.Errorf("supersede predecessor: %w", err))
 		trackStartFailure("supersede_predecessor")
 		return "", fmt.Errorf("supersede predecessor for replacement run %s: %w; inspect no-mistakes axi status --run %s and correct the fault before no-mistakes rerun", run.ID, errors.Join(err, settlementErr), run.ID)
@@ -2805,9 +2858,9 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				verifiedHead, verified := preserveRunHead(m.db, wtDir, run)
 				var dbErr error
 				if verified {
-					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, &verifiedHead)
+					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, &verifiedHead, runCtx)
 				} else {
-					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, nil)
+					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, nil, runCtx)
 				}
 				if dbErr != nil {
 					slog.Error("failed to update run after panic", "run_id", run.ID, "error", dbErr)
@@ -3426,10 +3479,28 @@ func (m *RunManager) runCancelsLocked() map[string]context.CancelCauseFunc {
 // terminalRunSettled reports whether a run's terminal outcome is durable.
 // Until it is, the run goroutine keeps custody of the run.
 func (m *RunManager) terminalRunSettled(runID string) bool {
+	m.mu.Lock()
+	var event *types.RunEndingEvent
+	if owned := m.runs[runID]; owned != nil {
+		owned.state = ownershipFinishing
+		if owned.handle != nil && owned.handle.runCtx != nil {
+			var cause *pipeline.RunCancelCause
+			if errors.As(context.Cause(owned.handle.runCtx), &cause) {
+				event = cause.Event
+			}
+		}
+	}
+	m.mu.Unlock()
 	run, err := pipeline.ReadSettledRun(m.db, runID)
 	if err != nil || run == nil || !run.Status.Terminal() {
 		slog.Error("terminal outcome unsettled; retaining run custody", "run_id", runID, "error", err)
 		return false
+	}
+	if event != nil && run.EndingEvent == nil {
+		if err := pipeline.SettleTerminalWrite(m.db, func() error { return m.db.RecordRunEnding(runID, event) }); err != nil {
+			slog.Error("ending attribution unsettled; retaining run custody", "run_id", runID, "error", err)
+			return false
+		}
 	}
 	return true
 }
@@ -3458,6 +3529,9 @@ func (m *RunManager) HandleCancel(runID string) error {
 }
 
 func (m *RunManager) handleCancelWithCleanup(runID string) (int, error) {
+	return m.handleCancelWithAttribution(runID, nil)
+}
+func (m *RunManager) handleCancelWithAttribution(runID string, event *types.RunEndingEvent) (int, error) {
 	m.mu.Lock()
 	owned := m.runs[runID]
 	m.mu.Unlock()
@@ -3471,7 +3545,7 @@ func (m *RunManager) handleCancelWithCleanup(runID string) (int, error) {
 		}
 		return 0, fmt.Errorf("no active run %s", runID)
 	}
-	_, err := m.cancelManagedRun(runID, types.RunCancelReasonAbortedByUser)
+	_, err := m.cancelManagedRun(runID, types.RunCancelReasonAbortedByUser, event)
 	return 0, err
 }
 
@@ -3498,7 +3572,7 @@ func (m *RunManager) activeRunIDs(repoID, branch string) []string {
 	return ids
 }
 
-func (m *RunManager) cancelRunIDs(ids []string) error {
+func (m *RunManager) cancelRunIDs(ids []string, events ...*types.RunEndingEvent) error {
 	if m.afterSupersedeSnapshot != nil {
 		m.afterSupersedeSnapshot()
 	}
@@ -3508,7 +3582,7 @@ func (m *RunManager) cancelRunIDs(ids []string) error {
 	// dispatch claimed after the snapshot is waited for like any other.
 	var toWait []<-chan struct{}
 	for _, id := range ids {
-		done, err := m.cancelManagedRun(id, types.RunCancelReasonSuperseded)
+		done, err := m.cancelManagedRun(id, types.RunCancelReasonSuperseded, events...)
 		if err != nil {
 			return err
 		}

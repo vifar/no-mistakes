@@ -134,10 +134,6 @@ func ReleaseCommitStatusLock() {
 	}
 }
 
-func SettleIneligibleTerminal(d *db.DB, runID, message string, status types.RunStatus) error {
-	return SettleTerminalWrite(d, func() error { return d.RecordIneligibleTerminal(runID, message, status, nil) })
-}
-
 func SettleTerminalWrite(d *db.DB, write func() error) error {
 	if d.Closed() {
 		return fmt.Errorf("database closed before terminal settlement")
@@ -185,17 +181,24 @@ func WithCommitStatusLock(ctx context.Context, write func() error) error {
 }
 
 // RecordRunFailure is shared by daemon panic and recovery fallbacks.
-func RecordRunFailure(ctx context.Context, d *db.DB, runID, message string, head *string) error {
-	return RecordRunTerminal(ctx, d, runID, message, types.RunFailed, head)
+func RecordRunFailure(ctx context.Context, d *db.DB, runID, message string, head *string, ctxs ...context.Context) error {
+	return RecordRunTerminal(ctx, d, runID, message, types.RunFailed, head, ctxs...)
 }
 
 // RecordRunTerminal records a failed or cancelled fallback outcome through the
 // same settled, preservation-revoking write as RecordRunFailure.
-func RecordRunTerminal(ctx context.Context, d *db.DB, runID, message string, status types.RunStatus, head *string) error {
-	err := WithCommitStatusLock(ctx, func() error { return d.RecordIneligibleTerminal(runID, message, status, head) })
+func RecordRunTerminal(ctx context.Context, d *db.DB, runID, message string, status types.RunStatus, head *string, ctxs ...context.Context) error {
+	ctxs = append([]context.Context{ctx}, ctxs...)
+	writeTerminal := func(head *string) error {
+		if err := RecordCancellationAttribution(d, runID, ctxs...); err != nil {
+			return err
+		}
+		return d.RecordIneligibleTerminal(runID, message, status, head)
+	}
+	err := WithCommitStatusLock(ctx, func() error { return writeTerminal(head) })
 	if err != nil {
 		slog.Warn("recording ineligible terminal fallback", "run", runID, "error", err)
-		if settlementErr := SettleIneligibleTerminal(d, runID, message, status); settlementErr != nil {
+		if settlementErr := SettleTerminalWrite(d, func() error { return writeTerminal(nil) }); settlementErr != nil {
 			return errors.Join(err, settlementErr)
 		}
 	}

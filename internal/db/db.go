@@ -25,7 +25,9 @@ var (
 // or additiveMigrationStatements changes. Version zero is the historical,
 // unversioned schema; its complete upgrade runs once before the stamp is
 // committed. Current opens execute no DDL or backfill DML.
-const schemaVersion = 5
+// Version 6 is allocated by the parallel upstream-sync migration. Keep this
+// addition newer so those databases also receive the ending audit column.
+const schemaVersion = 7
 
 // DB wraps a SQLite database connection.
 type DB struct {

@@ -100,7 +100,7 @@ func TestSetupFailurePreservesCancellation(t *testing.T) {
 				wantReason := types.RunCancelReasonAbortedByUser
 				switch action {
 				case "abort":
-					err = f.mgr.HandleCancel(id)
+					_, err = f.mgr.handleCancelWithAttribution(id, &types.RunEndingEvent{Caller: "setup-caller", Client: "axi", Reason: "explicit setup stop"})
 				case "signal":
 					wantStatus, wantReason = types.RunFailed, "signal:"
 					err = f.mgr.HandleCancel(id)
@@ -125,6 +125,12 @@ func TestSetupFailurePreservesCancellation(t *testing.T) {
 				}
 				if stored.Status != wantStatus || stored.Error == nil || !strings.Contains(*stored.Error, wantReason) {
 					t.Fatalf("setup outcome = %s, %v; want %s with %q", stored.Status, stored.Error, wantStatus, wantReason)
+				}
+				if action == "abort" {
+					e := endingPayload(t, stored)
+					if e["caller"] != "setup-caller" || e["reason"] != "explicit setup stop" || e["client"] != "axi" || e["attribution_source"] != "caller" {
+						t.Fatalf("setup attribution lost: %#v", e)
+					}
 				}
 				if f.started(id) {
 					t.Fatal("failed setup reached the executor")
