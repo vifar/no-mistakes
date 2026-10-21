@@ -31,9 +31,10 @@ func SetWorktreeConfig(ctx context.Context, dir, key, value string) error {
 }
 
 // sharedConfigKeys reads the FILE, not the effective worktree configuration.
-// Values are hashed individually; baseline files and errors never disclose URL
-// credentials or other config values. --no-includes keeps the file boundary
-// explicit; changes to include directives are themselves detected.
+// Values and subsection-bearing key identities are hashed individually;
+// baseline files and errors never disclose URL credentials or config values.
+// --no-includes keeps the file boundary explicit; changes to include
+// directives are themselves detected.
 func sharedConfigKeys(ctx context.Context, bare string) (map[string]string, error) {
 	path := filepath.Join(bare, "config")
 	raw, err := RunRaw(ctx, bare, "config", "--file", path, "--no-includes", "--null", "--list")
@@ -52,9 +53,20 @@ func sharedConfigKeys(ctx context.Context, bare string) (map[string]string, erro
 	result := make(map[string]string, len(values))
 	for key, value := range values {
 		sum := sha256.Sum256([]byte(value))
-		result[key] = hex.EncodeToString(sum[:])
+		result[sharedConfigKeyIdentity(key)] = hex.EncodeToString(sum[:])
 	}
 	return result, nil
+}
+
+// Subsection names are arbitrary strings: URL rewrites, HTTP/credential
+// scopes and even remote names can contain secrets. Preserve ordinary keys for
+// actionable diagnostics, but never persist or print subsection-bearing names.
+func sharedConfigKeyIdentity(key string) string {
+	if strings.Count(key, ".") < 2 {
+		return key
+	}
+	sum := sha256.Sum256([]byte(key))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // RecordSharedConfigBaseline runs only at deliberate enrollment/migration,
@@ -83,6 +95,11 @@ func RecordSharedConfigBaseline(ctx context.Context, bare string) error {
 }
 
 func sharedConfigChanged(bare, key string) error {
+	// Also redact identities read from a legacy baseline.
+	key = sharedConfigKeyIdentity(key)
+	if strings.HasPrefix(key, "sha256:") {
+		key = "redacted config key (" + key + ")"
+	}
 	return fmt.Errorf("shared gate config %s: unexpected key or value for %s; use git config --worktree for worktree-scoped settings", filepath.Join(bare, "config"), key)
 }
 

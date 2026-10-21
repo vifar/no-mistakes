@@ -2,6 +2,8 @@ package git
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,7 +91,12 @@ func TestIssue131BaselineDetectsFileAndKey(t *testing.T) {
 			}
 			runGitOrFatal(t, bare, "config", "--file", path, key, value)
 			_, err := ProtectSharedConfig(context.Background(), bare)
-			if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(strings.ToLower(err.Error()), key) {
+			expectedKey := key
+			if strings.HasPrefix(key, "remote.") {
+				sum := sha256.Sum256([]byte(key))
+				expectedKey = "redacted config key (sha256:" + hex.EncodeToString(sum[:]) + ")"
+			}
+			if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(strings.ToLower(err.Error()), expectedKey) {
 				t.Fatalf("want file and key, got %v", err)
 			}
 		})
@@ -237,5 +244,95 @@ func TestIssue131EnrollmentRefusesNonGateBeforeWritingConfig(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(bare, sharedConfigBaselineFile)); !os.IsNotExist(err) {
 		t.Fatalf("refused enrollment wrote a baseline: %v", err)
+	}
+}
+
+// Git subsection names can contain credentials, even though ordinary variable
+// names cannot. The persisted baseline and diagnostics are public contracts.
+func TestIssue131SensitiveConfigIdentitiesNeverPersistOrPrint(t *testing.T) {
+	for _, key := range []string{
+		"url.https://fixture-user:fixture-password@example.invalid/.insteadof",
+		"http.https://fixture-user:fixture-password@example.invalid/.extraheader",
+		"remote.fixture-password.url",
+		"credential.https://fixture-user:fixture-password@example.invalid/.username",
+	} {
+		for _, change := range []string{"value", "identity", "deletion", "addition"} {
+			// Do not put credential-bearing keys into subtest names or failure output.
+			t.Run(strings.SplitN(key, ".", 2)[0]+"/"+change, func(t *testing.T) {
+				ctx := context.Background()
+				bare, _ := issue131Gate(t)
+				path := filepath.Join(bare, "config")
+				if change != "addition" {
+					runGitOrFatal(t, bare, "config", "--file", path, key, "fixture-value")
+				}
+				if err := RecordSharedConfigBaseline(ctx, bare); err != nil {
+					t.Fatal("cannot record fixture baseline")
+				}
+				data, err := os.ReadFile(filepath.Join(bare, sharedConfigBaselineFile))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, raw := range []string{key, "fixture-user", "fixture-password", "fixture-value"} {
+					if strings.Contains(string(data), raw) {
+						t.Fatal("baseline disclosed a sensitive config identity or value")
+					}
+				}
+				if change != "addition" {
+					sum := sha256.Sum256([]byte(key))
+					if !strings.Contains(string(data), "sha256:"+hex.EncodeToString(sum[:])) {
+						t.Fatal("baseline did not retain a hashed sensitive key identity")
+					}
+				}
+				switch change {
+				case "value", "addition":
+					runGitOrFatal(t, bare, "config", "--file", path, key, "fixture-new-value")
+				case "identity":
+					runGitOrFatal(t, bare, "config", "--file", path, "--unset", key)
+					runGitOrFatal(t, bare, "config", "--file", path, strings.ReplaceAll(key, "fixture-password", "fixture-other-password"), "fixture-value")
+				case "deletion":
+					runGitOrFatal(t, bare, "config", "--file", path, "--unset", key)
+				}
+				guard, err := ProtectSharedConfig(ctx, bare)
+				if err == nil {
+					guard.Close()
+					t.Fatal("sensitive config change escaped preflight")
+				}
+				diagnostic := err.Error()
+				if !strings.Contains(diagnostic, path) || !strings.Contains(diagnostic, "redacted config key") {
+					t.Fatal("diagnostic did not name the file and redacted key identity")
+				}
+				for _, raw := range []string{key, "fixture-user", "fixture-password", "fixture-other-password", "fixture-value", "fixture-new-value"} {
+					if strings.Contains(diagnostic, raw) {
+						t.Fatal("diagnostic disclosed sensitive config data")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestIssue131LegacySensitiveBaselineDiagnosticIsRedacted(t *testing.T) {
+	bare, _ := issue131Gate(t)
+	// Simulate an older baseline whose key names were persisted verbatim.
+	path := filepath.Join(bare, sharedConfigBaselineFile)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "url.https://fixture-user:fixture-password@example.invalid/.insteadof"
+	data = append([]byte(`{"`+key+`":"legacy-value-hash",`), data[1:]...)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := ProtectSharedConfig(context.Background(), bare)
+	if err == nil {
+		guard.Close()
+		t.Fatal("legacy baseline mismatch escaped detection")
+	}
+	if strings.Contains(err.Error(), "fixture-user") || strings.Contains(err.Error(), "fixture-password") {
+		t.Fatal("legacy baseline diagnostic disclosed a sensitive config key")
+	}
+	if !strings.Contains(err.Error(), "redacted config key") {
+		t.Fatal("legacy diagnostic lost the redacted identity")
 	}
 }

@@ -67,3 +67,32 @@ func TestIssue131FailsTheStepThatChangesSharedConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestIssue131MissingGateFailsPreflightBeforeStep(t *testing.T) {
+	for _, enrolled := range []bool{false, true} {
+		name := "missing-gate"
+		if enrolled {
+			name = "missing-baseline"
+		}
+		t.Run(name, func(t *testing.T) {
+			gate := filepath.Join(t.TempDir(), "gate.git")
+			if enrolled {
+				if err := git.InitBare(context.Background(), gate); err != nil {
+					t.Fatal(err)
+				}
+			}
+			executed := false
+			step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+				executed = true
+				return &StepOutcome{}, nil
+			}}
+			_, err := executeWithConfigProtection(step, &StepContext{Ctx: context.Background(), GateDir: gate})
+			if err == nil || !strings.Contains(err.Error(), "review shared config preflight") || !strings.Contains(err.Error(), gate) {
+				t.Fatalf("expected named preflight failure for missing gate enrollment, got %v", err)
+			}
+			if executed {
+				t.Fatal("step ran without an enrolled gate")
+			}
+		})
+	}
+}
