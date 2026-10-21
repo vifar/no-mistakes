@@ -597,7 +597,7 @@ Repeated failures to read the PR target do not bypass this deadline: the monitor
 While that CI gate is parked, the daemon continues bounded read-only PR-state checks.
 If the PR is merged or closed externally, an eligible stale gate returns to CI execution under the [CI completion rules](/no-mistakes/reference/pipeline-steps/#ci); the observation alone does not complete the run. An open, unknown, or temporarily unreachable PR remains parked for a user decision.
 
-Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to monitor until the PR is merged, closed, or the run is aborted with `no-mistakes axi abort --run <id>`.
+Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to disable the idle deadline. Healthy monitoring can continue until the PR is merged, closed, or the run is aborted with `no-mistakes axi abort --run <id>`; the separate [`ci_readiness_receipt_timeout`](#ci_readiness_receipt_timeout) still applies to missing comparison proof.
 
 Legacy alias: `babysit_timeout`.
 
