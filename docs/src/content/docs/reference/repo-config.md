@@ -899,7 +899,7 @@ With no trusted copy of this file, the operator's global value applies, then the
 
 ### ci.review_bot_comments
 
-When the CI step reads a supported review bot's (currently Greptile's) unresolved review comments.
+When the CI step reads a supported review bot's (Greptile or GitHub's Codex connector) unresolved review comments.
 
 | | |
 |---|---|
@@ -915,6 +915,12 @@ ci:
 - **`on_failure` (default)** reads them only when the bot's own in-scope check failed. A green bot check is green, whatever comments it left. This is the behavior before the key existed.
 - **`always`** also reads comments from informational, green or absent bot checks under the conditions below, since the bot's threads from an earlier head can still be unresolved. Each unresolved comment becomes the same `ask-user` finding a red bot check produces, anchored to the comment's file and line, so the step parks for a decision instead of reporting `checks-passed`. A green bot with nothing unresolved is still green.
 
+Codex (`chatgpt-codex-connector`, commenting as `chatgpt-codex-connector[bot]`) posts PR reviews and summary comments instead of a check run. Use `always` to include its unresolved threads; `on_failure` keeps its existing check-failure meaning and does not turn an absent Codex check into a failure. Exclude `Codex Review` explicitly in `ci.external_checks` to silence Codex without silencing Greptile.
+
+Under `always`, Codex completion is read separately from check runs. A provider-visible `PENDING` review of the current head, or a bot-authored 👀 reaction acknowledging an outstanding `@codex review` request, withholds readiness. A submitted review or a summary naming the reviewed commit settles review activity; a bot-authored 👍 on the request signals a clean review. Historical requests retire after a later completed review or summary. Another app's reactions do not count. An absent bot is not a required review gate, and an automatic review with no provider-visible start signal cannot be distinguished from absence. Existing unresolved threads are still read regardless of which head they originated on. Completion-read errors fail closed like comment-read errors.
+
+Codex severity badges retain their P-level in the finding description and map into the existing severity vocabulary: P0/P1 → `error`, P2 → `warning`, P3 → `info`; missing or malformed badges default to `warning`. Findings remain `ask-user`. Greptile's severity and check-based completion behavior are unchanged.
+
 A review bot can conclude its check `success` while leaving an unresolved comment. The comment most likely to be missed that way is the one on the pipeline's own CI repair commit, which no human has reviewed yet.
 
 Where the comments come from, and how the bot is identified, is provider-specific. On GitHub they are the bot's unresolved review-thread comments, and the bot is identified by the check suite's app slug. On GitLab they are the merge request's unresolved discussion notes, and the bot is identified by the login it comments as (Greptile posts there as `greptileai`); a GitLab job names no publishing application, so no GitLab check can be attributed to a bot.
@@ -927,7 +933,7 @@ Under `always`:
 - The findings never spend an `auto_fix.ci` attempt. A human decides: approve, skip, or select comments for a fix round.
 - Approving over them records the CI step as passed with an override naming the comments, never as a clean pass.
 - A comment list that cannot be read is not treated as empty: `checks-passed` is withheld, and a read that keeps failing parks for a decision. Strict `ci-ready` receipt export uses the same comment verification with the run's recorded policy and refuses export on any unresolved comment or comment-read error, even if readiness was previously recorded.
-- Each green poll costs one more provider read for the comments.
+- Each green poll reads the comments. Codex additionally reads paginated PR reviews and summary comments, plus reactions for outstanding explicit review requests.
 
 Forges that cannot supply review comments skip comment collection under either value. Because only GitHub can attribute a *check* to a review bot, `on_failure` reads nothing on GitLab: a GitLab run needs `always` for the bot's unresolved discussions to become findings.
 
@@ -1074,7 +1080,7 @@ ci:
     - "approval-status"
 ```
 
-An external approval app, such as a GitHub App job that approves the exact head after an outside reviewer signs off, cannot pass until the head has been published and reviewed externally. Waiting on it, or trying to repair it, deadlocks the run; in strict shipping the failing context would park the CI step as an actionable finding that can be neither approved nor skipped. A check classified as external under the [scope rules](#cirequired_checks) is reported in the step log as `external (awaiting outside approval)`, is never waited on, never repaired, and never becomes a finding, even when the target branch requires it. `external_checks` outranks `must_pass` and the required set. Patterns use the same glob syntax and name forms as [`ci.must_pass`](#cimust_pass), including the job-part rule for a required context that has not registered yet: with the branch requiring `approve`, `Final Approval / approve*` excludes it before it appears, so it never becomes a pending placeholder. Because a context that has not registered yet carries no workflow, that rule matches by the job part alone: choose a qualified pattern whose job part does not also name another workflow's required check, or that check is excluded until it registers. An explicit pattern matching a supported review bot's check name (`Greptile Review`) silences that bot's comments even under [`ci.review_bot_comments: always`](#cireview_bot_comments), whether its check is absent, informational, or required. Informational classification alone does not silence comments under `always`. A list set here replaces the operator's [`ci.external_checks`](/no-mistakes/reference/global-config/#ciexternal_checks); `[]` clears it.
+An external approval app, such as a GitHub App job that approves the exact head after an outside reviewer signs off, cannot pass until the head has been published and reviewed externally. Waiting on it, or trying to repair it, deadlocks the run; in strict shipping the failing context would park the CI step as an actionable finding that can be neither approved nor skipped. A check classified as external under the [scope rules](#cirequired_checks) is reported in the step log as `external (awaiting outside approval)`, is never waited on, never repaired, and never becomes a finding, even when the target branch requires it. `external_checks` outranks `must_pass` and the required set. Patterns use the same glob syntax and name forms as [`ci.must_pass`](#cimust_pass), including the job-part rule for a required context that has not registered yet: with the branch requiring `approve`, `Final Approval / approve*` excludes it before it appears, so it never becomes a pending placeholder. Because a context that has not registered yet carries no workflow, that rule matches by the job part alone: choose a qualified pattern whose job part does not also name another workflow's required check, or that check is excluded until it registers. An explicit pattern matching a supported review bot's check name (`Greptile Review` or `Codex Review`) silences that bot's comments even under [`ci.review_bot_comments: always`](#cireview_bot_comments), whether its check is absent, informational, or required. Informational classification alone does not silence comments under `always`. A list set here replaces the operator's [`ci.external_checks`](/no-mistakes/reference/global-config/#ciexternal_checks); `[]` clears it.
 
 ### rebase.strategy
 

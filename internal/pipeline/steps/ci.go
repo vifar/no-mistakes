@@ -1163,6 +1163,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						clearCIMonitorReady(sctx)
 						return nil, botErr
 					}
+					if errors.Is(botErr, scm.ErrReviewBotPending) {
+						clearCIMonitorReady(sctx)
+						lastMonitorLog = logCIMonitorStatus(sctx, "review bot review is pending, waiting for completion...", lastMonitorLog)
+						break
+					}
 					if botErr != nil {
 						clearCIMonitorReady(sctx)
 						lastMonitorLog = ""

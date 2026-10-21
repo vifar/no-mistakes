@@ -61,10 +61,11 @@ type forgeRules struct {
 }
 
 type forgeThread struct {
-	Author string `json:"author"`
-	Path   string `json:"path,omitempty"`
-	Line   int    `json:"line,omitempty"`
-	Body   string `json:"body"`
+	Author   string `json:"author"`
+	Path     string `json:"path,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Body     string `json:"body"`
+	Resolved bool   `json:"resolved,omitempty"`
 }
 
 type forgeStatus struct {
@@ -82,6 +83,7 @@ type forgeState struct {
 	Runs             []json.RawMessage  `json:"runs,omitempty"`
 	AttemptJobs      map[string][]int64 `json:"attempt_jobs,omitempty"`
 	ReviewThreads    []forgeThread      `json:"review_threads,omitempty"`
+	Reviews          []json.RawMessage  `json:"reviews,omitempty"`
 	Mergeable        string             `json:"mergeable,omitempty"`
 	MergeStateStatus string             `json:"merge_state_status,omitempty"`
 }

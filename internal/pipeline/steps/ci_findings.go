@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -240,7 +241,7 @@ func reviewBotFindings(provider scm.Provider, checks []reviewBotCheck, comments 
 				body = body[:maxReviewBotCommentBytes] + "..."
 			}
 			candidates = append(candidates, Finding{
-				Severity:    types.FindingSeverityWarning,
+				Severity:    reviewBotCommentSeverity(checked.bot, comment.Body),
 				Action:      types.ActionAskUser,
 				Category:    types.FindingCategoryCIReviewBot,
 				Check:       checked.check.Name,
@@ -569,4 +570,23 @@ func ciTerminalRepairOutcome(outcome *pipeline.StepOutcome, selected Findings, d
 	outcome.AutoFixable = false
 	outcome.Findings = string(encoded)
 	return outcome
+}
+
+// Codex's Shields severity badge maps into the existing finding vocabulary.
+// Keep the original badge in Description so its P-level remains inspectable.
+var codexSeverityBadge = regexp.MustCompile(`!\[P([0-3]) Badge\]\(https://img\.shields\.io/badge/P([0-3])[-_][^ )]+\)`)
+
+func reviewBotCommentSeverity(bot scm.ReviewBot, body string) string {
+	if bot.AppSlug == "chatgpt-codex-connector" {
+		badge := codexSeverityBadge.FindStringSubmatch(body)
+		if len(badge) == 3 && badge[1] == badge[2] {
+			switch badge[1] {
+			case "0", "1":
+				return types.FindingSeverityError
+			case "3":
+				return types.FindingSeverityInfo
+			}
+		}
+	}
+	return types.FindingSeverityWarning
 }

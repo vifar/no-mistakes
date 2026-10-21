@@ -351,8 +351,16 @@ func TestGreenReviewBotChecksExcludesPendingAndFailing(t *testing.T) {
 		{Name: "Greptile neutral", Bucket: scm.CheckBucketSkip, App: "greptile-apps"},
 	})
 	var names []string
+	absentCodex := 0
 	for _, check := range got {
+		if check.bot.AppSlug == "chatgpt-codex-connector" && check.check.Name == "" {
+			absentCodex++
+			continue
+		}
 		names = append(names, check.check.Name)
+	}
+	if absentCodex != 1 {
+		t.Fatalf("want one absent Codex candidate, got %d", absentCodex)
 	}
 	if strings.Join(names, ",") != "Greptile green,Greptile neutral" {
 		t.Fatalf("green review-bot checks = %v", names)
