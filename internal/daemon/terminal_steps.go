@@ -16,17 +16,28 @@ const terminalStepSweepInterval = time.Minute
 // versions can have outlived the run; explicit abort repairs them immediately,
 // whereas the background sweep requires five minutes of inactivity.
 func (m *RunManager) repairTerminalSteps(runID string, at time.Time, quietAge time.Duration) (int, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if m.beforeTerminalStepsRead != nil {
+		m.beforeTerminalStepsRead()
+	}
 	steps, err := m.db.TerminalExecutingSteps()
 	if err != nil {
 		return 0, err
 	}
 	closed := 0
 	for _, step := range steps {
-		if (runID != "" && step.RunID != runID) || m.runs[step.RunID] != nil {
+		if runID != "" && step.RunID != runID {
 			continue
 		}
+		m.mu.Lock()
+		owned := m.runs[step.RunID] != nil
+		m.mu.Unlock()
+		if owned {
+			continue
+		}
+		// Terminal run IDs are never resumed. A revived DB row or new step
+		// activity still fails CloseTerminalStep's conditional write. Keep
+		// database and OS reads outside mu so unrelated aborts never wait on
+		// this maintenance scan.
 		if step.AgentPID != nil {
 			alive, err := processRunning(*step.AgentPID)
 			if *step.AgentPID <= 0 || err != nil || alive {

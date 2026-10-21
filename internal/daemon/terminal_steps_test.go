@@ -136,3 +136,38 @@ func TestAbortTerminalStepRefusesLiveProcess(t *testing.T) {
 		t.Fatalf("live process row closed: %+v", got)
 	}
 }
+
+// An unrelated database read must never hold the lock needed to stop a live run.
+func TestTerminalStepSweepDoesNotDelayActiveAbort(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	id := f.push("running")
+	f.waitStarted(id)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	f.mgr.beforeTerminalStepsRead = func() { close(entered); <-release }
+	swept := make(chan error, 1)
+	go func() { _, err := f.mgr.sweepTerminalSteps(time.Now(), 5*time.Minute); swept <- err }()
+	<-entered
+	aborted := make(chan error, 1)
+	go func() { aborted <- f.mgr.HandleCancel(id) }()
+	delayed := false
+	var abortErr error
+	select {
+	case abortErr = <-aborted:
+	case <-time.After(time.Second):
+		delayed = true
+	}
+	close(release)
+	if delayed {
+		abortErr = <-aborted
+	}
+	if err := <-swept; err != nil {
+		t.Fatal(err)
+	}
+	if abortErr != nil {
+		t.Fatal(abortErr)
+	}
+	if delayed {
+		t.Fatal("a blocked stale-row read held the ownership lock and delayed active abort")
+	}
+}
