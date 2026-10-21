@@ -3332,10 +3332,6 @@ func (e *Executor) completeRun(ctx context.Context, run *db.Run, repo *db.Repo) 
 		e.reportPublishedHeadStatus(context.Background(), run, repo, "success")
 		e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	}
-	// The run's work is over: it has decided to complete and the outcome is
-	// recorded. A caller that must not be held hostage by the recording waits
-	// for this boundary.
-	e.reportWorkloadDone()
 	if run.Status != types.RunCompleted {
 		if run.Error != nil {
 			return errors.New(*run.Error)
