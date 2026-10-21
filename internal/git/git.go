@@ -449,7 +449,8 @@ func runPatchID(ctx context.Context, dir string, diff io.Reader) ([]byte, error)
 
 // CommitPatchID measures only the named non-merge commit's own change.
 // Empty and merge commits have no identity. An identity is a diagnostic,
-// never proof that another head preserves this commit's work.
+// never proof that another head preserves this commit's work; it supplies
+// advisory leads for a human inspecting a possible rewrite.
 func CommitPatchID(ctx context.Context, dir, commit string) (string, error) {
 	ids, err := commitPatchIDs(ctx, dir, "--no-walk", commit)
 	if err != nil {
@@ -471,6 +472,8 @@ func CommitPatchIDs(ctx context.Context, dir string, revs ...string) (map[string
 func commitPatchIDs(ctx context.Context, dir string, revs ...string) (map[string]string, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// patch-id must receive Git's stored-byte diff, never presentation output
+	// from a pager, color, external drivers, textconv, or submodule settings.
 	logArgs := append([]string{"--no-pager", "log", "--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "--ignore-submodules=none", "--no-merges", "--format=commit %H", "-p", "-M", "--root"}, revs...)
 	if isBareGitDir(dir) {
 		logArgs = append([]string{"--git-dir=" + dir}, logArgs...)
@@ -479,6 +482,8 @@ func commitPatchIDs(ctx context.Context, dir string, revs ...string) (map[string
 	shellenv.ConfigureShellCommand(logCmd)
 	var stderr bytes.Buffer
 	logCmd.Stderr = &stderr
+	// Pipe diffs directly between Git processes so range size never requires
+	// buffering the patch stream in this process.
 	read, write, err := os.Pipe()
 	if err != nil {
 		return nil, err

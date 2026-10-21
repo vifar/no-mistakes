@@ -1421,15 +1421,16 @@ func preservedContainsLocalWork(ctx context.Context, dir, local, preserved strin
 	return mergeTreePreservesFinalHead(ctx, dir, base, local, preserved)
 }
 
-// localHeadPatchMatch names the commit in the preserved head that carries the
-// local head's change under a different identity, or "" when there is none.
+// localHeadPatchMatch names a commit on the preserved side whose patch-ID
+// matches the local head's, or "" when no match is found or the scan fails.
 //
 // This is a DIAGNOSTIC, never a proof and never a path. Patch identity
 // discards hunk locations and whitespace, so it cannot tell a genuine replay
 // from a same-shaped edit to a different identical block - which is exactly
 // why preservedContainsLocalWork refuses to adopt a head on patch identity
-// alone. Here it answers a question for a HUMAN: "is my work in there, under
-// a new identity?" The operator decides; the refusal stands either way.
+// alone. A historical match also says nothing about whether the change
+// survives at the preserved head. It is an advisory lead for the operator's
+// inspection; the refusal stands either way.
 //
 // The scan covers the preserved side of the divergence, which is where a
 // rewritten copy can live: a commit reachable from the preserved head but not
