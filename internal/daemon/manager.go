@@ -436,7 +436,6 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 func (m *RunManager) failRunSetup(ctx context.Context, runID string, started bool, setupErr error) error {
 	err := pipeline.SettleTerminalWrite(m.db, func() error {
 		m.mu.Lock()
-		defer m.mu.Unlock()
 		status, message := types.RunFailed, setupErr.Error()
 		attributionCtx := ctx
 		cause := context.Cause(attributionCtx)
@@ -446,6 +445,7 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 				attributionCtx = owned.handle.runCtx
 			}
 		}
+		m.mu.Unlock()
 		cancelled := pipeline.CancellationOnly(setupErr, cause)
 		if cancelled {
 			status, message = types.RunCancelled, cause.Error()
@@ -3479,10 +3479,28 @@ func (m *RunManager) runCancelsLocked() map[string]context.CancelCauseFunc {
 // terminalRunSettled reports whether a run's terminal outcome is durable.
 // Until it is, the run goroutine keeps custody of the run.
 func (m *RunManager) terminalRunSettled(runID string) bool {
+	m.mu.Lock()
+	var event *types.RunEndingEvent
+	if owned := m.runs[runID]; owned != nil {
+		owned.state = ownershipFinishing
+		if owned.handle != nil && owned.handle.runCtx != nil {
+			var cause *pipeline.RunCancelCause
+			if errors.As(context.Cause(owned.handle.runCtx), &cause) {
+				event = cause.Event
+			}
+		}
+	}
+	m.mu.Unlock()
 	run, err := pipeline.ReadSettledRun(m.db, runID)
 	if err != nil || run == nil || !run.Status.Terminal() {
 		slog.Error("terminal outcome unsettled; retaining run custody", "run_id", runID, "error", err)
 		return false
+	}
+	if event != nil && run.EndingEvent == nil {
+		if err := pipeline.SettleTerminalWrite(m.db, func() error { return m.db.RecordRunEnding(runID, event) }); err != nil {
+			slog.Error("ending attribution unsettled; retaining run custody", "run_id", runID, "error", err)
+			return false
+		}
 	}
 	return true
 }
