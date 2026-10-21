@@ -76,16 +76,19 @@ type forgeStatus struct {
 }
 
 type forgeState struct {
-	Checks           []forgeCheck       `json:"checks,omitempty"`
-	Statuses         []forgeStatus      `json:"statuses,omitempty"`
-	Protection       *forgeEndpoint     `json:"protection,omitempty"`
-	Rules            *forgeRules        `json:"rules,omitempty"`
-	Runs             []json.RawMessage  `json:"runs,omitempty"`
-	AttemptJobs      map[string][]int64 `json:"attempt_jobs,omitempty"`
-	ReviewThreads    []forgeThread      `json:"review_threads,omitempty"`
-	Reviews          []json.RawMessage  `json:"reviews,omitempty"`
-	Mergeable        string             `json:"mergeable,omitempty"`
-	MergeStateStatus string             `json:"merge_state_status,omitempty"`
+	Checks           []forgeCheck                 `json:"checks,omitempty"`
+	Statuses         []forgeStatus                `json:"statuses,omitempty"`
+	Protection       *forgeEndpoint               `json:"protection,omitempty"`
+	Rules            *forgeRules                  `json:"rules,omitempty"`
+	Runs             []json.RawMessage            `json:"runs,omitempty"`
+	AttemptJobs      map[string][]int64           `json:"attempt_jobs,omitempty"`
+	ReviewThreads    []forgeThread                `json:"review_threads,omitempty"`
+	Reviews          []json.RawMessage            `json:"reviews,omitempty"`
+	ReviewSummaries  []json.RawMessage            `json:"review_summaries,omitempty"`
+	ReviewReactions  map[string][]json.RawMessage `json:"review_reactions,omitempty"`
+	ReviewError      *forgeEndpoint               `json:"review_error,omitempty"`
+	Mergeable        string                       `json:"mergeable,omitempty"`
+	MergeStateStatus string                       `json:"merge_state_status,omitempty"`
 }
 
 const (
