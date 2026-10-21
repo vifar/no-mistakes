@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	gitpath "path"
 	"path/filepath"
 	"strings"
 
@@ -70,6 +71,36 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 			snapshot.Status = append(snapshot.Status, []byte(entry+"\x00")...)
 		}
 	}
+	// Literal pathspecs and disabled external diff/textconv prevent source
+	// filenames or repository diff drivers from changing the captured scope.
+	// Recovery consumes a standard patch, regardless of display preferences.
+	// Submodule settings can otherwise omit gitlinks or emit log summaries
+	// that git apply cannot consume, in either patch stream.
+	patchArgs := []string{"--literal-pathspecs", "diff", "--no-color", "--binary",
+		"--no-ext-diff", "--no-textconv", "--no-renames", "--no-relative",
+		"--ignore-submodules=none", "--submodule=short",
+		"--src-prefix=a/", "--dst-prefix=b/", "--unified=3",
+		"--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= "}
+	// Capture each change once, and only for the selected paths. A dirty path's
+	// pathspec also matches its descendants, so a file replaced by a directory
+	// (or the reverse) would otherwise have its descendant's patch appended
+	// once per matching pathspec, leaving a record git apply cannot consume.
+	// The covering set keeps every surviving pathspec free of another selected
+	// path's prefix, so batches cannot overlap either.
+	for _, batch := range pathBatches(coveringLeftoverPaths(paths)) {
+		stagedArgs := append(append([]string{}, patchArgs...), "--cached", head, "--")
+		staged, err := git.RunRaw(c.Ctx, c.WorkDir, append(stagedArgs, batch...)...)
+		if err != nil {
+			return err
+		}
+		snapshot.StagedPatch = append(snapshot.StagedPatch, staged...)
+		unstagedArgs := append(append([]string{}, patchArgs...), "--")
+		unstaged, err := git.RunRaw(c.Ctx, c.WorkDir, append(unstagedArgs, batch...)...)
+		if err != nil {
+			return err
+		}
+		snapshot.UnstagedPatch = append(snapshot.UnstagedPatch, unstaged...)
+	}
 	for _, path := range paths {
 		records := entries[path]
 		if len(records) == 0 {
@@ -79,26 +110,6 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 		for _, entry := range records {
 			untracked = untracked || strings.HasPrefix(entry, "?? ")
 		}
-		// Literal pathspecs and disabled external diff/textconv prevent source
-		// filenames or repository diff drivers from changing the captured scope.
-		// Recovery consumes a standard patch, regardless of display preferences.
-		// Submodule settings can otherwise omit gitlinks or emit log summaries
-		// that git apply cannot consume, in either patch stream.
-		patchArgs := []string{"--literal-pathspecs", "diff", "--no-color", "--binary",
-			"--no-ext-diff", "--no-textconv", "--no-renames", "--no-relative",
-			"--ignore-submodules=none", "--submodule=short",
-			"--src-prefix=a/", "--dst-prefix=b/", "--unified=3",
-			"--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= "}
-		staged, err := git.RunRaw(c.Ctx, c.WorkDir, append(patchArgs, "--cached", head, "--", path)...)
-		if err != nil {
-			return err
-		}
-		snapshot.StagedPatch = append(snapshot.StagedPatch, staged...)
-		unstaged, err := git.RunRaw(c.Ctx, c.WorkDir, append(patchArgs, "--", path)...)
-		if err != nil {
-			return err
-		}
-		snapshot.UnstagedPatch = append(snapshot.UnstagedPatch, unstaged...)
 		if !untracked {
 			continue
 		}
@@ -152,4 +163,29 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 		c.Log(fmt.Sprintf("saved leftover %s validation edits for paths %q in private run evidence %s", producer, paths, filepath.Base(destination)))
 	}
 	return nil
+}
+
+// coveringLeftoverPaths drops selected paths that another selected path
+// already matches. Git treats a pathspec as a path prefix, so the patch for
+// "a" also carries every change under "a/"; capturing "a/b" separately would
+// append the same change a second time and produce a record git apply rejects.
+func coveringLeftoverPaths(paths []string) []string {
+	selected := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		selected[path] = true
+	}
+	covering := make([]string, 0, len(paths))
+	for _, path := range paths {
+		covered := false
+		for dir := gitpath.Dir(path); dir != "." && dir != "/"; dir = gitpath.Dir(dir) {
+			if selected[dir] {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			covering = append(covering, path)
+		}
+	}
+	return covering
 }
