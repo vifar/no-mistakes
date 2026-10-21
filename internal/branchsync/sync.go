@@ -854,6 +854,10 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		state.Changed = false
 		return state
 	}
+	if state.State == StatePushInProgress && run != nil && terminalRunStatus(run.Status) {
+		state.Safety = "blocked_terminal_push_step"
+		return state
+	}
 	if state.State != StatePipelineOwned || run == nil {
 		return blockedPlan(state, state.State, "blocked_recover_not_applicable", "nothing to recover: the branch is not held by a terminal run with unpublished pipeline commits; no files or refs were changed")
 	}
@@ -2097,11 +2101,15 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 	state.Target.Remote = s.remoteName(ctx)
 	state.Remote = RemoteState{ObservedHead: ptr(run.LastPushedSHA), Freshness: "pipeline_push", ObservedAt: value(run.LastPushedAt)}
 
-	if run.PushActive || pushStepRunning(s.DB, run.ID) {
+	if run.PushActive || pushStepBlocksRun(s.DB, run) {
 		state.State = StatePushInProgress
 		state.Safety = "blocked_push_in_progress"
 		state.Pipeline.Phase = "push"
 		state.NextAction = &NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
+		if terminalRunStatus(run.Status) {
+			state.Error = terminalPushDiagnostic(s.DB, run)
+			state.NextAction = &NextAction{Code: "cleanup_terminal_steps", Command: "no-mistakes axi abort --run " + run.ID}
+		}
 		return state, run, false
 	}
 	if run.LastPushedSHA == nil || run.PushTargetFingerprint == nil || run.PushRef == nil || run.PushGeneration == nil || run.SubmittedHeadSHA == nil {
@@ -2995,4 +3003,41 @@ func blockedPlan(state State, resultState, safety, message string) State {
 	state.NextAction = nil
 	state.Error = message
 	return state
+}
+
+// A terminal run's PID-less row cannot represent an executing push. A recorded
+// PID remains a conservative block until the daemon verifies it and repairs the
+// row; cached status performs no process or Git mutations.
+func pushStepBlocksRun(database *db.DB, run *db.Run) bool {
+	if !terminalRunStatus(run.Status) {
+		return pushStepRunning(database, run.ID)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		return true
+	}
+	for _, step := range steps {
+		if step.StepName == types.StepPush && (step.Status == types.StepStatusRunning || step.Status == types.StepStatusFixing) && step.AgentPID != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func terminalPushDiagnostic(database *db.DB, run *db.Run) string {
+	label := "push step rows"
+	if run.PushActive {
+		label = "push_active"
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		label += " (step rows unreadable)"
+	} else {
+		for _, step := range steps {
+			if step.StepName == types.StepPush && (step.Status == types.StepStatusRunning || step.Status == types.StepStatusFixing) {
+				label += fmt.Sprintf("; step %s (%s, %s)", step.ID, step.StepName, step.Status)
+			}
+		}
+	}
+	return fmt.Sprintf("terminal run %s (%s) retains stale push state %s; run no-mistakes axi abort --run %s to verify process liveness and clean up before recovery", run.ID, run.Status, label, run.ID)
 }

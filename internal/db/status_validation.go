@@ -300,7 +300,7 @@ func (d *DB) RecordIneligibleTerminal(runID, message string, status types.RunSta
 		if err != nil {
 			return err
 		}
-		return nil
+		return closeExecutingSteps(writeCtx, tx, runID, "run ended: "+message, ts)
 	})
 }
 

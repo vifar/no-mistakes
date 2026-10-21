@@ -2359,6 +2359,16 @@ func runAxiAbortByRunID(cmd *cobra.Command, runID string) error {
 	if !confirmed {
 		return emitUnconfirmedAbort(cmd, runID, "", reason, runViewPtrFromIPC(final), true)
 	}
+	if result.StepsClosed > 0 {
+		emitDoc(cmd,
+			toon.Field{Key: "aborted", Value: false},
+			toon.Field{Key: "run", Value: runID},
+			toon.Field{Key: "run_status", Value: string(final.Status)},
+			toon.Field{Key: "steps_closed", Value: result.StepsClosed},
+			toon.Field{Key: "detail", Value: "closed interrupted steps on an already-terminal run"},
+		)
+		return nil
+	}
 	emitDoc(cmd,
 		toon.Field{Key: "aborted", Value: true},
 		toon.Field{Key: "run", Value: runID},

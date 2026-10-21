@@ -255,12 +255,19 @@ func (m *RunManager) StartLimitWatcher() {
 		go func() {
 			defer m.wg.Done()
 			ticker := time.NewTicker(limitWatchInterval)
+			var lastStepSweep time.Time
 			defer ticker.Stop()
 			for {
 				select {
 				case <-m.watchStop:
 					return
-				case <-ticker.C:
+				case at := <-ticker.C:
+					if at.Sub(lastStepSweep) >= terminalStepSweepInterval {
+						if _, err := m.sweepTerminalSteps(at, terminalStepQuietAge); err != nil {
+							slog.Warn("terminal step sweep failed", "error", err)
+						}
+						lastStepSweep = at
+					}
 					m.sched.dispatch()
 				}
 			}
@@ -3430,14 +3437,26 @@ func (m *RunManager) releaseShutdownForRecovery(runID string) bool {
 
 // HandleCancel stops an active run and propagates cancellation to the executor.
 func (m *RunManager) HandleCancel(runID string) error {
+	_, err := m.handleCancelWithCleanup(runID)
+	return err
+}
+
+func (m *RunManager) handleCancelWithCleanup(runID string) (int, error) {
 	m.mu.Lock()
 	owned := m.runs[runID]
 	m.mu.Unlock()
 	if owned == nil {
-		return fmt.Errorf("no active run %s", runID)
+		closed, err := m.repairTerminalSteps(runID, time.Now(), 0)
+		if err != nil {
+			return closed, err
+		}
+		if closed > 0 {
+			return closed, nil
+		}
+		return 0, fmt.Errorf("no active run %s", runID)
 	}
 	_, err := m.cancelManagedRun(runID, types.RunCancelReasonAbortedByUser)
-	return err
+	return 0, err
 }
 
 // cancelActiveRuns cancels any in-progress runs for the given repo+branch
