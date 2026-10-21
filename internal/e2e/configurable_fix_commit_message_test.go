@@ -67,7 +67,7 @@ func configurableFixCommitScenario(t *testing.T, fixSummary string) string {
 }
 
 func TestConfigurableFixCommitMessageJourney(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, "guard unsafe value")})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, "guard unsafe value\\n\\nCo-Authored-By: Claude <noreply@anthropic.com>\\nClaude-Session: abc")})
 
 	globalConfig := filepath.Join(h.NMHome, "config.yaml")
 	globalData, err := os.ReadFile(globalConfig)
@@ -123,7 +123,7 @@ commit:
 }
 
 func TestFixCommitTrailersJourney(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, "guard unsafe value")})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, "guard unsafe value\\n\\nCo-Authored-By: Claude <noreply@anthropic.com>\\nClaude-Session: abc")})
 
 	globalConfig := filepath.Join(h.NMHome, "config.yaml")
 	globalData, err := os.ReadFile(globalConfig)
@@ -234,7 +234,7 @@ commit:
 }
 
 func TestPerRepositoryMachineLocalFixCommitJourney(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, "guard unsafe value")})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, "guard unsafe value\\n\\nCo-Authored-By: Claude <noreply@anthropic.com>\\nClaude-Session: abc")})
 
 	globalConfig := filepath.Join(h.NMHome, "config.yaml")
 	globalData, err := os.ReadFile(globalConfig)

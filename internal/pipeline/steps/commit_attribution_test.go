@@ -1,6 +1,8 @@
 package steps
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -94,6 +96,27 @@ func TestCommitAttributionSummaryBeforeSubjectNormalization(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, &mockAgent{}, dir, base, head, config.Commands{})
 	writeAgentChange(t, dir)
 	if err := commitAgentFixes(sctx, types.StepLint, "repair widget\n\nCo-Authored-By: Claude <noreply@anthropic.com>", "fallback"); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastCommitMessage(t, dir); got != "no-mistakes(lint): repair widget" {
+		t.Fatalf("subject = %q", got)
+	}
+}
+
+func TestCommitAttributionAgentSummaryThroughFixMode(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	raw, err := json.Marshal(map[string]string{"summary": "repair widget\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCodex-Session: abc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		writeAgentChange(t, dir)
+		return &agent.Result{Output: raw}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	sctx.Fixing = true
+	if _, err := executeFixMode(sctx, types.StepLint, fixExecutionOptions{FallbackSummary: "repair widget"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := lastCommitMessage(t, dir); got != "no-mistakes(lint): repair widget" {

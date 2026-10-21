@@ -564,7 +564,9 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 	if len(summary.Summary) > config.MaxFixMessageSummaryBytes {
 		return "", fmt.Errorf("%w: commit summary must not exceed %d bytes", errRejectedCommitSummary, config.MaxFixMessageSummaryBytes)
 	}
-	cleaned := strings.Join(strings.Fields(summary.Summary), " ")
+	// Strip while the raw summary still has trailer boundaries; flattening
+	// first would turn the attribution into irreversible subject prose.
+	cleaned := strings.Join(strings.Fields(git.StripAIAttributionTrailers(summary.Summary)), " ")
 	cleaned = strings.Trim(cleaned, " \t\r\n\"'.;:,-")
 	return cleaned, nil
 }
