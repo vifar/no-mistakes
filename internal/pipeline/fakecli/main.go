@@ -1519,9 +1519,10 @@ func printFakeCommitChecks(raw string, args []string) {
 }
 
 // printFakeReviewThreads renders FAKE_CLI_REVIEW_COMMENTS - a JSON array of
-// {author, path, line, body} - as the reviewThreads GraphQL response the
-// GitHub backend's GetReviewComments parses, one unresolved thread per
-// comment. An empty or invalid value renders a pull request with no threads.
+// {author, path, line, body, resolved} - as the reviewThreads GraphQL response
+// the GitHub backend's GetReviewComments parses, one thread per comment.
+// Threads default to unresolved when resolved is omitted. An empty value
+// renders no threads; invalid JSON fails the command.
 func printFakeReviewThreads(raw string) {
 	var comments []struct {
 		Author   string `json:"author"`

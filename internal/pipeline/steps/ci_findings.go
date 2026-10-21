@@ -76,7 +76,7 @@ type ciIssues struct {
 //     same rebase repair;
 //   - a failing check published by a registered review bot (scm.ReviewBots)
 //     is the bot's opinion about the change, not a verdict on it, so it
-//     becomes one ask-user warning per unresolved bot comment, anchored to
+//     becomes one ask-user finding per unresolved bot comment, anchored to
 //     the file and line the comment is about; under
 //     ci.review_bot_comments: always, scm.ReviewBotCommentChecks selects
 //     additional bots whose unresolved comments are findings too;

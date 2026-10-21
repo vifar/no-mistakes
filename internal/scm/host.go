@@ -363,9 +363,9 @@ func ReviewBotForCheck(check Check) (ReviewBot, bool) {
 	return ReviewBot{}, false
 }
 
-// ReviewBotForApp returns the registered review bot that publishes checks
-// under slug. An empty slug never matches: a provider that reported no app
-// identity has not identified a bot.
+// ReviewBotForApp returns the registered review bot identified by the app
+// slug, whether or not it publishes checks. An empty slug never matches:
+// a provider that reported no app identity has not identified a bot.
 func ReviewBotForApp(slug string) (ReviewBot, bool) {
 	slug = strings.ToLower(strings.TrimSpace(slug))
 	if slug == "" {
