@@ -38,7 +38,7 @@ func TestCIScopeCodexBadgeAndExclusionJourney(t *testing.T) {
 			}
 			threads := []forgeThread{{Author: "greptile-apps[bot]", Path: "greptile.go", Line: 8, Body: "![P1 Badge](https://img.shields.io/badge/P1-orange) Greptile stays warning"}, {Author: "unknown-app[bot]", Path: "unknown.go", Line: 9, Body: "![P1 Badge](https://img.shields.io/badge/P1-orange) Unregistered app"}}
 			for n := 0; n < 4; n++ {
-				threads = append(threads, forgeThread{Author: "chatgpt-codex-connector[bot]", Path: fmt.Sprintf("P%d.go", n), Line: 70+n, Body: fmt.Sprintf("![P%d Badge](https://img.shields.io/badge/P%d-orange) Native priority", n, n)})
+				threads = append(threads, forgeThread{Author: "chatgpt-codex-connector[bot]", Path: fmt.Sprintf("P%d.go", n), Line: 70 + n, Body: fmt.Sprintf("![P%d Badge](https://img.shields.io/badge/P%d-orange) Native priority", n, n)})
 			}
 			j.setForge(forgeState{Checks: checks, Protection: protectionJSON("build"), ReviewThreads: threads})
 			j.init()
@@ -99,11 +99,11 @@ func TestCIScopeCodexFreshReceiptJourney(t *testing.T) {
 	eyes := json.RawMessage(`{"user":{"login":"chatgpt-codex-connector[bot]"},"content":"eyes"}`)
 	clean := json.RawMessage(`{"user":{"login":"chatgpt-codex-connector[bot]"},"content":"+1"}`)
 	for _, tc := range []struct {
-		name                         string
+		name                          string
 		reviews, summaries, reactions []json.RawMessage
-		threads                      []forgeThread
+		threads                       []forgeThread
 		ready, readError              bool
-		wantError                    string
+		wantError                     string
 	}{
 		{name: "no-participation", ready: true},
 		{name: "current-pending", reviews: []json.RawMessage{codexActivity(bot, head, "PENDING", "")}, wantError: "review bot review is pending"},
