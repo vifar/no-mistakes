@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -40,11 +41,21 @@ func TestAttributionProductionDispatchStatus(t *testing.T) {
 	if err := os.Mkdir(hooks, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(hooks, "post-checkout"), []byte("#!/bin/sh\nexit 37\n"), 0700); err != nil {
+	if err := os.WriteFile(filepath.Join(hooks, "post-checkout"), []byte("#!/bin/sh\nprintf 'original stdout\\n'\nprintf 'original stderr\\n' >&2\nexit 37\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	invoke("config", "core.hooksPath", hooks)
 	head := invoke("rev-parse", "HEAD")
+	// Native Git is the output oracle, including its hook stream routing.
+	native := exec.Command(realGit, "checkout", "--", "tracked.txt")
+	native.Dir = dir
+	var nativeStdout, nativeStderr bytes.Buffer
+	native.Stdout, native.Stderr = &nativeStdout, &nativeStderr
+	if err := native.Run(); err == nil {
+		t.Fatal("native hook failure swallowed")
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 37 {
+		t.Fatalf("native checkout = %v, want 37", err)
+	}
 	env, err := git.AttributionHookEnv(dir, os.Environ(), func(args ...string) (string, error) { return git.Run(context.Background(), dir, args...) }, head, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -52,10 +63,15 @@ func TestAttributionProductionDispatchStatus(t *testing.T) {
 	env = append(env, "NM_TEST_ATTRIBUTION_DISPATCH=1")
 	cmd := exec.Command(realGit, "checkout", "--", "tracked.txt")
 	cmd.Dir, cmd.Env = dir, env
-	if out, err := cmd.CombinedOutput(); err == nil {
-		t.Fatalf("production hook failure swallowed: %s", out)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("production hook failure swallowed: stdout %q, stderr %q", stdout.String(), stderr.String())
 	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 37 {
 		t.Errorf("production owned checkout = %v, want 37", err)
+	}
+	if stdout.String() != nativeStdout.String() || stderr.String() != nativeStderr.String() {
+		t.Errorf("production owned checkout changed native output: stdout %q, stderr %q; want stdout %q, stderr %q", stdout.String(), stderr.String(), nativeStdout.String(), nativeStderr.String())
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -74,6 +90,10 @@ func TestAttributionProductionDispatchStatus(t *testing.T) {
 				t.Fatalf("dispatch succeeded unexpectedly: %s", out)
 			} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != tc.want {
 				t.Errorf("production dispatcher = %v, want %d", err, tc.want)
+			} else if tc.name == "internal" && !strings.Contains(string(out), "missing-policy") {
+				t.Errorf("internal policy failure lost its diagnostic: %q", out)
+			} else if tc.name == "delegated" && string(out) != "original stdout\noriginal stderr\n" {
+				t.Errorf("delegated hook output changed: %q", out)
 			}
 		})
 	}
