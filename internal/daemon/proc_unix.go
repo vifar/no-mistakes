@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -51,9 +52,16 @@ func splitUnixProcessLine(line string) (int, string, bool) {
 }
 
 func processRunning(pid int) (bool, error) {
+	return processRunningContext(context.Background(), pid)
+}
+
+func processRunningContext(ctx context.Context, pid int) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	err := syscall.Kill(pid, 0)
 	if err == nil {
-		state, err := processState(pid)
+		state, err := processState(ctx, pid)
 		if err != nil {
 			return false, err
 		}
@@ -71,8 +79,8 @@ func processRunning(pid int) (bool, error) {
 	return false, err
 }
 
-func processState(pid int) (string, error) {
-	cmd := processStateCommand(pid)
+func processState(ctx context.Context, pid int) (string, error) {
+	cmd := processStateCommand(ctx, pid)
 	out, err := cmd.Output()
 	if err != nil {
 		return "", err
@@ -80,8 +88,9 @@ func processState(pid int) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-func processStateCommand(pid int) *exec.Cmd {
-	cmd := exec.Command(psExecutable(), "-p", fmt.Sprintf("%d", pid), "-o", "stat=")
+func processStateCommand(ctx context.Context, pid int) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, psExecutable(), "-p", fmt.Sprintf("%d", pid), "-o", "stat=")
+	cmd.WaitDelay = time.Second
 	env := upsertEnv(os.Environ(), "LC_ALL", "C")
 	cmd.Env = upsertEnv(env, "LANG", "C")
 	return cmd

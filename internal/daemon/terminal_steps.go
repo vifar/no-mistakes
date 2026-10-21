@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,20 +12,33 @@ import (
 
 const terminalStepQuietAge = 5 * time.Minute
 const terminalStepSweepInterval = time.Minute
+const terminalStepScanBudget = 10 * time.Second
+const terminalStepProbeBudget = time.Second
 
 // repairTerminalSteps never competes with an executor. Terminal rows from older
 // versions can have outlived the run; explicit abort repairs them immediately,
 // whereas the background sweep requires five minutes of inactivity.
-func (m *RunManager) repairTerminalSteps(runID string, at time.Time, quietAge time.Duration) (int, error) {
-	if m.beforeTerminalStepsRead != nil {
-		m.beforeTerminalStepsRead()
+func (m *RunManager) repairTerminalSteps(ctx context.Context, runID string, at time.Time, quietAge time.Duration) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, terminalStepScanBudget)
+	defer cancel()
+	select {
+	case m.maintenanceGate <- struct{}{}:
+		defer func() { <-m.maintenanceGate }()
+	case <-ctx.Done():
+		return 0, ctx.Err()
 	}
-	steps, err := m.db.TerminalExecutingSteps()
+	if m.beforeTerminalStepsRead != nil {
+		m.beforeTerminalStepsRead(ctx)
+	}
+	steps, err := m.db.TerminalExecutingSteps(ctx)
 	if err != nil {
 		return 0, err
 	}
 	closed := 0
 	for _, step := range steps {
+		if err := ctx.Err(); err != nil {
+			return closed, err
+		}
 		if runID != "" && step.RunID != runID {
 			continue
 		}
@@ -39,7 +53,16 @@ func (m *RunManager) repairTerminalSteps(runID string, at time.Time, quietAge ti
 		// database and OS reads outside mu so unrelated aborts never wait on
 		// this maintenance scan.
 		if step.AgentPID != nil {
-			alive, err := processRunning(*step.AgentPID)
+			probeCtx, cancelProbe := context.WithTimeout(ctx, terminalStepProbeBudget)
+			probe := m.terminalProcessRunning
+			if probe == nil {
+				probe = processRunningContext
+			}
+			alive, err := probe(probeCtx, *step.AgentPID)
+			if probeCtx.Err() != nil {
+				err = probeCtx.Err()
+			}
+			cancelProbe()
 			if *step.AgentPID <= 0 || err != nil || alive {
 				if runID != "" {
 					return closed, fmt.Errorf("terminal run %s still has step %s (%s) with live or unverifiable agent_pid; no cleanup performed for that row", step.RunID, step.ID, step.StepName)
@@ -50,7 +73,7 @@ func (m *RunManager) repairTerminalSteps(runID string, at time.Time, quietAge ti
 		if quietAge > 0 && !terminalStepQuiet(step, m.paths.RunLogDir(step.RunID), at, quietAge) {
 			continue
 		}
-		changed, err := m.db.CloseTerminalStep(step, at.Unix())
+		changed, err := m.db.CloseTerminalStep(ctx, step, at.Unix())
 		if err != nil {
 			return closed, err
 		}
@@ -82,6 +105,6 @@ func terminalStepQuiet(step *db.StepResult, logDir string, at time.Time, age tim
 	return err == nil && info.Mode().IsRegular() && at.Sub(info.ModTime()) >= age
 }
 
-func (m *RunManager) sweepTerminalSteps(at time.Time, quietAge time.Duration) (int, error) {
-	return m.repairTerminalSteps("", at, quietAge)
+func (m *RunManager) sweepTerminalSteps(ctx context.Context, at time.Time, quietAge time.Duration) (int, error) {
+	return m.repairTerminalSteps(ctx, "", at, quietAge)
 }
