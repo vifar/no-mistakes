@@ -1194,55 +1194,80 @@ func TestExecuteFixMode_NoWorktreeChangesCanonicalizesAgentSummary(t *testing.T)
 
 func TestExecuteFixMode_ReviewCommitR4ReportsApplied(t *testing.T) {
 	t.Parallel()
-	dir, base, head := setupGitRepo(t)
-	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-		writeAgentChange(t, dir)
-		return &agent.Result{Output: json.RawMessage(`{"summary":"guard unsafe value","verification":"passed"}`)}, nil
-	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
-	sctx.Fixing = true
-	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"unsafe value"}]}`
-	sctx.PreviousFindings = findings
-	summary, err := executeFixMode(sctx, types.StepReview, fixExecutionOptions{FallbackSummary: "apply review fix", RequireVerification: true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summary != "guard unsafe value" {
-		t.Fatalf("fix summary = %q, want the committed Review rationale", summary)
-	}
-	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got == head {
-		t.Fatal("expected committed Review fix to advance HEAD")
-	}
-	if body := gitCmd(t, dir, "show", "-s", "--format=%b"); body != "guard unsafe value\n\nRound findings:\n- unsafe value" {
-		t.Fatalf("commit body = %q", body)
-	}
-	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", &findings, nil, 0); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := sctx.DB.InsertStepRound(step.ID, 2, "auto_fix", nil, &summary, 0); err != nil {
-		t.Fatal(err)
-	}
-	rounds, err := sctx.DB.GetRoundsByStep(step.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	step.Status = types.StepStatusCompleted
-	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
-		md, _ := BuildPipelineSummaryFor(
-			[]*db.StepResult{step}, map[string][]*db.StepRound{step.ID: rounds}, testPipelineHeadSHA, provider,
-		)
-		for _, want := range []string{"🔧 **Review** - 1 issue found → Fix applied ✅", "🔧 Fix applied."} {
-			if !strings.Contains(md, want) {
-				t.Errorf("provider %s: missing %q in PR rendering:\n%s", provider, want, md)
+	for _, tc := range []struct {
+		name, input, wantSummary, wantHeading, wantDetail string
+		change                                            bool
+	}{
+		{"descriptive repair", "guard unsafe value", "guard unsafe value", "Fix applied", "🔧 Fix applied.", true},
+		{"canonical collision after commit", "no changes applied", "Fixer summary: no changes applied", "Fix applied", "🔧 Fix applied.", true},
+		{"genuine no change", "no changes applied", "no changes applied", "no changes applied", "🔧 No changes applied.", false},
+		{"genuine no change with descriptive prose", "guard unsafe value", "no changes applied", "no changes applied", "🔧 No changes applied.", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			output, err := json.Marshal(map[string]string{"summary": tc.input, "verification": "passed"})
+			if err != nil {
+				t.Fatal(err)
 			}
-		}
-		if strings.Contains(md, "result not reported") {
-			t.Errorf("provider %s: committed Review repair reported as missing:\n%s", provider, md)
-		}
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				if tc.change {
+					writeAgentChange(t, dir)
+				}
+				return &agent.Result{Output: output}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+			sctx.Fixing = true
+			findings := `{"findings":[{"id":"review-1","severity":"warning","description":"unsafe value"}]}`
+			sctx.PreviousFindings = findings
+			summary, err := executeFixMode(sctx, types.StepReview, fixExecutionOptions{FallbackSummary: "apply review fix", RequireVerification: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if summary != tc.wantSummary {
+				t.Fatalf("fix summary = %q, want %q", summary, tc.wantSummary)
+			}
+			if advanced := gitCmd(t, dir, "rev-parse", "HEAD") != head; advanced != tc.change {
+				t.Fatalf("HEAD advanced = %v, want %v", advanced, tc.change)
+			}
+			if tc.change {
+				if subject := lastCommitMessage(t, dir); subject != "no-mistakes(review): "+tc.input {
+					t.Errorf("subject = %q, want unchanged fixer subject", subject)
+				}
+				if body := gitCmd(t, dir, "show", "-s", "--format=%b"); body != tc.wantSummary+"\n\nRound findings:\n- unsafe value" {
+					t.Fatalf("commit body = %q", body)
+				}
+			}
+			step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", &findings, nil, 0); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sctx.DB.InsertStepRound(step.ID, 2, "auto_fix", nil, &summary, 0); err != nil {
+				t.Fatal(err)
+			}
+			rounds, err := sctx.DB.GetRoundsByStep(step.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) != 2 || rounds[1].FixSummary == nil || *rounds[1].FixSummary != tc.wantSummary {
+				t.Fatalf("persisted Review summary differs from the expected outcome: %+v", rounds)
+			}
+			step.Status = types.StepStatusCompleted
+			for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+				md, _ := BuildPipelineSummaryFor(
+					[]*db.StepResult{step}, map[string][]*db.StepRound{step.ID: rounds}, testPipelineHeadSHA, provider,
+				)
+				wantHeading := "🔧 **Review** - 1 issue found → " + tc.wantHeading + " ✅"
+				if !strings.Contains(md, wantHeading) || !strings.Contains(md, tc.wantDetail) {
+					t.Errorf("provider %s: want heading %q and detail %q, got:\n%s", provider, wantHeading, tc.wantDetail, md)
+				}
+				if strings.Contains(md, "result not reported") {
+					t.Errorf("provider %s: Review outcome reported as missing:\n%s", provider, md)
+				}
+			}
+		})
 	}
 }
 

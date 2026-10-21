@@ -37,6 +37,7 @@ func TestBuildPipelineSummary_R4ReviewSummaryOutcomeContract(t *testing.T) {
 			{"canonical applied", "changes applied", reviewApplied, otherApplied},
 			{"descriptive", "guard unsafe value", reviewApplied, unreported},
 			{"misleading prose", "no changes applied: checked formatting", reviewApplied, unreported},
+			{"reserved fixer prose", "Fixer summary: no changes applied", reviewApplied, unreported},
 			{"unavailable rationale", "body: unavailable - fixer returned no summary", reviewApplied, unreported},
 		} {
 			for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {

@@ -13,7 +13,7 @@ import (
 // flattened into a subject, a trailer can no longer be removed line by line.
 const reviewAIIdentity = `(?:claude(?: code)?|codex|chatgpt|openai|anthropic|(?:github )?copilot|gemini|grok|pi|omp|opencode|antigravity|rovodev|cursor|devin|acp(?::[^\s<>]+)?|no-mistakes|(?:gpt|gemini|grok)-[0-9][a-z0-9._-]*|o[1-9](?:-[a-z0-9._-]+)?|claude-(?:sonnet|opus|haiku)[a-z0-9._-]*)`
 
-var reviewAIAttribution = regexp.MustCompile(`(?i)^[\s>"'\x60*-]*(?:generated\s+with\b|assisted-by\s*:|` + reviewAIIdentity + `-session\s*:|co-authored-by\s*:\s*(?:no-mistakes(?:\s|:|$)|` + reviewAIIdentity + `(?:\[bot\])?(?:\s*<|:|[\s>"'\x60]*$)))`)
+var reviewAIAttribution = regexp.MustCompile(`(?i)^[\s>"'\x60*-]*(?:generated\s+with\b|assisted-by\s*:|` + reviewAIIdentity + `-session\s*:|co-authored-by\s*:\s*["'\x60]?(?:no-mistakes(?:\s|:|$)|` + reviewAIIdentity + `(?:\[bot\])?(?:["'\x60]?\s*<|:|[\s>"'\x60]*$)))`)
 
 func stripReviewAIAttribution(text string, configuredTrailers []string) string {
 	var kept []string
@@ -57,6 +57,9 @@ func reviewFixCommitSummary(summary string, producer *agent.Result, configuredTr
 	}
 	// Keep the existing subject's normalization and punctuation behavior.
 	subject = strings.Trim(strings.Join(strings.Fields(body), " "), " \t\r\n\"'.;:,-")
+	if body == NoChangesAppliedSummary {
+		body = "Fixer summary: " + body
+	}
 	return subject, body
 }
 

@@ -23,6 +23,7 @@ func TestReviewFixCommitBody(t *testing.T) {
 	}{
 		{"rationale", "Reject stale receipts so approval stays bound to the head", "Reject stale receipts so approval stays bound to the head", "Reject stale receipts so approval stays bound to the head"},
 		{"misleading wording", "no changes applied: checked formatting", "no changes applied: checked formatting", "no changes applied: checked formatting"},
+		{"reserved no-change wording", "no changes applied", "Fixer summary: no changes applied", "no changes applied"},
 		{"multiline disclosure", "Bind receipts to HEAD\n\nRed first: stale receipt accepted before fix.\nGreen: focused regression passed.", "Red first: stale receipt accepted before fix.\nGreen: focused regression passed.", "Bind receipts to HEAD Red first: stale receipt accepted before fix. Green: focused regression passed"},
 		{"missing", "", "body: unavailable - fixer returned no summary", "address review findings"},
 		{"whitespace", " \n\t", "body: unavailable - fixer returned no summary", "address review findings"},
@@ -201,6 +202,20 @@ func TestReviewFixCommitR1DisclosureAndHumanAttribution(t *testing.T) {
 	assertUnconfiguredReviewAttributionFiltered(t, "Generated with Codex\n> Co-Authored-By: Claude <noreply@anthropic.com>\nAssisted-by: pi:local\nCodex-Session: abc")
 }
 
+func TestReviewFixCommitR1QuotedDisplayNames(t *testing.T) {
+	t.Parallel()
+	for _, identity := range []string{
+		"Claude", "Claude Code", "Codex", "ChatGPT", "OpenAI", "Anthropic", "Copilot", "GitHub Copilot",
+		"Gemini", "Grok", "pi", "omp", "OpenCode", "Antigravity", "RovoDev", "Cursor", "Devin",
+		"acp:cursor", "acp:cursor:model", "acp:custom-target", "no-mistakes", "no-mistakes codex",
+		"gpt-5.5", "o3", "gemini-2.5-pro", "grok-4", "claude-opus-4-6",
+	} {
+		t.Run(identity, func(t *testing.T) {
+			assertUnconfiguredReviewAttributionFiltered(t, `Co-Authored-By: "`+identity+`" <model@example.com>`)
+		})
+	}
+}
+
 func TestReviewFixCommitR3UnconfiguredAIIdentities(t *testing.T) {
 	t.Parallel()
 	t.Run("model coauthor with default empty trailers", func(t *testing.T) {
@@ -225,8 +240,9 @@ func TestReviewFixCommitR3UnconfiguredAIIdentities(t *testing.T) {
 func assertUnconfiguredReviewAttributionFiltered(t *testing.T, attribution string) {
 	t.Helper()
 	const human = "Co-Authored-By: Claude Smith <claude@example.com>"
+	const quotedHuman = `Co-Authored-By: "Claude Smith" <claude@example.com>`
 	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
-	const cleanSummary = "guard unsafe value\n\n" + disclosure + "\n\n" + human
+	const cleanSummary = "guard unsafe value\n\n" + disclosure + "\n\n" + human + "\n" + quotedHuman
 	dir, base, head := setupGitRepo(t)
 	output, err := json.Marshal(map[string]string{"summary": cleanSummary + "\n" + attribution, "verification": "passed"})
 	if err != nil {
@@ -240,7 +256,10 @@ func assertUnconfiguredReviewAttributionFiltered(t *testing.T, attribution strin
 	if len(sctx.Config.Commit.Trailers) != 0 {
 		t.Fatal("identity classification requires default empty commit trailers")
 	}
-	findings, err := json.Marshal(Findings{Items: []Finding{{File: "receipt.go\n" + attribution, Description: disclosure + "\n" + human + "\n" + attribution}}})
+	findings, err := json.Marshal(Findings{Items: []Finding{
+		{File: "receipt.go\n" + attribution, Description: disclosure + "\n" + human + "\n" + quotedHuman + "\n" + attribution},
+		{File: quotedHuman, Description: disclosure},
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,11 +272,11 @@ func assertUnconfiguredReviewAttributionFiltered(t *testing.T, attribution strin
 	if summary != cleanSummary {
 		t.Errorf("returned summary = %q, want %q", summary, cleanSummary)
 	}
-	wantSubject := "no-mistakes(review): guard unsafe value " + disclosure + " " + human
+	wantSubject := "no-mistakes(review): guard unsafe value " + disclosure + " " + human + " " + quotedHuman
 	if subject := lastCommitMessage(t, dir); subject != wantSubject {
 		t.Errorf("subject = %q, want %q", subject, wantSubject)
 	}
-	wantBody := cleanSummary + "\n\nRound findings:\n- receipt.go: " + disclosure + " " + human
+	wantBody := cleanSummary + "\n\nRound findings:\n- receipt.go: " + disclosure + " " + human + " " + quotedHuman + "\n- " + quotedHuman + ": " + disclosure
 	if body := gitCmd(t, dir, "show", "-s", "--format=%b"); body != wantBody {
 		t.Errorf("body = %q, want %q", body, wantBody)
 	}
