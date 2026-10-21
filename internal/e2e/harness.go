@@ -102,7 +102,6 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	if err != nil {
 		t.Fatalf("mkdir e2e root: %v", err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	h := &Harness{
 		t:                 t,
 		NMBin:             nmBin,
@@ -119,6 +118,17 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 		allowRepoCommands: opts.AllowRepoCommands,
 		globalConfigExtra: opts.GlobalConfigExtra,
 	}
+
+	// Registered before shutdown so the daemon is reaped even on failure,
+	// then its fixture remains available after all cleanup callbacks finish.
+	t.Cleanup(func() {
+		if t.Failed() {
+			h.dumpDebugState()
+			t.Logf("retained failing fixture diagnostics: %s", root)
+			return
+		}
+		_ = os.RemoveAll(root)
+	})
 
 	for _, dir := range []string{h.BinDir, h.NMHome, h.HomeDir, h.WorkDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -316,9 +326,37 @@ func (h *Harness) RunInDirWithEnv(dir string, env map[string]string, args ...str
 	cmd := exec.CommandContext(ctx, h.NMBin, args...)
 	cmd.Dir = dir
 	cmd.Env = mergedEnv(os.Environ(), env)
+	// Shutdown can delete its own PID file before reporting a probe error.
+	// Snapshot it before the command, not during failing-fixture cleanup.
+	pidRecord, _ := os.ReadFile(filepath.Join(h.NMHome, "daemon.pid"))
 	out, err := cmd.CombinedOutput()
+	if err != nil {
+		h.retainCommandDiagnostics(pidRecord, out, err)
+	}
 	h.syncDaemonOwnership()
 	return string(out), err
+}
+
+// retainCommandDiagnostics preserves stderr (including process-probe context)
+// and the pre-command PID even when shutdown removed the live record.
+func (h *Harness) retainCommandDiagnostics(pidRecord, output []byte, commandErr error) {
+	dir := filepath.Join(h.NMHome, "diagnostics")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		h.t.Logf("retain command diagnostics: %v", err)
+		return
+	}
+	artifacts := map[string][]byte{
+		"command-output.log": output,
+		"command-error.txt":  []byte(commandErr.Error()),
+	}
+	if len(pidRecord) > 0 {
+		artifacts["daemon.pid"] = pidRecord
+	}
+	for name, data := range artifacts {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
+			h.t.Logf("retain %s: %v", name, err)
+		}
+	}
 }
 
 // syncDaemonOwnership records a live daemon PID into the suite inventory when

@@ -31,7 +31,7 @@ func TestDaemonStopLeavesNoDaemonProcessOwningTheRoot(t *testing.T) {
 	}
 	stopped := daemonPIDForRoot(t, h)
 
-	out, err := h.Run("daemon", "stop")
+	out, err := h.Run("daemon", "stop", "--force")
 	if err != nil {
 		t.Fatalf("nm daemon stop: %v\n%s", err, out)
 	}
