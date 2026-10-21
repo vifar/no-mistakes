@@ -33,6 +33,9 @@ func TestPRContextGuardAcceptsTerminalCIRepairAdvanceOnAMergedPR(t *testing.T) {
 		advanceTarget bool
 		changeMerge   bool
 		retarget      bool
+		foreignHead   bool
+		divergentHead bool
+		stalePublish  bool
 		wantError     string
 	}{
 		{name: "merged with a pipeline-published repair", merged: true, publish: true},
@@ -41,6 +44,9 @@ func TestPRContextGuardAcceptsTerminalCIRepairAdvanceOnAMergedPR(t *testing.T) {
 		{name: "merge changed the repair", merged: true, publish: true, changeMerge: true, wantError: "merged PR tree differs"},
 		{name: "merged into a different branch", merged: true, publish: true, retarget: true, wantError: "matching PR receipt"},
 		{name: "closed after retargeting", publish: true, retarget: true, wantError: "matching PR receipt"},
+		{name: "closed after another publisher advances the forge head", publish: true, foreignHead: true, wantError: "matching PR receipt"},
+		{name: "closed with a published head on a different lineage", publish: true, divergentHead: true, wantError: "matching PR receipt"},
+		{name: "closed with only an older publication record", publish: true, stalePublish: true, wantError: "matching PR receipt"},
 		// The negative: the SAME head advance, but the run never published it
 		// (no durable publication record), so the proof is absent and the
 		// guard must still fail closed.
@@ -61,6 +67,9 @@ func TestPRContextGuardAcceptsTerminalCIRepairAdvanceOnAMergedPR(t *testing.T) {
 			receiptHead := receipt.LocalHeadSHA
 
 			// The CI step commits a repair, which advances the head.
+			if tc.divergentHead {
+				gitCmd(t, dir, "reset", "--hard", base)
+			}
 			if err := os.WriteFile(filepath.Join(dir, "repair.txt"), []byte("fixed\n"), 0o644); err != nil {
 				t.Fatal(err)
 			}
@@ -73,10 +82,19 @@ func TestPRContextGuardAcceptsTerminalCIRepairAdvanceOnAMergedPR(t *testing.T) {
 			// The run publishes the repair head: the durable publication record
 			// is the proof that the advance was the pipeline's own.
 			if tc.publish {
+				publishedHead := repairHead
+				if tc.stalePublish {
+					publishedHead = receiptHead
+				}
 				if err := sctx.DB.UpdateRunPublication(sctx.Run.ID, db.PushBinding{
-					HeadSHA: repairHead, TargetKind: "upstream", TargetFingerprint: "test", Ref: "refs/heads/feature",
+					HeadSHA: publishedHead, TargetKind: "upstream", TargetFingerprint: "test", Ref: "refs/heads/feature",
 				}); err != nil {
 					t.Fatal(err)
+				}
+				if tc.stalePublish {
+					if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, repairHead); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			sctx.Run.HeadSHA = repairHead
@@ -116,7 +134,16 @@ func TestPRContextGuardAcceptsTerminalCIRepairAdvanceOnAMergedPR(t *testing.T) {
 				targetBranch = "release"
 				gitCmd(t, dir, "branch", targetBranch, "main")
 			}
-			facts := fmt.Sprintf(`{"number":42,"html_url":%q,"state":"closed","merged":%t,"merge_commit_sha":%q,"head":{"ref":"feature","sha":%q,"repo":{"full_name":"test/repo"}},"base":{"ref":%q}}`, prURL, merged, mergedSHA, repairHead, targetBranch)
+			forgeHead := repairHead
+			if tc.foreignHead {
+				// Another publisher can advance the forge while this run still
+				// has its own published repair checked out. Local ancestry alone
+				// must not authorize that different live head.
+				gitCmd(t, dir, "commit", "--allow-empty", "-m", "another publisher")
+				forgeHead = gitCmd(t, dir, "rev-parse", "HEAD")
+				gitCmd(t, dir, "reset", "--hard", repairHead)
+			}
+			facts := fmt.Sprintf(`{"number":42,"html_url":%q,"state":"closed","merged":%t,"merge_commit_sha":%q,"head":{"ref":"feature","sha":%q,"repo":{"full_name":"test/repo"}},"base":{"ref":%q}}`, prURL, merged, mergedSHA, forgeHead, targetBranch)
 			binDir := fakeCLIBinDir(t)
 			linkTestBinary(t, binDir, "gh")
 			sctx.Env = fakeCLIEnv(binDir, map[string]string{
@@ -143,13 +170,13 @@ func TestPRContextGuardAcceptsTerminalCIRepairAdvanceOnAMergedPR(t *testing.T) {
 				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
 					t.Fatalf("expected %q, got decision %+v, error %v", tc.wantError, decision, err)
 				}
-				if tc.retarget {
+				if tc.retarget || tc.foreignHead || tc.divergentHead || tc.stalePublish {
 					unchanged, readErr := sctx.DB.GetRunPRContext(sctx.Run.ID)
 					if readErr != nil {
 						t.Fatal(readErr)
 					}
 					if unchanged.PRContextCandidate != receipt.PRContextCandidate {
-						t.Fatalf("retarget replaced receipt: %+v", unchanged)
+						t.Fatalf("unproven advance replaced receipt: %+v", unchanged)
 					}
 				}
 				return
