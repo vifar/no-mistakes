@@ -50,7 +50,8 @@ var fetchRecoveredDefaultBranchSHA = fetchTrustedDefaultBranchSHA
 // RunManager tracks active pipeline executors and manages run lifecycle.
 type RunManager struct {
 	// beforeAnswerRespond is a test scheduling barrier, nil in production.
-	beforeAnswerRespond func()
+	beforeAnswerRespond     func()
+	beforeTerminalStepsRead func() // test barrier for a blocked stale-row query
 
 	runtimeInstance  string
 	runtimeStartedAt time.Time
