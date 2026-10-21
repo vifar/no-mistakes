@@ -1429,7 +1429,8 @@ func TestCIStep_BaseTipResolverDeadlineIsBoundedByRemainingTimeout(t *testing.T)
 
 // TestCIStep_UnlimitedTimeoutNeverExpires verifies that an unlimited timeout
 // (ci_timeout: "unlimited" / non-positive) makes the monitor watch until the
-// PR merges or closes, never self-terminating, and skips base-tip polling.
+// PR merges or closes with current comparison proof, never self-terminating,
+// and skips base-tip polling. Missing proof has its own independent bound.
 func TestCIStep_UnlimitedTimeoutNeverExpires(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
@@ -1440,7 +1441,7 @@ func TestCIStep_UnlimitedTimeoutNeverExpires(t *testing.T) {
 	ag := &stepstest.MockAgent{AgentName: "test"}
 	sctx := stepstest.NewTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
-	sctx.Run.PRURL = &prURL
+	stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
 	sctx.Config.CITimeout = config.CITimeoutUnlimited
 
 	var logs []string
@@ -1457,6 +1458,10 @@ func TestCIStep_UnlimitedTimeoutNeverExpires(t *testing.T) {
 	pollCount := 0
 	step := (&steps.CIStep{}).SetNow(func() time.Time { return current }).SetBaseBranchTip(func(context.Context) (string, bool) { tipCalls++; return "sha", true }).SetWaitForNextPoll(func(ctx context.Context, interval time.Duration) error {
 		pollCount++
+		durable, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil || durable.CIReadyAt == nil {
+			t.Fatalf("healthy unlimited monitor lost readiness: %+v %v", durable, err)
+		}
 		if pollCount >= 2 {
 			cancel()
 			return ctx.Err()

@@ -19,6 +19,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+var errCIReadinessReceiptMissing = errors.New("CI readiness lacks a current PR comparison receipt")
+
 const (
 	defaultBaseBranchTipResolveWindow = 30 * time.Second
 	defaultPublishedHeadResolveWindow = 30 * time.Second
@@ -677,6 +679,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	noCIHintLogged := false
 	consecutiveCheckErrs := 0
 	consecutiveBotCommentErrs := 0
+	receiptTimeout := sctx.Config.CIReadinessReceiptTimeout
+	if receiptTimeout <= 0 {
+		receiptTimeout = config.DefaultCIReadinessReceiptTimeout
+	}
+	var receiptMissingSince time.Time
+	receiptMissingHead := ""
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
 		sctx.Log("CI timeout reached")
 		var outcome *pipeline.StepOutcome
@@ -695,6 +703,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if !unlimited {
 			remaining := timeout - now().Sub(timeoutAnchor)
 			if remaining > 0 && remaining < interval {
+				interval = remaining
+			}
+		}
+		if !receiptMissingSince.IsZero() {
+			if remaining := receiptTimeout - now().Sub(receiptMissingSince); remaining > 0 && remaining < interval {
 				interval = remaining
 			}
 		}
@@ -730,6 +743,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				return nil, err
 			}
 		}
+		receiptMissingObserved := false
 		botCommentReadFailed := false
 		behindObserved := false
 
@@ -747,6 +761,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					return nil, readErr
 				}
 				if readErr != nil {
+					receiptMissingSince = time.Time{}
+					receiptMissingHead = ""
 					// An unreadable target cannot be classified against; wait
 					// for the next poll instead of using a possibly stale one.
 					sctx.Log(fmt.Sprintf("warning: could not read the PR target branch: %v", readErr))
@@ -1193,7 +1209,18 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					if !rollupObserved && sctx.Config != nil && sctx.Config.NoCI {
 						passedMsg = ciNoChecksPassedMsg
 					}
-					lastMonitorLog = logVerifiedCIMonitorStatus(sctx, host, checks, passedMsg, lastMonitorLog)
+					var comparisonErr error
+					lastMonitorLog, comparisonErr = logVerifiedCIMonitorStatus(sctx, host, checks, passedMsg, lastMonitorLog)
+					if errors.Is(comparisonErr, errCIReadinessReceiptMissing) {
+						receiptMissingObserved = true
+						if receiptMissingSince.IsZero() || receiptMissingHead != sctx.Run.HeadSHA {
+							receiptMissingSince = now()
+							receiptMissingHead = sctx.Run.HeadSHA
+						}
+						if now().Sub(receiptMissingSince) >= receiptTimeout {
+							return nil, fmt.Errorf("ci-readiness-receipt-missing: CI readiness could not be established because the current PR comparison receipt for head %s is missing after %s of otherwise-ready observations; re-run validation after recovering branch custody", receiptMissingHead, receiptTimeout)
+						}
+					}
 					if lastMonitorLog == passedMsg && sctx.PublishedHeadValidated != nil {
 						sctx.PublishedHeadValidated(pr.HeadSHA)
 					}
@@ -1204,6 +1231,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		}
 
+		// Only consecutive otherwise-ready observations spend the proof budget.
+		// Pending checks, provider outages, and other comparison failures reset it.
+		if !receiptMissingObserved {
+			receiptMissingSince = time.Time{}
+			receiptMissingHead = ""
+		}
 		if !botCommentReadFailed {
 			consecutiveBotCommentErrs = 0
 		}
@@ -1240,13 +1273,13 @@ func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) st
 	return message
 }
 
-func logVerifiedCIMonitorStatus(sctx *pipeline.StepContext, host scm.Host, checks []scm.Check, message, previous string) string {
+func logVerifiedCIMonitorStatus(sctx *pipeline.StepContext, host scm.Host, checks []scm.Check, message, previous string) (string, error) {
 	if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
 		clearCIMonitorReady(sctx)
 		sctx.Log(fmt.Sprintf("warning: CI readiness comparison could not be verified: %v", err))
-		return ""
+		return "", err
 	}
-	return logCIMonitorStatus(sctx, message, previous)
+	return logCIMonitorStatus(sctx, message, previous), nil
 }
 
 func verifyCIMonitorComparison(sctx *pipeline.StepContext, host scm.Host, checks []scm.Check) error {
@@ -1261,7 +1294,7 @@ func verifyCIMonitorComparison(sctx *pipeline.StepContext, host scm.Host, checks
 		return err
 	}
 	if receipt == nil || receipt.PRURL == "" || sctx.Run.HeadSHA != receipt.LocalHeadSHA {
-		return fmt.Errorf("CI readiness lacks a current PR comparison receipt")
+		return errCIReadinessReceiptMissing
 	}
 	durable, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {

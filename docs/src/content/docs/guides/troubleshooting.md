@@ -294,13 +294,16 @@ Symptom: CI step keeps monitoring an open PR longer than expected, or pauses aft
 Monitoring while the PR remains open - even after checks are currently healthy - is intended behavior, because a later default-branch update can make the PR conflict or rerun CI.
 Once the CI monitor reports readiness and the PR is mergeable, the CI panel shows `✓ Checks passed` and the terminal title switches to `Checks passed`, so you can tell when to go merge the PR. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns readiness and signal-clearing rules, including check scope and GitHub Actions runs that do not appear in the PR check rollup.
 
-How long the monitor runs is controlled by `ci_timeout` in `~/.no-mistakes/config.yaml`, an idle timeout that re-arms whenever the upstream default branch advances; the [`ci_timeout` field reference](/no-mistakes/reference/global-config/#ci_timeout) owns the default, the `unlimited` keyword and its aliases, and the exact re-arm semantics.
+For the monitor's idle deadline, see the [`ci_timeout` field reference](/no-mistakes/reference/global-config/#ci_timeout), which owns the default, unlimited monitoring, and re-arm semantics.
 Older config files may still contain an explicit `ci_timeout: "4h"` value; update it if you want the newer default behavior.
 
 If the PR is still open at the timeout, the step pauses for approval with findings for the open monitoring state or any known unresolved failures.
 You can approve, fix, or skip from the TUI or `no-mistakes axi respond`.
 
 A park that happens **before** the timeout, with a finding that CI checks could not be read from the provider, means the check read itself is failing (after 6 consecutive failed polls, the step stops waiting instead of spinning to `ci_timeout`). The finding is provider-neutral and the step log shows the underlying provider error; for GitHub, a `gh` older than 2.50 rejects the `gh pr checks --json` call and needs upgrading. The same park on GitLab, Forgejo, Bitbucket Cloud, Azure DevOps, Gitea, or a provider plugin points at that provider's CLI, credentials, or plugin instead. For GitLab's "waiting for the delivered commit's own checks" message, see [CI source-commit binding](/no-mistakes/reference/pipeline-steps/#ci).
+
+If checks are green but the log repeats `CI readiness lacks a current PR comparison receipt`, see [`ci_readiness_receipt_timeout`](/no-mistakes/reference/global-config/#ci_readiness_receipt_timeout) for the separate proof bound, named terminal failure, and recovery guidance. This differs from waiting for absent external checks; the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns that readiness distinction.
+
 Use `no-mistakes axi abort` only when you mean to cancel the whole active run.
 
 ## Step looks quiet or wedged
