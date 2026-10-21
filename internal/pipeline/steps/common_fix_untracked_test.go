@@ -197,6 +197,16 @@ func assertUntrackedProposalCommitted(t *testing.T, sc *pipeline.StepContext, be
 	if head == before || sc.Run.HeadSHA != head {
 		t.Errorf("helper did not record a new head: before=%s HEAD=%s run=%s", before, head, sc.Run.HeadSHA)
 	}
+	recorded, err := sc.DB.GetRun(sc.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorded == nil {
+		t.Fatal("committed correction has no persisted run")
+	}
+	if recorded.HeadSHA != head {
+		t.Errorf("persisted run head = %s, want committed HEAD %s", recorded.HeadSHA, head)
+	}
 	if got, err := git.RunRaw(sc.Ctx, sc.WorkDir, "show", "HEAD:docs/proposal.md"); err != nil || string(got) != "# Intended documentation\n" {
 		t.Errorf("committed content = %q, err=%v", got, err)
 	}
