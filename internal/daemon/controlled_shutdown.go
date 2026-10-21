@@ -154,6 +154,7 @@ func (m *RunManager) prepareControlledShutdown(ctx context.Context, expected ipc
 // once a shutdown has begun, and so a wait on wg can finish.
 func (m *RunManager) stopLimitWatcher() {
 	m.watchOnce.Do(func() {})
+	m.maintenanceCancel()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.watchStop != nil {

@@ -31,8 +31,8 @@ func closeExecutingSteps(ctx context.Context, tx *sql.Tx, runID, reason string, 
 // TerminalExecutingSteps finds legacy rows left executing after their run ended.
 // No active run is a candidate, including non-native steps with no agent PID.
 // Certified watcher cancellation keeps its existing proof-owned step semantics.
-func (d *DB) TerminalExecutingSteps() ([]*StepResult, error) {
-	rows, err := d.sql.Query(`SELECT s.id FROM step_results s JOIN runs r ON r.id=s.run_id
+func (d *DB) TerminalExecutingSteps(ctx context.Context) ([]*StepResult, error) {
+	rows, err := d.sql.QueryContext(ctx, `SELECT s.id FROM step_results s JOIN runs r ON r.id=s.run_id
  WHERE r.status IN ('completed','failed','cancelled','ci_monitor_interrupted')
  AND s.status IN ('running','fixing','awaiting_approval','fix_review')
  AND NOT EXISTS (SELECT 1 FROM commit_status_publications p WHERE p.run_id=r.id
@@ -56,13 +56,15 @@ func (d *DB) TerminalExecutingSteps() ([]*StepResult, error) {
 	}
 	var steps []*StepResult
 	for _, id := range ids {
-		step, err := d.GetStepResult(id)
+		step := &StepResult{}
+		err := d.sql.QueryRowContext(ctx, `SELECT `+stepResultColumns+`, last_activity_at, last_activity, agent_pid, auto_fix_limit, round_started_at, override_reason, skip_reason, approval_reason, gate_nonce, gate_round_id, accepted_gaps_json, pending_response FROM step_results WHERE id=?`, id).Scan(&step.ID, &step.RunID, &step.StepName, &step.StepOrder, &step.Status, &step.ExitCode, &step.DurationMS, &step.LogPath, &step.FindingsJSON, &step.Error, &step.StartedAt, &step.CompletedAt, &step.LastActivityAt, &step.LastActivity, &step.AgentPID, &step.AutoFixLimit, &step.RoundStartedAt, &step.OverrideReason, &step.SkipReason, &step.ApprovalReason, &step.GateNonce, &step.GateRoundID, &step.AcceptedGapsJSON, &step.PendingResponse)
+		if err == sql.ErrNoRows {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}
-		if step != nil {
-			steps = append(steps, step)
-		}
+		steps = append(steps, step)
 	}
 	return steps, nil
 }
@@ -70,9 +72,9 @@ func (d *DB) TerminalExecutingSteps() ([]*StepResult, error) {
 // CloseTerminalStep conditionally closes the inspected row. A restarted row,
 // new activity, changed PID or revived run invalidates the observation.
 // The caller must first exclude executor ownership and a live/unknown process.
-func (d *DB) CloseTerminalStep(step *StepResult, ts int64) (bool, error) {
+func (d *DB) CloseTerminalStep(ctx context.Context, step *StepResult, ts int64) (bool, error) {
 	changed := false
-	err := sqlitewrite.Transaction(context.Background(), d.sql, "CloseTerminalStep", func(ctx context.Context, tx *sql.Tx) error {
+	err := sqlitewrite.Transaction(ctx, d.sql, "CloseTerminalStep", func(ctx context.Context, tx *sql.Tx) error {
 		result, err := tx.ExecContext(ctx, `UPDATE step_results SET status='failed', error='terminal run: interrupted step',
  completed_at=?, last_activity_at=?, last_activity='terminal run: interrupted step', agent_pid=NULL, pending_response=NULL
  WHERE id=? AND run_id=? AND status=? AND status IN ('running','fixing','awaiting_approval','fix_review')

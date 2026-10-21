@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -65,6 +66,13 @@ func setSysProcAttr(cmd *exec.Cmd) {
 }
 
 func processRunning(pid int) (bool, error) {
+	return processRunningContext(context.Background(), pid)
+}
+
+func processRunningContext(ctx context.Context, pid int) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	if pid <= 0 {
 		return false, nil
 	}

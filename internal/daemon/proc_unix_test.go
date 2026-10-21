@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -59,7 +60,7 @@ func TestProcessStateCommandForcesCLocale(t *testing.T) {
 	t.Setenv("LC_ALL", "fr_FR.UTF-8")
 	t.Setenv("LANG", "fr_FR.UTF-8")
 
-	cmd := processStateCommand(123)
+	cmd := processStateCommand(context.Background(), 123)
 
 	if got := strings.Join(cmd.Args[1:], " "); got != "-p 123 -o stat=" {
 		t.Fatalf("args = %q, want %q", got, "-p 123 -o stat=")
@@ -174,5 +175,41 @@ func TestProcessRunningDoesNotHideAmbiguousPSFailures(t *testing.T) {
 				t.Fatalf("existing pid probe accepted: running=%v", running)
 			}
 		})
+	}
+}
+
+func TestTerminalProcessProbeCancelsBlockedPS(t *testing.T) {
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	if err := os.WriteFile(filepath.Join(dir, "ps"), []byte("#!/bin/sh\nprintf ready > \"$PROBE_READY\"\nexec sleep 60\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PROBE_READY", ready)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := processRunningContext(ctx, os.Getpid()); done <- err }()
+	for {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("probe exited before barrier: %v", err)
+		case <-ctx.Done():
+			t.Fatal("ps did not enter barrier")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled ps reported dead process")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked ps did not stop")
+
 	}
 }
