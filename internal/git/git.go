@@ -154,12 +154,17 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	// the cancellation's doing. Observing the context AFTER the command
 	// returned would not: a child can die of a signal on its own and then
 	// race a shutdown that happened to observe the context a moment later.
+	//
+	// The cancel hook is INVOKED by the context and by nothing else, so its
+	// invocation is the provenance. The kill it performs can still be
+	// refused - the process group may already be gone, or the platform may
+	// refuse it - and a refused kill does not make the command's failure
+	// independent, because the context is what interrupted it.
 	var cancelled atomic.Bool
 	cancelCommand := cmd.Cancel
 	cmd.Cancel = func() error {
-		err := cancelCommand()
-		cancelled.Store(err == nil)
-		return err
+		cancelled.Store(true)
+		return cancelCommand()
 	}
 	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
