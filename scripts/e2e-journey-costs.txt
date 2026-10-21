@@ -33,9 +33,13 @@ default_journey_seconds=15
 journey_seconds=(
   617 TestRetainedTargetContinuityLiveJourney
   564 TestCIReceiptRecoveryJourneys
+  382 TestTargetAdvancePublishedGuardsLiveJourney
+  313 TestTargetAdvanceAcceptedGapRecoversLiveJourney
+  128 TestSQLiteParkedGateExhaustionSettlesTerminalTruth
   119 TestCIScopeAutoDiscovery
   119 TestCustomGateStructuredFindingsJourney
   105 TestPushTargetAdvanceLiveJourney
+  100 TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney
   94 TestNativeTestCompletionOnRealBinary
   90 TestAttachCommitStatusJourney
   81 TestCIScopeRequiredChecksBlockReadiness
@@ -44,6 +48,7 @@ journey_seconds=(
   63 TestLeftoverTargetAdvanceLiveJourney
   61 TestCustomGateWatcherProofProductionJourneys
   58 TestOmitIntentJourney
+  57 TestSQLiteContentionOnRealDaemon
   56 TestCertificationContentionProductionJourney
   51 TestCIScopeExternalOverridesAndAllExcludedRestriction
   48 TestAcceptedTestGapCommitStatusJourney
@@ -55,7 +60,10 @@ journey_seconds=(
   39 TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary
   38 TestProviderPluginJourney
   38 TestRecoveredRewriteSafetyLiveJourney
+  37 TestDaemonRetainsIndependentFailureUntilStorageRecovers
   36 TestCustomGatesJourney
+  36 TestTargetAdvanceDuringReviewFixLiveJourney
+  35 TestSiblingPollingReportsConditionBeforePackageTimeout
   34 TestCertifiedWatcherProductionLifecycle
   32 TestDocumentJourneyAdmissionAndInterruptedHistory
   31 TestMachineLocalCommandOverridesJourney
@@ -77,9 +85,10 @@ journey_seconds=(
   20 TestStorageBlockedFailureReleasesCapacityOnRealDaemon
   19 TestCIScopeCarriedReplayKeepsAppBoundRequiredRepair
   19 TestSupersessionDoesNotWaitForBlockedSettlementOnRealDaemon
+  19 TestTargetAdvanceInitialObservationURLLiveJourney
   18 TestDocumentAnalyzerSummaryContractOnRealBinary
   18 TestDocumentJourneyOverBudgetDiscardSurvivesRecovery
-  18 TestPlannedStopRefusesOwnedAdmissionFailureOnRealDaemon
+  18 TestTargetAdvanceReviewCarryLiveJourney
   17 TestFilelessSelectedReviewFindingRequiresCompleteVerification
   17 TestGateIdentityJourney_TUIRespondUsesDisplayedSnapshot
   17 TestPlannedStopKeepsAnUnownedRowUntouched
@@ -90,7 +99,6 @@ journey_seconds=(
   15 TestDocumentJourneyCleanFlaggedBytesAndEscapedCount
   15 TestLivePiProfileReattachAndRerunSemantics
   15 TestPushCorrectionIndependentForgeHeadLiveJourney
-  15 TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney
   14 TestAxiAgentJourney
   14 TestAxiRecoveredRewriteRetiresMirrorJourney
   14 TestClosingIssueRefsOwnedTemplateJourney
@@ -99,6 +107,7 @@ journey_seconds=(
   13 TestDocumentJourneyCarryStopsAndPublishesHistoricalEvidence
   13 TestFailedInvocationUsageJourney
   13 TestReviewPostMergeStaleSnapshotJourney
+  13 TestSQLiteDocumentContentionOnRealDaemon
   12 TestRebaseMergeStrategyGlobalDefaultAndTrustedOverrideJourney
   11 TestAnalyzerEvidenceFailuresFailPipelineJourney
   11 TestAxiAnswerPartialReturnsAtOnceAndTheClosingAnswerReturnsAGenuineReAsk
@@ -133,6 +142,7 @@ journey_seconds=(
   8 TestPRWhatChangedScopesToFinalDiffWhileEvidenceStaysStepScoped
   8 TestPerRepositoryMachineLocalFixCommitJourney
   8 TestPiRunProfileSurvivesGlobalChangesAcrossEveryDuty
+  8 TestPlannedStopRefusesOwnedAdmissionFailureOnRealDaemon
   8 TestPrepareSubmoduleCheckoutReachesConfiguredCommands
   8 TestRebaseMergeStrategyAgentResolvedConflictPublishesAMergeJourney
   8 TestRebaseMergeStrategyPublishesAMergeOfTheReviewedHeadJourney
@@ -140,6 +150,7 @@ journey_seconds=(
   8 TestReviewConversationJourney
   8 TestReviewConversationOffRefusesAnAnswer
   8 TestRunOwnerReceiptJourney
+  8 TestSQLiteMigrationContentionOnRealCLI
   7 TestAxiAnswerWaitElapsedReattachesWithAxiRun
   7 TestAxiParkedAwaitingAgentSignal
   7 TestClosingIssueRefsNonGitHubFailsAtPR
@@ -163,10 +174,14 @@ journey_seconds=(
   6 TestPushedRepoConfigCannotSelectReviewAgent
   6 TestReviewAnswerRestartsForChangedSourceHeadJourney
   6 TestRunOwnerRetainedMultihopJourney
+  6 TestSilentAgentTimeoutReportsMeasuredEvidence
+  5 TestDaemonStopLivePostKillProbe
   5 TestGateDeclineJourney_PartialSelectionKeepsEarlierFixes
   5 TestReviewConversationSupersededRoundsReachTheNextReviewer
   5 TestRunOwnerLaunchJourney
   5 TestRunOwnerReplayRefusalJourney
+  5 TestSQLiteRecordClearedOnRealGateRecovery
+  5 TestSQLiteTokenInFailingCommandOnRealDaemon
   4 TestAXIControlByteFailureGateRemainsReadable
   4 TestClosingIssueRefsSkippedPRIsRefused
   4 TestForcedRestartWithRealProcessExitDuringPIDInspection
@@ -181,12 +196,15 @@ journey_seconds=(
   4 TestRunOwnerReceiptFailureBeforeCommitJourney
   3 TestAxiRunSkipsRepositoryPrePushHookForLocalGate
   3 TestAxiTerminalEqualTreeRecoveryJourney
+  3 TestDaemonStopLiveFailedFixtureCleanup
+  3 TestFailedStatusCommandRetainsFixtureDiagnostics
   3 TestLivePiProfileTrustedPiOverridesGlobalAuto
   3 TestPushedBranchCannotEnableTheReviewConversation
   3 TestRebaseMergeStrategyUnparseableTrustedValueFailsRunClosedJourney
   3 TestReviewExternalPRLifecycleStillParks
   2 TestAgentlessRunFailsBeforePipelineStarts
   2 TestAxiRunReportsImmediateAgentlessFailureWithoutRerun
+  2 TestAxiSyncConfirmsMergedPRAfterCIMonitorInterrupted
   2 TestDaemonRestartReplacesTheDaemonWithExactlyOneOwner
   2 TestDaemonRunUsesProvidedRoot
   2 TestDaemonStopLeavesNoDaemonProcessOwningTheRoot
@@ -196,9 +214,13 @@ journey_seconds=(
   2 TestInitSkillOptOut
   2 TestOriginAdmissionWithoutCompleteFactsOnRealBinary
   2 TestPlannedStopCancelsRealGitSetup
+  2 TestStartupRefDiagnosticsOnRealCLI
   2 TestTerminalPRObservationDoesNotCompleteRun
   1 TestAxiRunPreflightGuards
   1 TestCIReceiptTimeoutDoctorConfig
+  1 TestDaemonForceStopWithRealExitDuringStateProbe
+  1 TestDaemonStopLiveFinalIdentityGuard
+  1 TestDaemonStopLiveSuccessfulFixtureCleanup
   1 TestHarnessNonRepositoryTempDirStaysOutsideCheckout
   1 TestInitLegacyNotice
   1 TestInitRepoRename
@@ -208,6 +230,8 @@ journey_seconds=(
   0 TestCommitChangeCreatesMissingBranchFromMain
   0 TestDaemonStartTimeoutLeavesRoomForLoginShellProbe
   0 TestDaemonStopDirFallsBackWhenWorkDirMoved
+  0 TestDaemonStopLiveFailedFixtureChild
+  0 TestFailedStatusCommandDiagnosticsChild
   0 TestFixtureRootFromRepoRoot
   0 TestValidatePromptsAbsent
   0 TestValidatePushedHead

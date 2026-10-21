@@ -94,16 +94,17 @@ about seven minutes and gives every daemon slot to a shard when the shards
 begin.
 
 The daemon cap bounds how many temporary daemons may be live at once; it is
-not a bound on test parallelism. The suite's default cap is four, which
-leaves three shards once the terminal worker takes its slot, and three
-shards carry the measured e2e bucket - about 4000 seconds of work - inside
-the 2400 second budget. The shard count is bounded by what the cap leaves,
-so a shard can always get a slot: a shard that cannot get one does not wait -
-it fails, and the suite reports a failure that has nothing to do with the
-code under test. With one daemon slot, the complete suite runs in a single
-process with the same budget. All workers use the budget remaining after the
-matrix and discovery, and all workers share the same daemon cap. Each run
-retains the shared temporary-daemon inventory and cleanup trap.
+not a bound on test parallelism. The suite's default cap is five, which
+leaves four shards once the terminal worker takes its slot, and four shards
+carry the measured e2e bucket - about 4500 seconds of work - inside the
+2400 second budget: each shard carries about 1240 seconds, less than half
+the allowance. The shard count is bounded by what the cap leaves, so a shard
+can always get a slot: a shard that cannot get one does not wait - it fails,
+and the suite reports a failure that has nothing to do with the code under
+test. With one daemon slot, the complete suite runs in a single process with
+the same budget. All workers use the budget remaining after the matrix and
+discovery, and all workers share the same daemon cap. Each run retains the
+shared temporary-daemon inventory and cleanup trap.
 
 ## Required execution policy
 

@@ -45,12 +45,12 @@ fi
 # once. It is not a bound on test parallelism: the step-test worker takes no
 # daemon slot at all, and the shards each take one.
 #
-# The default is four, not two, because the e2e bucket is roughly 4000
+# The default is five, not two, because the e2e bucket is roughly 4500
 # seconds of measured work and the budget is 2400. With a cap of two only
 # one shard could run beside the terminal worker, so the bucket was
 # serialised into a single worker that could not finish inside the budget -
 # the suite died on its own -timeout rather than on a failing test.
-export NM_E2E_DAEMON_MAX="${NM_E2E_DAEMON_MAX:-4}"
+export NM_E2E_DAEMON_MAX="${NM_E2E_DAEMON_MAX:-5}"
 
 reap_inventory() {
   # Best-effort; never expand into shared-daemon territory (reaper refuses).
@@ -200,17 +200,17 @@ if [[ "$#" -eq 0 ]]; then
   trap 'handle_signal 130' INT
   trap 'handle_signal 143' TERM
 
-  daemon_cap="${NM_E2E_DAEMON_MAX:-4}"
+  daemon_cap="${NM_E2E_DAEMON_MAX:-5}"
   if [[ "$daemon_cap" =~ ^\+?[0-9]+$ ]]; then
     daemon_cap="${daemon_cap#+}"
     while [[ "$daemon_cap" == 0* && "${#daemon_cap}" -gt 1 ]]; do
       daemon_cap="${daemon_cap#0}"
     done
     if [[ "$daemon_cap" == 0 ]]; then
-      daemon_cap=4
+      daemon_cap=5
     fi
   else
-    daemon_cap=4
+    daemon_cap=5
   fi
   # The NORMALIZED cap is exported, so the workers see the same number the
   # plan was built on. A child that read the original value would fall back
@@ -236,11 +236,12 @@ if [[ "$#" -eq 0 ]]; then
   if (( shard_count < 1 )); then
     shard_count=1
   fi
-  if (( shard_count > 3 )); then
-    # More shards than this only adds contention on a small runner. Three
-    # shards carry the measured e2e bucket - about 4000 seconds of work -
-    # inside the 2400 second budget, and they are bounded by the cap.
-    shard_count=3
+  if (( shard_count > 4 )); then
+    # More shards than this only adds contention on a small runner. Four
+    # shards carry the measured e2e bucket - about 4500 seconds of work -
+    # inside the 2400 second budget with room to spare, and they are
+    # bounded by the cap.
+    shard_count=4
   fi
 
   start_seconds=$SECONDS

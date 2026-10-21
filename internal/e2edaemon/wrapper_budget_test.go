@@ -53,9 +53,9 @@ func TestE2EWrapperDefaultPartitionsJourneyAndRunsRemainder(t *testing.T) {
 	// pipeline-step worker, one shard per remaining daemon slot, and the
 	// cleanup. The shard count is bounded by what the daemon cap leaves -
 	// the terminal worker takes one slot - and by the runner's own capacity,
-	// so this fixture's cap of 8 yields the maximum of three shards.
-	if len(calls) != 10 {
-		t.Fatalf("go calls = %q, want matrix, discovery, terminal journey, step tests, three shards, and cleanup", calls)
+	// so this fixture's cap of 8 yields the maximum of four shards.
+	if len(calls) != 11 {
+		t.Fatalf("go calls = %q, want matrix, discovery, terminal journey, step tests, four shards, and cleanup", calls)
 	}
 	assertBothMatrixCallsFinishedBeforeCleanup(t, result.events)
 	first := callContaining(t, calls, "-run ^TestUserJourney$/(claude|codex)$")
