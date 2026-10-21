@@ -933,7 +933,7 @@ Under `always`:
 - The findings never spend an `auto_fix.ci` attempt. A human decides: approve, skip, or select comments for a fix round.
 - Approving over them records the CI step as passed with an override naming the comments, never as a clean pass.
 - A comment or completion read that fails is not treated as absence: `checks-passed` is withheld, and a read that keeps failing parks for a decision. Strict `ci-ready` receipt export uses the same verification with the run's recorded policy and refuses export on unresolved comments, pending review activity, or read errors, even if readiness was previously recorded.
-- Each green poll reads the comments. Codex additionally reads paginated PR reviews and summary comments, plus reactions for outstanding explicit review requests.
+- Each green poll reads the comments. Codex additionally reads paginated PR reviews and summary comments, plus reactions on explicit review requests. When checking whether a later review or summary settled an acknowledged request, it also reads live PR facts and the source branch's paginated push history to attribute the requested head.
 
 Forges that cannot supply review comments skip comment collection under either value. Because only GitHub can attribute a *check* to a review bot, `on_failure` reads nothing on GitLab: a GitLab run needs `always` for the bot's unresolved discussions to become findings.
 

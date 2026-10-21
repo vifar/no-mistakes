@@ -63,8 +63,9 @@ func readReviewActivity[T any](ctx context.Context, h *Host, endpoint string) ([
 }
 
 // ReviewBotPending implements scm.ReviewBotPendingHost. A provider-visible
-// PENDING review on this head holds readiness; a submitted review or its summary
-// settles it. An absent bot does not become a required review gate.
+// PENDING review on this head holds readiness. Acknowledged requests need a
+// later completion for their attributed head or a clean reaction on the request;
+// unrelated completions cannot settle them. An absent bot is not a required gate.
 func (h *Host) ReviewBotPending(ctx context.Context, pr *scm.PR, bot scm.ReviewBot) (bool, error) {
 	state, err := h.reviewBotState(ctx, pr, bot)
 	return state == "pending", err

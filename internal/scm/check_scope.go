@@ -593,7 +593,7 @@ func ReviewBotCommentChecks(checks []Check, excluded ...Check) []Check {
 
 // ReadReadinessReviewBotComments applies the recorded comment policy to
 // provider-supported bots. Pending checkless reviews hold readiness, but never
-// hide a different, settled bot's unresolved findings.
+// hide unresolved findings from any eligible bot, including the pending bot.
 func ReadReadinessReviewBotComments(ctx context.Context, host Host, pr *PR, policy CheckScopePolicy, checks []Check, excluded ...Check) ([]ReviewComment, error) {
 	if policy.ReviewBotComments != "always" || !host.Capabilities().ReviewComments {
 		return nil, nil

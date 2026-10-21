@@ -490,12 +490,13 @@ type ReviewComment struct {
 	URL       string
 }
 
-// ErrReviewBotPending means a registered bot has an unfinished current-head
-// review. It is a readiness wait, not a comment-read failure or a fix finding.
+// ErrReviewBotPending means a registered bot has unfinished review activity.
+// It is a readiness wait, not a comment-read failure or a fix finding.
 var ErrReviewBotPending = errors.New("review bot review is pending")
 
 // ReviewBotPendingHost reads completion for bots without check runs. No observed
-// participation means absent, not pending; old-head reviews cannot hold a new head.
+// participation means absent, not pending. Old-head PENDING reviews alone do not
+// hold a new head; acknowledged requests need their own settlement evidence.
 type ReviewBotPendingHost interface {
 	ReviewBotPending(context.Context, *PR, ReviewBot) (bool, error)
 }
