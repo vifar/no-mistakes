@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	gitpath "path"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -65,7 +65,6 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 		return err
 	}
 	entries := map[string][]string{}
-	var excluded []string
 	for _, entry := range strings.Split(string(status), "\x00") {
 		if len(entry) < 4 || entry[2] != ' ' {
 			continue
@@ -73,12 +72,8 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 		if wanted[entry[3:]] {
 			entries[entry[3:]] = append(entries[entry[3:]], entry)
 			snapshot.Status = append(snapshot.Status, []byte(entry+"\x00")...)
-		} else {
-			excluded = append(excluded, ":(top,exclude,literal)"+entry[3:])
 		}
 	}
-	// Literal pathspecs and disabled external diff/textconv prevent source
-	// filenames or repository diff drivers from changing the captured scope.
 	// Recovery consumes a standard patch, regardless of display preferences.
 	// Submodule settings can otherwise omit gitlinks or emit log summaries
 	// that git apply cannot consume, in either patch stream.
@@ -87,26 +82,15 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 		"--ignore-submodules=none", "--submodule=short",
 		"--src-prefix=a/", "--dst-prefix=b/", "--unified=3",
 		"--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= "}
-	// Capture each change once, and only for the selected paths. A dirty path's
-	// pathspec also matches its descendants, so a file replaced by a directory
-	// (or the reverse) would otherwise have its descendant's patch appended
-	// once per matching pathspec, leaving a record git apply cannot consume.
-	// The covering set keeps every surviving pathspec free of another selected
-	// path's prefix, so batches cannot overlap either.
-	for _, batch := range pathBatches(coveringLeftoverPaths(paths)) {
-		selected := make([]string, 0, len(batch)+len(excluded))
-		for _, path := range batch {
-			selected = append(selected, ":(top,literal)"+path)
-		}
-		selected = append(selected, excluded...)
+	for _, batch := range leftoverPatchBatches(paths) {
 		stagedArgs := append(append([]string{}, patchArgs...), "--cached", head, "--")
-		staged, err := git.RunRaw(c.Ctx, c.WorkDir, append(stagedArgs, selected...)...)
+		staged, err := git.RunRaw(c.Ctx, c.WorkDir, append(stagedArgs, batch...)...)
 		if err != nil {
 			return err
 		}
 		snapshot.StagedPatch = append(snapshot.StagedPatch, staged...)
 		unstagedArgs := append(append([]string{}, patchArgs...), "--")
-		unstaged, err := git.RunRaw(c.Ctx, c.WorkDir, append(unstagedArgs, selected...)...)
+		unstaged, err := git.RunRaw(c.Ctx, c.WorkDir, append(unstagedArgs, batch...)...)
 		if err != nil {
 			return err
 		}
@@ -176,27 +160,30 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 	return nil
 }
 
-// coveringLeftoverPaths drops selected paths that another selected path
-// already matches. Git treats a pathspec as a path prefix, so the patch for
-// "a" also carries every change under "a/"; capturing "a/b" separately would
-// append the same change a second time and produce a record git apply rejects.
-func coveringLeftoverPaths(paths []string) []string {
-	selected := make(map[string]bool, len(paths))
+func leftoverPatchBatches(paths []string) [][]string {
+	paths = append([]string(nil), paths...)
+	sort.SliceStable(paths, func(i, j int) bool {
+		return strings.Count(paths[i], "/") < strings.Count(paths[j], "/")
+	})
+	escape := strings.NewReplacer(`\`, `\\`, `*`, `\*`, `?`, `\?`, `[`, `\[`)
+	var batches [][]string
+	var batch []string
+	size, depth := 0, 0
 	for _, path := range paths {
-		selected[path] = true
-	}
-	covering := make([]string, 0, len(paths))
-	for _, path := range paths {
-		covered := false
-		for dir := gitpath.Dir(path); dir != "." && dir != "/"; dir = gitpath.Dir(dir) {
-			if selected[dir] {
-				covered = true
-				break
-			}
+		include := ":(top,literal)" + path
+		exclude := ":(top,exclude,glob)" + escape.Replace(path) + "/**"
+		bytes := len(include) + len(exclude) + 2
+		pathDepth := strings.Count(path, "/")
+		if len(batch) > 0 && (depth != pathDepth || size+bytes > stagingBatchBytes) {
+			batches = append(batches, batch)
+			batch, size = nil, 0
 		}
-		if !covered {
-			covering = append(covering, path)
-		}
+		batch = append(batch, include, exclude)
+		size += bytes
+		depth = pathDepth
 	}
-	return covering
+	if len(batch) > 0 {
+		batches = append(batches, batch)
+	}
+	return batches
 }

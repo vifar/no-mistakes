@@ -3,8 +3,10 @@ package steps
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -91,6 +93,103 @@ func TestTargetRewindSnapshotCoversReplacedPathsOnce(t *testing.T) {
 		if tracked == "feature.txt" {
 			t.Fatal("recovery restored the removed file")
 		}
+	}
+}
+
+func TestTargetRewindSnapshotLargeScratchInventory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix filename contract")
+	}
+	c, _ := rewindFixture(t)
+	c.RunLogDir = t.TempDir()
+	head := c.Run.HeadSHA
+	names := []string{"feature.txt", "trailing]", "trailing[", "trailing!", "trailing^", "trailing-", "trailing\\", "trailing?", "trailing*", "trailing\n", "literal[*?\\].txt"}
+	if runtime.GOOS != "darwin" {
+		names = append(names, "trailing\xff", "trailing\xfe")
+	}
+	for i := 0; i < 100; i++ {
+		names = append(names, fmt.Sprintf("real-%03d-%s.txt", i, strings.Repeat("y", 180)))
+	}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(c.WorkDir, name), []byte("staged "+name+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, c.WorkDir, "add", "-A")
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(c.WorkDir, name), []byte("working "+name+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	patternSibling := filepath.Join(c.WorkDir, `feature.tx[\t]`, ".journal-live", "postgres.log")
+	if err := os.MkdirAll(filepath.Dir(patternSibling), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(patternSibling, []byte("private scratch\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, c.WorkDir, "--literal-pathspecs", "add", `feature.tx[\t]/.journal-live/postgres.log`)
+	scratch := filepath.Join(c.WorkDir, ".journal-live")
+	if err := os.Mkdir(scratch, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 12000; i++ {
+		name := fmt.Sprintf("%05d-%s.log", i, strings.Repeat("x", 200))
+		if err := os.WriteFile(filepath.Join(scratch, name), []byte("private scratch\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := snapshotLeftoverValidationEdits(c, "test", head); err != nil {
+		t.Fatal(err)
+	}
+	files, err := filepath.Glob(filepath.Join(c.RunLogDir, "leftover-validation-*.json"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("snapshot: %v %v", files, err)
+	}
+	data, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var record leftoverValidationSnapshot
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(record.StagedPatch, []byte(".journal-live")) || bytes.Contains(record.UnstagedPatch, []byte(".journal-live")) {
+		t.Fatal("recovery patches retained scratch")
+	}
+	if len(record.Paths) != len(names) || len(record.Untracked) != 0 || bytes.Contains(record.Status, []byte(".journal-live")) {
+		t.Fatalf("unexpected recovery scope: %+v", record)
+	}
+	if err := os.RemoveAll(c.WorkDir); err != nil {
+		t.Fatal(err)
+	}
+	recovery := t.TempDir()
+	gitCmd(t, recovery, "clone", c.Repo.UpstreamURL, ".")
+	gitCmd(t, recovery, "checkout", "--detach", head)
+	for _, patch := range []struct {
+		data []byte
+		args []string
+	}{
+		{record.StagedPatch, []string{"apply", "--index"}},
+		{record.UnstagedPatch, []string{"apply"}},
+	} {
+		file := filepath.Join(t.TempDir(), "recover.patch")
+		if err := os.WriteFile(file, patch.data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, recovery, append(patch.args, file)...)
+	}
+	for _, name := range names {
+		got, err := os.ReadFile(filepath.Join(recovery, name))
+		if err != nil || string(got) != "working "+name+"\n" {
+			t.Fatalf("working bytes not recovered for %q: %q %v", name, got, err)
+		}
+		if got := gitCmd(t, recovery, "show", ":"+name); got != "staged "+strings.TrimSpace(name) {
+			t.Fatalf("staged bytes not recovered for %q: %q", name, got)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(recovery, ".journal-live")); !os.IsNotExist(err) {
+		t.Fatalf("scratch restored by recovery: %v", err)
 	}
 }
 
