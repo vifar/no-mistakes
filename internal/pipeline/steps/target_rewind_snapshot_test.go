@@ -104,14 +104,14 @@ func TestTargetRewindDurableLeftoverEvidence(t *testing.T) {
 				t.Fatal(err)
 			}
 			var snapshot struct {
-				RunID         string            `json:"run_id"`
-				Producer      string            `json:"producer"`
-				Head          string            `json:"head"`
-				Paths         []string          `json:"paths"`
-				Status        []byte            `json:"status"`
-				StagedPatch   []byte            `json:"staged_patch"`
-				UnstagedPatch []byte            `json:"unstaged_patch"`
-				Untracked     map[string][]byte `json:"untracked"`
+				RunID         string                   `json:"run_id"`
+				Producer      string                   `json:"producer"`
+				Head          string                   `json:"head"`
+				Paths         [][]byte                 `json:"paths"`
+				Status        []byte                   `json:"status"`
+				StagedPatch   []byte                   `json:"staged_patch"`
+				UnstagedPatch []byte                   `json:"unstaged_patch"`
+				Untracked     []leftoverValidationFile `json:"untracked"`
 			}
 			if err := json.Unmarshal(data, &snapshot); err != nil {
 				t.Fatal(err)
@@ -125,7 +125,7 @@ func TestTargetRewindDurableLeftoverEvidence(t *testing.T) {
 			if kind == "partial stage" && !bytes.Contains(snapshot.StagedPatch, []byte("+staged version")) {
 				t.Fatal("snapshot lost index version")
 			}
-			if kind == "untracked binary" && !bytes.Equal(snapshot.Untracked["new\nfile.bin"], binary) {
+			if kind == "untracked binary" && (len(snapshot.Untracked) != 1 || string(snapshot.Untracked[0].Path) != "new\nfile.bin" || !bytes.Equal(snapshot.Untracked[0].Data, binary)) {
 				t.Fatal("snapshot lost untracked binary bytes or filename")
 			}
 			if bytes.Contains(data, []byte("scratch bytes")) || bytes.Contains(snapshot.Status, []byte(".journal-live")) {

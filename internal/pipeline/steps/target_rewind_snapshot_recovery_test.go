@@ -51,17 +51,17 @@ func TestTargetRewindSnapshotRecoveryVariants(t *testing.T) {
 				t.Fatal(err)
 			}
 			var record struct {
-				Paths     []string          `json:"paths"`
-				Status    []byte            `json:"status"`
-				Staged    []byte            `json:"staged_patch"`
-				Unstaged  []byte            `json:"unstaged_patch"`
-				Untracked map[string][]byte `json:"untracked"`
+				Paths     [][]byte                 `json:"paths"`
+				Status    []byte                   `json:"status"`
+				Staged    []byte                   `json:"staged_patch"`
+				Unstaged  []byte                   `json:"unstaged_patch"`
+				Untracked []leftoverValidationFile `json:"untracked"`
 			}
 			if err := json.Unmarshal(data, &record); err != nil {
 				t.Fatal(err)
 			}
 			if kind == "deleted index with surviving file" {
-				if len(record.Paths) != 1 || record.Paths[0] != "feature.txt" {
+				if len(record.Paths) != 1 || string(record.Paths[0]) != "feature.txt" {
 					t.Fatalf("paths not deduplicated: %q", record.Paths)
 				}
 				for _, status := range []string{"D  feature.txt\x00", "?? feature.txt\x00"} {
@@ -69,7 +69,7 @@ func TestTargetRewindSnapshotRecoveryVariants(t *testing.T) {
 						t.Fatalf("lost or duplicated status %q: %q", status, record.Status)
 					}
 				}
-				if !bytes.Equal(record.Untracked["feature.txt"], working) {
+				if len(record.Untracked) != 1 || string(record.Untracked[0].Path) != "feature.txt" || !bytes.Equal(record.Untracked[0].Data, working) {
 					t.Fatal("lost untracked working copy")
 				}
 				if bytes.Count(record.Staged, []byte("diff --git a/feature.txt b/feature.txt")) != 1 {
@@ -103,7 +103,7 @@ func TestTargetRewindSnapshotRecoveryVariants(t *testing.T) {
 				gitCmd(t, recovery, append(args, file)...)
 			}
 			if kind == "deleted index with surviving file" {
-				if err := os.WriteFile(filepath.Join(recovery, "feature.txt"), record.Untracked["feature.txt"], 0600); err != nil {
+				if err := os.WriteFile(filepath.Join(recovery, "feature.txt"), record.Untracked[0].Data, 0600); err != nil {
 					t.Fatal(err)
 				}
 				if got := gitCmd(t, recovery, "status", "--porcelain"); !strings.Contains(got, "D  feature.txt") || !strings.Contains(got, "?? feature.txt") {

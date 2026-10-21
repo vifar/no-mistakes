@@ -16,17 +16,24 @@ import (
 // without relying on the disposable worktree (or its Git object store) surviving.
 // Apply staged_patch to head, then unstaged_patch to that index version;
 // untracked holds files that Git's diff cannot represent until they are added.
+// Paths and symlink targets must be byte fields too: JSON strings (including
+// map keys) replace invalid UTF-8, collapsing distinct Unix filenames.
 type leftoverValidationSnapshot struct {
-	RunID         string            `json:"run_id"`
-	Producer      string            `json:"producer"`
-	Head          string            `json:"head"`
-	Paths         []string          `json:"paths"`
-	Status        []byte            `json:"status"`
-	StagedPatch   []byte            `json:"staged_patch"`
-	UnstagedPatch []byte            `json:"unstaged_patch"`
-	Untracked     map[string][]byte `json:"untracked,omitempty"`
-	Symlinks      map[string]string `json:"symlinks,omitempty"`
-	Modes         map[string]uint32 `json:"modes,omitempty"`
+	RunID         string                   `json:"run_id"`
+	Producer      string                   `json:"producer"`
+	Head          string                   `json:"head"`
+	Paths         [][]byte                 `json:"paths"`
+	Status        []byte                   `json:"status"`
+	StagedPatch   []byte                   `json:"staged_patch"`
+	UnstagedPatch []byte                   `json:"unstaged_patch"`
+	Untracked     []leftoverValidationFile `json:"untracked,omitempty"`
+}
+
+type leftoverValidationFile struct {
+	Path          []byte `json:"path"`
+	Data          []byte `json:"data,omitempty"`
+	SymlinkTarget []byte `json:"symlink_target,omitempty"`
+	Mode          uint32 `json:"mode"`
 }
 
 func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head string) error {
@@ -48,8 +55,10 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 		}
 	}
 	paths = unique
-	snapshot := leftoverValidationSnapshot{RunID: c.Run.ID, Producer: producer, Head: head, Paths: paths,
-		Untracked: map[string][]byte{}, Symlinks: map[string]string{}, Modes: map[string]uint32{}}
+	snapshot := leftoverValidationSnapshot{RunID: c.Run.ID, Producer: producer, Head: head}
+	for _, path := range paths {
+		snapshot.Paths = append(snapshot.Paths, []byte(path))
+	}
 	status, err := git.RunRaw(c.Ctx, c.WorkDir, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=none")
 	if err != nil {
 		return err
@@ -73,8 +82,11 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 		// Literal pathspecs and disabled external diff/textconv prevent source
 		// filenames or repository diff drivers from changing the captured scope.
 		// Recovery consumes a standard patch, regardless of display preferences.
+		// Submodule settings can otherwise omit gitlinks or emit log summaries
+		// that git apply cannot consume, in either patch stream.
 		patchArgs := []string{"--literal-pathspecs", "diff", "--no-color", "--binary",
 			"--no-ext-diff", "--no-textconv", "--no-renames", "--no-relative",
+			"--ignore-submodules=none", "--submodule=short",
 			"--src-prefix=a/", "--dst-prefix=b/", "--unified=3",
 			"--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= "}
 		staged, err := git.RunRaw(c.Ctx, c.WorkDir, append(patchArgs, "--cached", head, "--", path)...)
@@ -95,23 +107,24 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 		if err != nil {
 			return err
 		}
-		snapshot.Modes[path] = uint32(info.Mode().Perm())
+		file := leftoverValidationFile{Path: []byte(path), Mode: uint32(info.Mode().Perm())}
 		switch {
 		case info.Mode()&os.ModeSymlink != 0:
 			target, err := os.Readlink(full)
 			if err != nil {
 				return err
 			}
-			snapshot.Symlinks[path] = target
+			file.SymlinkTarget = []byte(target)
 		case info.Mode().IsRegular():
 			data, err := os.ReadFile(full)
 			if err != nil {
 				return err
 			}
-			snapshot.Untracked[path] = data
+			file.Data = data
 		default:
 			return fmt.Errorf("cannot preserve non-file leftover path %q", path)
 		}
+		snapshot.Untracked = append(snapshot.Untracked, file)
 	}
 	if err := os.MkdirAll(c.RunLogDir, 0700); err != nil {
 		return err
