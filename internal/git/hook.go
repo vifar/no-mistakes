@@ -342,6 +342,9 @@ func GateConfigCurrent(bareDir string) bool {
 	if err != nil || string(content) != stamp {
 		return false
 	}
+	if _, err := os.Stat(filepath.Join(bareDir, sharedConfigBaselineFile)); err != nil {
+		return false
+	}
 	// Admission is a security boundary, not merely notification. Verify the
 	// managed pre-receive bytes on every startup so a stale stamp cannot hide a
 	// removed or replaced guard. This remains filesystem-only for current gates.
@@ -356,6 +359,25 @@ func GateConfigCurrent(bareDir string) bool {
 // MarkGateConfigCurrent atomically records a fully completed gate migration.
 // Callers must validate the gate and finish every mutation before marking it.
 func MarkGateConfigCurrent(bareDir string) error {
+	if err := ValidateBareRepository(context.Background(), bareDir); err != nil {
+		return err
+	}
+	// The legacy isolation helper intentionally leaves shared hooksPath alone.
+	// Finish enrollment separately: once the bare's hook intent is pinned in
+	// per-worktree scope, shared hooksPath no longer belongs in the baseline.
+	ctx := context.Background()
+	enabled, err := RunBare(ctx, bareDir, "config", "--local", "--type=bool", "--get", "--default=false", "extensions.worktreeConfig")
+	if err != nil {
+		return err
+	}
+	if enabled == "true" {
+		if _, err := RunBare(ctx, bareDir, "config", "--local", "--unset-all", "core.hookspath"); err != nil && !isConfigKeyMissing(err) {
+			return err
+		}
+	}
+	if err := RecordSharedConfigBaseline(context.Background(), bareDir); err != nil {
+		return err
+	}
 	stamp, err := gateConfigStampContent(bareDir)
 	if err != nil {
 		return err
@@ -373,8 +395,8 @@ func gateConfigStampContent(bareDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256([]byte("gate-config-v3\x00" + preReceiveHookScript(exe, gate) + "\x00" + postReceiveHookScript(exe, gate)))
-	return fmt.Sprintf("v3:%x\n", sum), nil
+	sum := sha256.Sum256([]byte("gate-config-v4\x00" + preReceiveHookScript(exe, gate) + "\x00" + postReceiveHookScript(exe, gate)))
+	return fmt.Sprintf("v4:%x\n", sum), nil
 }
 
 // IsolateHooksPath protects the gate's post-receive hook from being
@@ -409,6 +431,9 @@ func IsolateHooksPath(ctx context.Context, bareDir string) error {
 }
 
 func EnsureHooksPathIsolation(ctx context.Context, bareDir string) (bool, error) {
+	if err := ValidateBareRepository(ctx, bareDir); err != nil {
+		return false, err
+	}
 	if _, err := runGit(ctx, bareDir, "config", "--worktree", "--get", "core.hookspath"); err != nil {
 		if isWorktreeConfigUnsupported(err) {
 			return false, nil

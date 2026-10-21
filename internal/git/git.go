@@ -212,6 +212,9 @@ func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEn
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(nonInteractiveEnvForContext(ctx, dir), extraEnv...)
+	if len(args) > 0 && strings.HasPrefix(args[0], "--git-dir=") {
+		cmd.Env = bareRepositoryEnv(cmd.Env)
+	}
 	if input != "" {
 		cmd.Stdin = strings.NewReader(input)
 	}
@@ -463,8 +466,21 @@ func isBareGitDir(dir string) bool {
 
 // InitBare creates a new bare git repository at the given path.
 func InitBare(ctx context.Context, path string) error {
+	// Refuse both the checkout root and its non-bare Git directory before any
+	// `init --bare` write. Refreshing a registered gate needs validation, not
+	// another initialization that can rewrite core.bare in the wrong scope.
+	if _, err := os.Lstat(filepath.Join(path, ".git")); err == nil {
+		return fmt.Errorf("refuse bare initialization of working checkout %s", path)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if _, err := os.Lstat(filepath.Join(path, "HEAD")); err == nil {
+		return ValidateBareRepository(ctx, path)
+	} else if !os.IsNotExist(err) {
+		return err
+	}
 	cmd := exec.CommandContext(ctx, "git", "init", "--bare", path)
-	cmd.Env = nonInteractiveEnvForContext(ctx, "")
+	cmd.Env = bareRepositoryEnv(nonInteractiveEnvForContext(ctx, ""))
 	winproc.Harden(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -991,18 +1007,8 @@ func CopyLocalUserIdentity(ctx context.Context, srcDir, dstDir string) error {
 		if value == "" {
 			continue
 		}
-		if _, err := Run(ctx, dstDir, "config", "--worktree", key, value); err != nil {
-			if !isWorktreeConfigWriteUnavailable(err) {
-				return err
-			}
-			// Per-worktree config is not usable here (Git too old for the
-			// flag, or the repo has multiple worktrees without
-			// extensions.worktreeConfig enabled). Fall back to the shared
-			// local config. Such gates also lack per-worktree isolation, so
-			// this matches the legacy behavior.
-			if _, err := Run(ctx, dstDir, "config", "--local", key, value); err != nil {
-				return err
-			}
+		if err := SetWorktreeConfig(ctx, dstDir, key, value); err != nil {
+			return err
 		}
 	}
 	return nil

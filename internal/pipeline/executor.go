@@ -1969,7 +1969,7 @@ rounds:
 			err = e.acquireSlot(ctx)
 		}
 		if err == nil {
-			outcome, err = step.Execute(sctx)
+			outcome, err = executeWithConfigProtection(step, sctx)
 		}
 		if err == nil && run.Shipping != nil {
 			if outcome.Skipped || outcome.SkipRemaining {
