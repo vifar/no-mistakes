@@ -83,7 +83,8 @@ const e2eDaemonStartTimeout = "45s"
 // NewHarness builds the fixture binaries (once per test
 // process), creates a temp git repo with origin, writes the no-mistakes
 // global config to point at the chosen fake agent, and registers cleanup
-// to stop the daemon and remove temp state at test end.
+// to stop the daemon at test end. Successful tests remove temp state; failed
+// tests retain the fixture root and log its path for diagnostic inspection.
 func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	t.Helper()
 	if opts.Agent == "" {
