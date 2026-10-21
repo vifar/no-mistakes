@@ -63,9 +63,9 @@ measurement, so the heaviest shard can carry appreciably more than its
 measured share, and a budget that no longer fits the work reports a failure
 that is really a budget. With at least two daemon slots, the user-journey
 matrix runs in two isolated Go test processes: Claude and Codex in one, all
-other agents in the other. The terminal-merge and retained-target continuity
-journey tables then share one Go test process alongside a separate
-pipeline-step worker. Before starting those workers, the wrapper checks test
+other agents in the other. The terminal-merge, retained-target continuity, and
+published-guard journey tables then share one Go test process alongside a
+separate pipeline-step worker. Before starting those workers, the wrapper checks test
 discovery in both package trees and fails if either discovery fails or returns
 no tests. It waits for the pipeline-step worker to succeed before starting
 shards containing the remaining e2e tests.
