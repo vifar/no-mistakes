@@ -240,7 +240,7 @@ func (a *fallbackAgent) Close() error {
 // completed turn. Those are the agent's verdict on the work, and re-running
 // them under a different agent would discard a real answer.
 func isAgentUnavailableError(err error) bool {
-	if err == nil || IsStructuredOutputRejected(err) || IsReplayUnsafe(err) {
+	if err == nil || IsStructuredOutputRejected(err) || IsTerminalProviderError(err) || IsUsageLimitReached(err) || IsReplayUnsafe(err) {
 		return false
 	}
 	// A provider's completed-turn verdict can quote setup-looking prose. It

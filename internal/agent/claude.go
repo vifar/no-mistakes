@@ -41,6 +41,7 @@ type claudeAPIError struct {
 	// the request. Such a 429 clears at the limit's reset time, not after a
 	// backoff.
 	usageLimitReached bool
+	schemaExhausted   bool
 }
 
 func (e *claudeAPIError) UsageLimitReached() bool {
@@ -52,7 +53,14 @@ func (e *claudeAPIError) TerminalProviderError() bool {
 	return !retry
 }
 
+func (e *claudeAPIError) Is(target error) bool {
+	return e.schemaExhausted && target == ErrStructuredOutputRetriesExhausted
+}
+
 func (e *claudeAPIError) Error() string {
+	if e.schemaExhausted {
+		return "claude error: subtype=error_max_structured_output_retries"
+	}
 	message := []rune(e.Message)
 	if len(message) > claudeAPIErrorMessageMaxRunes {
 		message = append(message[:claudeAPIErrorMessageMaxRunes], []rune("...")...)
@@ -61,7 +69,7 @@ func (e *claudeAPIError) Error() string {
 }
 
 func (e *claudeAPIError) classify() (string, bool) {
-	if e.usageLimitReached || isTerminalRetryError(strings.ToLower(e.Message)) {
+	if e.schemaExhausted || e.usageLimitReached || isTerminalRetryError(strings.ToLower(e.Message)) {
 		return "", false
 	}
 	if status := transientStatusRE.FindString(strconv.Itoa(e.Status)); status != "" {
@@ -148,6 +156,9 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	if err := parseClaudeEvents(ctx, started.stdout, opts.OnChunk, &usage, &result); err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
+		if terminal := result.terminalAPIError(); terminal != nil {
+			err = errors.Join(err, terminal)
+		}
 		retErr := fmt.Errorf("claude parse events: %w", err)
 		emitAgentExited(opts, "claude", pid, retErr)
 		return resultFromUsage(usage), retErr
@@ -208,24 +219,32 @@ func claudeExitError(waitErr error, stderr string, apiErr *claudeAPIError) error
 // claudeEvent so a change of their wire type costs only this diagnostic and
 // never the result event itself.
 func (r *claudeResult) terminalAPIError() *claudeAPIError {
-	if r == nil || !r.IsError {
+	if r == nil || (!r.IsError && r.Subtype == "success") {
 		return nil
 	}
 	var fields struct {
 		APIErrorStatus int    `json:"api_error_status"`
 		Result         string `json:"result"`
 	}
-	if err := json.Unmarshal(r.rawEvent, &fields); err != nil || fields.APIErrorStatus == 0 {
+	if err := json.Unmarshal(r.rawEvent, &fields); err != nil {
+		fields.APIErrorStatus, fields.Result = 0, ""
+	}
+	schemaExhausted := r.Subtype == "error_max_structured_output_retries"
+	if fields.APIErrorStatus == 0 && !r.usageLimitReached && !schemaExhausted {
 		return nil
 	}
 	return &claudeAPIError{
 		Status:            fields.APIErrorStatus,
 		Message:           strings.Join(strings.Fields(fields.Result), " "),
 		usageLimitReached: r.usageLimitReached,
+		schemaExhausted:   schemaExhausted,
 	}
 }
 
 func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage TokenUsage) (*Result, error) {
+	if err := result.terminalAPIError(); err != nil {
+		return resultFromUsage(usage), err
+	}
 	if result.IsError || result.Subtype != "success" {
 		return resultFromUsage(usage), fmt.Errorf("claude error: subtype=%s", result.Subtype)
 	}

@@ -79,6 +79,8 @@ type RunOpts struct {
 	OnAttempt func(Attempt)
 }
 
+var ErrStructuredOutputRetriesExhausted = errors.New("native structured output retries exhausted")
+
 // IsStructuredOutputRejected reports whether an invocation completed but its
 // final structured response was absent, malformed, or rejected by the requested
 // schema. Callers may use this distinction to ask the same agent to correct its
@@ -110,14 +112,40 @@ func IsUsageLimitReached(err error) bool {
 	var limit interface {
 		UsageLimitReached() bool
 	}
-	return errors.As(err, &limit) && limit.UsageLimitReached()
+	if errors.As(err, &limit) && limit.UsageLimitReached() {
+		return true
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, child := range wrapped.Unwrap() {
+			if IsUsageLimitReached(child) {
+				return true
+			}
+		}
+	case interface{ Unwrap() error }:
+		return IsUsageLimitReached(wrapped.Unwrap())
+	}
+	return false
 }
 
 func IsTerminalProviderError(err error) bool {
 	var terminal interface {
 		TerminalProviderError() bool
 	}
-	return errors.As(err, &terminal) && terminal.TerminalProviderError()
+	if errors.As(err, &terminal) && terminal.TerminalProviderError() {
+		return true
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, child := range wrapped.Unwrap() {
+			if IsTerminalProviderError(child) {
+				return true
+			}
+		}
+	case interface{ Unwrap() error }:
+		return IsTerminalProviderError(wrapped.Unwrap())
+	}
+	return false
 }
 
 type structuredOutputRejection struct{ err error }

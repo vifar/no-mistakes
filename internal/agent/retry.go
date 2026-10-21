@@ -167,6 +167,9 @@ func cloneSessionRef(session *SessionRef) *SessionRef {
 // CLI reported the API error it ended on, that record alone decides: the
 // message text beside it is not classifier input.
 func claudeRetryClassifier(err error) (string, bool) {
+	if IsTerminalProviderError(err) || IsUsageLimitReached(err) {
+		return "", false
+	}
 	if errors.Is(err, errNoStructuredOutput) {
 		return "missing structured output", true
 	}
@@ -246,7 +249,7 @@ var terminalNeedles = []struct {
 // API or network failure. It deliberately ignores ctx cancellation/deadline
 // errors so explicit cancellation is never silently retried.
 func classifyTransient(err error) (string, bool) {
-	if err == nil {
+	if err == nil || IsTerminalProviderError(err) || IsUsageLimitReached(err) {
 		return "", false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -344,17 +347,17 @@ func isTerminalRetryError(msg string) bool {
 // concrete shapes may trigger the quota-aware mid-run switch - transient
 // overload, unavailability, and parse failures never do.
 func IsQuotaExhaustionError(err error) bool {
-	if err == nil || IsStructuredOutputRejected(err) || IsReplayUnsafe(err) {
+	if err == nil || IsStructuredOutputRejected(err) || errors.Is(err, ErrStructuredOutputRetriesExhausted) || IsReplayUnsafe(err) {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
+	if IsUsageLimitReached(err) {
+		return true
+	}
 	var apiErr *claudeAPIError
 	if errors.As(err, &apiErr) {
-		if apiErr.UsageLimitReached() {
-			return true
-		}
 		return isTerminalRetryError(strings.ToLower(apiErr.Message))
 	}
 	return isTerminalRetryError(strings.ToLower(err.Error()))

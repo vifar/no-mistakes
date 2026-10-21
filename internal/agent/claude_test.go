@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -851,13 +852,17 @@ func TestClaudeStdinHelper(t *testing.T) {
 		for {
 			time.Sleep(time.Second)
 		}
-	case "replay-then-fail":
+	case "replay-then-fail", "replay-then-exit":
 		if fixture := os.Getenv("NM_CLAUDE_STDIN_FIXTURE"); fixture != "" {
 			stream, err := os.ReadFile(fixture)
 			if err != nil {
 				os.Exit(6)
 			}
 			_, _ = os.Stdout.Write(stream)
+		}
+		if mode == "replay-then-exit" {
+			code, _ := strconv.Atoi(os.Getenv("NM_CLAUDE_STDIN_EXIT"))
+			os.Exit(code)
 		}
 		os.Exit(1)
 	case "read":
@@ -1068,5 +1073,71 @@ func TestParseClaudeEvents_UnansweredSubmissionFailsAsMissing(t *testing.T) {
 	_, err := finalizeClaudeResult(result, json.RawMessage(`{"type":"object"}`), TokenUsage{})
 	if !errors.Is(err, errNoStructuredOutput) {
 		t.Fatalf("expected errNoStructuredOutput, got %v (structured output %s)", err, result.StructuredOutput)
+	}
+}
+
+type nonTerminalClaudeDiagnostic struct{ error }
+
+func (e nonTerminalClaudeDiagnostic) Unwrap() error             { return e.error }
+func (nonTerminalClaudeDiagnostic) UsageLimitReached() bool     { return false }
+func (nonTerminalClaudeDiagnostic) TerminalProviderError() bool { return false }
+
+func TestClaudeAgent_NativeTerminalVerdictsSurviveExit(t *testing.T) {
+	defer withFastBackoff(t)()
+	for _, verdict := range []struct {
+		name, stream  string
+		schema, limit bool
+	}{
+		{"schema", `{"type":"result","subtype":"error_max_structured_output_retries","is_error":true}`, true, false},
+		{"schema over transient status", `{"type":"result","subtype":"error_max_structured_output_retries","is_error":true,"api_error_status":503}`, true, false},
+		{"usage without status", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}
+{"type":"result","subtype":"error_during_execution","is_error":true}`, false, true},
+		{"usage with status", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}
+{"type":"result","subtype":"error_during_execution","is_error":true,"api_error_status":429}`, false, true},
+	} {
+		for _, code := range []int{0, 1} {
+			t.Run(verdict.name+"/exit="+strconv.Itoa(code), func(t *testing.T) {
+				fixture := filepath.Join(t.TempDir(), "stream.jsonl")
+				if err := os.WriteFile(fixture, []byte(verdict.stream+"\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("NM_CLAUDE_STDIN_HELPER", "replay-then-exit")
+				t.Setenv("NM_CLAUDE_STDIN_FIXTURE", fixture)
+				t.Setenv("NM_CLAUDE_STDIN_EXIT", strconv.Itoa(code))
+				attempts := 0
+				a := newClaudeStdinHelperAgent(t)
+				successor := &fallbackTestAgent{name: "successor", run: func() (*Result, error) { return &Result{}, nil }}
+				var fallbackOpts []FallbackOption
+				if verdict.schema {
+					fallbackOpts = append(fallbackOpts, WithQuotaSwitch(""))
+				}
+				_, failure := NewFallback([]Agent{a, successor}, fallbackOpts...).Run(context.Background(), RunOpts{Prompt: "review", CWD: t.TempDir(), JSONSchema: json.RawMessage(`{"type":"object"}`), OnAttempt: func(Attempt) { attempts++ }})
+				if failure == nil || attempts != 1 || successor.calls != 0 {
+					t.Fatalf("native verdict replayed: attempts=%d successor=%d err=%v", attempts, successor.calls, failure)
+				}
+				var exitErr *exec.ExitError
+				if errors.As(failure, &exitErr) != (code != 0) {
+					t.Fatalf("lost real process exit: %v", failure)
+				}
+				if IsStructuredOutputRejected(failure) {
+					t.Fatalf("native exhaustion entered formatting correction: %v", failure)
+				}
+				other := nonTerminalClaudeDiagnostic{errors.New("additional diagnostic")}
+				for _, err := range []error{failure, fmt.Errorf("wrapped: %w", failure), errors.Join(other, failure), errors.Join(failure, other), nonTerminalClaudeDiagnostic{failure}} {
+					if !IsTerminalProviderError(err) || IsUsageLimitReached(err) != verdict.limit || errors.Is(err, ErrStructuredOutputRetriesExhausted) != verdict.schema {
+						t.Fatalf("lost terminal evidence: %v", err)
+					}
+					if _, retry := claudeRetryClassifier(err); retry {
+						t.Fatalf("Claude retry admitted native terminal verdict: %v", err)
+					}
+					if _, retry := classifyTransient(errors.Join(err, errors.New("overloaded_error"))); retry {
+						t.Fatalf("shared retry ignored terminal verdict: %v", err)
+					}
+					if IsQuotaExhaustionError(err) != verdict.limit {
+						t.Fatalf("incorrect quota-switch classification: %v", err)
+					}
+				}
+			})
+		}
 	}
 }
