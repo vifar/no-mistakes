@@ -82,6 +82,10 @@ func TestClaudeTerminalVerdictRejectsCrashAndCheckpointRetry(t *testing.T) {
 		{"schema", `{"type":"result","subtype":"error_max_structured_output_retries","is_error":true}`, true, false, false, 1},
 		{"usage", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}
 {"type":"result","subtype":"error_during_execution","is_error":true}`, false, true, false, 1},
+		{"usage without result", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}`, false, true, false, 1},
+		{"recovered transient", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}
+{"type":"result","subtype":"error_during_execution","is_error":true,"api_error_status":503}`, false, false, true, 4},
 		{"transient", `{"type":"result","subtype":"error_during_execution","is_error":true,"api_error_status":503}`, false, false, true, 4},
 	} {
 		for _, code := range []int{0, 1} {

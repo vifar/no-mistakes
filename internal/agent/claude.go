@@ -153,13 +153,20 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 
 	var usage TokenUsage
 	var result *claudeResult
-	if err := parseClaudeEvents(ctx, started.stdout, opts.OnChunk, &usage, &result); err != nil {
-		err = started.waitAfterParseError(err)
+	usageLimitReached, parseErr := parseClaudeEvents(ctx, started.stdout, opts.OnChunk, &usage, &result)
+	failure := func(err error) error {
+		if err != nil && usageLimitReached && !IsUsageLimitReached(err) {
+			return errors.Join(err, &claudeAPIError{usageLimitReached: true})
+		}
+		return err
+	}
+	if parseErr != nil {
+		err = started.waitAfterParseError(parseErr)
 		stderrWG.Wait()
 		if terminal := result.terminalAPIError(); terminal != nil {
 			err = errors.Join(err, terminal)
 		}
-		retErr := fmt.Errorf("claude parse events: %w", err)
+		retErr := failure(fmt.Errorf("claude parse events: %w", err))
 		emitAgentExited(opts, "claude", pid, retErr)
 		return resultFromUsage(usage), retErr
 	}
@@ -167,18 +174,19 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	waitErr := started.wait()
 	stderrWG.Wait()
 	if waitErr != nil {
-		retErr := claudeExitError(waitErr, string(stderrBuf), result.terminalAPIError())
+		retErr := failure(claudeExitError(waitErr, string(stderrBuf), result.terminalAPIError()))
 		emitAgentExited(opts, "claude", pid, retErr)
 		return resultFromUsage(usage), retErr
 	}
 
 	if result == nil {
-		retErr := fmt.Errorf("claude returned no result event")
+		retErr := failure(fmt.Errorf("claude returned no result event"))
 		emitAgentExited(opts, "claude", pid, retErr)
 		return resultFromUsage(usage), retErr
 	}
 
 	res, err := finalizeClaudeResult(result, opts.JSONSchema, usage)
+	err = failure(err)
 	if res != nil {
 		res.SessionID = result.sessionID
 		res.Resumed = resumeID != ""
@@ -438,7 +446,7 @@ const claudeStructuredOutputTool = "StructuredOutput"
 
 // parseClaudeEvents reads JSONL from the reader and dispatches events.
 // It accumulates token usage and captures the final result event.
-func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, result **claudeResult) error {
+func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, result **claudeResult) (bool, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), claudeScannerMaxTokenSize)
 	var textBuf string
@@ -455,7 +463,7 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return usageLimitReached, ctx.Err()
 		default:
 		}
 
@@ -549,5 +557,5 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 		}
 	}
 
-	return scanner.Err()
+	return usageLimitReached, scanner.Err()
 }

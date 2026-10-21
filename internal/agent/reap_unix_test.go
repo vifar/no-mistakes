@@ -39,7 +39,7 @@ func TestNativeAgentCommand_SlowClaudeCallbackPreservesCompletedTurn(t *testing.
 	}()
 	var usage TokenUsage
 	var result *claudeResult
-	err = parseClaudeEvents(ctx, started.stdout, func(string) {
+	_, err = parseClaudeEvents(ctx, started.stdout, func(string) {
 		// Simulate a synchronous log/database callback on a loaded host.
 		time.Sleep(300 * time.Millisecond)
 	}, &usage, &result)

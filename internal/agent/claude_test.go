@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"time"
 )
 
@@ -113,7 +114,7 @@ func TestParseClaudeEvents_AssistantMessage(t *testing.T) {
 	var chunks []string
 	var usage TokenUsage
 
-	err := parseClaudeEvents(
+	_, err := parseClaudeEvents(
 		context.Background(),
 		strings.NewReader(events),
 		func(text string) { chunks = append(chunks, text) },
@@ -151,7 +152,7 @@ func TestParseClaudeEvents_ResultEvent(t *testing.T) {
 	var usage TokenUsage
 	var result *claudeResult
 
-	err := parseClaudeEvents(
+	_, err := parseClaudeEvents(
 		context.Background(),
 		bytes.NewReader(append(line, '\n')),
 		nil,
@@ -194,7 +195,7 @@ func TestParseClaudeEvents_LargeAssistantEvent(t *testing.T) {
 	var chunks []string
 	var usage TokenUsage
 
-	err = parseClaudeEvents(
+	_, err = parseClaudeEvents(
 		context.Background(),
 		bytes.NewReader(append(line, '\n')),
 		func(text string) { chunks = append(chunks, text) },
@@ -224,7 +225,7 @@ func TestParseClaudeEvents_MultipleEvents(t *testing.T) {
 	var usage TokenUsage
 	var result *claudeResult
 
-	err := parseClaudeEvents(
+	_, err := parseClaudeEvents(
 		context.Background(),
 		strings.NewReader(events),
 		func(text string) { chunks = append(chunks, text) },
@@ -261,7 +262,7 @@ func TestParseClaudeEvents_NoSeparatorForFirstMessage(t *testing.T) {
 	var chunks []string
 	var usage TokenUsage
 
-	err := parseClaudeEvents(
+	_, err := parseClaudeEvents(
 		context.Background(),
 		strings.NewReader(events),
 		func(text string) { chunks = append(chunks, text) },
@@ -288,7 +289,7 @@ func TestParseClaudeEvents_NoSeparatorAfterToolOnlyEvent(t *testing.T) {
 	var chunks []string
 	var usage TokenUsage
 
-	err := parseClaudeEvents(
+	_, err := parseClaudeEvents(
 		context.Background(),
 		strings.NewReader(events),
 		func(text string) { chunks = append(chunks, text) },
@@ -313,7 +314,7 @@ func TestParseClaudeEvents_DoesNotSeparateSplitAssistantReply(t *testing.T) {
 	var chunks []string
 	var usage TokenUsage
 
-	err := parseClaudeEvents(
+	_, err := parseClaudeEvents(
 		context.Background(),
 		strings.NewReader(events),
 		func(text string) { chunks = append(chunks, text) },
@@ -337,7 +338,7 @@ func TestParseClaudeEvents_SkipsMalformedLines(t *testing.T) {
 	var chunks []string
 	var usage TokenUsage
 
-	err := parseClaudeEvents(
+	_, err := parseClaudeEvents(
 		context.Background(),
 		strings.NewReader(events),
 		func(text string) { chunks = append(chunks, text) },
@@ -356,7 +357,7 @@ func TestParseClaudeEvents_CacheTokens(t *testing.T) {
 	events := `{"type":"assistant","message":{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":30,"cache_creation_input_tokens":10},"content":[]}}
 `
 	var usage TokenUsage
-	err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, nil)
+	_, err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -380,7 +381,7 @@ func TestParseClaudeEvents_MultipleContentBlocksUsage(t *testing.T) {
 	var usage TokenUsage
 	var result *claudeResult
 	var text strings.Builder
-	if err := parseClaudeEvents(context.Background(), strings.NewReader(events), func(chunk string) {
+	if _, err := parseClaudeEvents(context.Background(), strings.NewReader(events), func(chunk string) {
 		text.WriteString(chunk)
 	}, &usage, &result); err != nil {
 		t.Fatal(err)
@@ -415,7 +416,7 @@ func TestParseClaudeEvents_CumulativeUsage(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var usage TokenUsage
-			if err := parseClaudeEvents(context.Background(), strings.NewReader(strings.Join(tc.events, "\n")), nil, &usage, nil); err != nil {
+			if _, err := parseClaudeEvents(context.Background(), strings.NewReader(strings.Join(tc.events, "\n")), nil, &usage, nil); err != nil {
 				t.Fatal(err)
 			}
 			if usage.InputTokens != 31_000*tc.messages || usage.OutputTokens != 500*tc.messages ||
@@ -435,7 +436,7 @@ func TestParseClaudeEvents_ContextCancellation(t *testing.T) {
 	events := `{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5},"content":[{"type":"text","text":"ok"}]}}
 `
 	var usage TokenUsage
-	err := parseClaudeEvents(ctx, strings.NewReader(events), nil, &usage, nil)
+	_, err := parseClaudeEvents(ctx, strings.NewReader(events), nil, &usage, nil)
 	if err == nil {
 		t.Fatal("expected error from cancelled context")
 	}
@@ -447,7 +448,7 @@ func TestParseClaudeEvents_ErrorResult(t *testing.T) {
 	var usage TokenUsage
 	var result *claudeResult
 
-	err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &result)
+	_, err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &result)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -539,7 +540,7 @@ func TestParseClaudeEvents_ResultCapturesRawEvent(t *testing.T) {
 	var usage TokenUsage
 	var result *claudeResult
 
-	err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &result)
+	_, err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, &result)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -978,7 +979,7 @@ func parseClaudeStream(t *testing.T, stream string) *claudeResult {
 	t.Helper()
 	var usage TokenUsage
 	var result *claudeResult
-	if err := parseClaudeEvents(context.Background(), strings.NewReader(stream), nil, &usage, &result); err != nil {
+	if _, err := parseClaudeEvents(context.Background(), strings.NewReader(stream), nil, &usage, &result); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if result == nil {
@@ -1092,6 +1093,7 @@ func TestClaudeAgent_NativeTerminalVerdictsSurviveExit(t *testing.T) {
 		{"schema over transient status", `{"type":"result","subtype":"error_max_structured_output_retries","is_error":true,"api_error_status":503}`, true, false},
 		{"usage without status", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}
 {"type":"result","subtype":"error_during_execution","is_error":true}`, false, true},
+		{"usage without result", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}`, false, true},
 		{"usage with status", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}
 {"type":"result","subtype":"error_during_execution","is_error":true,"api_error_status":429}`, false, true},
 	} {
@@ -1139,5 +1141,87 @@ func TestClaudeAgent_NativeTerminalVerdictsSurviveExit(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestParseClaudeEvents_RejectionSurvivesScannerFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name, stream string
+		limit        bool
+	}{
+		{"rejected", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}`, true},
+		{"allowed", `{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}`, false},
+		{"recovered", `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var usage TokenUsage
+			var result *claudeResult
+			reader := io.MultiReader(strings.NewReader(tc.stream+"\n"), iotest.ErrReader(io.ErrUnexpectedEOF))
+			rejected, err := parseClaudeEvents(context.Background(), reader, nil, &usage, &result)
+			if !errors.Is(err, io.ErrUnexpectedEOF) || rejected != tc.limit || result != nil {
+				t.Fatalf("lost stream evidence: rejected=%v result=%+v err=%v", rejected, result, err)
+			}
+		})
+	}
+}
+
+func TestClaudeAgent_RejectionSurvivesParseCancellation(t *testing.T) {
+	fixture := filepath.Join(t.TempDir(), "stream.jsonl")
+	stream := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"cancel"}]}}
+{"type":"system"}
+`
+	if err := os.WriteFile(fixture, []byte(stream), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NM_CLAUDE_STDIN_HELPER", "replay-then-exit")
+	t.Setenv("NM_CLAUDE_STDIN_FIXTURE", fixture)
+	t.Setenv("NM_CLAUDE_STDIN_EXIT", "1")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attempts := 0
+	_, failure := newClaudeStdinHelperAgent(t).Run(ctx, RunOpts{Prompt: "review", CWD: t.TempDir(), OnChunk: func(string) { cancel() }, OnAttempt: func(Attempt) { attempts++ }})
+	if !errors.Is(failure, context.Canceled) || !IsUsageLimitReached(failure) || !IsTerminalProviderError(failure) || attempts != 1 {
+		t.Fatalf("parse cancellation lost rejection: attempts=%d err=%v", attempts, failure)
+	}
+	for _, err := range []error{failure, fmt.Errorf("wrapped: %w", failure), errors.Join(nonTerminalClaudeDiagnostic{errors.New("other")}, failure)} {
+		if !IsUsageLimitReached(err) || !IsTerminalProviderError(err) {
+			t.Fatalf("wrapped parse failure lost rejection: %v", err)
+		}
+		if _, retry := claudeRetryClassifier(err); retry {
+			t.Fatalf("parse cancellation retried: %v", err)
+		}
+	}
+}
+
+func TestClaudeAgent_AllowedRateLimitDoesNotBecomeARejection(t *testing.T) {
+	for _, ending := range []string{"no result", "success"} {
+		t.Run(ending, func(t *testing.T) {
+			stream := `{"type":"rate_limit_event","rate_limit_info":{"status":"rejected"}}
+{"type":"rate_limit_event","rate_limit_info":{"status":"allowed"}}
+`
+			if ending == "success" {
+				stream += `{"type":"result","subtype":"success","structured_output":{"ok":true}}` + "\n"
+			}
+			fixture := filepath.Join(t.TempDir(), "stream.jsonl")
+			if err := os.WriteFile(fixture, []byte(stream), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("NM_CLAUDE_STDIN_HELPER", "replay-then-exit")
+			t.Setenv("NM_CLAUDE_STDIN_FIXTURE", fixture)
+			t.Setenv("NM_CLAUDE_STDIN_EXIT", "0")
+			result, err := newClaudeStdinHelperAgent(t).Run(context.Background(), RunOpts{Prompt: "review", CWD: t.TempDir(), JSONSchema: json.RawMessage(`{"type":"object"}`)})
+			if IsUsageLimitReached(err) || IsTerminalProviderError(err) {
+				t.Fatalf("allowed rate limit treated as rejected: %v", err)
+			}
+			if ending == "success" {
+				if err != nil || result == nil || string(result.Output) != `{"ok":true}` {
+					t.Fatalf("recovered turn did not succeed: result=%+v err=%v", result, err)
+				}
+			} else if err == nil {
+				t.Fatal("missing result accepted")
+			}
+		})
 	}
 }
