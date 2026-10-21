@@ -2593,9 +2593,9 @@ type queueSpec struct {
 // done and workloadDone are two different signals. done means the run's
 // custody is settled: its terminal outcome is durable, or it was deliberately
 // left for the next start's recovery. workloadDone means the run's WORKLOAD
-// has stopped, whatever became of its outcome. A caller that waits for a run
-// to stop - a supersession, a shutdown drain - waits for workloadDone, so it
-// is never held hostage by storage that cannot record the outcome.
+// has stopped, whatever became of its outcome. Supersession waits for
+// workloadDone so storage cannot hold up a replacement workload. Planned
+// shutdown still waits for custody settlement before acknowledging.
 type runHandle struct {
 	cancel context.CancelCauseFunc
 	runCtx context.Context
