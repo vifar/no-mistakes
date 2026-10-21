@@ -81,6 +81,8 @@ case "$prompt" in
    if [ ! -f %s ]; then
      test ! -d node_modules
      scenario=%s
+   elif [ "$(wc -l < %s)" -eq 1 ]; then
+     scenario=%s
    fi ;;
  *'You are validating a code change by driving the product itself'*)
    node_modules/.bin/tsx
@@ -91,7 +93,7 @@ if [ -n "$scenario" ]; then
 else
  printf '%%s' "$prompt" | %s "$@"
 fi
-`, shellQuote(verified), shellQuote(fix), shellQuote(verified), shellQuote(initial), shellQuote(evidence), shellQuote(realAgent), shellQuote(realAgent)))
+`, shellQuote(verified), shellQuote(fix), shellQuote(verified), shellQuote(initial), shellQuote(verified), shellQuote(initial), shellQuote(evidence), shellQuote(realAgent), shellQuote(realAgent)))
 	runner := filepath.Join(h.BinDir, "fixture-tsx")
 	write(runner, "#!/bin/sh\nset -eu\ntest \"$(cat feature.txt)\" = fixed\n")
 	write(filepath.Join(h.BinDir, "nm-prepare"), fmt.Sprintf("#!/bin/sh\nset -eu\nmkdir -p node_modules/.bin\ncp %s node_modules/.bin/tsx\necho install >> %s\necho mutation > README.md\necho stray > prepare-stray\n", shellQuote(runner), shellQuote(calls)))
@@ -108,15 +110,37 @@ fi
 		t.Fatalf("read-only review paid setup: %v", err)
 	}
 	h.RespondWithFindings(parked.ID, types.StepReview, types.ActionFix, []string{"dependency-bug"})
+	first, _ := findStep(parked.Steps, types.StepReview)
+	second := documentJourneyNextGate(t, h, parked.ID, types.StepReview, first.Gate.Nonce)
+	if out, err := h.Run("daemon", "stop", "--force"); err != nil {
+		t.Fatalf("stop between fix rounds: %v\n%s", err, out)
+	}
+	if out, err := h.Run("daemon", "start"); err != nil {
+		t.Fatalf("recover prepared worktree: %v\n%s", err, out)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if err := h.respondError(second.ID, types.StepReview, types.ActionFix, []string{"dependency-bug"}); err == nil {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("recovered gate refused second fix: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	run := h.WaitForRun(branch, 90*time.Second)
 	if run.Status != types.RunCompleted {
 		t.Fatalf("status=%s error=%s\n%s", run.Status, deref(run.Error), readStepLog(t, h, run.ID, "review"))
 	}
 	for _, path := range []string{verified, evidence, calls} {
 		data, err := os.ReadFile(path)
-		if err != nil || len(strings.Fields(string(data))) != 1 {
-			t.Fatalf("receipt %s=%q error=%v, want exactly one execution", path, data, err)
+		want := 1
+		if path == verified {
+			want = 2
 		}
+		if err != nil || len(strings.Fields(string(data))) != want {
+			t.Fatalf("receipt %s=%q error=%v, want %d executions", path, data, err, want)
+		}
+		t.Logf("execution receipt %s: %s", filepath.Base(path), data)
 	}
 	if got := h.UpstreamBranchSHA(branch); got != run.HeadSHA {
 		t.Fatalf("published head=%s, want validated %s", got, run.HeadSHA)
@@ -131,5 +155,11 @@ fi
 	if got := gitIn(t, h, h.UpstreamDir, "rev-list", "--count", submitted+".."+run.HeadSHA); strings.TrimSpace(got) != "1" {
 		t.Fatalf("extra setup/format commit: %s", got)
 	}
-	t.Logf("run=%s submitted=%s head=%s; fixer ran installed runner against own edit; setup once; Test evidence persisted; Lint completed", run.ID, submitted, run.HeadSHA)
+	if out, err := h.Run("axi", "status", "--run", run.ID); err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	} else {
+		t.Logf("actual CLI status:\n%s", out)
+	}
+	t.Logf("actual review log:\n%s", readStepLog(t, h, run.ID, "review"))
+	t.Logf("run=%s submitted=%s head=%s; two fixer checks across daemon recovery; setup once; Test evidence persisted; one substantive commit", run.ID, submitted, run.HeadSHA)
 }
