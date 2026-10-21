@@ -79,7 +79,7 @@ func TestIssue100MergeabilityPreservesReadDiagnostics(t *testing.T) {
 			`gh pr view 42 --json mergeable,mergeStateStatus --jq .mergeable + " " + .mergeStateStatus`: {stderr: tc.detail, code: 1},
 		}), nil, "", "")
 		_, err := host.GetMergeableState(context.Background(), &scm.PR{Number: "42"})
-		if err == nil || errors.Is(err, scm.ErrTransientTimeout) != tc.timeout || !tc.timeout && !strings.Contains(err.Error(), tc.detail) {
+		if err == nil || errors.Is(err, scm.ErrTransientTimeout) != tc.timeout || !strings.Contains(err.Error(), tc.detail) {
 			t.Fatalf("detail=%q error=%v", tc.detail, err)
 		}
 	}

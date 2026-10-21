@@ -31,7 +31,7 @@ func prReadError(ctx context.Context, operation, detail string, err error) error
 		return fmt.Errorf("%s interrupted: %w", operation, ctx.Err())
 	}
 	if isKeyringTimeout(detail) {
-		return fmt.Errorf("%s: %w: %w", operation, scm.ErrTransientTimeout, err)
+		return fmt.Errorf("%s: %w: %s: %w", operation, scm.ErrTransientTimeout, strings.TrimSpace(detail), err)
 	}
 	return fmt.Errorf("%s: %s: %w", operation, detail, err)
 }

@@ -146,6 +146,8 @@ func TestIssue100PublishedTargetRetentionRetriesReadTimeouts(t *testing.T) {
 			{"recovers", "Timeout trying to log in to github.com account test (keyring)", 1, 2},
 			{"exhausts", "Timeout trying to log in to github.com account test (keyring)", 9, 3},
 			{"credentials", "HTTP 401: Bad credentials", 9, 1},
+			{"not_logged_in", "You are not logged into any GitHub hosts", 9, 1},
+			{"unrelated_timeout", "network timeout", 9, 1},
 		} {
 			t.Run(source+"/"+tc.name, func(t *testing.T) {
 				c, selection, receipt := retainedTargetFixture(t)
