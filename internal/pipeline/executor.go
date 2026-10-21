@@ -3138,10 +3138,6 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if e.ciMonitorInterruptedByShutdown(run.ID, err, ctxs...) {
 		return ErrCIMonitorInterruptedAtShutdown
 	}
-	// The run's work is over: it has decided its outcome. Recording that
-	// outcome can still be waiting on storage, and a caller that must not be
-	// held hostage by the recording waits for this boundary.
-	e.reportWorkloadDone()
 	infrastructure := sqlitewrite.IsContention(err)
 	errMsg := err.Error()
 	if infrastructure {
@@ -3255,14 +3251,25 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		// The write is awaited here because the run's custody depends on it:
 		// the outcome is either durable or the run keeps its custody for the
 		// next start's recovery. A caller that must not be held hostage by
-		// the recording waits for the workload boundary, which the hook above
-		// already reported.
+		// the recording waits for the workload boundary, which is reported
+		// once the outcome is durable.
 		dbErr = SettleTerminalWrite(e.db, writeTerminal)
 	}
 	if dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
 		return errors.Join(err, dbErr)
 	}
+	// The run's work is over: it has decided its outcome, and that outcome -
+	// including the cancellation's attribution - is durable. The RETRY above
+	// is the part that can still wait on storage, so a caller that must not
+	// be held hostage by an unhealthy store waits for this boundary rather
+	// than for the whole settlement.
+	//
+	// The boundary is reported AFTER the write, not before it: the
+	// attribution of WHO cancelled the run is part of the outcome the run
+	// decided, and a caller that reads the run the moment the boundary
+	// fires must find that attribution.
+	e.reportWorkloadDone()
 	durable, readErr := ReadSettledRun(e.db, run.ID)
 	if readErr != nil {
 		return errors.Join(err, readErr)

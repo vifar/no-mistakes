@@ -116,20 +116,26 @@ func TestCancellationAttributableIgnoresAWrapperAroundAnIndependentCause(t *test
 	}
 }
 
-// A subprocess this command's own context stopped is the cancellation: the
-// git package records that provenance at the execution boundary, where it is
-// known, and the classifier reads the marker rather than guessing from the
-// shape of the error.
+// A subprocess this command's own context stopped is AUDITED as the
+// cancellation's doing: the git package records that provenance at the
+// execution boundary, where it is known. The audit is the marker's job.
 //
-// The marker is read through the git package's own transport wrapper, which
-// adds the command and the captured stderr - a MESSAGE, not a meaning.
-func TestCancellationAttributableAcceptsAStoppedSubprocess(t *testing.T) {
+// The marker's presence is not the CLASSIFICATION. A command that was
+// stopped still reports its own outcome - a worktree operation that was
+// interrupted says the operation was interrupted - and that message is the
+// operation's, not the cancellation's. So a stopped subprocess alone does
+// not make the failure the cancellation: the failure is the cancellation
+// only when it IS the cancellation.
+func TestCancellationAttributableAuditsAStoppedSubprocessWithoutClassifyingIt(t *testing.T) {
 	cause := errors.New("daemon shutting down")
 	stopped := &git.CancelledExitError{ExitError: killedProcessExit(t)}
 	err := &stepExecutionError{step: "document", message: "git rev-parse: signal: terminated", cause: stopped}
-	if !CancellationAttributable(err, cause) {
-		t.Fatalf("a subprocess the context stopped was not attributed to the cancellation: %v", err)
+	if CancellationAttributable(err, cause) {
+		t.Fatalf("a stopped subprocess was classified as the cancellation: %v", err)
 	}
+	// The same command, whose failure IS the cancellation, is the
+	// cancellation's: the context's own error, joined with the stopped
+	// child's exit.
 	transport := &git.CommandError{
 		Command: "rev-parse refs/heads/main^{commit}",
 		Stderr:  "signal: terminated",
@@ -153,23 +159,27 @@ func killedProcessExit(t *testing.T) *exec.ExitError {
 	return exit
 }
 
-// A stop that was REFUSED is still the cancellation's doing. The git package
-// records that provenance, and the classifier reads it through the transport
-// wrapper, so a refused stop is recorded as the cancellation and not as an
-// independent failure.
-func TestCancellationAttributableReadsARefusedStop(t *testing.T) {
+// A stop that was REFUSED is AUDITED as the cancellation's doing: the git
+// package records that provenance, and the classifier reads it through the
+// transport wrapper.
+//
+// The audit is not the classification: a refused stop says the context
+// interrupted the command, and the failure the command left is still the
+// command's own unless it IS the cancellation.
+func TestCancellationAttributableAuditsARefusedStop(t *testing.T) {
 	refusal := &git.CancelledExitError{Refused: errors.New("operation not permitted")}
 	cause := errors.New("cancelled: planned daemon shutdown")
 
-	// The marker on its own.
-	if !CancellationAttributable(refusal, cause) {
-		t.Fatal("a refused stop was not read as the cancellation")
+	// The marker on its own is an audit, not a classification.
+	if CancellationAttributable(refusal, cause) {
+		t.Fatal("a refused stop was classified as the cancellation")
 	}
 
 	// The marker through the git package's transport wrapper, which adds the
 	// command and the captured stderr - a MESSAGE, so the question is asked
-	// of what it wraps.
-	wrapped := &git.CommandError{Command: "git rev-parse", Stderr: "", Err: refusal}
+	// of what it wraps. The refusal joined with the context's own error IS
+	// the cancellation.
+	wrapped := &git.CommandError{Command: "git rev-parse", Stderr: "", Err: errors.Join(refusal, context.Canceled)}
 	if !CancellationAttributable(wrapped, cause) {
 		t.Fatal("a refused stop behind the transport wrapper was not read as the cancellation")
 	}

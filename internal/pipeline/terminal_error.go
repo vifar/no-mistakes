@@ -133,6 +133,17 @@ func CancellationAttributable(err, cause error) bool {
 			return false
 		}
 		for _, child := range children {
+			// A stopped child's exit is the cancellation's own report of
+			// the stop, and the report is a MESSAGE: it says the child
+			// died of a signal, and the context's own error already says
+			// the cancellation. It is not a part of its own that has to
+			// BE the cancellation.
+			if marked, ok := child.(*git.CancelledExitError); ok {
+				if marked.ExitError == nil && marked.Refused == nil {
+					return false
+				}
+				continue
+			}
 			if !CancellationAttributable(child, cause) {
 				return false
 			}
@@ -160,18 +171,23 @@ func CancellationAttributable(err, cause error) bool {
 	if errors.As(err, &meaningful) && meaningful.AddsMeaning() {
 		return false
 	}
-	// A subprocess this command's own context stopped is the cancellation,
-	// whatever it reported on the way out. The git package records that
-	// provenance at the execution boundary, where it is known, so the marker
-	// is read rather than guessed from the shape of the error.
+	// A subprocess this command's own context stopped is the cancellation's
+	// doing, and the git package records that provenance at the execution
+	// boundary, where it is known. The marker is the AUDIT of who stopped
+	// the work.
+	//
+	// The stopped child's exit is a MESSAGE about the stop, not a
+	// MEANING: the child reports the signal it died of, and that report
+	// says nothing the context's own error does not already say. So the
+	// marker is read THROUGH, and the question is asked of what it carries.
+	// A joined error is attributable only when EVERY part of it is, and
+	// the stopped child's exit is not the cancellation - it is the
+	// cancellation's own report of the stop.
 	//
 	// The marker is read where it IS, not wherever it is found. The git
 	// package's own transport wrapper is the exception: it adds the command
 	// and the captured stderr, which is a MESSAGE, so the marker is read
 	// through it.
-	if _, ok := err.(*git.CancelledExitError); ok {
-		return true
-	}
 	var commandErr *git.CommandError
 	if errors.As(err, &commandErr) {
 		inner := commandErr.Unwrap()
@@ -179,6 +195,12 @@ func CancellationAttributable(err, cause error) bool {
 			return false
 		}
 		return CancellationAttributable(inner, cause)
+	}
+	if _, ok := err.(*git.CancelledExitError); ok {
+		// The marker on its own, with nothing around it. It says the
+		// context stopped the command; it does not say the failure IS
+		// the cancellation.
+		return err == cause || err == context.Canceled
 	}
 	if _, ok := err.(interface{ Unwrap() error }); ok {
 		// Any other wrapper adds MEANING around the real cause. So the

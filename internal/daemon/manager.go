@@ -473,7 +473,11 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 			}
 		}
 		m.mu.Unlock()
-		cancelled := pipeline.CancellationAttributable(setupErr, cause)
+		// A setup failure is the SETUP's own outcome. The cancellation is
+		// the reason only when the setup error IS the cancellation: a
+		// worktree operation that was interrupted reports the operation's
+		// own failure, and that failure keeps its own outcome.
+		cancelled := pipeline.CancellationOnly(setupErr, cause)
 		if cancelled {
 			status, message = types.RunCancelled, cause.Error()
 			var planned *pipeline.ControlledShutdownCause
@@ -2958,14 +2962,6 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		defer slot.Release()
 		defer func() {
 			if r := recover(); r != nil {
-				// A panic is the run's work ending, so the workload boundary
-				// is reported here too. A waiter must not be left on the
-				// signal because the pipeline panicked instead of deciding.
-				workloadOnce.Do(func() {
-					m.markFinishing(run.ID)
-					slot.Release()
-					close(handle.workloadDone)
-				})
 				errMsg := fmt.Sprintf("internal panic: %v", r)
 				slog.Error("panic in pipeline goroutine", "run_id", run.ID, "panic", r)
 				run.Status = types.RunFailed
@@ -2997,6 +2993,19 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				} else if err := executor.ReportSettledRunFailure(context.Background(), run, repo); err != nil {
 					slog.Error("terminal notification failed", "run_id", run.ID, "error", err)
 				}
+				// A panic is the run's work ending, so the workload boundary
+				// is reported here too. A waiter must not be left on the
+				// signal because the pipeline panicked instead of deciding.
+				//
+				// The boundary is reported AFTER the failure is recorded:
+				// the attribution of WHO cancelled the run is part of the
+				// outcome the run decided, and a caller that reads the run
+				// the moment the boundary fires must find that attribution.
+				workloadOnce.Do(func() {
+					m.markFinishing(run.ID)
+					slot.Release()
+					close(handle.workloadDone)
+				})
 			} else if run.Status == types.RunFailed || run.Status == types.RunCancelled {
 				executor.ReportPublishedHeadFailure(context.Background(), run, repo)
 			}
