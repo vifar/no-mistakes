@@ -51,6 +51,17 @@ func writeAttributionFile(path string, data []byte, mode os.FileMode) error {
 	return os.Rename(file.Name(), path)
 }
 
+func AttributionHookExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() > 0 {
+		return exitErr.ExitCode()
+	}
+	return 1
+}
+
 func HandleAttributionHook(args []string) (bool, error) {
 	if len(args) == 0 || args[0] != "__sanitize-commit-message" {
 		return false, nil
@@ -81,7 +92,11 @@ func HandleAttributionHook(args []string) (bool, error) {
 		return true, fmt.Errorf("attribution hook does not own this Git directory")
 	}
 	var input []byte
-	if name == "post-rewrite" {
+	stdinInfo, err := os.Stdin.Stat()
+	if err != nil {
+		return true, err
+	}
+	if stdinInfo.Mode()&os.ModeCharDevice == 0 {
 		input, err = io.ReadAll(os.Stdin)
 		if err != nil {
 			return true, err
@@ -176,28 +191,27 @@ func HandleAttributionHook(args []string) (bool, error) {
 		}
 	}
 	cmdArgs := []string{"-c", "core.hooksPath=" + policy.OriginalHooks, "hook", "run", "--ignore-missing"}
-	if name == "post-rewrite" {
-		inputFile, err := os.CreateTemp(root, ".rewrite-input-")
-		if err != nil {
-			return true, err
-		}
-		defer os.Remove(inputFile.Name())
-		if _, err := inputFile.Write(input); err != nil {
-			inputFile.Close()
-			return true, err
-		}
-		if err := inputFile.Close(); err != nil {
-			return true, err
-		}
-		cmdArgs = append(cmdArgs, "--to-stdin="+inputFile.Name())
+	inputFile, err := os.CreateTemp(root, ".hook-input-")
+	if err != nil {
+		return true, err
 	}
+	defer os.Remove(inputFile.Name())
+	if _, err := inputFile.Write(input); err != nil {
+		inputFile.Close()
+		return true, err
+	}
+	if err := inputFile.Close(); err != nil {
+		return true, err
+	}
+	cmdArgs = append(cmdArgs, "--to-stdin="+inputFile.Name())
 	cmdArgs = append(cmdArgs, name, "--")
 	cmdArgs = append(cmdArgs, hookArgs...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	winproc.Harden(cmd)
-	if err := cmd.Run(); err != nil {
-		return true, err
+	hookErr := cmd.Run()
+	if hookErr != nil && name != "post-rewrite" {
+		return true, hookErr
 	}
 	if name == "post-rewrite" && len(hookArgs) > 0 && hookArgs[0] == "rebase" {
 		for _, line := range strings.Split(string(input), "\n") {
@@ -207,38 +221,38 @@ func HandleAttributionHook(args []string) (bool, error) {
 			}
 			original, err := existingReplayOriginal(root, pair[0], policy, run)
 			if err != nil {
-				return true, err
+				return true, errors.Join(hookErr, err)
 			}
 			if original == "" {
 				continue
 			}
 			prior, err := existingReplayOriginal(root, pair[1], policy, run)
 			if err != nil {
-				return true, err
+				return true, errors.Join(hookErr, err)
 			}
 			if prior != "" {
 				canonical, err := attributionCommitMessage(prior, run)
 				if err != nil {
-					return true, err
+					return true, errors.Join(hookErr, err)
 				}
 				message, err := attributionCommitMessage(pair[1], run)
 				if err != nil {
-					return true, err
+					return true, errors.Join(hookErr, err)
 				}
 				if bytes.Equal(message, canonical) {
 					continue
 				}
 			}
 			if err := os.MkdirAll(filepath.Join(root, "replays"), 0700); err != nil {
-				return true, err
+				return true, errors.Join(hookErr, err)
 			}
 			if err := writeAttributionFile(filepath.Join(root, "replays", pair[1]), []byte(original), 0600); err != nil {
-				return true, err
+				return true, errors.Join(hookErr, err)
 			}
 		}
 	}
 	if name != "prepare-commit-msg" && name != "commit-msg" {
-		return true, nil
+		return true, hookErr
 	}
 	if len(hookArgs) == 0 {
 		return true, fmt.Errorf("missing commit message path")

@@ -12,10 +12,7 @@ import (
 
 func TestMain(m *testing.M) {
 	if handled, err := git.HandleAttributionHook(os.Args[1:]); handled {
-		if err != nil {
-			os.Exit(1)
-		}
-		os.Exit(0)
+		os.Exit(git.AttributionHookExitCode(err))
 	}
 	testgit.ClearConfigEnv()
 	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")

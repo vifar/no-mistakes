@@ -15,10 +15,7 @@ import (
 
 func TestMain(m *testing.M) {
 	if handled, err := git.HandleAttributionHook(os.Args[1:]); handled {
-		if err != nil {
-			os.Exit(1)
-		}
-		os.Exit(0)
+		os.Exit(git.AttributionHookExitCode(err))
 	}
 	if handled, exitCode, err := shellenv.RunWindowsCooperativeCommandHelper(os.Args[1:]); handled {
 		if err != nil {

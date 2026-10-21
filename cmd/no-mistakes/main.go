@@ -30,9 +30,8 @@ func run() int {
 	if handled, err := git.HandleAttributionHook(os.Args[1:]); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
-			return 1
 		}
-		return 0
+		return git.AttributionHookExitCode(err)
 	}
 	if handled, exitCode, err := shellenv.RunWindowsCooperativeCommandHelper(os.Args[1:]); handled {
 		if err != nil {

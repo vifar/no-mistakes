@@ -14,6 +14,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if os.Getenv("NM_TEST_ATTRIBUTION_DISPATCH") == "1" {
+		os.Exit(run())
+	}
 	testgit.ClearConfigEnv()
 	root, err := os.MkdirTemp("", "nm-main-test-")
 	if err != nil {
