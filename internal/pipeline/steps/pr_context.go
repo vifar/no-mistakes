@@ -61,10 +61,6 @@ func GuardPRContext(sctx *pipeline.StepContext, step types.StepName) (pipeline.P
 			if err != nil {
 				return pipeline.PRContextDecision{}, fmt.Errorf("read terminal PR comparison after CI: %w", err)
 			}
-			if receipt == nil || receipt.PRURL == "" || current == nil || current.PRURL == nil || *current.PRURL != receipt.PRURL ||
-				current.HeadSHA != receipt.LocalHeadSHA || sctx.Run.HeadSHA != receipt.LocalHeadSHA {
-				return pipeline.PRContextDecision{}, fmt.Errorf("terminal CI state lacks a matching PR receipt")
-			}
 			sctx.Run.PRURL = current.PRURL
 			selection, err := resolvePRTargetWithReader(sctx, reader, true)
 			if err != nil {
@@ -72,6 +68,27 @@ func GuardPRContext(sctx *pipeline.StepContext, step types.StepName) (pipeline.P
 			}
 			if !strings.EqualFold(string(selection.State), *state) {
 				return pipeline.PRContextDecision{}, fmt.Errorf("terminal CI state differs from the live PR state")
+			}
+			if receipt == nil || receipt.PRURL == "" || current == nil || current.PRURL == nil || *current.PRURL != receipt.PRURL ||
+				current.HeadSHA != receipt.LocalHeadSHA || sctx.Run.HeadSHA != receipt.LocalHeadSHA {
+				// The receipt may still name the pre-repair head while the run
+				// PUBLISHED a repair head. A step's own proven forward edit
+				// advances the receipt instead of failing the run as an
+				// unexplained change - the same rule the rewind path and the
+				// non-terminal CI path already follow. The durable
+				// publication record is the proof that the advance was the
+				// pipeline's own; an unproven advance still fails closed.
+				advanced, err := advanceReceiptForPipelineOwnedHead(sctx, receipt, current, selection)
+				if err != nil {
+					return pipeline.PRContextDecision{}, err
+				}
+				if !advanced {
+					return pipeline.PRContextDecision{}, fmt.Errorf("terminal CI state lacks a matching PR receipt")
+				}
+				receipt, err = sctx.DB.GetRunPRContext(sctx.Run.ID)
+				if err != nil {
+					return pipeline.PRContextDecision{}, fmt.Errorf("read advanced terminal PR comparison after CI: %w", err)
+				}
 			}
 			if err := verifyCurrentPRComparison(sctx, host, selection, receipt, nil); err != nil {
 				return pipeline.PRContextDecision{}, fmt.Errorf("terminal CI comparison: %w", err)
@@ -106,6 +123,63 @@ func GuardPRContext(sctx *pipeline.StepContext, step types.StepName) (pipeline.P
 		return pipeline.PRContextDecision{Target: selection}, nil
 	}
 	return guardPRContextWithSelection(sctx, step, selection, freshRetarget)
+}
+
+// advanceReceiptForPipelineOwnedHead re-pins the PR-comparison receipt when the
+// run's head moved because THIS run published it.
+//
+// The proof is the durable publication record, never the local commit lineage
+// alone: the run's recorded head and its last published head must both be the
+// candidate head, and the candidate must be a descendant of the receipt's
+// head. That is the same proof the non-terminal path uses for a published CI
+// repair (pipelineOwnedPublicationAdvance), so a run that published its own
+// repair is not failed as an unexplained change - and a head some OTHER
+// publisher moved still fails closed.
+//
+// It reports whether the receipt now names the run's head. The caller
+// re-reads the receipt after this returns true.
+func advanceReceiptForPipelineOwnedHead(sctx *pipeline.StepContext, receipt *db.PRContext, current *db.Run, selection pipeline.PRTargetSelection) (bool, error) {
+	if sctx == nil || sctx.DB == nil || receipt == nil || current == nil {
+		return false, nil
+	}
+	publishedHead := current.HeadSHA
+	if publishedHead == "" || publishedHead == receipt.LocalHeadSHA {
+		return false, nil
+	}
+	// The publication record is the proof: this run published the head.
+	if current.LastPushedSHA == nil || *current.LastPushedSHA != publishedHead {
+		return false, nil
+	}
+	// The advance must be a descendant of the receipt's head, never a
+	// different line of history.
+	if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", receipt.LocalHeadSHA, publishedHead); err != nil {
+		return false, nil
+	}
+	// The receipt must name the LIVE forge head, or the terminal comparison
+	// would reject the very advance this accepted. The forge head is the
+	// one the live PR reports, and the publication record above already
+	// proved this run published exactly that head.
+	if selection.ForgeHeadSHA == "" || selection.ForgeHeadSHA != publishedHead {
+		return false, nil
+	}
+	// The comparison itself is RECOMPUTED against the published head, so the
+	// receipt's merge base and diff digest describe the head the PR actually
+	// carries - never the stale pre-repair comparison.
+	candidate, err := readPRComparison(sctx, selection)
+	if err != nil {
+		return false, fmt.Errorf("read advanced PR comparison: %w", err)
+	}
+	if candidate.LocalHeadSHA != publishedHead {
+		return false, nil
+	}
+	candidate.PRURL = selection.PRURL
+	candidate.SourceRepo = selection.SourceRepo
+	candidate.SourceBranch = selection.SourceBranch
+	candidate.ForgeHeadSHA = selection.ForgeHeadSHA
+	if _, err := sctx.DB.AdvanceRunPRContext(sctx.Run.ID, candidate); err != nil {
+		return false, fmt.Errorf("advance terminal PR comparison receipt: %w", err)
+	}
+	return true, nil
 }
 
 // A per-run flag records a fresh explicit --base-branch request separately
