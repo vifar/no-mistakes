@@ -64,7 +64,7 @@ That is a core design choice, not an implementation detail.
    While a step is actively running or fixing, AXI run objects can also show `active_steps` with the active duration, latest activity, native agent PID, and current execution or fix round.
 8. After local checks pass, the push step forwards the branch to the configured push target only after verifying that the update will not discard unincorporated commits already on that target, and the PR step creates or updates the pull request.
    For GitHub fork routing, the push target is the fork and the PR base repository is the parent from `origin`.
-9. The CI step keeps watching the open PR until it is merged, closed, or its configured idle timeout elapses with no base-branch movement, and can auto-fix failures or merge conflicts when supported.
+9. The CI step monitors provider checks and PR mergeability and can auto-fix failures or merge conflicts when supported. See the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) for monitoring and completion rules.
    While it watches, the TUI and terminal title surface a `Checks passed` signal when the [CI step's readiness rules](/no-mistakes/reference/pipeline-steps/#ci) are met, and `no-mistakes axi` returns `outcome: checks-passed` with instructions to summarize the run and list any pipeline fixes, so agents stop and ask you to review and merge it.
 
 **Key design decisions:**
