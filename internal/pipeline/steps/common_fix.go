@@ -419,7 +419,9 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 		if err := recordAgentFixHead(sctx, stepName, headSHA); err != nil {
 			return false, err
 		}
-		return headSHA != recordedHead, nil
+		committed := headSHA != recordedHead
+		sctx.FixApplied = &committed
+		return committed, nil
 	}
 	summary = git.StripAIAttributionTrailers(summary, sctx.Config.Commit.Trailers...)
 	if summary == "" {
@@ -466,7 +468,9 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if err := recordAgentFixHead(sctx, stepName, headSHA); err != nil {
 		return false, err
 	}
-	return headSHA != recordedHead, nil
+	committed := headSHA != recordedHead
+	sctx.FixApplied = &committed
+	return committed, nil
 }
 
 func runPipelineCorrectionAgent(sctx *pipeline.StepContext, invoke func() (*agent.Result, error)) (*agent.Result, error) {
@@ -650,7 +654,8 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		return "", err
 	}
 	committed := sctx.Run.HeadSHA != startingHead
-	if committed && stepName == types.StepReview && summary != "" && !strings.HasPrefix(strings.ToLower(summary), NoChangesAppliedSummary) {
+	sctx.FixApplied = &committed
+	if committed && stepName == types.StepReview && summary != "" {
 		return summary, nil
 	}
 	return fixResultSummary(committed), nil

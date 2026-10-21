@@ -102,10 +102,6 @@ func attributionAddress(value string) (*mail.Address, error) {
 // Generated-with footers are recognized alongside Git's key:value trailers.
 // Continuations belong to their trailer, so deleting one cannot orphan its value.
 func StripAIAttributionTrailers(message string, configured ...string) string {
-	return stripAttribution(message, configured, nil)
-}
-
-func stripAttribution(message string, configured []string, preserved map[string]int) string {
 	lines := strings.Split(message, "\n")
 	drop := make([]bool, len(lines))
 	changed := false
@@ -149,18 +145,7 @@ func stripAttribution(message string, configured []string, preserved map[string]
 				allRemoved = false
 				continue
 			}
-			if preserved != nil {
-				if preserved["*"] < 0 {
-					preserved[entry.text]++
-					allRemoved = false
-					continue
-				}
-				if preserved[entry.text] > 0 {
-					preserved[entry.text]--
-					allRemoved = false
-					continue
-				}
-			}
+
 			changed = true
 			for i := entry.start; i < entry.end; i++ {
 				drop[i] = true
@@ -215,14 +200,4 @@ func configuredAttribution(line string, sources []string) bool {
 		}
 	}
 	return false
-}
-
-func stripAttributionPreserving(message, original string, configured []string) string {
-	var preserved map[string]int
-	if original != "" {
-		preserved = map[string]int{"*": -1}
-		stripAttribution(original, configured, preserved)
-		delete(preserved, "*")
-	}
-	return stripAttribution(message, configured, preserved)
 }

@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     selected_finding_ids TEXT,
     selection_source     TEXT,
     fix_summary          TEXT,
+    fix_applied          INTEGER,
     repair_published     INTEGER NOT NULL DEFAULT 0,
     duration_ms          INTEGER NOT NULL,
     created_at           INTEGER NOT NULL
@@ -575,4 +576,5 @@ var additiveMigrationStatements = []string{
 	// first leftover is preserved and re-reviewed, and a second one is
 	// refused rather than looped on.
 	`ALTER TABLE runs ADD COLUMN leftover_validation_commits INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE step_rounds ADD COLUMN fix_applied INTEGER`,
 }

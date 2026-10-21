@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -66,6 +67,9 @@ func TestReplayProvenanceAutomaticPicks(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if got := storedReplayMessage(t, f.dir, "HEAD"); !bytes.Equal(got, []byte(message+"\n")) {
+				t.Errorf("raw submitted replay changed: %q", got)
+			}
 			if got := gitCmd(t, f.dir, "log", "-1", "--format=%B"); got != message {
 				t.Errorf("automatic submitted replay = %q, want %q", got, message)
 			}
@@ -94,6 +98,9 @@ func TestReplayProvenanceCleanPickAfterConflict(t *testing.T) {
 		writeFixtureFile(t, f.dir, "shared.txt", "main line\nfeature line\n")
 		replayAgentGit(t, ctx, opts, "add", "-A")
 		replayAgentGit(t, ctx, opts, "rebase", "--continue")
+		if got := storedReplayMessage(t, f.dir, "HEAD"); !bytes.Equal(got, []byte(second+"\n")) {
+			t.Errorf("raw clean pick after conflict changed: %q", got)
+		}
 		if got := gitCmd(t, f.dir, "log", "-1", "--format=%B"); got != second {
 			t.Errorf("clean pick after conflict = %q, want %q", got, second)
 		}
@@ -140,6 +147,9 @@ func TestReplayProvenanceSuccessiveRebases(t *testing.T) {
 	}
 	if got := gitCmd(t, f.dir, "log", "-1", "--format=%B"); got != message {
 		t.Errorf("second replay = %q, want %q", got, message)
+	}
+	if got := storedReplayMessage(t, f.dir, "HEAD"); !bytes.Equal(got, []byte(message+"\n")) {
+		t.Errorf("raw successive replay changed: %q", got)
 	}
 	if next := gitCmd(t, f.dir, "rev-parse", "HEAD"); next == firstReplay {
 		t.Fatal("second rebase did not replay history")
@@ -247,10 +257,23 @@ func TestImportedProvenanceFastForward(t *testing.T) {
 }
 
 func TestRepairOutcomeExecutorWithoutEvalProvenance(t *testing.T) {
+	testRepairOutcomeExecutor(t, false, "guard unsafe value", true)
+}
+func TestRepairOutcomeRecordedMatrix(t *testing.T) {
+	for _, capture := range []bool{false, true} {
+		for _, description := range []string{"guard unsafe value", "no changes applied"} {
+			for _, change := range []bool{false, true} {
+				t.Run(fmt.Sprintf("capture=%v/summary=%s/change=%v", capture, description, change), func(t *testing.T) { testRepairOutcomeExecutor(t, capture, description, change) })
+			}
+		}
+	}
+}
+func testRepairOutcomeExecutor(t *testing.T, capture bool, description string, change bool) {
+	t.Helper()
 	dir, base, head := setupGitRepo(t)
 	c := newTestContextWithDBRecords(t, nil, dir, base, head, config.Commands{})
 	c.Repo.UpstreamURL = dir
-	c.Config.CaptureEvalProvenance = false
+	c.Config.CaptureEvalProvenance = capture
 	c.Config.AutoFix = config.AutoFix{Review: 1}
 	p := paths.WithRoot(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {
@@ -259,10 +282,13 @@ func TestRepairOutcomeExecutorWithoutEvalProvenance(t *testing.T) {
 	reviews := 0
 	c.Agent = &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		if strings.Contains(opts.Prompt, "Investigate previous review findings") {
-			writeFixtureFile(t, dir, "feature.txt", "guarded feature\n")
-			replayAgentGit(t, ctx, opts, "add", "-A")
-			replayAgentGit(t, ctx, opts, "commit", "-m", "guard unsafe value\n\nCodex-Session: agent")
-			return &agent.Result{Output: []byte(`{"summary":"guard unsafe value","verification":"passed"}`)}, nil
+			if change {
+				writeFixtureFile(t, dir, "feature.txt", "guarded feature\n")
+				replayAgentGit(t, ctx, opts, "add", "-A")
+				replayAgentGit(t, ctx, opts, "commit", "-m", "guard unsafe value\n\nCodex-Session: agent")
+			}
+			output, _ := json.Marshal(map[string]string{"summary": description, "verification": "passed"})
+			return &agent.Result{Output: output}, nil
 		}
 		reviews++
 		findings := cleanReviewFindings()
@@ -293,10 +319,20 @@ func TestRepairOutcomeExecutorWithoutEvalProvenance(t *testing.T) {
 		grouped[round.StepResultID] = append(grouped[round.StepResultID], round)
 		if round.IsFixRound() {
 			found = true
-			if round.StartingHeadSHA != nil {
+			encoded, _ := json.Marshal(round)
+			var recorded map[string]any
+			_ = json.Unmarshal(encoded, &recorded)
+			if applied, ok := recorded["FixApplied"].(bool); !ok || applied != change {
+				t.Errorf("recorded repair outcome = %v, want %v", recorded["FixApplied"], change)
+			}
+			if !capture && round.StartingHeadSHA != nil {
 				t.Fatal("test enabled optional evaluation provenance")
 			}
-			if round.FixSummary == nil || *round.FixSummary != "guard unsafe value" {
+			want := description
+			if !change {
+				want = NoChangesAppliedSummary
+			}
+			if round.FixSummary == nil || *round.FixSummary != want {
 				t.Errorf("persisted direct repair summary = %v", round.FixSummary)
 			}
 		}
@@ -305,8 +341,11 @@ func TestRepairOutcomeExecutorWithoutEvalProvenance(t *testing.T) {
 		t.Fatal("no persisted fixer round")
 	}
 	md, _ := BuildPipelineSummary(steps, grouped, c.Run.HeadSHA)
-	if !strings.Contains(md, "auto-fixed") || !strings.Contains(md, "🔧 Fix applied.") || strings.Contains(md, "result not reported") || strings.Contains(md, "No changes applied") {
+	if change && (!strings.Contains(md, "auto-fixed") || !strings.Contains(md, "🔧 Fix applied.") || strings.Contains(md, "result not reported") || strings.Contains(md, "🔧 No changes applied.")) {
 		t.Fatalf("ordinary Review rendering:\n%s", md)
+	}
+	if !change && (!strings.Contains(md, "🔧 No changes applied.") || strings.Contains(md, "auto-fixed")) {
+		t.Fatalf("no-op rendering:\n%s", md)
 	}
 }
 
@@ -339,5 +378,30 @@ func TestRepairOutcomeDirectAgentAndNoop(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestRepairOutcomeDescriptionIsNotEvidence(t *testing.T) {
+	applied, noChange := true, false
+	for _, tc := range []struct {
+		name, description, want string
+		evidence                *bool
+	}{
+		{"applied contradicts description", "no changes applied", "🔧 Fix applied.", &applied},
+		{"noop contradicts description", "changes applied", "🔧 No changes applied.", &noChange},
+		{"no report", "guard unsafe value", "🔧 Fix attempted; result not reported.", nil},
+		{"committed without description", "", "🔧 Fix applied.", &applied},
+		{"nothing reported", "", "🔧 Fix attempted; result not reported.", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := `{"findings":[{"id":"f1","severity":"error","description":"unsafe value"}]}`
+			md, _ := BuildPipelineSummary([]*db.StepResult{{ID: "review", StepName: types.StepReview, Status: types.StepStatusCompleted}}, map[string][]*db.StepRound{"review": {{Round: 1, Trigger: "initial", FindingsJSON: &findings}, {Round: 2, Trigger: "auto_fix", FixSummary: &tc.description, FixApplied: tc.evidence}}}, testPipelineHeadSHA)
+			if !strings.Contains(md, tc.want) {
+				t.Fatalf("round outcome:\n%s", md)
+			}
+			if tc.evidence == nil && (strings.Contains(md, "auto-fixed") || strings.Contains(md, "🔧 Fix applied.")) {
+				t.Fatalf("description claimed activity:\n%s", md)
+			}
+		})
 	}
 }

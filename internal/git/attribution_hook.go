@@ -1,6 +1,7 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -118,7 +119,21 @@ func HandleAttributionHook(args []string) (bool, error) {
 					}
 				}
 				if replaying {
-					source.Original, err = submittedReplayOriginal(root, original, policy.Submitted, run)
+					origHeadPath, err := run("rev-parse", "--git-path", "rebase-merge/orig-head")
+					if err != nil {
+						return true, err
+					}
+					origHead, err := os.ReadFile(origHeadPath)
+					if err != nil {
+						return true, err
+					}
+					if !attributionObjectID.Match(bytes.TrimSpace(origHead)) {
+						return true, fmt.Errorf("invalid rebase original head")
+					}
+					if _, err := run("merge-base", "--is-ancestor", original, strings.TrimSpace(string(origHead))); err != nil {
+						return true, err
+					}
+					source.Original, err = existingReplayOriginal(root, original, policy, run)
 					if err != nil {
 						return true, err
 					}
@@ -128,6 +143,18 @@ func HandleAttributionHook(args []string) (bool, error) {
 		encoded, _ := json.Marshal(source)
 		if err := writeAttributionFile(filepath.Join(root, "source.json"), encoded, 0600); err != nil {
 			return true, err
+		}
+	}
+	if name == "prepare-commit-msg" && source.Original == "" {
+		content, err := os.ReadFile(hookArgs[0])
+		if err != nil {
+			return true, err
+		}
+		cleaned := StripAIAttributionTrailers(string(content), policy.Configured...)
+		if cleaned != string(content) {
+			if err := os.WriteFile(hookArgs[0], []byte(cleaned+"\n"), 0600); err != nil {
+				return true, err
+			}
 		}
 	}
 	cmdArgs := []string{"-c", "core.hooksPath=" + policy.OriginalHooks, "hook", "run", "--ignore-missing"}
@@ -160,7 +187,7 @@ func HandleAttributionHook(args []string) (bool, error) {
 			if len(pair) != 2 || !attributionObjectID.MatchString(pair[0]) || !attributionObjectID.MatchString(pair[1]) {
 				continue
 			}
-			original, err := submittedReplayOriginal(root, pair[0], policy.Submitted, run)
+			original, err := existingReplayOriginal(root, pair[0], policy, run)
 			if err != nil {
 				return true, err
 			}
@@ -190,18 +217,19 @@ func HandleAttributionHook(args []string) (bool, error) {
 			return true, err
 		}
 	}
-	originalMessage := ""
 	if source.Original != "" && source.MessageFile == hookArgs[0] {
-		originalMessage, err = run("show", "-s", "--format=%B", source.Original)
+		message, err := attributionCommitMessage(source.Original, run)
 		if err != nil {
 			return true, err
 		}
+		return true, os.WriteFile(hookArgs[0], message, 0600)
 	}
+
 	content, err := os.ReadFile(hookArgs[0])
 	if err != nil {
 		return true, err
 	}
-	cleaned := stripAttributionPreserving(string(content), originalMessage, policy.Configured)
+	cleaned := StripAIAttributionTrailers(string(content), policy.Configured...)
 	if cleaned == string(content) {
 		return true, nil
 	}
@@ -306,7 +334,7 @@ func AttributionHookEnv(dir string, env []string, run func(...string) (string, e
 			parameters = value
 		}
 	}
-	env = append(append([]string(nil), env...), "GIT_CONFIG_PARAMETERS="+strings.TrimSpace(parameters+" "+quote("core.hooksPath="+filepath.ToSlash(root))))
+	env = append(append([]string(nil), env...), "GIT_CONFIG_PARAMETERS="+strings.TrimSpace(parameters+" "+quote("core.hooksPath="+filepath.ToSlash(root))+" "+quote("commit.cleanup=verbatim")))
 	return env, nil
 }
 
@@ -324,16 +352,16 @@ func ValidateCommitAttribution(before, after string, run func(...string) (string
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	policy := attributionPolicy{Submitted: submitted}
 	if err == nil {
-		var policy attributionPolicy
 		if err := json.Unmarshal(data, &policy); err != nil {
 			return err
 		}
 		if submitted != "" && policy.Submitted != "" && submitted != policy.Submitted {
 			return fmt.Errorf("attribution validation belongs to a different submitted head")
 		}
-		if submitted == "" {
-			submitted = policy.Submitted
+		if policy.Submitted == "" {
+			policy.Submitted = submitted
 		}
 		for _, target := range policy.Targets {
 			if attributionObjectID.MatchString(target) {
@@ -346,42 +374,67 @@ func ValidateCommitAttribution(before, after string, run func(...string) (string
 		return err
 	}
 	for _, sha := range strings.Fields(commits) {
-		message, err := run("show", "-s", "--format=%B", sha)
+		message, err := attributionCommitMessage(sha, run)
 		if err != nil {
 			return err
 		}
-		if StripAIAttributionTrailers(message, configured...) == message {
-			continue
-		}
-		original, err := submittedReplayOriginal(root, sha, submitted, run)
+		original, err := existingReplayOriginal(root, sha, policy, run)
 		if err != nil {
 			return err
 		}
-		originalMessage := ""
 		if original != "" {
-			originalMessage, err = run("show", "-s", "--format=%B", original)
+			canonical, err := attributionCommitMessage(original, run)
 			if err != nil {
 				return err
 			}
-		}
-		if stripAttributionPreserving(message, originalMessage, configured) != message {
+			if !bytes.Equal(message, canonical) {
+				return fmt.Errorf("refusing replay %s: original commit message changed", sha)
+			}
+		} else if StripAIAttributionTrailers(string(message), configured...) != string(message) {
 			return fmt.Errorf("refusing pipeline commit %s: AI attribution bypassed commit-time filtering", sha)
 		}
 	}
 	return nil
 }
 
-func submittedReplayOriginal(root, candidate, submitted string, run func(...string) (string, error)) (string, error) {
-	if !attributionObjectID.MatchString(candidate) || !attributionObjectID.MatchString(submitted) {
+func attributionCommitMessage(sha string, run func(...string) (string, error)) ([]byte, error) {
+	framed, err := run("show", "-s", "--encoding=none", "--format=format:%x00%B%x00", sha)
+	if err != nil {
+		return nil, err
+	}
+	if len(framed) < 2 || framed[0] != 0 || framed[len(framed)-1] != 0 {
+		return nil, fmt.Errorf("invalid raw commit message framing")
+	}
+	return []byte(framed[1 : len(framed)-1]), nil
+}
+
+func existingReplayOriginal(root, candidate string, policy attributionPolicy, run func(...string) (string, error)) (string, error) {
+	if !attributionObjectID.MatchString(candidate) {
 		return "", nil
 	}
-	_, err := run("merge-base", "--is-ancestor", candidate, submitted)
-	if err == nil {
-		return candidate, nil
+	contained := func(sha string) (bool, error) {
+		roots := append([]string{policy.Submitted}, policy.Targets...)
+		for _, tip := range roots {
+			if !attributionObjectID.MatchString(tip) {
+				continue
+			}
+			_, err := run("merge-base", "--is-ancestor", sha, tip)
+			if err == nil {
+				return true, nil
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				return false, err
+			}
+		}
+		return false, nil
 	}
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+	known, err := contained(candidate)
+	if err != nil {
 		return "", err
+	}
+	if known {
+		return candidate, nil
 	}
 	original, err := os.ReadFile(filepath.Join(root, "replays", candidate))
 	if os.IsNotExist(err) {
@@ -392,10 +445,14 @@ func submittedReplayOriginal(root, candidate, submitted string, run func(...stri
 	}
 	canonical := strings.TrimSpace(string(original))
 	if !attributionObjectID.MatchString(canonical) {
-		return "", fmt.Errorf("invalid submitted replay provenance")
+		return "", fmt.Errorf("invalid existing replay provenance")
 	}
-	if _, err := run("merge-base", "--is-ancestor", canonical, submitted); err != nil {
+	known, err = contained(canonical)
+	if err != nil {
 		return "", err
+	}
+	if !known {
+		return "", fmt.Errorf("replay provenance is outside preserved history")
 	}
 	return canonical, nil
 }
