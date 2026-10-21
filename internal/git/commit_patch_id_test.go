@@ -1,0 +1,126 @@
+package git
+
+import (
+	"context"
+	"path/filepath"
+	"testing"
+)
+
+// TestCommitPatchIDIsTheNamedCommitOwnIdentity pins the identity of one
+// commit against its first parent: the named commit's own change, and not
+// another commit's.
+func TestCommitPatchIDIsTheNamedCommitOwnIdentity(t *testing.T) {
+	dir := initTestRepo(t)
+	ctx := context.Background()
+
+	writeFile(t, filepath.Join(dir, "file.txt"), "first\n")
+	run(t, dir, "git", "add", "-A")
+	run(t, dir, "git", "commit", "-m", "first change")
+	first := run(t, dir, "git", "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(dir, "other.txt"), "second\n")
+	run(t, dir, "git", "add", "-A")
+	run(t, dir, "git", "commit", "-m", "second change")
+	second := run(t, dir, "git", "rev-parse", "HEAD")
+
+	firstID, err := CommitPatchID(ctx, dir, first)
+	if err != nil {
+		t.Fatalf("CommitPatchID for the first commit: %v", err)
+	}
+	secondID, err := CommitPatchID(ctx, dir, second)
+	if err != nil {
+		t.Fatalf("CommitPatchID for the second commit: %v", err)
+	}
+	if firstID == "" || secondID == "" {
+		t.Fatalf("empty commit identity: %q and %q", firstID, secondID)
+	}
+	if firstID == secondID {
+		t.Fatal("two different commits reported the same identity")
+	}
+
+	// A commit with no diff of its own has no identity.
+	run(t, dir, "git", "commit", "--allow-empty", "-m", "empty change")
+	empty := run(t, dir, "git", "rev-parse", "HEAD")
+	emptyID, err := CommitPatchID(ctx, dir, empty)
+	if err != nil {
+		t.Fatalf("CommitPatchID for the empty commit: %v", err)
+	}
+	if emptyID != "" {
+		t.Fatalf("the empty commit reported identity %q", emptyID)
+	}
+}
+
+// TestCommitPatchIDSurvivesARewrite is the property the diagnostic exists
+// for: the same change re-applied onto a different parent has the SAME
+// identity, which is why a rewrite reads as a rewrite and not as lost work.
+func TestCommitPatchIDSurvivesARewrite(t *testing.T) {
+	dir := initTestRepo(t)
+	ctx := context.Background()
+
+	base := run(t, dir, "git", "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(dir, "file.txt"), "base\n")
+	run(t, dir, "git", "add", "-A")
+	run(t, dir, "git", "commit", "-m", "base file")
+	base = run(t, dir, "git", "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(dir, "file.txt"), "feature\n")
+	run(t, dir, "git", "commit", "-am", "operator work")
+	original := run(t, dir, "git", "rev-parse", "HEAD")
+
+	// The rewritten copy sits on a different parent - a newer main - so it is
+	// a different commit object carrying the same change.
+	run(t, dir, "git", "checkout", "-B", "rewritten", base)
+	writeFile(t, filepath.Join(dir, "other.txt"), "newer main\n")
+	run(t, dir, "git", "add", "-A")
+	run(t, dir, "git", "commit", "-m", "upstream(main): newer main")
+	writeFile(t, filepath.Join(dir, "file.txt"), "feature\n")
+	run(t, dir, "git", "commit", "-am", "operator work")
+	rewritten := run(t, dir, "git", "rev-parse", "HEAD")
+	if rewritten == original {
+		t.Fatal("the rewritten copy is the same commit object")
+	}
+
+	originalID, err := CommitPatchID(ctx, dir, original)
+	if err != nil {
+		t.Fatalf("CommitPatchID for the original: %v", err)
+	}
+	rewrittenID, err := CommitPatchID(ctx, dir, rewritten)
+	if err != nil {
+		t.Fatalf("CommitPatchID for the rewritten copy: %v", err)
+	}
+	if originalID == "" || originalID != rewrittenID {
+		t.Fatalf("the rewritten copy reported %q, want the original's %q", rewrittenID, originalID)
+	}
+}
+
+// TestCommitPatchIDsCoversTheRange pins the range form: every commit in the
+// range is present, keyed by its own SHA, and a commit outside the range is
+// not.
+func TestCommitPatchIDsCoversTheRange(t *testing.T) {
+	dir := initTestRepo(t)
+	ctx := context.Background()
+
+	base := run(t, dir, "git", "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(dir, "file.txt"), "one\n")
+	run(t, dir, "git", "add", "-A")
+	run(t, dir, "git", "commit", "-m", "one")
+	one := run(t, dir, "git", "rev-parse", "HEAD")
+	writeFile(t, filepath.Join(dir, "file.txt"), "two\n")
+	run(t, dir, "git", "commit", "-am", "two")
+	two := run(t, dir, "git", "rev-parse", "HEAD")
+
+	ids, err := CommitPatchIDs(ctx, dir, two, "--not", base)
+	if err != nil {
+		t.Fatalf("CommitPatchIDs over the range: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("the range reported %d identities, want 2: %v", len(ids), ids)
+	}
+	if ids[one] == "" || ids[two] == "" {
+		t.Fatalf("the range is missing a commit: %v", ids)
+	}
+	if ids[one] == ids[two] {
+		t.Fatal("two different commits in the range reported the same identity")
+	}
+	if _, present := ids[base]; present {
+		t.Fatal("a commit outside the range was reported")
+	}
+}

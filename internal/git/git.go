@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -231,10 +232,12 @@ func gitCommand(ctx context.Context, dir string, extraEnv []string, args ...stri
 }
 
 func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEnv []string, input string, args ...string) ([]byte, error) {
+	return runInDirWithReaderRawCaptured(ctx, dir, extraEnv, strings.NewReader(input), args...)
+}
+
+func runInDirWithReaderRawCaptured(ctx context.Context, dir string, extraEnv []string, input io.Reader, args ...string) ([]byte, error) {
 	cmd := gitCommand(ctx, dir, extraEnv, args...)
-	if input != "" {
-		cmd.Stdin = strings.NewReader(input)
-	}
+	cmd.Stdin = input
 	// OutputShellCommand captures stdout only, so unlike cmd.Output it never
 	// fills ExitError.Stderr. Capture stderr explicitly or the git error text
 	// below silently becomes empty.
@@ -384,7 +387,7 @@ func StablePatchIDFromDiff(ctx context.Context, dir, diff string) (string, error
 	if strings.TrimSpace(diff) == "" {
 		return "", nil
 	}
-	out, err := runPatchID(ctx, dir, diff)
+	out, err := runPatchID(ctx, dir, strings.NewReader(diff))
 	if err != nil {
 		return "", err
 	}
@@ -405,6 +408,12 @@ func StablePatchIdentities(ctx context.Context, dir, stream string) ([]PatchIden
 	if strings.TrimSpace(stream) == "" {
 		return nil, nil
 	}
+	return StablePatchIdentitiesReader(ctx, dir, strings.NewReader(stream))
+}
+
+// StablePatchIdentitiesReader measures a patch stream without buffering its diffs.
+// Only Git's compact identity output is retained in this process.
+func StablePatchIdentitiesReader(ctx context.Context, dir string, stream io.Reader) ([]PatchIdentity, error) {
 	out, err := runPatchID(ctx, dir, stream)
 	if err != nil {
 		return nil, err
@@ -426,12 +435,82 @@ func StablePatchIdentities(ctx context.Context, dir, stream string) ([]PatchIden
 
 // runPatchID feeds a diff to `git patch-id --stable` and returns its raw
 // output.
-func runPatchID(ctx context.Context, dir, diff string) ([]byte, error) {
+func runPatchID(ctx context.Context, dir string, diff io.Reader) ([]byte, error) {
 	args := []string{"patch-id", "--stable"}
 	if isBareGitDir(dir) {
 		args = append([]string{"--git-dir=" + dir}, args...)
 	}
-	return runInDirWithEnvAndInputRaw(ctx, dir, nil, diff, args...)
+	out, err := runInDirWithReaderRawCaptured(ctx, dir, nil, diff, args...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// CommitPatchID measures only the named non-merge commit's own change.
+// Empty and merge commits have no identity. An identity is a diagnostic,
+// never proof that another head preserves this commit's work.
+func CommitPatchID(ctx context.Context, dir, commit string) (string, error) {
+	ids, err := commitPatchIDs(ctx, dir, "--no-walk", commit)
+	if err != nil {
+		return "", err
+	}
+	return ids[commit], nil
+}
+
+// CommitPatchIDs indexes the shared stable identities by commit for a range.
+// Diffs flow directly from Git into the shared reader; no range diff is held
+// in this process, and empty or merge commits are absent from the result.
+func CommitPatchIDs(ctx context.Context, dir string, revs ...string) (map[string]string, error) {
+	if len(revs) == 0 {
+		return map[string]string{}, nil
+	}
+	return commitPatchIDs(ctx, dir, revs...)
+}
+
+func commitPatchIDs(ctx context.Context, dir string, revs ...string) (map[string]string, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	logArgs := append([]string{"--no-pager", "log", "--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "--ignore-submodules=none", "--no-merges", "--format=commit %H", "-p", "-M", "--root"}, revs...)
+	if isBareGitDir(dir) {
+		logArgs = append([]string{"--git-dir=" + dir}, logArgs...)
+	}
+	logCmd := gitCommand(ctx, dir, nil, logArgs...)
+	shellenv.ConfigureShellCommand(logCmd)
+	var stderr bytes.Buffer
+	logCmd.Stderr = &stderr
+	read, write, err := os.Pipe()
+	if err != nil {
+		return nil, err
+	}
+	defer read.Close()
+	defer write.Close()
+	logCmd.Stdout = write
+	if err := shellenv.StartShellCommand(logCmd); err != nil {
+		return nil, &CommandError{Command: safeurl.RedactText(strings.Join(logArgs, " ")), Stderr: safeurl.RedactText(stderr.String()), Err: errors.Join(err, ctx.Err())}
+	}
+	defer shellenv.TerminateShellCommandGroup(logCmd)
+	// The child owns the writing end now; EOF reaches patch-id when it exits.
+	_ = write.Close()
+	identities, patchErr := StablePatchIdentitiesReader(ctx, dir, read)
+	_ = read.Close()
+	if patchErr != nil {
+		cancel()
+	}
+	logErr := logCmd.Wait()
+	if patchErr != nil {
+		return nil, patchErr
+	}
+	if logErr != nil {
+		return nil, &CommandError{Command: safeurl.RedactText(strings.Join(logArgs, " ")), Stderr: safeurl.RedactText(stderr.String()), Err: errors.Join(logErr, ctx.Err())}
+	}
+	ids := make(map[string]string, len(identities))
+	for _, identity := range identities {
+		if identity.Commit != "" {
+			ids[identity.Commit] = identity.PatchID
+		}
+	}
+	return ids, nil
 }
 
 // ValidateBareRepository verifies both the filesystem shape and Git's own bare
