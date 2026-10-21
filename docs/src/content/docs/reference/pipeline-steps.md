@@ -262,6 +262,7 @@ Updates matching documentation for code changes and reports unresolved gaps or o
 - Asks the agent to find documentation gaps caused by this change, update their owner documents or doc comments, and verify its edits; the pipeline checks convergence before committing
 - Carries validation credit under the trusted [`document.doc_only_paths`](/no-mistakes/reference/repo-config/#documentdoc_only_paths) rules
 - Stops repeated edits and bounds commits under [`document.max_commits_per_run`](/no-mistakes/reference/repo-config/#documentmax_commits_per_run), which also defines requirements for a clean worktree and interrupted passes
+- At the commit cap, runs a read-only gap check instead of stopping blind: no remaining gap completes the step, a remaining gap stays an ordinary finding, and the cap notice is informational so it can never block an approval on its own
 - Preserves predecessor edits under the [leftover-edit rules](#target-advances-before-publication) before starting its own pass
 - The placement policy gives each fact one authoritative owner, prefers removing stale duplicates or replacing them with pointers, avoids new documentation surfaces for perceived gaps, and keeps durable incident lessons near their owner instead of in `AGENTS.md`
 - `document.instructions` can add trusted default-branch ownership rules for the repository, and a matching machine-local [`repository_overrides`](/no-mistakes/reference/global-config/#machine-local-review-and-documentation-guidance) entry can add the operator's own, in a separate labeled section

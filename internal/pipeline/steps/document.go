@@ -190,7 +190,13 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		return &pipeline.StepOutcome{}, nil
 	}
 	if history.commits >= limit {
-		return stoppedDocumentOutcome(sctx, documentCapFinding(previous, false), "Document commit limit reached; stopping further commits"), nil
+		// The cap bounds COMMITS, not the run. The documentation may still be
+		// accurate, and the only way to know is to ask: a read-only gap check
+		// spends no budget and cannot make the documentation worse. Without
+		// it the step parks on a finding no agent can resolve (issue #123),
+		// and strict shipping refuses to approve that finding, so the run
+		// could never finish.
+		return s.runCapGapCheck(sctx, baseSHA, targetBranch, previous, combinedLint)
 	}
 
 	if combinedLint {

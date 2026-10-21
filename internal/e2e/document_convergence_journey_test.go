@@ -346,8 +346,8 @@ func TestDocumentJourneyAdmissionAndInterruptedHistory(t *testing.T) {
 				limited := documentJourneyNextGate(t, h, parked.ID, types.StepDocument, "")
 				after, err := os.ReadFile(filepath.Join(worktree, "feature.txt"))
 				if err != nil || string(after) != string(before) || limited.HeadSHA != revalidated.HeadSHA ||
-					gitIn(t, h, worktree, "ls-files", "-v") != flags || len(documentJourneyPasses(t, h, parked.ID)) != 0 || documentJourneyCalls(h) != 0 {
-					t.Fatalf("zero Document budget changed the preserved edit or launched an agent: %+v error=%v", limited, err)
+					gitIn(t, h, worktree, "ls-files", "-v") != flags || len(documentJourneyPasses(t, h, parked.ID)) != 0 {
+					t.Fatalf("zero Document budget changed the preserved edit or recorded a pass: %+v error=%v", limited, err)
 				}
 				return
 			}
@@ -453,19 +453,32 @@ func TestDocumentJourneyTrustedLimits(t *testing.T) {
 				return
 			}
 			parked := waitForStepStatus(t, h, branch, types.StepDocument, types.StepStatusAwaitingApproval, 90*time.Second)
-			if parked.HeadSHA != submitted || documentJourneyCalls(h) != 0 || len(documentJourneyPasses(t, h, parked.ID)) != 0 {
+			if parked.HeadSHA != submitted || len(documentJourneyPasses(t, h, parked.ID)) != 0 {
 				t.Fatal("branch widened trusted zero budget")
 			}
 			step, _ := findStep(parked.Steps, types.StepDocument)
 			if step.FindingsJSON == nil || !strings.Contains(*step.FindingsJSON, "commit limit reached") || strings.Contains(*step.FindingsJSON, "discard") {
 				t.Fatalf("zero-budget admission falsely reported a discard: %+v", step)
 			}
+			// The zero budget still runs the READ-ONLY gap check: the cap
+			// bounds commits, and only a real gap may park the run.
+			if documentJourneyCalls(h) == 0 {
+				t.Fatal("the zero budget did not run the read-only gap check")
+			}
+			// The gap check never commits, so the budget stays spent and no
+			// Document pass is recorded.
+			if got := documentJourneyCalls(h); got > 1 {
+				t.Fatalf("the zero budget ran %d passes, want 1", got)
+			}
+			if len(documentJourneyPasses(t, h, parked.ID)) != 0 {
+				t.Fatal("the gap check recorded a Document pass")
+			}
 			gateJourneyDaemon(t, h, "stop")
 			gateJourneyDaemon(t, h, "start")
 			parked = documentJourneyNextGate(t, h, parked.ID, types.StepDocument, "")
 			previous := documentJourneyFix(t, h, parked)
 			parked = documentJourneyNextGate(t, h, parked.ID, types.StepDocument, previous)
-			if documentJourneyCalls(h) != 0 || len(documentJourneyPasses(t, h, parked.ID)) != 0 {
+			if len(documentJourneyPasses(t, h, parked.ID)) != 0 {
 				t.Fatal("recovery lost trusted budget")
 			}
 			documentJourneyStatus(t, h, parked.ID)

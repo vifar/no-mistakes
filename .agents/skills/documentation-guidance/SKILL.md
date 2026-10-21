@@ -20,6 +20,11 @@ metadata:
 - The shared default test-quality rule lives in `internal/testguidance`; render it only into the task-first skill and pipeline roles that can author, repair, or review tests. Its fake-agent prompt tests are the intentional generated-interface contract, not source-text checks.
 - Review auto-fix is disabled by default (`auto_fix.review: 0` in `config.go` `autoFixDefaults`), so blocking and ask-user review findings park for an agent decision; keep the skill, the live `axi` gate `note`, and docs qualified if you touch review auto-fix.
 
+**The Document Commit Cap**
+
+- `document.max_commits_per_run` bounds COMMITS, never the run. When the budget is spent the step still runs a READ-ONLY gap check (`internal/pipeline/steps/document_cap.go`): it asks which gaps remain, spends no budget, and rolls back anything the check tries to edit. No gap remaining completes the step; a gap that remains stays an ordinary `ask-user` finding and parks. The cap notice is INFORMATIONAL (`no-op`), never actionable: an actionable cap finding is a deadlock, because no fix round can clear it and strict shipping refuses to approve it (issue #123). Exact-head reuse stays HEAD-keyed: a new commit with an identical tree is a repeat the agent must be asked about, not a reuse.
+- Regressions: `internal/pipeline/steps/document_cap_test.go` (rebase trigger, code-fix trigger, real gap at the cap, strict mode, the gap-check prompt contract, the rollback of a check that edited), `internal/pipeline/steps/document_cap_strict_test.go` (a strict run finishes; a real gap still parks and still blocks the approval), `internal/pipeline/document_cap_shipping_test.go` (the executor and the strict admission treat the notice as non-blocking).
+
 **Combined Document+Lint Housekeeping Pass**
 
 - When `commands.lint` is empty, the document step performs both duties in one agent invocation and stashes the lint half on `RunShared` (consume-once); the lint step consumes it instead of paying a second cold pass. Neither duty is ever silently dropped: a skipped pass, untrusted structured output, or a lint fix round falls back to lint's own agent pass. Configured `commands.lint` stays a first-class deterministic gate. Uncategorized findings fail safe to the stricter documentation gate.

@@ -1,0 +1,260 @@
+package steps
+
+import (
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
+
+// The Document commit cap is a BOUND on how many commits the step may make in
+// one run. It is not a verdict on the documentation, and it must never be the
+// reason a run cannot finish.
+//
+// Issue #123: the cap was checked BEFORE the agent ran, so the step emitted an
+// `ask-user` finding on every round without ever asking whether the
+// documentation was still accurate. The finding was an ACTIONABLE one, so
+// strict shipping refused to approve the gate ("strict shipping cannot approve
+// unresolved actionable findings"), and the gate's other exits were closed
+// too: a fix response re-ran the step, which re-emitted the identical finding
+// without ever calling the agent. The run was neither passing nor failing,
+// and it could never finish.
+//
+// Two real runs hit it the same day, through two different triggers: an
+// automatic rebase renamed the head, and an ordinary reviewed code fix
+// changed it. Both reached the cap, because the cap is spent by COMMITS and a
+// renamed head spends no more of them.
+//
+// The fix has two halves:
+//
+//  1. The cap still runs the READ-ONLY gap check. It asks what gaps remain
+//     and applies nothing, so it spends no budget. With no gap remaining the
+//     step completes and the run continues.
+//
+//  2. The cap notice itself is INFORMATIONAL (no-op), never an actionable
+//     finding. A finding no agent and no human response can resolve must not
+//     be able to block an approval forever.
+
+// documentCapCheckSection is the read-only gap check's prompt section. The
+// agent must not edit anything: the cap forbids another commit, and a check
+// that edits would have to be undone.
+const documentCapCheckSection = `
+Commit budget exhausted (read-only gap check):
+- This run has spent its Document commit budget, so you may NOT create any commit and you may NOT edit any file.
+- This is a READ-ONLY check. Do not modify, create, delete, stage, or commit anything. Do not run formatters or fixers.
+- Report ONLY the documentation gaps that remain unresolved, in the same findings format as the normal pass.
+- If the documentation is already accurate for this change, return an empty findings array.
+- Report every remaining gap, even one you would have been able to fix in an earlier pass: an unreported gap would let the change ship with stale documentation.`
+
+// documentCapNoticeDescription is the informational cap notice's text. It
+// names the bound, not a decision: no fix round and no approval can change
+// it, so it must not be able to block either.
+const documentCapNoticeDescription = "Document commit limit reached; further documentation edits require a new run or an owner decision."
+
+// runCapGapCheck asks the agent what documentation gaps remain, without
+// letting it change anything.
+//
+// The outcome contract:
+//
+//   - No gap remains: the step completes. The cap blocked further COMMITS,
+//     and the run can finish.
+//   - A gap remains: the step parks with that gap as an ordinary finding, so
+//     the gap is still visible and still decidable. The cap notice rides
+//     along as INFORMATIONAL, never as the actionable finding.
+//
+// A gap check that edits is not honored: the edits are discarded with the
+// same rollback the convergence path uses, so the cap still bounds the
+// commits.
+func (s *DocumentStep) runCapGapCheck(sctx *pipeline.StepContext, baseSHA, targetBranch string, previous Findings, combinedLint bool) (*pipeline.StepOutcome, error) {
+	ctx := sctx.Ctx
+	headBefore := sctx.Run.HeadSHA
+	sctx.Log("Document commit limit reached; running a read-only gap check")
+
+	// The check starts from a clean worktree, exactly like a normal pass, so
+	// the rollback below can discard ONLY the check's own proposal.
+	dirtyPaths, err := worktreeDirtyPathsOutsideScratch(sctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(dirtyPaths) > 0 {
+		return nil, fmt.Errorf("Document requires a clean worktree so convergence can safely discard only its own edits: %s", strings.Join(dirtyPaths, ", "))
+	}
+	entryPaths, err := documentEntryPaths(sctx)
+	if err != nil {
+		return nil, err
+	}
+	retainedScratch, err := documentScratchPaths(sctx, entryPaths)
+	if err != nil {
+		return nil, err
+	}
+
+	prompt := s.buildCapCheckPrompt(sctx, baseSHA, targetBranch)
+	schema := findingsSchema
+	// The gap check is NOT a housekeeping pass: it performs no lint duty, so
+	// it must not claim the housekeeping purpose that the presentation
+	// surfaces read as "this invocation did both duties". The lint step
+	// falls back to its own pass, which is the documented fallback.
+	purpose := "document-gap-check"
+	if combinedLint {
+		schema = housekeepingFindingsSchema
+	}
+
+	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
+		Prompt:     prompt,
+		CWD:        sctx.WorkDir,
+		JSONSchema: schema,
+		OnChunk:    sctx.LogChunk,
+		Purpose:    purpose,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("agent document gap check: %w", err)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("agent document gap check returned no result")
+	}
+
+	// A gap check that edited is not honored: the edits are discarded and the
+	// cap still holds. The rollback is the same one the convergence path uses,
+	// so only this check's own proposal is touched.
+	paths, untracked, err := documentCandidatePaths(sctx, headBefore, retainedScratch)
+	if err != nil {
+		return nil, err
+	}
+	agentHead, err := stepGitRun(sctx, "rev-parse", "HEAD")
+	if err != nil {
+		return nil, err
+	}
+	if len(paths) > 0 || agentHead != headBefore {
+		sctx.Log("the read-only gap check edited the worktree; discarding its proposal")
+		if err := discardDocumentCandidate(sctx, headBefore, paths, untracked, retainedScratch); err != nil {
+			return nil, err
+		}
+	}
+
+	var reported Findings
+	if err := validateDocumentAnalyzerFindings(result.Output, &reported, false); err != nil {
+		return nil, fmt.Errorf("validate document gap check findings: %w", err)
+	}
+	gaps := reported
+	if combinedLint {
+		// The combined pass's lint half has its own gate; the Document gap
+		// check only speaks for the documentation half. The lint step falls
+		// back to its own pass, so neither duty is silently dropped.
+		gaps, _ = splitHousekeepingFindings(reported)
+	}
+	// A gap an EARLIER pass reported and the check did not repeat is still
+	// unresolved: the owner decided nothing about it, so it stays visible.
+	// The check only ever adds to the outstanding set, never removes from it.
+	for _, prior := range previous.Items {
+		found := false
+		for _, current := range gaps.Items {
+			priorKey, currentKey := prior, current
+			priorKey.ID, currentKey.ID = "", ""
+			if reflect.DeepEqual(priorKey, currentKey) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			gaps.Items = append(gaps.Items, prior)
+		}
+	}
+
+	// A gap the agent could not resolve is still a gap: it stays an ordinary
+	// finding so the owner can decide. The cap notice never carries the
+	// decision, because no fix round can ever clear it.
+	gaps = documentCapNotice(gaps)
+
+	if len(gaps.Items) == 0 {
+		sctx.Log("Document commit limit reached; the read-only gap check found no remaining documentation gap")
+		return documentCapOutcome(sctx, gaps, "Document commit limit reached; no remaining documentation gap"), nil
+	}
+	sctx.Log(fmt.Sprintf("Document commit limit reached; the read-only gap check found %d unresolved items", len(gaps.Items)))
+	return stoppedDocumentOutcome(sctx, gaps, "Document commit limit reached; stopping further commits"), nil
+}
+
+// buildCapCheckPrompt assembles the read-only gap check's prompt: the
+// ordinary context and placement policy, plus the read-only instruction that
+// replaces the normal pass's "leave edits uncommitted" rule.
+func (s *DocumentStep) buildCapCheckPrompt(sctx *pipeline.StepContext, baseSHA, targetBranch string) string {
+	ignorePatterns := "none"
+	if len(sctx.Config.IgnorePatterns) > 0 {
+		ignorePatterns = strings.Join(sctx.Config.IgnorePatterns, ", ")
+	}
+	prompt := s.buildPrompt(sctx, baseSHA, targetBranch, ignorePatterns, false)
+	// The normal prompt's edit rule and its commit instruction are replaced,
+	// not appended: a check that may edit is not a check.
+	prompt = strings.Replace(prompt,
+		"- Only edit documentation files or doc comments. Do not change executable behavior or tests.",
+		"- Do not edit anything. This is a read-only check.", 1)
+	prompt = strings.Replace(prompt,
+		"- Leave edits uncommitted; the pipeline checks convergence and creates any allowed commit.",
+		"- Make no edits at all; the pipeline discards anything you write.", 1)
+	// The task steps still read as a repair pass, which contradicts a
+	// read-only check. They are replaced, not appended: a check asked to fix
+	// things will fix them.
+	prompt = strings.Replace(prompt, "2. Find what this change made stale",
+		"2. Find what this change made stale (read the diff and the owner documents; do not change them)", 1)
+	prompt = strings.Replace(prompt, "3. Fix in the authoritative location",
+		"3. Do not fix anything - this pass only decides whether a gap remains", 1)
+	prompt = strings.Replace(prompt, "   - Update each altered fact in its owner document. Changed user-facing behavior must leave its authoritative user documentation accurate.\n",
+		"   - Note which owner document would need the update; do not write it.\n", 1)
+	prompt = strings.Replace(prompt, "   - Remove stale duplicates or reduce them to a short pointer to the owner; do not synchronize full copies.\n",
+		"   - Note stale duplicates and the owner each fact belongs to; do not change them.\n", 1)
+	prompt = strings.Replace(prompt, "   - Re-read what you changed to verify it now reflects the code.\n",
+		"   - Verify the owner's CURRENT content against the code before reporting a gap.\n", 1)
+	return prompt + documentCapCheckSection
+}
+
+// documentEntryPaths lists the worktree's untracked and staged-addition
+// paths, the entry set the scratch classification works on.
+func documentEntryPaths(sctx *pipeline.StepContext) ([]string, error) {
+	var entryPaths []string
+	for _, args := range [][]string{
+		{"ls-files", "--others", "--exclude-standard", "-z"},
+		{"diff", "--cached", "--diff-filter=A", "--no-renames", "--name-only", "-z", "HEAD"},
+	} {
+		out, err := stepGitRunRaw(sctx, args...)
+		if err != nil {
+			return nil, err
+		}
+		entryPaths = append(entryPaths, documentNULPaths(out)...)
+	}
+	return entryPaths, nil
+}
+
+// documentCapNotice adds the INFORMATIONAL cap notice. It is a no-op
+// finding: an actionable finding here is a deadlock, because no fix round
+// can clear it and strict shipping refuses to approve it.
+//
+// The notice is not added when the step found no gap at all: a run whose
+// documentation is accurate must not manufacture a finding, and a finding
+// nobody has to decide about is noise on a gate the run is about to leave.
+func documentCapNotice(findings Findings) Findings {
+	for _, finding := range findings.Items {
+		if finding.Description == documentCapNoticeDescription {
+			return findings
+		}
+	}
+	if len(findings.Items) == 0 {
+		return findings
+	}
+	findings.Items = append(findings.Items, types.Finding{
+		Severity: "info", Action: types.ActionNoOp, Description: documentCapNoticeDescription,
+	})
+	return findings
+}
+
+// documentCapOutcome reports a cap stop whose findings carry no actionable
+// item. It completes the step: the cap bounded the commits, and there is
+// nothing left to decide.
+func documentCapOutcome(sctx *pipeline.StepContext, findings Findings, reason string) *pipeline.StepOutcome {
+	sctx.Log(reason)
+	findings.Summary = reason
+	raw, _ := json.Marshal(findings)
+	return &pipeline.StepOutcome{NeedsApproval: false, Findings: string(raw), FixSummary: NoChangesAppliedSummary}
+}
