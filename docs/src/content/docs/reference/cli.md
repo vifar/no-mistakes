@@ -550,6 +550,7 @@ A verified archive plan reports its evidence in `branch_sync.recovery`, keeps `n
 
 For the alternative validation path and its refusal conditions, see [`no-mistakes rerun`](#no-mistakes-rerun); it is not offered for the archive-backed keep-local plan.
 A recovered never-pushed run reports `state: custody_returned`; a recovered pushed run reports its ordinary classification against the last push binding, typically `local_ahead`.
+When custody was already returned and the terminal run's current head equals its published head, plain `--recover` re-verifies that push binding. A clean local branch strictly behind it fast-forwards to the exact published head and reports `changed: true`; an equal branch reports `already_synchronized` with `changed: false`. A dirty, ahead, or diverged branch refuses without moving the branch. Divergence names the published head and a command to inspect both histories, even when ordinary `sync` could adopt an equivalent rewrite. Explicit `--keep-local` retains its existing keep-local behavior.
 On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pipeline-created exists to recover, and no file, ref, or database row changes.
 
 ## no-mistakes axi logs

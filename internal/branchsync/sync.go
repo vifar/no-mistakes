@@ -531,6 +531,12 @@ func (s *Service) gateContextRefusal(ctx context.Context) (State, bool) {
 // use a strict fast-forward. Equivalent-diverged branches first anchor the
 // pre-sync head, then move to the verified equivalent pipeline head.
 func (s *Service) Apply(ctx context.Context) State {
+	return s.apply(ctx, false)
+}
+
+// strictFastForward keeps published-head custody recovery from adopting even
+// equivalent divergence. Ordinary sync retains its anchored equivalent mode.
+func (s *Service) apply(ctx context.Context, strictFastForward bool) State {
 	if refusal, blocked := s.gateContextRefusal(ctx); blocked {
 		return refusal
 	}
@@ -538,6 +544,11 @@ func (s *Service) Apply(ctx context.Context) State {
 	if plan.State == StateSynchronized || plan.State == StateMergedRemoteRemoved {
 		plan.Changed = false
 		return plan
+	}
+	if strictFastForward && plan.State == StateDiverged {
+		blocked := blockedPlan(plan, StateDiverged, "blocked_recover_diverged", fmt.Sprintf("the local branch has diverged from pipeline-pushed head %s; recovery requires a strict fast-forward; inspect both histories before reconciling manually; no files or branch refs were changed", plan.Pipeline.PushedHead))
+		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right HEAD..." + plan.Pipeline.PushedHead}
+		return blocked
 	}
 	if !CanApply(plan) {
 		return plan
@@ -812,6 +823,20 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		return rebound
 	}
 	if run != nil && run.CustodyReturnedAt != nil {
+		// A custody stamp proves ownership, not that this worktree contains
+		// the final published fix. Repeating recovery must finish that move
+		// rather than silently reporting success on the old base (#89).
+		if !keepLocal && terminalRunStatus(run.Status) && run.LastPushedSHA != nil && run.HeadSHA == *run.LastPushedSHA {
+			published := s.apply(ctx, true)
+			published.Recovered = published.State == StateSynchronized
+			// Retired PRs still admit the existing exact-head no-op, but
+			// must never move a stale local branch after retirement.
+			if published.Local.Head == published.Pipeline.PushedHead &&
+				(published.State == StateMergedRemoteRetained || published.State == StateClosed) {
+				published.Recovered = true
+			}
+			return published
+		}
 		state.Recovered = true
 		state.Changed = false
 		return state
