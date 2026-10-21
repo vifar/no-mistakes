@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
@@ -663,6 +664,7 @@ func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string, produc
 		return ciRepairResult{}, nil
 	}
 
+	summary = git.StripAIAttributionTrailers(summary)
 	if summary == "" {
 		summary = "repair failing checks"
 	}

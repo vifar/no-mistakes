@@ -131,7 +131,7 @@ func TestFixCommitTrailersJourney(t *testing.T) {
 		t.Fatalf("read global config: %v", err)
 	}
 	globalSource := strings.Replace(string(globalData), "  review: 0\n", "  review: 1\n", 1)
-	globalSource += "commit:\n  trailers:\n    - 'Assisted-by: no-mistakes:{{.Agent}}:{{.Model}}'\n"
+	globalSource += "commit:\n  trailers:\n    - 'Assisted-by: no-mistakes:{{.Agent}}:{{.Model}}'\n    - 'Assisted-by: pi:local'\n    - 'Codex-Session: abc'\n    - 'Co-Authored-By: Claude Smith <claude@example.com>'\n"
 	if err := os.WriteFile(globalConfig, []byte(globalSource), 0o644); err != nil {
 		t.Fatalf("write global config: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestFixCommitTrailersJourney(t *testing.T) {
 	}
 
 	// git's own trailer parser reads the pushed commits, so this checks that
-	// the trailer survives the run as a trailer, not merely as message text.
+	// human attribution survives as a trailer and AI attribution is absent.
 	log, err := h.runGit(context.Background(), h.UpstreamDir, "log", "--format=%s%x00%(trailers:only,unfold)%x00", "main..refs/heads/"+branch)
 	if err != nil {
 		t.Fatalf("read upstream commits: %v\n%s", err, log)
@@ -168,12 +168,9 @@ func TestFixCommitTrailersJourney(t *testing.T) {
 			userTrailers = append(userTrailers, trailers)
 		}
 	}
-	// The model is whatever the recorded claude fixture served; it must arrive
-	// as reported, not as the unknown placeholder.
-	const prefix = "Assisted-by: no-mistakes:claude:"
-	if len(fixTrailers) != 1 || !strings.HasPrefix(fixTrailers[0], prefix) ||
-		strings.Contains(fixTrailers[0], "\n") || strings.TrimPrefix(fixTrailers[0], prefix) == "unknown" {
-		t.Fatalf("review fix commit trailers = %q, want one %q trailer carrying the served model", fixTrailers, prefix+"<model>")
+	const human = "Co-Authored-By: Claude Smith <claude@example.com>"
+	if len(fixTrailers) != 1 || fixTrailers[0] != human {
+		t.Fatalf("review fix commit trailers = %q, want only %q", fixTrailers, human)
 	}
 	if len(userTrailers) != 1 || userTrailers[0] != "" {
 		t.Fatalf("user commit trailers = %q, want the user's commit left untouched", userTrailers)

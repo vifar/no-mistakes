@@ -351,7 +351,7 @@ func commitPipelineCorrectionWithCleanup(
 	if err != nil {
 		return fmt.Errorf("prepare hook-free commit environment: %w", err)
 	}
-	_, commitErr := git.Run(ctx, workDir, "-c", "core.hooksPath="+emptyHooksDir, "commit", "--no-verify", "-m", message)
+	_, commitErr := git.Run(ctx, workDir, "-c", "core.hooksPath="+emptyHooksDir, "commit", "--no-verify", "-m", git.StripAIAttributionTrailers(message))
 	if cleanupErr := cleanup(emptyHooksDir); cleanupErr != nil {
 		if logf != nil {
 			logf(fmt.Sprintf("warning: failed to remove temporary hook-free commit directory %s: %v", emptyHooksDir, cleanupErr))
@@ -362,11 +362,12 @@ func commitPipelineCorrectionWithCleanup(
 	return commitErr
 }
 
-// withCommitTrailers appends commit.trailers rendered for producer. Changes not
-// attributable to a single invocation get none rather than a guessed agent.
+// withCommitTrailers renders configured trailers, then removes AI attribution
+// before any commit is written. Human trailers survive. Changes without a
+// single producer get no configured trailers rather than a guessed agent.
 func withCommitTrailers(sctx *pipeline.StepContext, message string, producer *agent.Result) (string, error) {
 	if producer == nil || len(sctx.Config.Commit.Trailers) == 0 {
-		return message, nil
+		return git.StripAIAttributionTrailers(message), nil
 	}
 	// A fallback chain reports the agent that actually ran in Provider; a bare
 	// adapter leaves it empty, and then the step agent is the one that ran.
@@ -378,7 +379,7 @@ func withCommitTrailers(sctx *pipeline.StepContext, message string, producer *ag
 	if err != nil {
 		return "", err
 	}
-	return message + "\n\n" + strings.Join(trailers, "\n"), nil
+	return git.StripAIAttributionTrailers(message + "\n\n" + strings.Join(trailers, "\n")), nil
 }
 
 // stagedChangesPresent is the handoff between catch-all staging and commit.
@@ -419,6 +420,7 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 		}
 		return false, recordAgentFixHead(sctx, stepName, headSHA)
 	}
+	summary = git.StripAIAttributionTrailers(summary)
 	if summary == "" {
 		summary = fallbackSummary
 	}

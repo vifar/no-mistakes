@@ -1243,7 +1243,7 @@ A `commit.branch_pattern` in `.no-mistakes.yaml` takes precedence and clears any
 
 ### commit.trailers
 
-Git trailers appended to each commit made from a single agent invocation's changes, naming the agent and model that produced them.
+Git trailers configured for commits made from a single agent invocation's changes. The fork removes recognized AI attribution at commit time; human attribution and other trailers remain.
 
 | | |
 | --- | --- |
@@ -1257,14 +1257,15 @@ Each entry renders to one trailer line. It supports literal text and two Go-styl
 | `{{.Agent}}` | The agent that actually ran the invocation; with an `agent` fallback list, the one that answered, not the first configured |
 | `{{.Model}}` | The model the agent reported serving the invocation, or `unknown` when it reports none |
 
-For example, this renders `Assisted-by: no-mistakes:codex:gpt-5.5` on a fix made by Codex after a fallback from Claude:
+For example, a human co-author can be retained:
 
 ```yaml
 commit:
   trailers:
-    - "Co-Authored-By: no-mistakes {{.Agent}} <noreply@example.com>"
-    - "Assisted-by: no-mistakes:{{.Agent}}:{{.Model}}"
+    - "Co-Authored-By: Some Person <person@example.com>"
 ```
+
+AI co-author and assistant identities (including `no-mistakes` and `pi:local`), `Claude-Session` and `Codex-Session`, and standalone generated-with AI footers are removed before a pipeline commit is written, even when configured here. Matching uses complete attribution lines and identities, not words inside a disclosure or a human name such as Claude Smith. Subject and body prose, human co-authors, and other trailers survive. User commits already present on a submitted branch are not rewritten.
 
 `{{.Agent}}` and `{{.Model}}` come from agent output, so each is cut to its first whitespace-separated token, reduced to letters, digits, and `-_.:/`, and limited to 64 bytes; a value with nothing left renders as `unknown`.
 Claude, Codex, Grok, and Pi report the model they served; other agents render `unknown`.
