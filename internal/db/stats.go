@@ -122,6 +122,9 @@ func (d *DB) aggregateRunStats(runID string, stepStats map[types.StepName]*StepS
 	runReported := 0
 	runFixed := 0
 	for _, step := range steps {
+		if step.CarriedFrom != nil && *step.CarriedFrom != "" {
+			continue
+		}
 		rounds, err := d.GetRoundsByStep(step.ID)
 		if err != nil {
 			return 0, 0, err
@@ -156,9 +159,9 @@ func StepFindingStatsFromRounds(step *StepResult, rounds []*StepRound) StepStats
 		return stats
 	}
 
-	reported := make(map[types.Finding]bool)
-	withdrawn := make(map[types.Finding]bool)
-	byID := make(map[string]types.Finding)
+	reported := make(map[findingStatsIdentity]bool)
+	withdrawn := make(map[findingStatsIdentity]bool)
+	byID := make(map[string]findingStatsIdentity)
 	var current []types.Finding
 	for _, round := range rounds {
 		if round.FindingsJSON != nil {
@@ -207,7 +210,7 @@ func (d *DB) FixedFindingsByStep(step *StepResult) (int, error) {
 
 // StepFindingStats returns reported and fixed finding counts for a single step.
 func (d *DB) StepFindingStats(step *StepResult) (StepStats, error) {
-	rounds, err := d.GetRoundsByStep(step.ID)
+	rounds, err := d.GetRoundsByStep(step.RoundsStepID())
 	if err != nil {
 		return StepStats{}, err
 	}
@@ -230,12 +233,19 @@ func findingItems(raw *string) []types.Finding {
 	})
 }
 
-func findingStatsKey(item types.Finding) types.Finding {
+type findingStatsIdentity struct {
+	finding types.Finding
+	claimID string
+}
+
+func findingStatsKey(item types.Finding) findingStatsIdentity {
 	item.ID = ""
 	item.Action = ""
 	item.Source = ""
 	item.UserInstructions = ""
-	return item
+	claimID := types.ReviewSupportClaimID(item)
+	item.Support = nil
+	return findingStatsIdentity{finding: item, claimID: claimID}
 }
 
 func sortStepStats(stats []StepStats) {
