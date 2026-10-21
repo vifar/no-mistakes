@@ -415,3 +415,25 @@ func TestOpencodeV2_SessionSetupRefusesCredentialRedirect(t *testing.T) {
 		t.Fatalf("unsafe setup redirect: forwarded=%v err=%v", forwarded.Load(), err)
 	}
 }
+
+func TestOpencodeV2_ProjectionRestoresMissingTextPartsInOrder(t *testing.T) {
+	for _, events := range []struct {
+		name, events string
+	}{
+		{"first part absent", `data: {"type":"session.text.delta","data":{"sessionID":"ses_fixture","assistantMessageID":"msg_final","ordinal":1,"delta":"world"}}`},
+		{"first part absent and later part ended", `data: {"type":"session.text.ended","data":{"sessionID":"ses_fixture","assistantMessageID":"msg_final","ordinal":1,"text":"world"}}`},
+		{"end events out of order", "data: {\"type\":\"session.text.ended\",\"data\":{\"sessionID\":\"ses_fixture\",\"assistantMessageID\":\"msg_final\",\"ordinal\":1,\"text\":\"world\"}}\n\ndata: {\"type\":\"session.text.ended\",\"data\":{\"sessionID\":\"ses_fixture\",\"assistantMessageID\":\"msg_final\",\"ordinal\":0,\"text\":\"hello \"}}"},
+	} {
+		t.Run(events.name, func(t *testing.T) {
+			f := &opencodeV2Fixture{pages: []string{`{"data":[{"id":"msg_final","type":"assistant","content":[{"type":"text","text":"hello "},{"type":"text","text":"world"}]}],"cursor":{}}`}, events: events.events + "\n\n"}
+			var chunks strings.Builder
+			result, err := v2Agent(f.server(t)).Run(context.Background(), RunOpts{CWD: t.TempDir(), Prompt: "work", OnChunk: func(s string) { chunks.WriteString(s) }})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Text != "hello world" || chunks.String() != "hello world" {
+				t.Fatalf("projection=%q displayed=%q; both must preserve all text parts in order", result.Text, chunks.String())
+			}
+		})
+	}
+}

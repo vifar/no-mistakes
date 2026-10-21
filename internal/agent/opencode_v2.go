@@ -8,8 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -50,7 +48,7 @@ func (a *opencodeAgent) runV2(ctx context.Context, opts RunOpts, baseURL string)
 	if response.StatusCode != http.StatusOK || !strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
 		return nil, agentSetupFailure(fmt.Errorf("opencode event stream: expected SSE response, got HTTP %d", response.StatusCode))
 	}
-	state := opencodeV2Stream{sessionID: sessionID, parts: make(map[string]string), emitted: make(map[string]string), flushed: make(map[string]bool), usage: make(map[string]TokenUsage)}
+	state := opencodeV2Stream{sessionID: sessionID, parts: make(map[string]string), emitted: make(map[string]string), usage: make(map[string]TokenUsage)}
 	streamDone := make(chan struct{})
 	go func() {
 		defer close(streamDone)
@@ -98,7 +96,6 @@ func (a *opencodeAgent) runV2(ctx context.Context, opts RunOpts, baseURL string)
 	evidence := opencodeToolsNone
 	text := ""
 	finalMessageID := ""
-	var finalParts []string // complete text of each text part of the final message, in order
 	var failure *opencodeV2Error
 	for _, message := range messages {
 		if message.Tokens != nil {
@@ -108,12 +105,10 @@ func (a *opencodeAgent) runV2(ctx context.Context, opts RunOpts, baseURL string)
 			continue
 		}
 		var current strings.Builder
-		var parts []string
 		for _, content := range message.Content {
 			switch content.Type {
 			case "text":
 				current.WriteString(content.Text)
-				parts = append(parts, content.Text)
 			case "reasoning":
 			case "tool":
 				evidence = opencodeToolsRan
@@ -128,7 +123,6 @@ func (a *opencodeAgent) runV2(ctx context.Context, opts RunOpts, baseURL string)
 		// tool-call steps must not substitute for an absent final response.
 		text = current.String()
 		finalMessageID = message.ID
-		finalParts = parts
 	}
 	total := accumulateUsage(usage)
 	if session.Data.Outcome != "succeeded" {
@@ -142,53 +136,17 @@ func (a *opencodeAgent) runV2(ctx context.Context, opts RunOpts, baseURL string)
 	if len(messages) == 0 {
 		return resultFromUsage(total), opencodeTurnFailure(opencodeToolsUnknown, fmt.Errorf("opencode projection: no messages after execution"))
 	}
-	// Completion and live events have independent delivery timing. The wait
-	// response may win even when final text is still buffered on the stream.
-	// Flush any buffered parts of the final message that never reached a
-	// definitive end, in their original (ordinal) order and using the complete
-	// fetched text for each part, so displayed progress is neither garbled nor
-	// stale. Then reconcile the final projection without emitting a prefix
-	// twice.
-	var unfinished []string
-	for key := range state.parts {
-		if !strings.HasPrefix(key, finalMessageID+":") || state.flushed[key] {
-			continue
-		}
-		unfinished = append(unfinished, key)
+	// Only a contiguous prefix of completed text parts reaches OnChunk.
+	// Events can omit entire parts, not just deltas, so reconcile against
+	// the complete projection rather than the set of observed stream keys.
+	streamed := state.emitted[finalMessageID]
+	if !strings.HasPrefix(text, streamed) {
+		return resultFromUsage(total), opencodeTurnFailure(opencodeToolsUnknown, fmt.Errorf("opencode projection disagrees with completed streamed text"))
 	}
-	slices.SortFunc(unfinished, func(a, b string) int {
-		return ordinalOf(a) - ordinalOf(b)
-	})
-	for _, key := range unfinished {
-		partText := state.parts[key]
-		if ordinal := ordinalOf(key); ordinal >= 0 && ordinal < len(finalParts) {
-			partText = finalParts[ordinal]
-		}
-		if partText == "" {
-			continue
-		}
-		state.emit(finalMessageID, partText, opts)
-		state.flushed[key] = true
-	}
-	if streamed := state.emitted[finalMessageID]; strings.HasPrefix(text, streamed) {
-		state.emit(finalMessageID, strings.TrimPrefix(text, streamed), opts)
-	}
+	state.emit(finalMessageID, strings.TrimPrefix(text, streamed), opts)
+
 	result, err := finalizeTextResult("opencode", text, opts.JSONSchema, total)
 	return result, opencodeTurnFailure(evidence, err)
-}
-
-// ordinalOf returns the text-part ordinal embedded in a stream part key
-// ("messageID:ordinal"), or -1 when the key is malformed.
-func ordinalOf(key string) int {
-	i := strings.LastIndex(key, ":")
-	if i < 0 || i == len(key)-1 {
-		return -1
-	}
-	n, err := strconv.Atoi(key[i+1:])
-	if err != nil {
-		return -1
-	}
-	return n
 }
 
 // The private server credential is sent only to the selected loopback server,
@@ -301,7 +259,8 @@ type opencodeV2Stream struct {
 	sessionID     string
 	parts         map[string]string
 	emitted       map[string]string
-	flushed       map[string]bool
+	ended         map[string]bool
+	nextOrdinal   map[string]int
 	lastMessageID string
 	usage         map[string]TokenUsage
 }
@@ -321,6 +280,12 @@ func (s *opencodeV2Stream) emit(messageID, text string, opts RunOpts) {
 }
 
 func (s *opencodeV2Stream) read(reader io.Reader, opts RunOpts) {
+	if s.ended == nil {
+		s.ended = make(map[string]bool)
+	}
+	if s.nextOrdinal == nil {
+		s.nextOrdinal = make(map[string]int)
+	}
 	progress := agentProgressEmitter(opts, "opencode")
 	_ = parseSSE(reader, func(event sseEvent) bool {
 		var value struct {
@@ -354,11 +319,20 @@ func (s *opencodeV2Stream) read(reader io.Reader, opts RunOpts) {
 				})
 			}
 		case "session.text.ended":
-			if !s.flushed[key] {
-				s.emit(data.MessageID, data.Text, opts)
-				s.flushed[key] = true
-			}
 			s.parts[key] = data.Text
+			s.ended[key] = true
+			// OnChunk is append-only. Hold later parts until all earlier
+			// ordinals are complete, so missing or reordered events cannot
+			// publish a suffix that the final projection cannot prepend to.
+			for {
+				ordinal := s.nextOrdinal[data.MessageID]
+				partKey := fmt.Sprintf("%s:%d", data.MessageID, ordinal)
+				if !s.ended[partKey] {
+					break
+				}
+				s.emit(data.MessageID, s.parts[partKey], opts)
+				s.nextOrdinal[data.MessageID] = ordinal + 1
+			}
 		case "session.tool.called", "session.tool.success", "session.tool.failed":
 			if data.MessageID != "" && data.ToolID != "" && progress != nil {
 				progress()
