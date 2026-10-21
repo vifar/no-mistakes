@@ -139,12 +139,12 @@ type pipelineAttestationPolicy struct {
 // template appendix. It is rendered before any body is budgeted, so a body
 // that fits the budget before the rendering is truncated to it rather than
 // refused afterwards.
-func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy) (string, string) {
-	pipelineMD, riskLine := buildPipelineSummaryForRaw(steps, rounds, headSHA, provider, policy)
+func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy, configuredTrailers ...string) (string, string) {
+	pipelineMD, riskLine := buildPipelineSummaryForRaw(steps, rounds, headSHA, provider, policy, configuredTrailers...)
 	return renderCoAuthorAsLabelledField(pipelineMD), renderCoAuthorAsLabelledField(riskLine)
 }
 
-func buildPipelineSummaryForRaw(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy) (string, string) {
+func buildPipelineSummaryForRaw(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy, configuredTrailers ...string) (string, string) {
 	if len(steps) == 0 {
 		return "", ""
 	}
@@ -157,7 +157,7 @@ func buildPipelineSummaryForRaw(steps []*db.StepResult, rounds map[string][]*db.
 			continue
 		}
 		stepRounds := rounds[sr.ID]
-		line, detail := buildStepEntry(sr, stepRounds, flavor)
+		line, detail := buildStepEntry(sr, stepRounds, flavor, configuredTrailers...)
 		if line != "" && detail != "" {
 			// Step details quote agent text (findings, fix summaries, tested
 			// commands). A foreign attestation comment in one lands after the
@@ -1222,10 +1222,10 @@ func formatTestingDuration(ms int64) string {
 	return d.Round(time.Second).String()
 }
 
-func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlavor) (statusLine, detailBlock string) {
+func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlavor, configuredTrailers ...string) (statusLine, detailBlock string) {
 	name := stepDisplayName(sr.StepName)
 	buildDetail := func(line string) (string, string) {
-		return line, buildStepDetails(line, sr, rounds, flavor)
+		return line, buildStepDetails(line, sr, rounds, flavor, configuredTrailers...)
 	}
 
 	switch sr.Status {
@@ -1482,7 +1482,7 @@ func buildFixResultText(stepName types.StepName, rounds []*db.StepRound) string 
 // round is shown as the review state observed at its end; a fix round is
 // prefixed with its recorded outcome so a reader can follow the result without
 // mentally replaying rounds.
-func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlavor) string {
+func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlavor, configuredTrailers ...string) string {
 	var inner strings.Builder
 	// A skipped step whose rounds recorded no findings never checked
 	// anything, so "No issues found" under a "skipped" summary would
@@ -1537,7 +1537,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 		if isFixRound {
 			inner.WriteString(fmt.Sprintf("%s still open:\n\n", countFindingsBySeverity(&findings)))
 		}
-		writeFindingItems(&inner, sr, &findings, flavor)
+		writeFindingItems(&inner, sr, &findings, flavor, configuredTrailers...)
 		inner.WriteString("\n")
 	}
 
@@ -1622,13 +1622,13 @@ func fixRoundLine(stepName types.StepName, r *db.StepRound) string {
 
 // writeFindingItems renders each finding as a `file:line - description` bullet,
 // followed by any test command details for the test step.
-func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Findings, flavor prBodyFlavor) {
+func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Findings, flavor prBodyFlavor, configuredTrailers ...string) {
 	for _, f := range findings.Items {
 		if sr.StepName == types.StepReview {
 			// Filter the raw display copy before escaping. Recorded findings
 			// remain intact for the audit trail and review decisions.
-			f.File = stripReviewAIAttribution(f.File, nil)
-			f.Description = stripReviewAIAttribution(f.Description, nil)
+			f.File = stripReviewAIAttribution(f.File, configuredTrailers)
+			f.Description = stripReviewAIAttribution(f.Description, configuredTrailers)
 		}
 		emoji := severityEmoji(f.Severity)
 		loc := ""

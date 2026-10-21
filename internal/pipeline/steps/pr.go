@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/conventional"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -708,7 +709,12 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	if sctx.Config != nil {
 		policy.AllowTestCommandOverride = strings.TrimSpace(sctx.Config.Test.AllowApproveOverFailure)
 	}
-	pipelineMD, riskLine = buildPipelineSummaryFor(steps, rounds, sctx.Run.HeadSHA, provider, policy)
+	trailers, err := reviewPRConfiguredTrailers(sctx, steps, rounds)
+	if err != nil {
+		slog.Warn("failed to prepare Review attribution filtering for pipeline summary")
+		return "", "", ""
+	}
+	pipelineMD, riskLine = buildPipelineSummaryFor(steps, rounds, sctx.Run.HeadSHA, provider, policy, trailers...)
 	// The review conversation rides inside the Pipeline section as an ordinary
 	// `### ` group, so the existing body-budget logic can drop it whole rather
 	// than competing with the attestation it must never displace.
@@ -730,6 +736,67 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	// body that fits the budget before the rendering is not over it after
 	// it.
 	return renderCoAuthorAsLabelledField(pipelineMD), renderCoAuthorAsLabelledField(riskLine), renderCoAuthorAsLabelledField(testingMD)
+}
+
+func reviewPRConfiguredTrailers(sctx *pipeline.StepContext, steps []*db.StepResult, rounds map[string][]*db.StepRound) ([]string, error) {
+	invocations, err := sctx.DB.GetAgentInvocationsByRun(sctx.Run.ID)
+	if err != nil {
+		return nil, err
+	}
+	var trailers []string
+	appendRendered := func(commit config.Commit, round int) error {
+		literal := commit
+		literal.Trailers = nil
+		for _, source := range commit.Trailers {
+			if !strings.Contains(source, "{{") {
+				literal.Trailers = append(literal.Trailers, source)
+			}
+		}
+		lines, err := literal.RenderTrailers(config.TrailerData{})
+		if err != nil {
+			return err
+		}
+		trailers = append(trailers, lines...)
+		for _, invocation := range invocations {
+			if invocation.StepName != string(types.StepReview) || (round != 0 && invocation.Round != round) {
+				continue
+			}
+			lines, err := commit.RenderTrailers(config.TrailerData{Agent: invocation.Agent, Model: invocation.Model})
+			if err != nil {
+				return err
+			}
+			trailers = append(trailers, lines...)
+		}
+		return nil
+	}
+	if sctx.Config != nil {
+		if err := appendRendered(sctx.Config.Commit, 0); err != nil {
+			return nil, err
+		}
+	}
+	for _, step := range steps {
+		if step.StepName != types.StepReview {
+			continue
+		}
+		for _, round := range rounds[step.ID] {
+			if len(round.GlobalConfigYAML) == 0 || len(round.RepoConfigYAML) == 0 {
+				continue
+			}
+			global, err := config.LoadGlobalFromBytes(round.GlobalConfigYAML)
+			if err != nil {
+				return nil, err
+			}
+			repo, err := config.LoadRepoFromBytes(round.RepoConfigYAML)
+			if err != nil {
+				return nil, err
+			}
+			cfg := config.MergeForRemote(global, repo, sctx.Repo.UpstreamURL)
+			if err := appendRendered(cfg.Commit, round.Round); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return trailers, nil
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a
