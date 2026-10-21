@@ -76,6 +76,23 @@ func shutdownCancellationOnly(err error, ctxs ...context.Context) bool {
 	return false
 }
 
+// MeaningfulFailure marks an error that adds MEANING around a cause, not just
+// a message. A wrapper that only adds a message - which command ran, what
+// its stderr said - is transparent: the question is asked of the cause it
+// wraps. A wrapper that adds meaning says something the cause does not, so it
+// IS the failure: the shipping layer's "the remote observation failed" says
+// the read produced no result, which is a failure in its own right even when
+// the cancellation stopped the process.
+//
+// The type is declared here and implemented by the packages that own such a
+// wrapper, so the pipeline does not have to know them.
+type MeaningfulFailure interface {
+	error
+	// AddsMeaning reports that this error is more than a message about the
+	// cause it wraps.
+	AddsMeaning() bool
+}
+
 // cancellationAttributable reports whether a run's failure IS the
 // cancellation, and so must be recorded as the cancellation's reason.
 //
@@ -136,16 +153,32 @@ func cancellationAttributable(err, cause error) bool {
 		}
 		return cancellationAttributable(inner, cause)
 	}
+	// A wrapper that says something the cause does not is the failure, and
+	// it is decided FIRST: a meaningful wrapper in between means the failure
+	// is that wrapper's, so nothing underneath it speaks for the whole error.
+	var meaningful MeaningfulFailure
+	if errors.As(err, &meaningful) && meaningful.AddsMeaning() {
+		return false
+	}
 	// A subprocess this command's own context stopped is the cancellation,
 	// whatever it reported on the way out. The git package records that
 	// provenance at the execution boundary, where it is known, so the marker
 	// is read rather than guessed from the shape of the error.
 	//
-	// The marker is read where it IS, not wherever it is found: a meaning
-	// adding wrapper in between means the failure is that wrapper's, so the
-	// marker underneath it does not speak for the whole error.
+	// The marker is read where it IS, not wherever it is found. The git
+	// package's own transport wrapper is the exception: it adds the command
+	// and the captured stderr, which is a MESSAGE, so the marker is read
+	// through it.
 	if _, ok := err.(*git.CancelledExitError); ok {
 		return true
+	}
+	var commandErr *git.CommandError
+	if errors.As(err, &commandErr) {
+		inner := commandErr.Unwrap()
+		if inner == nil {
+			return false
+		}
+		return cancellationAttributable(inner, cause)
 	}
 	if _, ok := err.(interface{ Unwrap() error }); ok {
 		// Any other wrapper adds MEANING around the real cause. So the

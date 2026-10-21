@@ -120,12 +120,23 @@ func TestCancellationAttributableIgnoresAWrapperAroundAnIndependentCause(t *test
 // git package records that provenance at the execution boundary, where it is
 // known, and the classifier reads the marker rather than guessing from the
 // shape of the error.
+//
+// The marker is read through the git package's own transport wrapper, which
+// adds the command and the captured stderr - a MESSAGE, not a meaning.
 func TestCancellationAttributableAcceptsAStoppedSubprocess(t *testing.T) {
 	cause := errors.New("daemon shutting down")
 	stopped := &git.CancelledExitError{ExitError: killedProcessExit(t)}
 	err := &stepExecutionError{step: "document", message: "git rev-parse: signal: terminated", cause: stopped}
 	if !cancellationAttributable(err, cause) {
 		t.Fatalf("a subprocess the context stopped was not attributed to the cancellation: %v", err)
+	}
+	transport := &git.CommandError{
+		Command: "rev-parse refs/heads/main^{commit}",
+		Stderr:  "signal: terminated",
+		Err:     errors.Join(stopped, context.Canceled),
+	}
+	if !cancellationAttributable(transport, cause) {
+		t.Fatalf("the marker was not read through git's transport wrapper: %v", transport)
 	}
 }
 
