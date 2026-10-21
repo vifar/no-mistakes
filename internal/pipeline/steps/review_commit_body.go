@@ -11,12 +11,20 @@ import (
 
 // Strip even quoted attribution before normalizing summary whitespace: once
 // flattened into a subject, a trailer can no longer be removed line by line.
-var reviewAIAttribution = regexp.MustCompile(`(?i)^[\s>"'\x60*-]*(?:generated\s+with\b|(?:claude|codex|chatgpt|openai|anthropic|copilot|gemini|grok|pi|omp|opencode|antigravity|rovodev|acp|no-mistakes)-session\s*:|(?:co-authored-by|assisted-by)\s*:\s*(?:no-mistakes(?:\s|:|$)|(?:claude(?: code)?|codex|chatgpt|openai|anthropic|(?:github )?copilot|gemini|grok|pi|omp|opencode|antigravity|rovodev|acp)(?:\[bot\])?(?:\s*<|:|[\s>"'\x60]*$)))`)
+var reviewAIAttribution = regexp.MustCompile(`(?i)^[\s>"'\x60*-]*(?:generated\s+with\b|assisted-by\s*:|(?:claude|codex|chatgpt|openai|anthropic|copilot|gemini|grok|pi|omp|opencode|antigravity|rovodev|acp|no-mistakes)-session\s*:|co-authored-by\s*:\s*(?:no-mistakes(?:\s|:|$)|(?:claude(?: code)?|codex|chatgpt|openai|anthropic|(?:github )?copilot|gemini|grok|pi|omp|opencode|antigravity|rovodev|acp)(?:\[bot\])?(?:\s*<|:|[\s>"'\x60]*$)))`)
 
-func stripReviewAIAttribution(text string) string {
+func stripReviewAIAttribution(text string, configuredTrailers []string) string {
 	var kept []string
 	for _, line := range strings.Split(text, "\n") {
-		if !reviewAIAttribution.MatchString(line) {
+		attribution := reviewAIAttribution.MatchString(line)
+		unquoted := strings.TrimRight(strings.TrimLeft(line, " \t\r>\"'`*-"), " \t\r\"'`")
+		for _, trailer := range configuredTrailers {
+			if strings.EqualFold(unquoted, strings.TrimRight(trailer, " \t\r\"'`")) {
+				attribution = true
+				break
+			}
+		}
+		if !attribution {
 			kept = append(kept, line)
 		}
 	}
@@ -26,7 +34,7 @@ func stripReviewAIAttribution(text string) string {
 // This is also the FixSummary returned to the executor for step_rounds. The
 // record is inserted after Execute returns, so reading a prior DB row here
 // would attach the wrong round's rationale to the commit.
-func reviewFixCommitSummary(summary string, producer *agent.Result) (subject, body string) {
+func reviewFixCommitSummary(summary string, producer *agent.Result, configuredTrailers []string) (subject, body string) {
 	raw := summary
 	reason := "fixer returned no summary"
 	if producer != nil && producer.Output != nil {
@@ -38,7 +46,7 @@ func reviewFixCommitSummary(summary string, producer *agent.Result) (subject, bo
 			raw = report.Summary
 		}
 	}
-	body = stripReviewAIAttribution(raw)
+	body = stripReviewAIAttribution(raw, configuredTrailers)
 	if body == "" {
 		if strings.TrimSpace(raw) != "" {
 			reason = "summary contained only attribution"
@@ -50,7 +58,7 @@ func reviewFixCommitSummary(summary string, producer *agent.Result) (subject, bo
 	return subject, body
 }
 
-func reviewFixCommitBody(summary, previousFindings string) string {
+func reviewFixCommitBody(summary, previousFindings string, configuredTrailers []string) string {
 	var b strings.Builder
 	b.WriteString(summary)
 	var findings Findings
@@ -68,8 +76,8 @@ func reviewFixCommitBody(summary, previousFindings string) string {
 			fmt.Fprintf(&b, "\n- %d more findings omitted", len(findings.Items)-i)
 			break
 		}
-		text := stripReviewAIAttribution(finding.Description)
-		if file := stripReviewAIAttribution(finding.File); file != "" {
+		text := stripReviewAIAttribution(finding.Description, configuredTrailers)
+		if file := stripReviewAIAttribution(finding.File, configuredTrailers); file != "" {
 			text = file + ": " + text
 		}
 		text = strings.Join(strings.Fields(text), " ")

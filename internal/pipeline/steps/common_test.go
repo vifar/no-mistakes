@@ -1192,7 +1192,7 @@ func TestExecuteFixMode_NoWorktreeChangesCanonicalizesAgentSummary(t *testing.T)
 	}
 }
 
-func TestExecuteFixMode_WorktreeChangesCanonicalizesMisleadingAgentSummary(t *testing.T) {
+func TestExecuteFixMode_NonReviewChangesCanonicalizeMisleadingAgentSummary(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
@@ -1209,7 +1209,7 @@ func TestExecuteFixMode_WorktreeChangesCanonicalizesMisleadingAgentSummary(t *te
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Fixing = true
 
-	summary, err := executeFixMode(sctx, types.StepReview, fixExecutionOptions{FallbackSummary: "apply review fix"})
+	summary, err := executeFixMode(sctx, types.StepLint, fixExecutionOptions{FallbackSummary: "apply lint fix"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1221,14 +1221,14 @@ func TestExecuteFixMode_WorktreeChangesCanonicalizesMisleadingAgentSummary(t *te
 	}
 	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"fixable warning"}],"summary":"1 warning"}`
 	md, _ := BuildPipelineSummary(
-		[]*db.StepResult{{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted}},
+		[]*db.StepResult{{ID: "s1", StepName: types.StepLint, Status: types.StepStatusCompleted}},
 		map[string][]*db.StepRound{"s1": {
 			{Round: 1, Trigger: "initial", FindingsJSON: &findings},
 			{Round: 2, Trigger: "auto_fix", FixSummary: &summary, FixApplied: sctx.FixApplied},
 		}},
 		testPipelineHeadSHA,
 	)
-	if !strings.Contains(md, "🔧 **Review** - 1 issue found → auto-fixed ✅") {
+	if !strings.Contains(md, "🔧 **Lint** - 1 issue found → auto-fixed ✅") {
 		t.Fatalf("expected committed fix in PR summary, got:\n%s", md)
 	}
 	if strings.Contains(md, "no changes applied") {

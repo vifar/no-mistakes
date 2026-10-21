@@ -21,11 +21,13 @@ func TestReviewFixCommitBody(t *testing.T) {
 		name, summary, wantBody, wantSubject string
 	}{
 		{"rationale", "Reject stale receipts so approval stays bound to the head", "Reject stale receipts so approval stays bound to the head", "Reject stale receipts so approval stays bound to the head"},
+		{"misleading wording", "no changes applied: checked formatting", "no changes applied: checked formatting", "no changes applied: checked formatting"},
 		{"multiline disclosure", "Bind receipts to HEAD\n\nRed first: stale receipt accepted before fix.\nGreen: focused regression passed.", "Red first: stale receipt accepted before fix.\nGreen: focused regression passed.", "Bind receipts to HEAD Red first: stale receipt accepted before fix. Green: focused regression passed"},
 		{"missing", "", "body: unavailable - fixer returned no summary", "address review findings"},
 		{"whitespace", " \n\t", "body: unavailable - fixer returned no summary", "address review findings"},
 		{"quoted attribution", "Guard receipts\n> Co-Authored-By: Claude <noreply@anthropic.com>\nGenerated with Codex\nClaude-Session: abc\nCo-Authored-By: Alex Example <alex@example.com>", "Guard receipts", "Guard receipts Co-Authored-By: Alex Example <alex@example.com>"},
 		{"only attribution", "> Co-Authored-By: Claude <noreply@anthropic.com>", "body: unavailable - summary contained only attribution", "address review findings"},
+		{"model attribution only", "Assisted-by: gpt-5.5", "body: unavailable - summary contained only attribution", "address review findings"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, base, head := setupGitRepo(t)
@@ -96,10 +98,10 @@ func TestReviewFixCommitBodySanitizesFindingsAndTrailers(t *testing.T) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
-	sctx.Config.Commit.Trailers = []string{"Co-Authored-By: Claude <noreply@anthropic.com>", "Co-Authored-By: Alex Example <alex@example.com>"}
+	sctx.Config.Commit.Trailers = []string{"Co-Authored-By: Claude <noreply@anthropic.com>", "Assisted-by: {{.Model}}"}
 	sctx.PreviousFindings = `{"findings":[{"description":"Guard approval\n> Co-Authored-By: Codex <ai@example.com>\nGenerated with Claude"}]}`
 	writeAgentChange(t, dir)
-	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "Guard receipts", "fallback", &agent.Result{}); err != nil {
+	if _, err := commitAgentFixesWithResult(sctx, types.StepReview, "Guard receipts\nCo-Authored-By: Alex Example <alex@example.com>", "fallback", &agent.Result{Model: "gpt-5.5"}); err != nil {
 		t.Fatal(err)
 	}
 	message := gitCmd(t, dir, "show", "-s", "--format=%B")
@@ -130,9 +132,15 @@ func TestReviewFixCommitAttributionBoundary(t *testing.T) {
 		"Assisted-by: Grok",
 		"Co-Authored-By: no-mistakes codex <noreply@example.com>",
 		"Assisted-by: no-mistakes:claude:local",
+		"Assisted-by: gpt-5.5",
+		"Co-Authored-By: gpt-5.5 <model@example.com>",
+		"> Reviewed-By: gpt-5.5",
+		`"Reviewed-By: gpt-5.5"`,
+		"Build-Agent: private-identifier",
+		"Co-Authored-By: configured-identity <noreply@example.com>",
 	}
 	noise := strings.Join(attribution, "\n")
-	cleanSummary := "Guard receipts\n\n" + disclosure + "\n\n" + human
+	cleanSummary := "Guard receipts\n\n" + disclosure + "\n\n" + human + "\n" + humanWithAIEmail
 	summary := cleanSummary + "\n" + noise
 	dir, base, head := setupGitRepo(t)
 	output, err := json.Marshal(map[string]string{"summary": summary, "verification": "passed"})
@@ -141,14 +149,24 @@ func TestReviewFixCommitAttributionBoundary(t *testing.T) {
 	}
 	ag := &mockAgent{name: "pi", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 		writeAgentChange(t, dir)
-		return &agent.Result{Output: output}, nil
+		return &agent.Result{Output: output, Model: "gpt-5.5"}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
 	sctx.Fixing = true
-	sctx.Config.Commit.Trailers = []string{human, humanWithAIEmail, "Assisted-by: {{.Agent}}:local", "Codex-Session: configured"}
+	sctx.Config.Commit.Trailers = []string{
+		"Assisted-by: {{.Agent}}:local",
+		"Assisted-by: {{.Model}}",
+		"Co-Authored-By: {{.Model}} <model@example.com>",
+		"Reviewed-By: {{.Model}}",
+		"Build-Agent: private-identifier",
+		"Co-Authored-By: configured-identity <noreply@example.com>",
+		"Codex-Session: configured",
+	}
 	findings, err := json.Marshal(Findings{Items: []Finding{
 		{File: "receipt.go\n" + noise, Description: disclosure + "\n" + noise},
 		{Description: human},
+		{File: humanWithAIEmail, Description: "Keep the human attribution"},
+		{File: disclosure, Description: "Keep ordinary prose"},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -161,16 +179,16 @@ func TestReviewFixCommitAttributionBoundary(t *testing.T) {
 	if gotSummary != cleanSummary {
 		t.Errorf("persisted summary = %q, want %q", gotSummary, cleanSummary)
 	}
-	wantBody := cleanSummary + "\n\nRound findings:\n- receipt.go: " + disclosure + "\n- " + human + "\n\n" + human + "\n" + humanWithAIEmail
+	wantBody := cleanSummary + "\n\nRound findings:\n- receipt.go: " + disclosure + "\n- " + human + "\n- " + humanWithAIEmail + ": Keep the human attribution\n- " + disclosure + ": Keep ordinary prose"
 	if body := gitCmd(t, dir, "show", "-s", "--format=%b"); body != wantBody {
 		t.Errorf("body = %q, want %q", body, wantBody)
 	}
-	wantSubject := "no-mistakes(review): Guard receipts " + disclosure + " " + human
+	wantSubject := "no-mistakes(review): Guard receipts " + disclosure + " " + human + " " + humanWithAIEmail
 	if subject := lastCommitMessage(t, dir); subject != wantSubject {
 		t.Errorf("subject = %q, want %q", subject, wantSubject)
 	}
-	if trailers := gitTrailers(t, dir); trailers != human+"\n"+humanWithAIEmail {
-		t.Errorf("trailers = %q, want only human co-authors", trailers)
+	if trailers := gitTrailers(t, dir); trailers != "" {
+		t.Errorf("trailers = %q, want no configured attribution", trailers)
 	}
 }
 
