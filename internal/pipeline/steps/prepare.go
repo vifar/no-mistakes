@@ -23,11 +23,11 @@ var (
 // ensurePrepared runs the trusted preparation command before the first
 // configured Test, Lint, or Format command, Review fix, Document or agent Lint
 // turn, or an opted-in agent-only Test.
-// Successful preparation is shared for the executor lifetime. Only ignored
-// materialization (for example node_modules) and submodules checked out at
-// their recorded commits survive preparation; its tracked and ordinary
-// untracked mutations are removed so setup cannot ride into a later pipeline
-// fix commit.
+// Successful preparation is shared per worktree, including after recovery.
+// Only ignored materialization (for example node_modules) and submodules
+// checked out at their recorded commits survive preparation; its tracked and
+// ordinary untracked mutations are removed so setup cannot ride into a later
+// pipeline fix commit.
 func ensurePrepared(sctx *pipeline.StepContext, logStep types.StepName) error {
 	prepareCmd := strings.TrimSpace(sctx.Config.Commands.Prepare)
 	if prepareCmd == "" {

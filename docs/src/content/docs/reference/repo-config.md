@@ -1197,7 +1197,7 @@ test:
 # commands.test remains unset: Test is agent-driven.
 ```
 
-Opts agent-only Test into running `commands.prepare` before its first agent turn (including a repair turn). Uses the same successful-worktree receipt, cleanup/restoration, failure reporting, and recovery behavior as configured Test/Lint/Format; later configured commands do not install again. A new worktree prepares separately. Existing dependencies or an agent's claim that installation succeeded do not count as managed preparation. An empty `commands.prepare` remains a no-op, and configured `commands.test` retains its existing preparation behavior.
+Opts agent-only Test into running [`commands.prepare`](#commandsprepare) before its first agent turn (including a repair turn), using the shared preparation lifecycle described there. A new worktree prepares separately. Existing dependencies or an agent's claim that installation succeeded do not count as managed preparation. Configured `commands.test` retains its existing preparation behavior.
 
 This is **eager**, not on-demand: opted-in repositories pay setup cost even when the evidence agent subsequently reports `no-surface`. Leave it off to retain lazy preparation at the other callers described under [`commands.prepare`](#commandsprepare). Preparation does not replace fresh Test evidence or change verdict/approval policy. Failures stop Test before the agent launches and never record successful preparation.
 
