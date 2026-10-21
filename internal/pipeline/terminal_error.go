@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -37,8 +38,15 @@ func (e *stepExecutionError) Error() string {
 func (e *stepExecutionError) Unwrap() error { return e.cause }
 
 func CancellationOnly(err, cause error) bool {
+	return cancellationOnly(err, cause, false)
+}
+
+func cancellationOnly(err, cause error, allowInterruptedGit bool) bool {
 	if err == nil || cause == nil {
 		return false
+	}
+	if command, ok := err.(*git.CommandError); ok && allowInterruptedGit && command.Interrupted {
+		return errors.Is(command, context.Canceled)
 	}
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
 		children := joined.Unwrap()
@@ -46,14 +54,14 @@ func CancellationOnly(err, cause error) bool {
 			return false
 		}
 		for _, child := range children {
-			if !CancellationOnly(child, cause) {
+			if !cancellationOnly(child, cause, allowInterruptedGit) {
 				return false
 			}
 		}
 		return true
 	}
 	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		return CancellationOnly(wrapped.Unwrap(), cause)
+		return cancellationOnly(wrapped.Unwrap(), cause, allowInterruptedGit)
 	}
 	return err == context.Canceled || err == cause
 }

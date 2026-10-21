@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
@@ -27,6 +28,9 @@ type CommandError struct {
 	Command string
 	Stderr  string
 	Err     error
+	// Interrupted records an acknowledged cancellation with only the expected
+	// termination exit. It is not proof suitable for preserving CI success.
+	Interrupted bool
 }
 
 func (e *CommandError) Error() string {
@@ -134,15 +138,24 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	shellenv.ConfigureShellCommand(cmd)
+	var interrupted atomic.Bool
+	cancel := cmd.Cancel
+	cmd.Cancel = func() error {
+		err := cancel()
+		interrupted.Store(err == nil)
+		return err
+	}
 	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
+		cancelledExit := interrupted.Load() && cancellationExit(err)
 		if ctx.Err() != nil {
 			err = errors.Join(err, ctx.Err())
 		}
 		return nil, &CommandError{
-			Command: safeurl.RedactText(strings.Join(args, " ")),
-			Stderr:  safeurl.RedactText(stderr.String()),
-			Err:     err,
+			Command:     safeurl.RedactText(strings.Join(args, " ")),
+			Stderr:      safeurl.RedactText(stderr.String()),
+			Err:         err,
+			Interrupted: cancelledExit,
 		}
 	}
 	return out, nil

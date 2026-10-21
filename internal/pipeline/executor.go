@@ -3316,7 +3316,13 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		if infrastructure {
 			break
 		}
-		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled && CancellationOnly(err, cause) {
+		cause := context.Cause(ctx)
+		// An operator can interrupt an ordinary Git read. Certified watchers and
+		// shutdown recovery still require the stricter cancellation-only proof:
+		// a signal exit is ambiguous evidence for preserving published success.
+		allowInterruptedGit := cause != nil && !watcherCancellation(err) &&
+			(cause.Error() == types.RunCancelReasonAbortedByUser || cause.Error() == types.RunCancelReasonSuperseded)
+		if cause != nil && cause != context.Canceled && cancellationOnly(err, cause, allowInterruptedGit) {
 			errMsg = cause.Error()
 			explicitCancellation = cause.Error() == types.RunCancelReasonAbortedByUser
 			if planned, ok := cause.(*ControlledShutdownCause); ok && planned.Instance != "" && planned.Instance == e.runtimeInstance {
