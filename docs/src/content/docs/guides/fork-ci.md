@@ -82,6 +82,15 @@ that only balances the number of tests leaves one shard as the suite's long
 pole while the rest idle, and the suite costs the sum of its shards instead
 of the time of its slowest one.
 
+The pipeline-step tests have their own worker. They are 1423 tests and they
+are fast, but they are also the reason the daemon-slot-constrained shards
+were long: a shard's `-run` pattern names tests, not packages, so every
+shard ran every package's selected tests. The step tests never take a daemon
+slot - only the e2e harness does - so a worker of their own competes for
+nothing and can run beside the shards. Their own worker also keeps them out
+of the shards' discovery, so a test is never both placed in a shard and run
+by another worker.
+
 The shard count is bounded by what the daemon cap leaves. The terminal worker
 runs alongside the shards and takes one of the cap's slots, and each shard is
 a whole Go test process that needs a slot of its own. A shard that cannot get

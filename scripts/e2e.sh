@@ -108,9 +108,9 @@ place_shards() {
   # The discovered tests, most expensive first. The sort is by the measured
   # cost and then by name, so the order is total and deterministic.
   #
-  # The journeys the terminal worker owns are left out: they run in that
-  # worker, not in a shard, and counting their cost against a shard would
-  # skew the balance away from the journeys that shard really runs.
+  # Only the E2E journeys are placed. The pipeline-step tests have their own
+  # worker, and the journeys the terminal worker owns run in that worker; a
+  # test placed in a shard and run by another worker would run twice.
   local placed
   placed="$(printf '%s\n' "$all_tests" | awk -v costs="$cost_file" -v fallback="$default_cost" '
     BEGIN {
@@ -262,6 +262,12 @@ if [[ "$#" -eq 0 ]]; then
   #
   # The discovery runs BEFORE any worker starts, so a failure here leaves no
   # worker behind to report a result the discovery already invalidated.
+  #
+  # The two inventories are kept apart. The pipeline-step tests run in their
+  # own worker and are never placed in a shard; the e2e journeys are the
+  # ones the shards balance. Keeping them apart is what makes "every test
+  # runs exactly once" true: a test that is both placed in a shard and run
+  # by another worker would run twice.
   all_tests=""
   for package in ./internal/e2e/... ./internal/pipeline/steps/...; do
     listed="$(go test -tags=e2e -count=1 -timeout 120s -list '.*' "$package" 2>/dev/null)"
@@ -275,8 +281,10 @@ if [[ "$#" -eq 0 ]]; then
       echo "e2e suite discovered no tests in $package" >&2
       exit 1
     fi
-    all_tests="${all_tests}${listed}
+    if [[ "$package" == "./internal/e2e/..." ]]; then
+      all_tests="${all_tests}${listed}
 "
+    fi
   done
 
   # The budget is recomputed AFTER the discovery, because the discovery is
@@ -301,6 +309,19 @@ if [[ "$#" -eq 0 ]]; then
   go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
     -run '^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$' ./internal/e2e/... &
   terminal_pid=$!
+
+  # The pipeline-step tests get their own worker. They are 1423 tests, and
+  # they are FAST, but they are also the reason the daemon-slot-constrained
+  # shards were long: a shard's -run pattern names tests, not packages, so
+  # every shard ran every package's selected tests. The step tests never
+  # take a daemon slot - only the e2e harness does - so a worker of their
+  # own competes for nothing and can run beside the shards.
+  #
+  # Giving them their own worker also keeps them out of the shards'
+  # discovery: a shard's pattern then names only journeys, and the step
+  # tests are no longer counted twice.
+  go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" ./internal/pipeline/steps/... &
+  steps_pid=$!
 
   # Everything else is split across shards. Each shard runs its own go test
   # process with its own timeout, so a slow journey in one shard cannot eat
@@ -344,7 +365,7 @@ if [[ "$#" -eq 0 ]]; then
     go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
       -run "^(${shard_pattern})$" \
       -skip '^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$' \
-      ./internal/e2e/... ./internal/pipeline/steps/... &
+      ./internal/e2e/... &
     shard_pids+=("$!")
     shard_statuses+=(0)
     shard_index=$((shard_index + 1))
@@ -352,6 +373,8 @@ if [[ "$#" -eq 0 ]]; then
 
   terminal_status=0
   wait "$terminal_pid" || terminal_status=$?
+  steps_status=0
+  wait "$steps_pid" || steps_status=$?
   shard_index=0
   while (( shard_index < ${#shard_pids[@]} )); do
     wait "${shard_pids[$shard_index]}" || shard_statuses[$shard_index]=$?
@@ -359,6 +382,9 @@ if [[ "$#" -eq 0 ]]; then
   done
   if (( terminal_status != 0 )); then
     exit "$terminal_status"
+  fi
+  if (( steps_status != 0 )); then
+    exit "$steps_status"
   fi
   shard_index=0
   while (( shard_index < ${#shard_statuses[@]} )); do
