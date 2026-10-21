@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -117,10 +116,7 @@ esac
 	}
 	// Restore a crash snapshot taken 120 seconds after parking, despite the
 	// acceptance having frozen its parked duration at ten seconds.
-	snapshotDB, err := sql.Open("sqlite", p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
+	snapshotDB := openControlDB(t, p.DB())
 	_, err = snapshotDB.Exec("UPDATE runs SET awaiting_agent_since = ? WHERE id = ?", time.Now().Add(-120*time.Second).Unix(), run.ID)
 	closeErr := snapshotDB.Close()
 	if err != nil || closeErr != nil {

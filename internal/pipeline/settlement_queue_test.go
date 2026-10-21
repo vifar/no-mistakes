@@ -2,14 +2,42 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 )
+
+// openControlDB opens a second connection to a test's database, with the
+// same pragmas the production connection uses.
+//
+// The control connection is how a fixture reaches past the pipeline to make
+// the storage misbehave - a trigger that refuses one run's terminal write, a
+// held lock, a renamed table. Those statements take a schema lock, and the
+// pipeline's own connection holds it whenever a statement is in flight. A
+// control connection WITHOUT the busy timeout fails that lock immediately
+// with SQLITE_BUSY, so the fixture's fault injection is really a race with
+// the pipeline's next statement, and the fixture fails for a reason that has
+// nothing to do with the behaviour it is testing.
+//
+// The production connection waits for the lock (see internal/db.Open), so the
+// control connection waits the same way. The fixtures then fail for the
+// reason they are about.
+func openControlDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	control, err := sql.Open("sqlite", fmt.Sprintf("%s?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(%d)", path, sqlitewrite.BusyTimeout.Milliseconds()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { control.Close() })
+	return control
+}
 
 // The settlement queues are global, and the production code serializes every
 // drain with the commit status lock. The fixtures below do the same, so a

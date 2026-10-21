@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"os"
 	"strings"
@@ -33,11 +32,7 @@ func TestPlannedShutdownRefusesUnsettledUnadmittedRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	control, err := sql.Open("sqlite", p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer control.Close()
+	control := openControlDB(t, p.DB())
 	if _, err := control.Exec(`CREATE TRIGGER fail_unadmitted_terminal BEFORE UPDATE OF status ON runs BEGIN SELECT RAISE(ABORT, 'storage unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
