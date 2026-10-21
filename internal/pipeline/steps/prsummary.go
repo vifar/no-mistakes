@@ -1556,6 +1556,9 @@ const (
 )
 
 func fixRoundOutcome(r *db.StepRound) fixOutcome {
+	if r.StartingHeadSHA != nil && r.ReviewedHeadSHA != nil && *r.StartingHeadSHA != "" && *r.ReviewedHeadSHA != "" && *r.StartingHeadSHA != *r.ReviewedHeadSHA {
+		return fixOutcomeApplied
+	}
 	if r.FixSummary == nil || strings.TrimSpace(*r.FixSummary) == "" {
 		return fixOutcomeUnreported
 	}

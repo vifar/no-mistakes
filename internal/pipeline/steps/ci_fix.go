@@ -298,7 +298,7 @@ CI logs:
 		return ciRepairResult{}, fmt.Errorf("agent CI fix: %w", err)
 	}
 
-	conclusion, conclusionErr := extractCIFixConclusion(result)
+	conclusion, conclusionErr := extractCIFixConclusion(result, sctx.Config.Commit.Trailers...)
 	if conclusionErr != nil {
 		sctx.Log(fmt.Sprintf("warning: could not parse CI repair conclusion: %v", conclusionErr))
 	}
@@ -462,8 +462,8 @@ var ciFixConclusionSchema = json.RawMessage(fmt.Sprintf(`{
 	"required": ["summary", "code_change_needed"]
 }`, config.MaxFixMessageSummaryBytes))
 
-func extractCIFixConclusion(result *agent.Result) (ciFixConclusion, error) {
-	summary, err := extractCommitSummary(result)
+func extractCIFixConclusion(result *agent.Result, configured ...string) (ciFixConclusion, error) {
+	summary, err := extractCommitSummary(result, configured...)
 	if err != nil {
 		return ciFixConclusion{}, err
 	}

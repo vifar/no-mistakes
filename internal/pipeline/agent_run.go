@@ -147,21 +147,15 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 	}
 	defer release()
 	var before string
-	var trailers []string
-	if sctx != nil && sctx.Config != nil {
-		trailers = sctx.Config.Commit.Trailers
-	}
 	if sctx != nil && sctx.Run != nil && sctx.WorkDir != "" {
 		before, err = git.HeadSHA(parent, sctx.WorkDir)
 		if err != nil {
 			return nil, err
 		}
-		var cleanup func()
-		opts.Env, cleanup, err = git.AttributionHookEnv(sctx.WorkDir, opts.Env, func(args ...string) (string, error) { return git.Run(parent, sctx.WorkDir, args...) }, trailers...)
+		opts.Env, err = sctx.CommitAttributionEnv(opts.Env, func(args ...string) (string, error) { return git.Run(parent, sctx.WorkDir, args...) })
 		if err != nil {
 			return nil, err
 		}
-		defer cleanup()
 	}
 	activity := observeAgentActivity(&opts)
 	result, runErr := invokeAgent(parent, timeout, working, stall, cause, activity, func(ctx context.Context) (*agent.Result, error) {
@@ -178,7 +172,7 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 		if err != nil {
 			return result, err
 		}
-		if err := git.ValidateCommitAttribution(before, after, func(args ...string) (string, error) { return git.Run(parent, sctx.WorkDir, args...) }, trailers...); err != nil {
+		if err := sctx.ValidateCommitAttribution(before, after, func(args ...string) (string, error) { return git.Run(parent, sctx.WorkDir, args...) }); err != nil {
 			return result, err
 		}
 	}

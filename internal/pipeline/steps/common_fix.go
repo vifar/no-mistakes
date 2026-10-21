@@ -488,7 +488,7 @@ func runPipelineCorrectionAgent(sctx *pipeline.StepContext, invoke func() (*agen
 }
 
 func recordPipelineHeadRange(sctx *pipeline.StepContext, before, after string) error {
-	if err := git.ValidateCommitAttribution(before, after, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }, sctx.Config.Commit.Trailers...); err != nil {
+	if err := sctx.ValidateCommitAttribution(before, after, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }); err != nil {
 		return err
 	}
 	if sctx.DB == nil || before == after {
@@ -520,7 +520,7 @@ func recordPipelineHeadRange(sctx *pipeline.StepContext, before, after string) e
 }
 
 func recordAgentFixHead(sctx *pipeline.StepContext, stepName types.StepName, headSHA string) error {
-	if err := git.ValidateCommitAttribution(sctx.Run.HeadSHA, headSHA, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }, sctx.Config.Commit.Trailers...); err != nil {
+	if err := sctx.ValidateCommitAttribution(sctx.Run.HeadSHA, headSHA, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }); err != nil {
 		return err
 	}
 	if headSHA == sctx.Run.HeadSHA {
@@ -553,7 +553,7 @@ func fixResultSummary(committed bool) string {
 	return NoChangesAppliedSummary
 }
 
-func extractCommitSummary(result *agent.Result) (string, error) {
+func extractCommitSummary(result *agent.Result, configured ...string) (string, error) {
 	var summary commitSummary
 	if result.Output == nil {
 		return "", fmt.Errorf("agent returned no structured summary")
@@ -569,7 +569,7 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 	}
 	// Strip while the raw summary still has trailer boundaries; flattening
 	// first would turn the attribution into irreversible subject prose.
-	cleaned := strings.Join(strings.Fields(git.StripAIAttributionTrailers(summary.Summary)), " ")
+	cleaned := strings.Join(strings.Fields(git.StripAIAttributionTrailers(summary.Summary, configured...)), " ")
 	cleaned = strings.Trim(cleaned, " \t\r\n\"'.;:,-")
 	return cleaned, nil
 }
@@ -632,7 +632,7 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 			return "", err
 		}
 	}
-	summary, err := extractCommitSummary(result)
+	summary, err := extractCommitSummary(result, sctx.Config.Commit.Trailers...)
 	if err != nil {
 		if errors.Is(err, errRejectedCommitSummary) {
 			return "", fmt.Errorf("validate %s fix summary: %w", stepName, err)

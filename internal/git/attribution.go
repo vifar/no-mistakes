@@ -10,6 +10,8 @@ import (
 
 var attributionTrailerKey = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*[ \t]*:`)
 var generatedAttribution = regexp.MustCompile(`(?i)^(?:🤖[ \t]*)?generated[ \t]+with[ \t]+(.+)$`)
+var modelAttributionIdentity = regexp.MustCompile(`^(?:gpt-[0-9][a-z0-9.-]*|o[134](?:-[a-z0-9.-]+)?|claude-(?:opus|sonnet|haiku)-[a-z0-9.-]+|gemini-[0-9][a-z0-9.-]*)$`)
+
 var attributionLink = regexp.MustCompile(`^\[([^]]+)\]\(https?://[^)]+\)$`)
 
 // IsAIAttributionTrailer classifies a complete, unfolded attribution line.
@@ -62,6 +64,9 @@ func IsAIAttributionTrailer(line string) bool {
 
 func aiAttributionIdentity(name string) bool {
 	name = strings.ToLower(strings.Join(strings.Fields(name), " "))
+	if modelAttributionIdentity.MatchString(name) {
+		return true
+	}
 	switch name {
 	case "claude", "claude code", "codex", "chatgpt", "openai", "anthropic",
 		"copilot", "github copilot", "gemini", "grok", "pi", "omp", "opencode", "no-mistakes",
@@ -97,6 +102,10 @@ func attributionAddress(value string) (*mail.Address, error) {
 // Generated-with footers are recognized alongside Git's key:value trailers.
 // Continuations belong to their trailer, so deleting one cannot orphan its value.
 func StripAIAttributionTrailers(message string, configured ...string) string {
+	return stripAttribution(message, configured, nil)
+}
+
+func stripAttribution(message string, configured []string, preserved map[string]int) string {
 	lines := strings.Split(message, "\n")
 	drop := make([]bool, len(lines))
 	changed := false
@@ -139,6 +148,18 @@ func StripAIAttributionTrailers(message string, configured ...string) string {
 			if !IsAIAttributionTrailer(entry.text) && !configuredAttribution(entry.text, configured) {
 				allRemoved = false
 				continue
+			}
+			if preserved != nil {
+				if preserved["*"] < 0 {
+					preserved[entry.text]++
+					allRemoved = false
+					continue
+				}
+				if preserved[entry.text] > 0 {
+					preserved[entry.text]--
+					allRemoved = false
+					continue
+				}
 			}
 			changed = true
 			for i := entry.start; i < entry.end; i++ {
@@ -194,4 +215,14 @@ func configuredAttribution(line string, sources []string) bool {
 		}
 	}
 	return false
+}
+
+func stripAttributionPreserving(message, original string, configured []string) string {
+	var preserved map[string]int
+	if original != "" {
+		preserved = map[string]int{"*": -1}
+		stripAttribution(original, configured, preserved)
+		delete(preserved, "*")
+	}
+	return stripAttribution(message, configured, preserved)
 }

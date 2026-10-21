@@ -474,7 +474,7 @@ func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	if _, err := git.Run(ctx, sctx.WorkDir, "rebase", targetRef); err != nil {
+	if _, err := stepGitRun(sctx, "rebase", targetRef); err != nil {
 		conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
 
@@ -497,7 +497,7 @@ func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef 
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	if _, err := git.Run(ctx, sctx.WorkDir, "rebase", targetRef); err == nil {
+	if _, err := stepGitRun(sctx, "rebase", targetRef); err == nil {
 		return nil
 	}
 
@@ -596,7 +596,7 @@ func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string)
 	}
 
 	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
-	if _, err := git.Run(ctx, sctx.WorkDir, mergeArgs(targetRef)...); err != nil {
+	if _, err := stepGitRun(sctx, mergeArgs(targetRef)...); err != nil {
 		conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
 		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
 
@@ -639,7 +639,7 @@ func mergeWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef s
 	}
 
 	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
-	if _, err := git.Run(ctx, sctx.WorkDir, mergeArgs(targetRef)...); err == nil {
+	if _, err := stepGitRun(sctx, mergeArgs(targetRef)...); err == nil {
 		return nil
 	}
 
@@ -888,6 +888,9 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext, targetBranch
 	headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve head after rebase: %w", err)
+	}
+	if err := sctx.ValidateCommitAttribution(sctx.Run.HeadSHA, headSHA, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }); err != nil {
+		return nil, err
 	}
 	if headSHA != "" && headSHA != sctx.Run.HeadSHA {
 		oldHead := sctx.Run.HeadSHA

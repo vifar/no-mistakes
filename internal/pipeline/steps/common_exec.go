@@ -206,14 +206,12 @@ func stepGitRunInput(sctx *pipeline.StepContext, input string, args ...string) (
 		cmd.Stdin = strings.NewReader(input)
 	}
 	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
-	if len(args) > 0 && args[0] == "commit" {
-		var cleanup func()
+	if len(args) > 0 && (args[0] == "commit" || args[0] == "merge" || args[0] == "rebase" || args[0] == "cherry-pick" || args[0] == "am") {
 		var err error
-		cmd.Env, cleanup, err = git.AttributionHookEnv(sctx.WorkDir, cmd.Env, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }, sctx.Config.Commit.Trailers...)
+		cmd.Env, err = sctx.CommitAttributionEnv(cmd.Env, func(args ...string) (string, error) { return stepGitRun(sctx, args...) })
 		if err != nil {
 			return "", err
 		}
-		defer cleanup()
 	}
 	out, err := cmd.Output()
 	if err != nil {
@@ -232,7 +230,7 @@ func stepGitHeadSHA(sctx *pipeline.StepContext) (string, error) {
 		return "", err
 	}
 	if sctx.Run != nil && sctx.Config != nil {
-		if err := git.ValidateCommitAttribution(sctx.Run.HeadSHA, head, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }, sctx.Config.Commit.Trailers...); err != nil {
+		if err := sctx.ValidateCommitAttribution(sctx.Run.HeadSHA, head, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }); err != nil {
 			return "", err
 		}
 	}

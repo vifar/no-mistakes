@@ -77,3 +77,11 @@ func TestStripAIAttributionTrailersConfiguredIdentifiers(t *testing.T) {
 		t.Fatalf("message = %q, want %q", got, want)
 	}
 }
+
+func TestAttributionBoundaryStandaloneModel(t *testing.T) {
+	input := "repair widget\n\nCo-Authored-By: gpt-5.5 <model@example.com>\nCo-Authored-By: Claude Smith <person@example.com>\nCo-Authored-By: Claude <claude@example.com>"
+	want := "repair widget\n\nCo-Authored-By: Claude Smith <person@example.com>\nCo-Authored-By: Claude <claude@example.com>"
+	if got := StripAIAttributionTrailers(input); got != want {
+		t.Fatalf("unconfigured model identity = %q, want %q", got, want)
+	}
+}
