@@ -103,7 +103,7 @@ func TestReapWorktreesHonorsRetentionAndSparesActiveRuns(t *testing.T) {
 	}
 }
 
-// A Document refusal must preserve owner work even after the retention window;
+// A Rebase or Document refusal must preserve owner work even after the retention window;
 // ordinary terminal leftovers must remain eligible for cleanup.
 func TestReapWorktreesPreservesFailedDocument(t *testing.T) {
 	for _, test := range []struct {
@@ -113,7 +113,7 @@ func TestReapWorktreesPreservesFailedDocument(t *testing.T) {
 		keep bool
 	}{
 		{"failed document", types.StepDocument, true, true},
-		{"failed rebase", types.StepRebase, true, false},
+		{"failed rebase", types.StepRebase, true, true},
 		{"completed rebase", types.StepRebase, false, false},
 		{"completed document", types.StepDocument, false, false},
 		{"failed lint", types.StepLint, true, false},
