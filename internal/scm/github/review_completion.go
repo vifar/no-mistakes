@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +17,7 @@ import (
 
 // Codex does not publish check runs. Its review commit_id is authoritative;
 // summary comments carry the reviewed commit explicitly. Never infer completion
-// from arbitrary text, another author's comment, or a review of an older head.
+// from arbitrary text or another author's comment.
 var reviewedCommit = regexp.MustCompile("(?m)\\*\\*Reviewed commit:\\*\\* `([0-9a-fA-F]{7,40})`")
 
 type botReviewActivity struct {
@@ -32,6 +34,10 @@ type botReviewActivity struct {
 }
 
 func (h *Host) reviewActivity(ctx context.Context, endpoint string) ([]botReviewActivity, error) {
+	return readReviewActivity[botReviewActivity](ctx, h, endpoint)
+}
+
+func readReviewActivity[T any](ctx context.Context, h *Host, endpoint string) ([]T, error) {
 	args := []string{"api"}
 	if h.host != "" {
 		args = append(args, "--hostname", h.host)
@@ -45,9 +51,9 @@ func (h *Host) reviewActivity(ctx context.Context, endpoint string) ([]botReview
 	if err = json.Unmarshal(out, &pages); err != nil || pages == nil {
 		return nil, errors.New("invalid review completion pages")
 	}
-	var activity []botReviewActivity
+	var activity []T
 	for _, page := range pages {
-		var rows []botReviewActivity
+		var rows []T
 		if err = json.Unmarshal(page, &rows); err != nil || rows == nil {
 			return nil, errors.New("invalid review completion page")
 		}
@@ -96,25 +102,32 @@ func (h *Host) reviewBotState(ctx context.Context, pr *scm.PR, bot scm.ReviewBot
 		return "", err
 	}
 	state := "absent"
-	var lastCompletion time.Time
+	type completion struct {
+		head string
+		at   time.Time
+	}
+	var completions []completion
 	for _, review := range reviews {
 		author, ok := scm.ReviewBotForLogin(scm.ProviderGitHub, review.User.Login)
 		if !ok || author.AppSlug != bot.AppSlug {
 			continue
 		}
-		if review.CommitID != pr.HeadSHA {
-			continue
-		}
-		if review.State != "PENDING" && review.SubmittedAt.After(lastCompletion) {
-			lastCompletion = review.SubmittedAt
-		}
 		switch review.State {
 		case "PENDING":
-			return "pending", nil
+			if review.CommitID == pr.HeadSHA {
+				return "pending", nil
+			}
 		case "COMMENTED", "APPROVED", "CHANGES_REQUESTED", "DISMISSED":
-			state = "settled"
+			if review.CommitID == pr.HeadSHA {
+				state = "settled"
+			}
+			if isFullCommitSHA(review.CommitID) && !review.SubmittedAt.IsZero() {
+				completions = append(completions, completion{review.CommitID, review.SubmittedAt})
+			}
 		default:
-			return "", fmt.Errorf("unknown review completion state %q", review.State)
+			if review.CommitID == pr.HeadSHA {
+				return "", fmt.Errorf("unknown review completion state %q", review.State)
+			}
 		}
 	}
 	for _, summary := range summaries {
@@ -123,19 +136,20 @@ func (h *Host) reviewBotState(ctx context.Context, pr *scm.PR, bot scm.ReviewBot
 			continue
 		}
 		match := reviewedCommit.FindStringSubmatch(summary.Body)
-		if len(match) == 2 && strings.HasPrefix(strings.ToLower(pr.HeadSHA), strings.ToLower(match[1])) {
-			if summary.CreatedAt.After(lastCompletion) {
-				lastCompletion = summary.CreatedAt
+		if len(match) == 2 {
+			head := strings.ToLower(match[1])
+			if !summary.CreatedAt.IsZero() {
+				completions = append(completions, completion{head, summary.CreatedAt})
 			}
-			state = "settled"
+			if strings.HasPrefix(pr.HeadSHA, head) {
+				state = "settled"
+			}
 		}
 	}
-	// The documented start signal is a bot-authored eyes reaction on an
-	// explicit review request. Counts on the comment do not prove authorship.
-	// Only a completion of the current head may retire pending requests; a
-	// late completion of an older head cannot speak for the current review. A +1 reaction is the clean-review completion.
+	var pushes []reviewHeadPush
+	historyRead := false
 	for _, request := range summaries {
-		if request.ID <= 0 || request.CreatedAt.IsZero() || !request.CreatedAt.After(lastCompletion) || !codexReviewRequest.MatchString(request.Body) {
+		if request.ID <= 0 || request.CreatedAt.IsZero() || !codexReviewRequest.MatchString(request.Body) {
 			continue
 		}
 		reactions, err := h.reviewActivity(ctx, "repos/"+repo+"/issues/comments/"+strconv.FormatInt(request.ID, 10)+"/reactions")
@@ -152,7 +166,28 @@ func (h *Host) reviewBotState(ctx context.Context, pr *scm.PR, bot scm.ReviewBot
 			clean = clean || reaction.Content == "+1"
 		}
 		if eyes && !clean {
-			return "pending", nil
+			settled := false
+			for _, completed := range completions {
+				if !completed.at.After(request.CreatedAt) {
+					continue
+				}
+				if !historyRead {
+					pushes, err = h.reviewRequestHistory(ctx, &scm.PR{Number: number, URL: pr.URL, HeadSHA: pr.HeadSHA})
+					if err != nil {
+						return "", err
+					}
+					historyRead = true
+				}
+				requestedHead := reviewRequestHead(pushes, request.CreatedAt)
+				if requestedHead != "" && strings.HasPrefix(requestedHead, completed.head) {
+					settled = true
+					break
+				}
+			}
+			if !settled {
+				return "pending", nil
+			}
+			state = "settled"
 		}
 		if clean {
 			state = "settled"
@@ -164,3 +199,57 @@ func (h *Host) reviewBotState(ctx context.Context, pr *scm.PR, bot scm.ReviewBot
 // Other mentions ask Codex to work; they are not review readiness signals.
 // https://developers.openai.com/codex/integrations/github/
 var codexReviewRequest = regexp.MustCompile(`(?im)^\s*@codex[ \t]+review(?:[ \t].*)?\s*$`)
+
+type reviewHeadPush struct {
+	Ref      string    `json:"ref"`
+	Before   string    `json:"before"`
+	After    string    `json:"after"`
+	PushedAt time.Time `json:"pushed_at"`
+}
+
+func (h *Host) reviewRequestHistory(ctx context.Context, pr *scm.PR) ([]reviewHeadPush, error) {
+	facts, err := h.ReadPRFacts(ctx, pr)
+	if err != nil {
+		return nil, err
+	}
+	if facts.HeadSHA != pr.HeadSHA {
+		return nil, errors.New("PR head changed while attributing review requests")
+	}
+	ref := "refs/heads/" + facts.SourceBranch
+	pushes, err := readReviewActivity[reviewHeadPush](ctx, h, "repos/"+facts.SourceRepository+"/activity?ref="+url.QueryEscape(ref)+"&per_page=100")
+	if err != nil {
+		return nil, err
+	}
+	for _, push := range pushes {
+		if push.Ref != ref || push.PushedAt.IsZero() || !isFullCommitSHA(push.Before) || !isFullCommitSHA(push.After) {
+			return nil, errors.New("invalid review request head history")
+		}
+	}
+	sort.Slice(pushes, func(i, j int) bool { return pushes[i].PushedAt.Before(pushes[j].PushedAt) })
+	for i := 1; i < len(pushes); i++ {
+		if !pushes[i].PushedAt.After(pushes[i-1].PushedAt) || pushes[i].Before != pushes[i-1].After {
+			return nil, errors.New("ambiguous review request head history")
+		}
+	}
+	if len(pushes) > 0 && pushes[len(pushes)-1].After != pr.HeadSHA {
+		return nil, errors.New("review request history does not reach the PR head")
+	}
+	return pushes, nil
+}
+
+func reviewRequestHead(pushes []reviewHeadPush, at time.Time) string {
+	head := ""
+	for _, push := range pushes {
+		if push.PushedAt.Equal(at) {
+			return ""
+		}
+		if push.PushedAt.After(at) {
+			break
+		}
+		head = push.After
+	}
+	if head == strings.Repeat("0", 40) {
+		return ""
+	}
+	return head
+}

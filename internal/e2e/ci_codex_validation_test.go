@@ -103,6 +103,7 @@ func TestCIScopeCodexFreshReceiptJourney(t *testing.T) {
 		reviews, summaries, reactions []json.RawMessage
 		threads                       []forgeThread
 		ready, readError              bool
+		historical                    bool
 		wantError                     string
 	}{
 		{name: "no-participation", ready: true},
@@ -113,17 +114,28 @@ func TestCIScopeCodexFreshReceiptJourney(t *testing.T) {
 		{name: "eyes-acknowledged", summaries: []json.RawMessage{request}, reactions: []json.RawMessage{eyes}, wantError: "review bot review is pending"},
 		{name: "late-old-review-does-not-settle", summaries: []json.RawMessage{request}, reactions: []json.RawMessage{eyes}, reviews: []json.RawMessage{codexActivity(bot, strings.Repeat("b", 40), "COMMENTED", "2026-10-21T12:01:00Z")}, wantError: "review bot review is pending"},
 		{name: "late-old-summary-does-not-settle", summaries: []json.RawMessage{request, codexSummary(strings.Repeat("b", 40))}, reactions: []json.RawMessage{eyes}, wantError: "review bot review is pending"},
+		{name: "historical-review-stays-settled", historical: true, summaries: []json.RawMessage{request}, reactions: []json.RawMessage{eyes}, reviews: []json.RawMessage{codexActivity(bot, strings.Repeat("b", 40), "COMMENTED", "2026-10-21T12:01:00Z")}, ready: true},
+		{name: "historical-summary-stays-settled", historical: true, summaries: []json.RawMessage{request, codexSummary(strings.Repeat("b", 40))}, reactions: []json.RawMessage{eyes}, ready: true},
 		{name: "current-summary-settles", summaries: []json.RawMessage{request, codexSummary(head[:10])}, reactions: []json.RawMessage{eyes}, ready: true},
 		{name: "clean-thumbs-up-settles", summaries: []json.RawMessage{request}, reactions: []json.RawMessage{eyes, clean}, ready: true},
 		{name: "other-app-eyes-ignored", summaries: []json.RawMessage{request}, reactions: []json.RawMessage{json.RawMessage(`{"user":{"login":"other-app[bot]"},"content":"eyes"}`)}, ready: true},
 		{name: "unknown-state-fails-closed", reviews: []json.RawMessage{codexActivity(bot, head, "NOT_A_REVIEW_STATE", "")}, wantError: "unknown review completion state"},
 		{name: "provider-read-error-fails-closed", readError: true, wantError: "HTTP 403"},
 		{name: "unresolved-thread", threads: []forgeThread{{Author: bot, Path: "store.go", Line: 73, Body: "![P1 Badge](https://img.shields.io/badge/P1-orange) Lost update"}}, wantError: "no unresolved review bot comments"},
+		{name: "pending-with-unresolved-thread", summaries: []json.RawMessage{request}, reactions: []json.RawMessage{eyes}, threads: []forgeThread{{Author: bot, Path: "store.go", Line: 73, Body: "![P1 Badge](https://img.shields.io/badge/P1-orange) Lost update"}}, wantError: "no unresolved review bot comments"},
 		{name: "resolved-thread", threads: []forgeThread{{Author: bot, Path: "store.go", Line: 73, Body: "Resolved", Resolved: true}}, ready: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			forge := base
 			forge.Reviews, forge.ReviewSummaries, forge.ReviewThreads = tc.reviews, tc.summaries, tc.threads
+			initialHead := head
+			if tc.historical {
+				initialHead = strings.Repeat("b", 40)
+			}
+			forge.ReviewPushes = []json.RawMessage{json.RawMessage(fmt.Sprintf(`{"ref":%q,"before":"0000000000000000000000000000000000000000","after":%q,"pushed_at":"2026-10-21T11:00:00Z"}`, "refs/heads/"+branch, initialHead))}
+			if tc.historical {
+				forge.ReviewPushes = append(forge.ReviewPushes, json.RawMessage(fmt.Sprintf(`{"ref":%q,"before":%q,"after":%q,"pushed_at":"2026-10-21T12:02:00Z"}`, "refs/heads/"+branch, initialHead, head)))
+			}
 			forge.ReviewReactions = map[string][]json.RawMessage{"7": tc.reactions}
 			if tc.readError {
 				forge.ReviewError = &forgeEndpoint{Status: 403, Message: "Forbidden"}

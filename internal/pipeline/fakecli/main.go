@@ -90,6 +90,15 @@ func handleFakeCLI(mode string) {
 		fmt.Println(raw)
 		os.Exit(0)
 	}
+	if strings.Contains(strings.Join(args, " "), "/reactions") && strings.Contains(strings.Join(args, " "), "--slurp") {
+		raw := os.Getenv("FAKE_CLI_PR_REACTIONS")
+		if raw == "" {
+			raw = "[[]]"
+		}
+		fmt.Println(raw)
+		os.Exit(0)
+	}
+
 	if strings.Contains(strings.Join(args, " "), "/issues/") && strings.Contains(strings.Join(args, " "), "/comments") && strings.Contains(strings.Join(args, " "), "--slurp") {
 		raw := os.Getenv("FAKE_CLI_PR_SUMMARIES")
 		if raw == "" {

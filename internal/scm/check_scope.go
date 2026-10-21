@@ -623,7 +623,6 @@ func ReadReadinessReviewBotComments(ctx context.Context, host Host, pr *PR, poli
 			}
 			if pending {
 				pendingBot = bot.AppSlug
-				continue
 			}
 		}
 		allowed[bot.AppSlug] = true

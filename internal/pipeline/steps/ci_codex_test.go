@@ -11,45 +11,60 @@ import (
 )
 
 func TestCodexThreadFindingsFollowPolicy(t *testing.T) {
-	for _, mode := range []string{"on_failure", "always"} {
-		for _, resolved := range []bool{false, true} {
-			name := mode + "/unresolved"
-			if resolved {
-				name = mode + "/resolved"
+	for _, pending := range []string{"none", "review", "request"} {
+		for _, mode := range []string{"on_failure", "always"} {
+			for _, resolved := range []bool{false, true} {
+				name := mode + "/unresolved"
+				if resolved {
+					name = mode + "/resolved"
+				}
+				if pending != "none" {
+					name += "/pending-" + pending
+				}
+				t.Run(name, func(t *testing.T) {
+					comments := []map[string]any{{"author": "chatgpt-codex-connector[bot]", "path": "internal/store.go", "line": 73, "body": "![P1 Badge](https://img.shields.io/badge/P1-orange) Fix the lost update", "resolved": resolved}}
+					raw, _ := json.Marshal(comments)
+					env := append(fakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass","app":"github-actions"}]`), "FAKE_CLI_REVIEW_COMMENTS="+string(raw))
+					sctx, ag, logs, ready, head := newGreenReviewBotContext(t, mode, env)
+					if pending == "review" {
+						sctx.Env = append(sctx.Env, `FAKE_CLI_PR_REVIEWS=[[{"user":{"login":"chatgpt-codex-connector[bot]"},"commit_id":"`+head+`","state":"PENDING"}]]`)
+					}
+					if pending == "request" {
+						sctx.Env = append(sctx.Env, `FAKE_CLI_PR_SUMMARIES=[[{"id":7,"body":"@codex review","created_at":"2026-10-21T12:00:00Z"}]]`, `FAKE_CLI_PR_REACTIONS=[[{"user":{"login":"chatgpt-codex-connector[bot]"},"content":"eyes"}]]`)
+					}
+					step := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return context.Canceled }}
+					out, err := driveCI(t, step, sctx)
+					blocks := mode == "always" && !resolved
+					if blocks {
+						if err != nil || out == nil || !out.NeedsApproval {
+							t.Fatalf("out=%+v err=%v; want findings; logs=%v", out, err, *logs)
+						}
+						f, e := types.ParseFindingsJSON(out.Findings)
+						if e != nil {
+							t.Fatal(e)
+						}
+						if len(f.Items) != 1 {
+							t.Fatalf("findings=%+v", f)
+						}
+						item := f.Items[0]
+						if item.Category != "ci-review-bot" || item.Action != "ask-user" || item.File != "internal/store.go" || item.Line != 73 || item.Severity != "error" {
+							t.Fatalf("lost finding contract: %+v", item)
+						}
+						if *ready {
+							t.Fatal("unresolved Codex thread reported ready")
+						}
+					} else if mode == "always" && resolved && pending != "none" {
+						if *ready || out != nil {
+							t.Fatalf("resolved thread must leave the pending review waiting: ready=%v out=%+v", *ready, out)
+						}
+					} else if !*ready {
+						t.Fatalf("expected readiness: out=%+v err=%v; logs=%v", out, err, *logs)
+					}
+					if len(ag.calls) != 0 {
+						t.Fatal("review threads must never auto-fix")
+					}
+				})
 			}
-			t.Run(name, func(t *testing.T) {
-				comments := []map[string]any{{"author": "chatgpt-codex-connector[bot]", "path": "internal/store.go", "line": 73, "body": "![P1 Badge](https://img.shields.io/badge/P1-orange) Fix the lost update", "resolved": resolved}}
-				raw, _ := json.Marshal(comments)
-				env := append(fakeCIGH(t, "OPEN", `[{"name":"build","state":"SUCCESS","bucket":"pass","app":"github-actions"}]`), "FAKE_CLI_REVIEW_COMMENTS="+string(raw))
-				sctx, ag, logs, ready, _ := newGreenReviewBotContext(t, mode, env)
-				step := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return context.Canceled }}
-				out, err := driveCI(t, step, sctx)
-				blocks := mode == "always" && !resolved
-				if blocks {
-					if err != nil || out == nil || !out.NeedsApproval {
-						t.Fatalf("out=%+v err=%v; want findings; logs=%v", out, err, *logs)
-					}
-					f, e := types.ParseFindingsJSON(out.Findings)
-					if e != nil {
-						t.Fatal(e)
-					}
-					if len(f.Items) != 1 {
-						t.Fatalf("findings=%+v", f)
-					}
-					item := f.Items[0]
-					if item.Category != "ci-review-bot" || item.Action != "ask-user" || item.File != "internal/store.go" || item.Line != 73 || item.Severity != "error" {
-						t.Fatalf("lost finding contract: %+v", item)
-					}
-					if *ready {
-						t.Fatal("unresolved Codex thread reported ready")
-					}
-				} else if !*ready {
-					t.Fatalf("expected readiness: out=%+v err=%v; logs=%v", out, err, *logs)
-				}
-				if len(ag.calls) != 0 {
-					t.Fatal("review threads must never auto-fix")
-				}
-			})
 		}
 	}
 }

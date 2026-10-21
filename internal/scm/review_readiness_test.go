@@ -30,13 +30,18 @@ func TestCodexPendingDoesNotWithholdAnotherBotsFindings(t *testing.T) {
 		{Author: "chatgpt-codex-connector[bot]", Path: "codex.go", Line: 2},
 	}}
 	got, err := ReadReadinessReviewBotComments(context.Background(), h, &PR{}, CheckScopePolicy{ReviewBotComments: "always"}, nil)
-	if err != nil || len(got) != 1 || got[0].Path != "greptile.go" {
-		t.Fatalf("comments=%+v err=%v; the settled Greptile finding must still escalate", got, err)
+	if err != nil || len(got) != 2 || got[0].Path != "greptile.go" || got[1].Path != "codex.go" {
+		t.Fatalf("comments=%+v err=%v; both bots must still escalate", got, err)
 	}
 	h.comments = h.comments[1:]
 	got, err = ReadReadinessReviewBotComments(context.Background(), h, &PR{}, CheckScopePolicy{ReviewBotComments: "always"}, nil)
+	if len(got) != 1 || err != nil || got[0].Path != "codex.go" {
+		t.Fatalf("comments=%+v err=%v; pending must retain Codex comments", got, err)
+	}
+	h.comments = nil
+	got, err = ReadReadinessReviewBotComments(context.Background(), h, &PR{}, CheckScopePolicy{ReviewBotComments: "always"}, nil)
 	if len(got) != 0 || !errors.Is(err, ErrReviewBotPending) {
-		t.Fatalf("comments=%+v err=%v; want pending without old Codex comments", got, err)
+		t.Fatalf("comments=%+v err=%v; pending without findings must wait", got, err)
 	}
 }
 

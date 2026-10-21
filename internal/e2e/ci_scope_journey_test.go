@@ -84,6 +84,7 @@ type forgeState struct {
 	AttemptJobs      map[string][]int64           `json:"attempt_jobs,omitempty"`
 	ReviewThreads    []forgeThread                `json:"review_threads,omitempty"`
 	Reviews          []json.RawMessage            `json:"reviews,omitempty"`
+	ReviewPushes     []json.RawMessage            `json:"review_pushes,omitempty"`
 	ReviewSummaries  []json.RawMessage            `json:"review_summaries,omitempty"`
 	ReviewReactions  map[string][]json.RawMessage `json:"review_reactions,omitempty"`
 	ReviewError      *forgeEndpoint               `json:"review_error,omitempty"`
