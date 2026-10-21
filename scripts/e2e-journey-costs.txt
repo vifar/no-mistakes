@@ -20,42 +20,197 @@
 # A journey that is not measured costs default_journey_seconds. Raising a
 # number here is a measurement, not a guess: the value is what the journey
 # actually cost.
+#
+# The measured total of the journeys a shard carries is about 3350 seconds,
+# and three shards carry that inside the 2400 second budget. The journeys
+# the terminal worker owns are listed here too, so the file is a complete
+# record of what the bucket costs; the placement leaves them out of the
+# shards.
 default_journey_seconds=15
 
 # The journeys the suite measures, in the order they were measured.
 # Format: <seconds> <test name>
 journey_seconds=(
   617 TestRetainedTargetContinuityLiveJourney
-  113 TestCustomGateStructuredFindingsJourney
-  89 TestAttachCommitStatusJourney
-  84 TestCIScopeAutoDiscovery
+  564 TestCIReceiptRecoveryJourneys
+  119 TestCIScopeAutoDiscovery
+  119 TestCustomGateStructuredFindingsJourney
+  105 TestPushTargetAdvanceLiveJourney
+  94 TestNativeTestCompletionOnRealBinary
+  90 TestAttachCommitStatusJourney
+  81 TestCIScopeRequiredChecksBlockReadiness
   81 TestDocumentJourneyUnsafeAndStrictRestart
-  68 TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary
-  65 TestCustomGateWatcherProofProductionJourneys
-  65 TestOmitIntentJourney
+  73 TestNoCIReadinessJourney
+  63 TestLeftoverTargetAdvanceLiveJourney
+  61 TestCustomGateWatcherProofProductionJourneys
+  58 TestOmitIntentJourney
   56 TestCertificationContentionProductionJourney
-  42 TestRerunIntentProvenanceJourney
-  40 TestAcceptedTestGapCommitStatusJourney
-  38 TestCIScopeExternalOverridesAndAllExcludedRestriction
-  37 TestCIScopeApprovalAndReceiptEnforceRecordedScope
-  32 TestCertifiedWatcherProductionLifecycle
-  31 TestDocumentJourneyAdmissionAndInterruptedHistory
-  30 TestClosingIssueRefsGitHubJourney
-  29 TestDocumentJourneyRecursiveSubmoduleRollback
+  51 TestCIScopeExternalOverridesAndAllExcludedRestriction
+  48 TestAcceptedTestGapCommitStatusJourney
+  44 TestGateStepCannotStartRecursivePipeline
+  43 TestRerunIntentProvenanceJourney
+  42 TestCIScopeActionsLinkedStatusStillBlocksReadiness
+  41 TestClosingIssueRefsGitHubJourney
+  40 TestCIReceiptTimeoutStatusJourney
+  39 TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary
+  38 TestProviderPluginJourney
+  38 TestRecoveredRewriteSafetyLiveJourney
+  36 TestCustomGatesJourney
+  34 TestCertifiedWatcherProductionLifecycle
+  32 TestDocumentJourneyAdmissionAndInterruptedHistory
+  31 TestMachineLocalCommandOverridesJourney
+  30 TestDocumentJourneyRecursiveSubmoduleRollback
+  29 TestCIScopeApprovalAndReceiptEnforceRecordedScope
+  28 TestLivePiProfileMixedHarnessRefusedBeforeActiveRunCancelled
   27 TestClosingIssueRefsReattachAfterComposeIsRefused
-  27 TestGateIdentityJourney_PendingResponseRecovery
-  23 TestCustomGatesJourney
-  22 TestDocumentJourneyRecoveredHistorySummaryContract
-  22 TestCIScopeActionsLinkedStatusStillBlocksReadiness
-  21 TestPlannedStopIgnoresAnUnownedRunOnRealDaemon
+  27 TestPushCorrectionTargetAdvanceLiveJourney
+  26 TestDocumentJourneySameFileContentContext
+  26 TestGateIdentityJourney_PendingResponseRecovery
+  23 TestDocumentJourneyRecoveredHistorySummaryContract
+  22 TestReviewConversationTUIYoloLeavesTheQuestionOpen
+  22 TestReviewConversationUnreadableQuestionHistoryNeedsAHuman
+  22 TestRunOwnerReceiveJourney
   21 TestDefaultFixtureVerificationAllowsReviewFixCommit
-  20 TestStorageBlockedFailureReleasesCapacityOnRealDaemon
+  21 TestPlannedStopIgnoresAnUnownedRunOnRealDaemon
+  20 TestRepoConfigCommandsFromDefaultBranch
   20 TestSetupStorageOutageReleasesCapacityOnRealDaemon
+  20 TestStorageBlockedFailureReleasesCapacityOnRealDaemon
+  19 TestCIScopeCarriedReplayKeepsAppBoundRequiredRepair
   19 TestSupersessionDoesNotWaitForBlockedSettlementOnRealDaemon
-  18 TestPlannedStopCancelsRealGitSetup
+  18 TestDocumentAnalyzerSummaryContractOnRealBinary
+  18 TestDocumentJourneyOverBudgetDiscardSurvivesRecovery
   18 TestPlannedStopRefusesOwnedAdmissionFailureOnRealDaemon
+  17 TestFilelessSelectedReviewFindingRequiresCompleteVerification
+  17 TestGateIdentityJourney_TUIRespondUsesDisplayedSnapshot
   17 TestPlannedStopKeepsAnUnownedRowUntouched
+  16 TestCIScopeActionsLinkedThirdPartyCheckStillBlocksReadiness
+  16 TestDocumentJourneyHiddenIndexPrecedesCachedCompletion
   16 TestGateIdentityJourney
+  16 TestTestAgentNewTestFilesArePreservedAndReReviewed
+  15 TestDocumentJourneyCleanFlaggedBytesAndEscapedCount
+  15 TestLivePiProfileReattachAndRerunSemantics
+  15 TestPushCorrectionIndependentForgeHeadLiveJourney
   15 TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney
-  14 TestEvalJourney
+  14 TestAxiAgentJourney
+  14 TestAxiRecoveredRewriteRetiresMirrorJourney
+  14 TestClosingIssueRefsOwnedTemplateJourney
+  14 TestReviewPathInstructionsJourney
+  13 TestCIScopeFirstAttemptKeepsCompletedRequiredJob
+  13 TestDocumentJourneyCarryStopsAndPublishesHistoricalEvidence
+  13 TestFailedInvocationUsageJourney
+  13 TestReviewPostMergeStaleSnapshotJourney
+  12 TestRebaseMergeStrategyGlobalDefaultAndTrustedOverrideJourney
+  11 TestAnalyzerEvidenceFailuresFailPipelineJourney
+  11 TestAxiAnswerPartialReturnsAtOnceAndTheClosingAnswerReturnsAGenuineReAsk
+  11 TestAxiBranchSyncJourney
+  11 TestLargeConfiguredTestAndLintFailuresRemainUsableThroughAXIFix
+  10 TestAxiPrePushAbortUnmovedHeadCustodyJourney
+  10 TestCIScopeStrictReadinessIgnoresNonRequiredAndExternalChecks
+  10 TestCIScopeTrustedConfigAndRestartSurvival
+  10 TestDocumentInheritedScratchRollbackLiveJourney
+  10 TestDocumentJourneyMidPassFlagsPreserveProposal
+  10 TestDocumentJourneyMidPassFlagsRefuseCleanVerdict
+  10 TestLivePiProfileConcurrentRunsStayIsolated
+  10 TestPushTargetAdvanceBudgetLiveJourney
+  10 TestSelectedFixFollowedByDocumentEditDoesNotRestartReview
+  9 TestAxiCustodyRecoveryAfterRebaseJourney
+  9 TestConfigurableFixCommitMessageJourney
+  9 TestDocumentJourneyTrustedLimits
+  9 TestForcedRestartKeepsCIMonitorRunInterrupted
+  9 TestGracefulDaemonRestartPreservesParkedReviewOnRealBinary
+  9 TestLivePiProfileFeatureBranchPiCannotOverrideGlobalAuto
+  9 TestLivePiProfileResumeAfterDaemonRestartKeepsPin
+  9 TestReviewConversationNeverReachesTheEvidenceBranch
+  9 TestReviewSchemaRetryExhaustionJourney
+  8 TestAxiAnswerFollowsAQuestionParkedInsideAFixRound
+  8 TestAxiAttachCommandsIgnoreInvalidConfigWhenDaemonRunning
+  8 TestAxiCustodyRecoveryJourney
+  8 TestEvalAutoCaptureJourney
+  8 TestGiteaProviderJourney
+  8 TestHostSearchBoundaryReachesEveryPipelinePrompt
+  8 TestLargePRInventoryOnRealBinary
+  8 TestOperatorInstructionsJourney
+  8 TestPRWhatChangedScopesToFinalDiffWhileEvidenceStaysStepScoped
+  8 TestPerRepositoryMachineLocalFixCommitJourney
+  8 TestPiRunProfileSurvivesGlobalChangesAcrossEveryDuty
+  8 TestPrepareSubmoduleCheckoutReachesConfiguredCommands
+  8 TestRebaseMergeStrategyAgentResolvedConflictPublishesAMergeJourney
+  8 TestRebaseMergeStrategyPublishesAMergeOfTheReviewedHeadJourney
+  8 TestReviewAgentsRouteIndependentProfilesOnRealBinary
+  8 TestReviewConversationJourney
+  8 TestReviewConversationOffRefusesAnAnswer
+  8 TestRunOwnerReceiptJourney
+  7 TestAxiAnswerWaitElapsedReattachesWithAxiRun
+  7 TestAxiParkedAwaitingAgentSignal
+  7 TestClosingIssueRefsNonGitHubFailsAtPR
+  7 TestClosingIssueRefsPublishedIntentIsNeutralized
+  7 TestDocumentJourneyDiscardKeepsCombinedLintDuty
+  7 TestEvalJourney
+  7 TestFixCommitTrailersJourney
+  7 TestForkRouting
+  7 TestGlobalBranchReplacementFixCommitJourney
+  7 TestImmutableAttachCommitStatusJourney
+  7 TestRebaseMergeStrategyPushedBranchCannotSelfSelectJourney
+  7 TestReviewPipelineOwnedPRCriterionDoesNotPark
+  7 TestRunCleanupLeavesNoEmptyEvidenceDirectory
+  7 TestTestEvidenceLivesUnderAppRootNotSharedTemp
+  6 TestAxiRunReattachesAfterManagedFix
+  6 TestDocumentNoOpPassOnCodexBinary
+  6 TestForcedRestartAdmitsTheSameQueuedRun
+  6 TestForcedRestartCancelsAnInterruptedReview
+  6 TestGateHookBindsPushToTheHomeThatOwnsTheGate
+  6 TestIntentJourney
+  6 TestPushedRepoConfigCannotSelectReviewAgent
+  6 TestReviewAnswerRestartsForChangedSourceHeadJourney
+  6 TestRunOwnerRetainedMultihopJourney
+  5 TestGateDeclineJourney_PartialSelectionKeepsEarlierFixes
+  5 TestReviewConversationSupersededRoundsReachTheNextReviewer
+  5 TestRunOwnerLaunchJourney
+  5 TestRunOwnerReplayRefusalJourney
+  4 TestAXIControlByteFailureGateRemainsReadable
+  4 TestClosingIssueRefsSkippedPRIsRefused
+  4 TestForcedRestartWithRealProcessExitDuringPIDInspection
+  4 TestGateIdentityJourney_CLIRespondUsesObservedSnapshot
+  4 TestGateIdentityJourney_DelayedClosingAnswer
+  4 TestGateIdentityJourney_ReparkSameRoundAndUnboundAbort
+  4 TestGateIdentityJourney_StaleAndUnboundResponsesAndStatus
+  4 TestImmutableAttachFailedValidationJourney
+  4 TestRebaseMergeStrategyRejectsAResolutionThatDidNotMergeJourney
+  4 TestRebaseMergeStrategyRejectsAnUnconcludedMergeJourney
+  4 TestReviewFixRoundCannotRetractACarriedFinding
+  4 TestRunOwnerReceiptFailureBeforeCommitJourney
+  3 TestAxiRunSkipsRepositoryPrePushHookForLocalGate
+  3 TestAxiTerminalEqualTreeRecoveryJourney
+  3 TestLivePiProfileTrustedPiOverridesGlobalAuto
+  3 TestPushedBranchCannotEnableTheReviewConversation
+  3 TestRebaseMergeStrategyUnparseableTrustedValueFailsRunClosedJourney
+  3 TestReviewExternalPRLifecycleStillParks
+  2 TestAgentlessRunFailsBeforePipelineStarts
+  2 TestAxiRunReportsImmediateAgentlessFailureWithoutRerun
+  2 TestDaemonRestartReplacesTheDaemonWithExactlyOneOwner
+  2 TestDaemonRunUsesProvidedRoot
+  2 TestDaemonStopLeavesNoDaemonProcessOwningTheRoot
+  2 TestEnrolledReceiveHooksExecutableIsolation
+  2 TestInitInSubmoduleRegistersSubmoduleOwnOrigin
+  2 TestInitIsIdempotent
+  2 TestInitSkillOptOut
+  2 TestOriginAdmissionWithoutCompleteFactsOnRealBinary
+  2 TestPlannedStopCancelsRealGitSetup
+  2 TestTerminalPRObservationDoesNotCompleteRun
+  1 TestAxiRunPreflightGuards
+  1 TestCIReceiptTimeoutDoctorConfig
+  1 TestHarnessNonRepositoryTempDirStaysOutsideCheckout
+  1 TestInitLegacyNotice
+  1 TestInitRepoRename
+  1 TestInitRollsBackWhenDaemonStartFails
+  1 TestLivePiProfileInvalidSelectionRefusedAtCli
+  1 TestPushToAMisshapenGateIsRefusedClosed
+  0 TestCommitChangeCreatesMissingBranchFromMain
+  0 TestDaemonStartTimeoutLeavesRoomForLoginShellProbe
+  0 TestDaemonStopDirFallsBackWhenWorkDirMoved
+  0 TestFixtureRootFromRepoRoot
+  0 TestValidatePromptsAbsent
+  0 TestValidatePushedHead
+  0 TestValidateSkippedSteps
+  0 TestWaitForRunPrefersNewestRunOnBranch
 )
