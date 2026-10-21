@@ -5,7 +5,6 @@ package e2e
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,7 +54,6 @@ func TestStorageBlockedFailureReleasesCapacityOnRealDaemon(t *testing.T) {
 	scenario := filepath.Join(t.TempDir(), "failure.yaml")
 	if err := os.WriteFile(scenario, []byte(`actions:
   - match: "- branch: feature/storage-blocked"
-    delay_ms: 2000
     git: [[rev-parse, --verify, refs/heads/independent-failure]]
   - structured:
       findings: []
@@ -75,19 +73,18 @@ func TestStorageBlockedFailureReleasesCapacityOnRealDaemon(t *testing.T) {
 	if out, err := h.Run("init"); err != nil {
 		t.Fatalf("init: %v\n%s", err, out)
 	}
-	h.CommitChange("feature/storage-blocked", "first.txt", "first\n", "first")
-	h.PushToGate("feature/storage-blocked")
-	first := waitForStepStatus(t, h, "feature/storage-blocked", types.StepReview, types.StepStatusRunning, 30*time.Second)
 	control, err := sql.Open("sqlite", paths.WithRoot(h.NMHome).DB())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer control.Close()
-	if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER block_one BEFORE UPDATE OF status ON runs WHEN NEW.id='%s' AND NEW.status IN ('failed','cancelled') BEGIN SELECT RAISE(ABORT,'owned storage outage'); END`, first.ID)); err != nil {
+	if _, err := control.Exec(`CREATE TRIGGER block_one BEFORE UPDATE OF status ON runs WHEN NEW.branch='feature/storage-blocked' AND NEW.status IN ('failed','cancelled') BEGIN SELECT RAISE(ABORT,'owned storage outage'); END`); err != nil {
 		t.Fatal(err)
 	}
 	defer control.Exec("DROP TRIGGER IF EXISTS block_one")
-	waitForStepStatus(t, h, "feature/storage-blocked", types.StepReview, types.StepStatusFailed, 30*time.Second)
+	h.CommitChange("feature/storage-blocked", "first.txt", "first\n", "first")
+	h.PushToGate("feature/storage-blocked")
+	first := waitForStepStatus(t, h, "feature/storage-blocked", types.StepReview, types.StepStatusFailed, 30*time.Second)
 	h.CommitChange("feature/next-workload", "second.txt", "second\n", "second")
 	h.PushToGate("feature/next-workload")
 	second := h.WaitForRun("feature/next-workload", 60*time.Second)
