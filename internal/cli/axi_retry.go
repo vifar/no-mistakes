@@ -26,8 +26,8 @@ func newAxiRetryCmd() *cobra.Command {
 		Use:   "retry",
 		Short: "Continue a run that failed on an agent invocation error",
 		Long: "Continues the current branch's latest run when it failed because an agent\n" +
-			"invocation itself failed - a provider error, a usage limit, a transport\n" +
-			"failure, or the agent process exiting - instead of starting the whole\n" +
+			"invocation itself failed - a provider error, a transport failure, or the\n" +
+			"agent process exiting - instead of starting the whole\n" +
 			"pipeline again with `no-mistakes rerun`.\n\n" +
 			"A new run starts at the failed run's preserved head, so every correction\n" +
 			"the pipeline already committed is kept. The steps before the failed one\n" +
@@ -45,7 +45,9 @@ func newAxiRetryCmd() *cobra.Command {
 			"Review's repository configuration, recorded global configuration, agent,\n" +
 			"and model are still the ones a new run would use. A failure\n" +
 			"about the change itself - a review finding, a failing test, a refused\n" +
-			"policy, a human decision - is never retried.\n\n" +
+			"policy, a human decision - is never retried. Neither is a timeout, a\n" +
+			"cancellation, a structured-output rejection, or a typed provider\n" +
+			"usage-limit signal.\n\n" +
 			"The new run records which run, step, and round it continues. Like `axi\n" +
 			"run`, retry then blocks until the next gate, CI-ready decision point, or\n" +
 			"final outcome, bounded by --wait (default 8m).",
