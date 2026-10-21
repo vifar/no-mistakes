@@ -224,7 +224,7 @@ For a repository with no external CI, commit this declaration to the default bra
 no_ci: true
 ```
 
-The pipeline's own `no-mistakes` commit status is already excluded from check collection; it does not need an `external_checks` entry. When no other checks are observed, the declaration records `ci_ready_at` and `ci_ready_no_ci = 1`, including when the target requires only that self-status. Ordinary `axi status` exposes `ci_ready: true` and `ci_ready_no_ci: true`, and `axi run` returns `checks-passed`. The validated head can receive `no-mistakes: success` while the run continues monitoring for a human merge; run completion is not a prerequisite for that status. Pending real checks still withhold readiness (`ci_ready: false`, `ci_ready_no_ci: false`).
+The [pipeline's own `no-mistakes` commit status](/no-mistakes/reference/pipeline-steps/#push) needs no `external_checks` entry. Once an ordinary run verifies readiness on an empty rollup under the rules above, the trusted declaration is recorded in `ci_ready_at` and `ci_ready_no_ci = 1`, including when the target requires only that self-status. See [`axi status`](/no-mistakes/reference/cli/#no-mistakes-axi-status) for the readiness fields and [Push](/no-mistakes/reference/pipeline-steps/#push) for commit-status publication before run completion.
 
 ### pr.base_branch
 
