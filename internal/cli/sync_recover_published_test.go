@@ -59,7 +59,9 @@ func TestAxiSyncRecoverPublishedDivergedRefuses(t *testing.T) {
 	if err == nil || !asExitError(err, &ee) || ee.code != 1 {
 		t.Errorf("recover error = %#v; want exit 1:\n%s", err, out)
 	}
-	for _, want := range []string{"changed: false", "state: diverged", f.pushed, "git log --oneline --left-right HEAD..." + f.pushed} {
+	// The refusal names the two heads it compared, and the handoff carries
+	// both of them too (#151).
+	for _, want := range []string{"changed: false", "state: diverged", f.pushed, "git log --oneline --left-right " + head + "..." + f.pushed} {
 		if !strings.Contains(out, want) {
 			t.Errorf("refusal missing %q:\n%s", want, out)
 		}

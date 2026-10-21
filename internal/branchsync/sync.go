@@ -546,8 +546,13 @@ func (s *Service) apply(ctx context.Context, strictFastForward bool) State {
 		return plan
 	}
 	if strictFastForward && plan.State == StateDiverged {
-		blocked := blockedPlan(plan, StateDiverged, "blocked_recover_diverged", fmt.Sprintf("the local branch has diverged from pipeline-pushed head %s; recovery requires a strict fast-forward; inspect both histories before reconciling manually; no files or branch refs were changed", plan.Pipeline.PushedHead))
-		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right HEAD..." + plan.Pipeline.PushedHead}
+		// The refusal names the two heads it compared and the tests it ran,
+		// so the operator can tell a rewritten commit from a lost one. The
+		// diagnostic is read-only and decides nothing: the strict
+		// fast-forward requirement already refused.
+		diagnostic := collectDivergenceDiagnostic(ctx, s.workDir(), plan.Local.Head, plan.Pipeline.PushedHead, "pipeline-pushed head")
+		blocked := blockedPlan(plan, StateDiverged, "blocked_recover_diverged", fmt.Sprintf("the local branch has diverged from pipeline-pushed head %s; %s; recovery requires a strict fast-forward; inspect both histories before reconciling manually; no files or branch refs were changed", plan.Pipeline.PushedHead, diagnostic.divergenceDescription()))
+		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right " + plan.Local.Head + "..." + plan.Pipeline.PushedHead}
 		return blocked
 	}
 	if !CanApply(plan) {
@@ -1075,8 +1080,13 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 			return s.recoverAdoptPreserved(ctx, run, state, preserved, trustedEqualTreeRewrite)
 		}
 		state.Relation = RelationDiverged
-		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_diverged", fmt.Sprintf("the local branch and the preserved pipeline head have diverged; the preserved commits are anchored at %s - reconcile manually and re-run the recovery, or use --keep-local to keep the current head. `no-mistakes rerun` resumes validating the selected preserved head, but refuses a known clean caller HEAD mismatch. If heads differ, inspect `no-mistakes axi status` and follow its exact `branch_sync.next_action.command` for custody or synchronization, then submit intended local commits with a fresh `no-mistakes axi run` once custody permits; no files or refs were changed", anchorRef))
-		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right HEAD..." + anchorRef}
+		// The refusal names the two heads it compared and the tests it ran,
+		// so the operator can tell a rewritten commit from a lost one. The
+		// diagnostic is read-only and decides nothing: the containment
+		// proof above already refused.
+		diagnostic := collectDivergenceDiagnostic(ctx, wd, local, preserved, "preserved pipeline head")
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_diverged", fmt.Sprintf("the local branch and the preserved pipeline head have diverged; %s; the preserved commits are anchored at %s - reconcile manually and re-run the recovery, or use --keep-local to keep the current head. `no-mistakes rerun` resumes validating the selected preserved head, but refuses a known clean caller HEAD mismatch. If heads differ, inspect `no-mistakes axi status` and follow its exact `branch_sync.next_action.command` for custody or synchronization, then submit intended local commits with a fresh `no-mistakes axi run` once custody permits; no files or refs were changed", diagnostic.divergenceDescription(), anchorRef))
+		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right " + local + "..." + preserved}
 		return blocked
 	}
 }
@@ -2289,16 +2299,43 @@ func revList(ctx context.Context, dir string, args ...string) ([]string, error) 
 	return strings.Fields(out), nil
 }
 
-func mergeTreePreservesFinalHead(ctx context.Context, dir, base, local, pushed string) bool {
-	mergedTree, err := git.Run(ctx, dir, "merge-tree", "--write-tree", "--merge-base", base, pushed, local)
-	if err != nil {
-		return false
+// containmentProof is the result of the executable three-way merge proof.
+//
+// The proof itself is the held field: merging the local branch into the
+// preserved head must produce exactly the preserved head's tree. The conflict
+// paths are reporting only - they tell the operator WHY the proof did not
+// hold, and they never change it.
+type containmentProof struct {
+	// held reports whether the merged tree is exactly the preserved head's
+	// tree, which is what makes the preserved head carry every local change.
+	held bool
+	// conflictPaths names the paths whose content conflicted, when the merge
+	// conflicted.
+	conflictPaths []string
+}
+
+// runContainmentProof runs the containment proof once and reports what it
+// found.
+//
+// A conflicting merge is a failed proof, exactly as it was before: Git writes
+// a tree with conflict markers and exits nonzero, and that tree can never be
+// the preserved head's tree. The conflict list is read from the same run, so
+// the proof and the report of the proof can never disagree.
+func runContainmentProof(ctx context.Context, dir, base, local, pushed string) containmentProof {
+	mergedTree, mergeErr := git.RunAllowingFailure(ctx, dir, "merge-tree", "--write-tree", "--merge-base", base, pushed, local)
+	conflicts := parseMergeConflictPaths(mergedTree)
+	if mergeErr != nil {
+		return containmentProof{conflictPaths: conflicts}
 	}
 	pushedTree, err := git.Run(ctx, dir, "rev-parse", pushed+"^{tree}")
 	if err != nil {
-		return false
+		return containmentProof{conflictPaths: conflicts}
 	}
-	return mergedTree == pushedTree
+	return containmentProof{held: strings.TrimSpace(mergedTree) == pushedTree, conflictPaths: conflicts}
+}
+
+func mergeTreePreservesFinalHead(ctx context.Context, dir, base, local, pushed string) bool {
+	return runContainmentProof(ctx, dir, base, local, pushed).held
 }
 
 func (s *Service) remoteName(ctx context.Context) string {
