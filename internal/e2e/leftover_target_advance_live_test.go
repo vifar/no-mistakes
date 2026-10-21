@@ -97,7 +97,7 @@ func TestLeftoverTargetAdvanceLiveJourney(t *testing.T) {
 				if run.Status != types.RunFailed || run.Error == nil || !strings.Contains(*run.Error, "test step left uncommitted edits") || !strings.Contains(*run.Error, "feature.txt") || strings.Contains(*run.Error, ".journal-live") {
 					t.Fatalf("second real edit was not refused with attribution: %s %s", run.Status, deref(run.Error))
 				}
-				assertLeftoverSnapshotSurvivesCleanup(t, h, run, "+second edit retained")
+				assertLeftoverSnapshotSurvivesCleanup(t, h, run.ID, run.RepoID, "+second edit retained")
 				return
 			}
 			run := h.WaitForRun(branch, 90*time.Second)
@@ -124,7 +124,7 @@ func TestLeftoverTargetAdvanceLiveJourney(t *testing.T) {
 				}
 			}
 			if kind == "post Test" {
-				assertLeftoverSnapshotSurvivesCleanup(t, h, run, "+preserved validation edit")
+				assertLeftoverSnapshotSurvivesCleanup(t, h, run.ID, run.RepoID, "+preserved validation edit")
 			}
 			published := h.UpstreamBranchSHA(branch)
 			if published != run.HeadSHA || !isAncestorIn(t, h, h.UpstreamDir, target, published) {
@@ -191,9 +191,9 @@ func TestDocumentInheritedScratchRollbackLiveJourney(t *testing.T) {
 
 // Issue #113 lost its worktree before anyone could list the edits. Exercise
 // the real executor's private record on both success and bounded refusal.
-func assertLeftoverSnapshotSurvivesCleanup(t *testing.T, h *Harness, run *db.Run, wantPatch string) {
+func assertLeftoverSnapshotSurvivesCleanup(t *testing.T, h *Harness, runID, repoID, wantPatch string) {
 	t.Helper()
-	files, err := filepath.Glob(filepath.Join(h.NMHome, "logs", run.ID, "leftover-validation-*.json"))
+	files, err := filepath.Glob(filepath.Join(h.NMHome, "logs", runID, "leftover-validation-*.json"))
 	if err != nil || len(files) != 1 {
 		t.Fatalf("missing durable leftover evidence: %v %v", files, err)
 	}
@@ -212,7 +212,7 @@ func assertLeftoverSnapshotSurvivesCleanup(t *testing.T, h *Harness, run *db.Run
 	if snapshot.Producer != "test" || !strings.Contains(string(snapshot.Status), "feature.txt") || !strings.Contains(string(snapshot.UnstagedPatch), wantPatch) {
 		t.Fatalf("snapshot lost producer, paths or edit bytes: %+v", snapshot)
 	}
-	worktree := paths.WithRoot(h.NMHome).WorktreeDir(run.RepoID, run.ID)
+	worktree := paths.WithRoot(h.NMHome).WorktreeDir(repoID, runID)
 	if err := os.RemoveAll(worktree); err != nil {
 		t.Fatal(err)
 	}
