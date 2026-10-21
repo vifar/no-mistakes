@@ -152,3 +152,32 @@ func killedProcessExit(t *testing.T) *exec.ExitError {
 	}
 	return exit
 }
+
+// A stop that was REFUSED is still the cancellation's doing. The git package
+// records that provenance, and the classifier reads it through the transport
+// wrapper, so a refused stop is recorded as the cancellation and not as an
+// independent failure.
+func TestCancellationAttributableReadsARefusedStop(t *testing.T) {
+	refusal := &git.CancelledExitError{Refused: errors.New("operation not permitted")}
+	cause := errors.New("cancelled: planned daemon shutdown")
+
+	// The marker on its own.
+	if !CancellationAttributable(refusal, cause) {
+		t.Fatal("a refused stop was not read as the cancellation")
+	}
+
+	// The marker through the git package's transport wrapper, which adds the
+	// command and the captured stderr - a MESSAGE, so the question is asked
+	// of what it wraps.
+	wrapped := &git.CommandError{Command: "git rev-parse", Stderr: "", Err: refusal}
+	if !CancellationAttributable(wrapped, cause) {
+		t.Fatal("a refused stop behind the transport wrapper was not read as the cancellation")
+	}
+
+	// The marker behind the pipeline's own step report, which is also a
+	// MESSAGE.
+	step := &stepExecutionError{step: "document", message: "step document failed", cause: wrapped}
+	if !CancellationAttributable(step, cause) {
+		t.Fatal("a refused stop behind the step report was not read as the cancellation")
+	}
+}

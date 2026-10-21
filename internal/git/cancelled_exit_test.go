@@ -121,3 +121,50 @@ func TestCancelledExitRecordsOnlyTheContextsOwnStop(t *testing.T) {
 		}
 	})
 }
+
+// A stop that is REFUSED still interrupts the command, and the interruption
+// is still the cancellation's doing. The standard library reports the
+// refusal instead of the child's exit status, so there is no exit status to
+// carry the provenance - the marker carries the refusal itself.
+//
+// This is the case a planned shutdown hits when the process group is already
+// gone: the run was cancelled, but the failure it recorded was the refusal
+// rather than the cancellation, so the run read as failed instead of
+// cancelled.
+func TestCancelledExitRecordsARefusedStop(t *testing.T) {
+	// The refusal is what the standard library reports when the cancel
+	// hook's kill is refused.
+	refusal := errors.New("operation not permitted")
+	wrapped := &cancelRefusal{refusal: refusal}
+	if !isCancelRefusal(wrapped) {
+		t.Fatalf("the refusal was not recognised: %v", wrapped)
+	}
+	if isCancelRefusal(refusal) {
+		t.Fatal("an unrelated error was read as a refusal")
+	}
+	if isCancelRefusal(nil) {
+		t.Fatal("no error was read as a refusal")
+	}
+
+	// The marker carries the refusal, so a caller can tell the refusal
+	// apart from a command that failed on its own.
+	marker := &CancelledExitError{Refused: wrapped}
+	if marker.Error() == "" {
+		t.Fatal("the marker reported no reason")
+	}
+	var found *CancelledExitError
+	if !errors.As(error(marker), &found) {
+		t.Fatal("the marker was not found through the error chain")
+	}
+	if found.Refused == nil {
+		t.Fatal("the marker did not carry the refusal")
+	}
+}
+
+// cancelRefusal is the standard library's report of a refused stop: a
+// wrapper whose text is the refusal's own.
+type cancelRefusal struct{ refusal error }
+
+func (e *cancelRefusal) Error() string { return cancelRefusalPrefix + ": " + e.refusal.Error() }
+
+func (e *cancelRefusal) Unwrap() error { return e.refusal }

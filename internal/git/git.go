@@ -47,9 +47,37 @@ func (e *CommandError) Unwrap() error { return e.Err }
 //
 // A caller that must know whether a failure is the cancellation reads this
 // marker, never the shape of the error.
-type CancelledExitError struct{ *exec.ExitError }
+//
+// The exit is not always an *exec.ExitError. When the context's stop is
+// REFUSED - the process group is already gone, or the platform refuses the
+// kill - the standard library reports the refusal ("exec: canceling Cmd: ...")
+// instead of the child's exit status, and there is no exit status to carry.
+// The refusal is still the context's doing, and the failure it leaves is the
+// interruption, not an independent one, so the marker carries the refusal
+// itself.
+type CancelledExitError struct {
+	*exec.ExitError
+	// Refused is the refusal the context's stop returned, when the command
+	// produced no exit status of its own.
+	Refused error
+}
 
-func (e *CancelledExitError) Unwrap() error { return e.ExitError }
+func (e *CancelledExitError) Unwrap() error {
+	if e.ExitError != nil {
+		return e.ExitError
+	}
+	return e.Refused
+}
+
+func (e *CancelledExitError) Error() string {
+	if e.ExitError != nil {
+		return e.ExitError.Error()
+	}
+	if e.Refused != nil {
+		return e.Refused.Error()
+	}
+	return "command was cancelled"
+}
 
 // IsZeroSHA returns true if the SHA is the null/zero ref that git uses for
 // new or deleted branches (40 zeros).
@@ -168,8 +196,27 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	}
 	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
-		if exit, ok := err.(*exec.ExitError); ok && cancelled.Load() && processWasCancelled(exit) {
-			err = &CancelledExitError{ExitError: exit}
+		if cancelled.Load() {
+			switch exit := err.(type) {
+			case *exec.ExitError:
+				// The child produced an exit status. It is the
+				// cancellation's doing only if the stop reached it.
+				if processWasCancelled(exit) {
+					err = &CancelledExitError{ExitError: exit}
+				}
+			default:
+				// The stop may have been REFUSED, so the standard
+				// library reports the refusal instead of an exit
+				// status. The refusal is still the context's doing:
+				// the context is what interrupted the command, and a
+				// refused kill does not make the failure independent.
+				//
+				// Only THAT refusal is the cancellation's. Any other
+				// error is the command's own.
+				if isCancelRefusal(err) {
+					err = &CancelledExitError{Refused: err}
+				}
+			}
 		}
 		if ctx.Err() != nil {
 			err = errors.Join(err, ctx.Err())
