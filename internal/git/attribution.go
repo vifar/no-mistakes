@@ -32,7 +32,15 @@ func IsAIAttributionTrailer(line string) bool {
 		return true
 	case "co-authored-by":
 		address, err := mail.ParseAddress(strings.TrimSpace(value))
-		return err == nil && aiAttributionIdentity(address.Name)
+		if err != nil {
+			return false
+		}
+		// Claude is also a human first name. A bare name needs the known
+		// tool mailbox; a personal address must keep its human attribution.
+		if strings.EqualFold(address.Name, "Claude") {
+			return strings.EqualFold(address.Address, "noreply@anthropic.com")
+		}
+		return aiAttributionIdentity(address.Name)
 	case "assisted-by":
 		// Configured assistants use agent:model or no-mistakes:agent:model.
 		identity, _, _ := strings.Cut(strings.TrimSpace(value), ":")

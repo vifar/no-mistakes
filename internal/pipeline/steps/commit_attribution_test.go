@@ -40,7 +40,7 @@ func TestCommitAttributionClaudeSession(t *testing.T) {
 }
 func TestCommitAttributionHumanCoauthor(t *testing.T) {
 	t.Parallel()
-	for _, name := range []string{"Some Person <person@example.com>", "Claude Smith <claude@example.com>", "Codex Jones <codex@example.com>"} {
+	for _, name := range []string{"Some Person <person@example.com>", "Claude Smith <claude@example.com>", "Claude <claude@example.com>", "Codex Jones <codex@example.com>"} {
 		msg := "repair widget\n\nKeep the reason.\n\nCo-Authored-By: " + name
 		assertCorrectionMessage(t, msg, msg)
 	}

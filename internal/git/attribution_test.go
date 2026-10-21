@@ -14,6 +14,7 @@ func TestIsAIAttributionTrailer(t *testing.T) {
 		{"Co-Authored-By: Claude <noreply@anthropic.com>", true},
 		{"Co-authored-by: Codex <ai@example.com>", true},
 		{"Co-Authored-By: Claude Smith <claude@example.com>", false},
+		{"Co-Authored-By: Claude <claude@example.com>", false},
 		{"Co-Authored-By: Some Person <openai@example.com>", false},
 		{"Assisted-by: pi:local", true},
 		{"Assisted-by: no-mistakes:codex:gpt-6.1-sol", true},
