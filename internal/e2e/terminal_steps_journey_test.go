@@ -118,7 +118,7 @@ func TestAxiTerminalStalePushRecoveryJourney(t *testing.T) {
 			t.Fatalf("recovery diagnostic missing %q: %s", want, blocked)
 		}
 	}
-	refused, refusedErr := h.RunInDir(h.HomeDir, "axi", "abort", "--run", run.ID)
+	refused, refusedErr := h.RunInDir(operator, "axi", "abort", "--run", run.ID)
 	t.Logf("cleanup refuses live PID (exit %v):\n%s", refusedErr, refused)
 	if refusedErr == nil || !strings.Contains(refused, step.ID) || !strings.Contains(refused, run.ID) {
 		t.Fatalf("live PID cleanup not refused with row identity: %v %s", refusedErr, refused)
@@ -130,7 +130,7 @@ func TestAxiTerminalStalePushRecoveryJourney(t *testing.T) {
 	if err := database.SetStepAgentActivity(step.ID, "process stopped", nil); err != nil {
 		t.Fatal(err)
 	}
-	out, err := h.RunInDir(h.HomeDir, "axi", "abort", "--run", run.ID)
+	out, err := h.RunInDir(operator, "axi", "abort", "--run", run.ID)
 	if err != nil {
 		t.Fatalf("legacy abort: %v\n%s", err, out)
 	}
@@ -142,7 +142,7 @@ func TestAxiTerminalStalePushRecoveryJourney(t *testing.T) {
 	if err != nil || row.CompletedAt == nil || row.Status != types.StepStatusFailed {
 		t.Fatalf("push row not closed: %+v %v", row, err)
 	}
-	again, err := h.RunInDir(h.HomeDir, "axi", "abort", "--run", run.ID)
+	again, err := h.RunInDir(operator, "axi", "abort", "--run", run.ID)
 	if err != nil || !strings.Contains(again, "aborted: false") {
 		t.Fatalf("repeat abort: %v\n%s", err, again)
 	}
@@ -380,7 +380,7 @@ func TestTerminalStepBlockedProbeAllowsLiveAbortJourney(t *testing.T) {
 	entered := filepath.Join(h.NMHome, "probe-entered")
 	release := filepath.Join(h.NMHome, "probe-release")
 	defer func() { _ = os.WriteFile(release, nil, 0600) }()
-	shim := "#!/bin/sh\nif [ \"$*\" = " + shellQuote("-p " + strconv.Itoa(pid) + " -o stat=") + " ]; then\n  : > " + shellQuote(entered) + "\n  while [ ! -f " + shellQuote(release) + " ]; do sleep 0.05; done\nfi\nexec " + shellQuote(realPS) + " \"$@\"\n"
+	shim := "#!/bin/sh\nif [ \"$*\" = " + shellQuote("-p "+strconv.Itoa(pid)+" -o stat=") + " ]; then\n  : > " + shellQuote(entered) + "\n  while [ ! -f " + shellQuote(release) + " ]; do sleep 0.05; done\nfi\nexec " + shellQuote(realPS) + " \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(h.BinDir, "ps"), []byte(shim), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -425,6 +425,97 @@ func TestTerminalStepBlockedProbeAllowsLiveAbortJourney(t *testing.T) {
 		t.Fatalf("stale sweep overwrote activity changed during OS probe: %+v %v", row, err)
 	}
 	t.Logf("conditional-write fence retained step %s running with activity=%d after its dead-PID snapshot was invalidated", row.ID, fresh)
+}
+
+// Stop the actual daemon while its maintenance process observation is blocked.
+// The external ps boundary stalls; the product must cancel it and retain the
+// row because an interrupted observation cannot prove that a process is dead.
+func TestTerminalMaintenanceProbeShutdownLiveJourney(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude"})
+	if out, err := h.Run("daemon", "start"); err != nil {
+		t.Fatalf("start isolated daemon: %v\n%s", err, out)
+	}
+	p := paths.WithRoot(h.NMHome)
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepo(h.WorkDir, h.UpstreamDir, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "blocked-probe-shutdown", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := database.InsertStepResult(run.ID, types.StepPush)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	pid := os.Getpid()
+	if err := database.SetStepAgentActivity(step.ID, "real live process", &pid); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunCancelled); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", p.DB()+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	old := time.Now().Add(-10 * time.Minute).Unix()
+	if _, err := raw.Exec("UPDATE step_results SET started_at=?, round_started_at=?, last_activity_at=? WHERE id=?", old, old, old, step.ID); err != nil {
+		t.Fatal(err)
+	}
+	realPS, err := exec.LookPath("ps")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := filepath.Join(h.NMHome, "shutdown-probe-entered")
+	shim := "#!/bin/sh\nif [ \"$*\" = " + shellQuote("-p "+strconv.Itoa(pid)+" -o stat=") + " ]; then\n  echo $$ > " + shellQuote(entered) + "\n  exec sleep 30\nfi\nexec " + shellQuote(realPS) + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(h.BinDir, "ps"), []byte(shim), 0700); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(75 * time.Second)
+	var probePID int
+	for {
+		if data, err := os.ReadFile(entered); err == nil {
+			probePID, err = strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("maintenance did not enter the blocked OS probe")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, h.NMBin, "daemon", "stop")
+	command.Dir = h.WorkDir
+	command.Env = os.Environ()
+	started := time.Now()
+	out, err := command.CombinedOutput()
+	t.Logf("daemon stop with maintenance ps blocked: elapsed=%s exit=%v\n%s", time.Since(started), err, out)
+	if err != nil {
+		t.Fatalf("shutdown waited for the blocked observation: %v %s", err, out)
+	}
+	state, err := exec.Command(realPS, "-p", strconv.Itoa(probePID), "-o", "stat=").Output()
+	if err == nil && strings.TrimSpace(string(state)) != "" {
+		t.Fatalf("shutdown left its probe child %d alive: %s", probePID, state)
+	}
+	row, err := database.GetStepResult(step.ID)
+	if err != nil || row.Status != types.StepStatusRunning || row.CompletedAt != nil || row.AgentPID == nil || *row.AgentPID != pid {
+		t.Fatalf("cancelled observation changed the protected row: %+v %v", row, err)
+	}
+	t.Logf("protected step %s remains running with live PID %d; blocked probe child %d is gone", row.ID, pid, probePID)
 }
 
 // Startup cleanup must distinguish an administrative interruption from a real
