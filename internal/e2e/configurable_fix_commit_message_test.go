@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -116,6 +117,31 @@ commit:
 			t.Fatalf("global template won over repository template: %q", subject)
 		}
 	}
+	body, err := h.runGit(context.Background(), h.UpstreamDir, "show", "-s", "--format=%b", "refs/heads/"+branch)
+	if err != nil {
+		t.Fatalf("read published review-fix body: %v", err)
+	}
+	if !strings.Contains(string(body), "guard unsafe value") || !strings.Contains(string(body), "- feature.txt: unsafe value needs validation") {
+		t.Fatalf("published review-fix body lost its summary or finding: %q", body)
+	}
+	database, err := db.OpenReadOnly(filepath.Join(h.NMHome, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rounds, err := database.GetRoundsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, round := range rounds {
+		if round.IsFixRound() && round.FixSummary != nil && *round.FixSummary == "guard unsafe value" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("published review-fix summary was not preserved in step_rounds.fix_summary")
+	}
 
 	t.Logf("global config: commit.fix_message = %q", "chore(global-{{.Step}}): {{.Summary}}")
 	t.Logf("repository config (higher precedence): commit.fix_message = %q", "fix(repo-{{.Step}}): {{.Summary}}")
@@ -153,7 +179,7 @@ func TestFixCommitTrailersJourney(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read correction before publication: %v\n%s", err, beforePush)
 	}
-	if got, want := strings.TrimSpace(string(beforePush)), "no-mistakes(review): guard unsafe value"; got != want {
+	if got, want := strings.TrimSpace(string(beforePush)), "no-mistakes(review): guard unsafe value\n\nguard unsafe value\n\nRound findings:\n- feature.txt: unsafe value needs validation"; got != want {
 		t.Fatalf("correction before publication = %q, want %q", got, want)
 	}
 	if out, err := h.runGit(context.Background(), h.UpstreamDir, "show-ref", "--verify", "refs/heads/"+branch); err == nil {

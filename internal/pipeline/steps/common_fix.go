@@ -425,6 +425,10 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 		return committed, nil
 	}
 	summary = git.StripAIAttributionTrailers(summary, sctx.Config.Commit.Trailers...)
+	var reviewBody string
+	if stepName == types.StepReview {
+		summary, reviewBody = reviewFixCommitSummary(summary, producer)
+	}
 	if summary == "" {
 		summary = fallbackSummary
 	}
@@ -435,9 +439,15 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if err != nil {
 		return false, fmt.Errorf("render %s fix commit message: %w", stepName, err)
 	}
+	if stepName == types.StepReview {
+		commitMessage += "\n\n" + reviewFixCommitBody(reviewBody, sctx.PreviousFindings)
+	}
 	commitMessage, err = withCommitTrailers(sctx, commitMessage, producer)
 	if err != nil {
 		return false, fmt.Errorf("render %s fix commit trailers: %w", stepName, err)
+	}
+	if stepName == types.StepReview {
+		commitMessage = stripReviewAIAttribution(commitMessage)
 	}
 	if err := stagePipelineChanges(sctx); err != nil {
 		return false, fmt.Errorf("stage %s changes: %w", stepName, err)
@@ -656,8 +666,9 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	}
 	committed := sctx.Run.HeadSHA != startingHead
 	sctx.FixApplied = &committed
-	if committed && stepName == types.StepReview && summary != "" {
-		return summary, nil
+	if committed && stepName == types.StepReview {
+		_, bodySummary := reviewFixCommitSummary(summary, result)
+		return bodySummary, nil
 	}
 	return fixResultSummary(committed), nil
 }

@@ -892,8 +892,11 @@ func TestCommitAgentFixes_BypassesLegacyHuskyPrepareCommitMsgHook(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gitCmd(t, dir, "log", "-1", "--format=%B"); got != wantMessage {
-		t.Fatalf("commit message = %q, want %q", got, wantMessage)
+	if got := gitCmd(t, dir, "log", "-1", "--format=%s"); got != wantMessage {
+		t.Fatalf("commit subject = %q, want %q", got, wantMessage)
+	}
+	if got := gitCmd(t, dir, "log", "-1", "--format=%b"); !strings.Contains(got, "apply review fix") {
+		t.Fatalf("commit body lost the fix summary: %q", got)
 	}
 	if got := gitCmd(t, dir, "show", "--format=", "--name-only", "HEAD"); got != "agent-fix.txt" {
 		t.Fatalf("committed files = %q, want agent-fix.txt", got)

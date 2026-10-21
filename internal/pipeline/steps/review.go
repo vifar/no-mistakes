@@ -179,7 +179,12 @@ Rules:
 - Do NOT run the complete repository test suite or lint suite during this fix round. The pipeline has dedicated test and lint steps after review that are the authoritative test and lint gates; their coverage may itself be focused on the changed area when the repository has no configured test or lint commands.
 - Return JSON with "summary" and "verification" fields when you are done.
 - The summary must be one concise sentence fragment suitable for a git commit subject.
-- Keep the summary under 10 words.%s
+- Keep the summary concise.%s
+
+The summary is preserved in this round's commit body and fix_summary record.
+Explain what changed and why, including any required disclosure or verification evidence.
+If that needs more detail, put it in subsequent paragraphs of the summary; keep the first sentence concise.
+Do not include generated-with lines, AI co-author trailers, or session attribution.
 
 Previous review findings to address:
 %s`,
