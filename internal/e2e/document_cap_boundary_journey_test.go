@@ -3,10 +3,13 @@
 package e2e
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -72,4 +75,35 @@ func TestDocumentCapCleanCheckLeavesLintToItsOwnPass(t *testing.T) {
 	}
 	capJourneyRestored(t, h, parked, head)
 	documentJourneyStatus(t, h, parked.ID)
+}
+
+// The selected R1 regression requires both index flags to fail closed even
+// when Git status hides every edit and the gap check claims there is no gap.
+func TestDocumentCapHiddenEditRefusesCleanVerdict(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			const hidden = "uncommitted repair hidden from status\n"
+			action := capJourneyCheck(documentJourneyAction("README.md", hidden))
+			action["git"] = [][]string{{"update-index", flag, "README.md"}}
+			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenarioWith(t, "", nil, action)})
+			branch, submitted := documentJourneyStart(t, h, "document:\n  max_commits_per_run: 0\ncommands:\n  lint: 'true'\n")
+			failed := documentJourneyFailed(t, h, branch, "worktree has 1 entries hidden from status by index flags")
+			worktree := paths.WithRoot(h.NMHome).WorktreeDir(failed.RepoID, failed.ID)
+			got, err := os.ReadFile(filepath.Join(worktree, "README.md"))
+			if err != nil || string(got) != hidden {
+				t.Fatalf("unsafe rollback changed the hidden proposal: %q %v", got, err)
+			}
+			if gitIn(t, h, worktree, "status", "--porcelain") != "" || gitIn(t, h, worktree, "rev-parse", "HEAD") != submitted {
+				t.Fatal("probe did not hide every edit at the submitted head")
+			}
+			if gitIn(t, h, worktree, "show", "HEAD:README.md") == strings.TrimSpace(hidden) {
+				t.Fatal("hidden repair unexpectedly reached the committed documentation")
+			}
+			if passes := documentJourneyPasses(t, h, failed.ID); len(passes) != 0 || capJourneyCalls(h) != 1 {
+				t.Fatalf("hidden-edit check recorded a pass or retried: passes=%+v calls=%d", passes, capJourneyCalls(h))
+			}
+			t.Logf("actual Git state: %s hid README.md from clean status; committed bytes unchanged; no Document pass; daemon refused clean verdict", flag)
+			documentJourneyStatus(t, h, failed.ID)
+		})
+	}
 }
