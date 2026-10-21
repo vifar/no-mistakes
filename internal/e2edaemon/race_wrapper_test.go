@@ -1,0 +1,214 @@
+//go:build darwin || linux
+
+package e2edaemon
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// The race suite is the CI job's wall clock. Run as one go test process, its
+// cost is the SUM of every package's race time, which outgrew the job's
+// bound: the suite was killed at 45 minutes with internal/pipeline/steps and
+// fifteen more packages never started, so the job could not report a failing
+// test.
+//
+// The wrapper splits the suite into parallel shards, so the job costs the
+// time of its slowest shard. These tests prove the split is COMPLETE and
+// BALANCED - a shard that silently ran nothing would make the suite pass
+// without ever running a package.
+func TestRaceWrapperRunsEveryPackageExactlyOnce(t *testing.T) {
+	result := runRaceWrapper(t, "")
+	if result.status != 0 {
+		t.Fatalf("wrapper failed: %s", result.output)
+	}
+	shards := raceWrapperShards(result.calls)
+	if len(shards) != 3 {
+		t.Fatalf("go calls = %q, want one test invocation per shard", result.calls)
+	}
+	// Every package in the inventory lands in exactly one shard. The
+	// inventory is the suite's own, so a package missing from every shard
+	// would stop running without a single failure.
+	seen := map[string]int{}
+	for _, call := range shards {
+		for _, pkg := range strings.Fields(call) {
+			if !strings.HasPrefix(pkg, "./") {
+				continue
+			}
+			seen[pkg]++
+		}
+	}
+	for pkg, count := range seen {
+		if count != 1 {
+			t.Errorf("package %s appears in %d shards, want exactly one", pkg, count)
+		}
+	}
+	for _, pkg := range raceWrapperInventory {
+		if seen[pkg] != 1 {
+			t.Errorf("package %s ran in %d shards, want exactly one", pkg, seen[pkg])
+		}
+	}
+}
+
+// The measured long poles each cost more than the rest of a shard together,
+// so two of them in one shard would make that shard the suite's long pole.
+func TestRaceWrapperPlacesOneLongPolePerShard(t *testing.T) {
+	result := runRaceWrapper(t, "")
+	if result.status != 0 {
+		t.Fatalf("wrapper failed: %s", result.output)
+	}
+	shards := raceWrapperShards(result.calls)
+	for _, call := range shards {
+		poles := 0
+		for _, pole := range raceWrapperPoles {
+			if raceWrapperHasPackage(call, pole) {
+				poles++
+			}
+		}
+		if poles > 1 {
+			t.Errorf("shard carries %d long poles: %q", poles, call)
+		}
+	}
+	// Every pole is placed exactly once, across the shards.
+	placed := 0
+	for _, call := range shards {
+		for _, pole := range raceWrapperPoles {
+			if raceWrapperHasPackage(call, pole) {
+				placed++
+			}
+		}
+	}
+	if placed != 3 {
+		t.Errorf("long poles placed %d times, want each of the three exactly once", placed)
+	}
+}
+
+// A shard that fails is the suite's failure, and the wrapper must report it
+// rather than passing on the shards that happened to succeed.
+func TestRaceWrapperFailsOnAShardFailure(t *testing.T) {
+	result := runRaceWrapper(t, "second")
+	if result.status != 29 {
+		t.Fatalf("wrapper status = %d, want the failing shard's status 29: %s", result.status, result.output)
+	}
+}
+
+// A package list that fails is fatal: the shards would otherwise run
+// whatever they could find and the suite would pass without every package.
+func TestRaceWrapperFailsOnAnUnlistableInventory(t *testing.T) {
+	result := runRaceWrapper(t, "nolist")
+	if result.status != 1 {
+		t.Fatalf("wrapper status = %d, want a failed inventory to reject the suite: %s", result.status, result.output)
+	}
+	if len(raceWrapperShards(result.calls)) != 0 {
+		t.Fatalf("a failed inventory launched shards: %q", result.calls)
+	}
+}
+
+// raceWrapperPoles are the measured long poles the wrapper must place one
+// per shard.
+var raceWrapperPoles = []string{"./internal/daemon", "./internal/pipeline/steps", "./internal/pipeline"}
+
+// raceWrapperShards returns the wrapper's go test invocations, leaving out
+// the inventory listing.
+func raceWrapperShards(calls []string) []string {
+	shards := []string{}
+	for _, call := range calls {
+		fields := strings.Fields(call)
+		if len(fields) == 0 || fields[0] != "test" {
+			continue
+		}
+		shards = append(shards, call)
+	}
+	return shards
+}
+
+// raceWrapperHasPackage reports whether a shard names a package exactly. The
+// package list is matched as a whole field, so ./internal/pipeline does not
+// count as naming ./internal/pipeline/steps.
+func raceWrapperHasPackage(call, pkg string) bool {
+	for _, field := range strings.Fields(call) {
+		if field == pkg {
+			return true
+		}
+	}
+	return false
+}
+
+type raceWrapperResult struct {
+	status int
+	output string
+	calls  []string
+}
+
+// raceWrapperInventory is the fake go list's package inventory.
+var raceWrapperInventory = []string{
+	"./cmd/fakeagent",
+	"./internal/agent",
+	"./internal/cli",
+	"./internal/daemon",
+	"./internal/pipeline",
+	"./internal/pipeline/steps",
+	"./internal/scm/github",
+}
+
+// runRaceWrapper runs scripts/race.sh against a fake go that records its
+// invocations. failShard names the shard that fails; "nolist" makes the
+// inventory unreadable.
+func runRaceWrapper(t *testing.T, failShard string) raceWrapperResult {
+	t.Helper()
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "calls")
+	fakeGo := filepath.Join(binDir, "go")
+	// The fake go list answers the inventory the wrapper asks for.
+	listPath := filepath.Join(dir, "list")
+	listed := ""
+	for _, pkg := range raceWrapperInventory {
+		listed += pkg + "\n"
+	}
+	if err := os.WriteFile(listPath, []byte(listed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	contents := "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$NM_RACE_FAKE_GO_LOG\"\n"
+	contents += "case \" $* \" in *' list '*) if [ \"${NM_RACE_FAKE_GO_FAIL_SHARD:-}\" = nolist ]; then exit 31; fi; cat \"$NM_RACE_FAKE_GO_LIST\"; exit 0 ;; esac\n"
+	contents += "status=0\n"
+	contents += "case \"$NM_RACE_FAKE_GO_FAIL_SHARD\" in second) case \" $* \" in *'./internal/pipeline/steps'*) status=29 ;; esac ;; esac\n"
+	contents += "exit \"$status\"\n"
+	if err := os.WriteFile(fakeGo, []byte(contents), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", "scripts/race.sh")
+	cmd.Dir = filepath.Join("..", "..")
+	cmd.Env = append(os.Environ(),
+		"PATH="+binDir+":"+os.Getenv("PATH"),
+		"NM_RACE_FAKE_GO_LOG="+logPath,
+		"NM_RACE_FAKE_GO_LIST="+listPath,
+		"NM_RACE_FAKE_GO_FAIL_SHARD="+failShard,
+	)
+	output, err := cmd.CombinedOutput()
+	status := 0
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			status = exitErr.ExitCode()
+		} else {
+			t.Fatalf("run wrapper: %v", err)
+		}
+	}
+	raw, readErr := os.ReadFile(logPath)
+	if readErr != nil && !os.IsNotExist(readErr) {
+		t.Fatal(readErr)
+	}
+	calls := []string{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.TrimSpace(line) != "" {
+			calls = append(calls, line)
+		}
+	}
+	return raceWrapperResult{status: status, output: string(output), calls: calls}
+}

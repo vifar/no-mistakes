@@ -35,6 +35,24 @@ tag) is not run by this fork's CI: no hosted Windows runner is used, and
 cross-compilation remains the only Windows and macOS check. It does not prove
 runtime behavior there.
 
+The race suite runs through `scripts/race.sh`, which splits it across
+parallel shards. Run as one `go test` process, the suite's cost is the SUM of
+every package's race time, which outgrew the job's bound: the job was killed
+with `internal/pipeline/steps` and fifteen more packages never started, so it
+could not report a failing test. The shards are assigned by PACKAGE, because
+a package's race time is the cost of its slowest test, so splitting a
+package's tests across shards would run the same expensive test more than
+once and save nothing. The assignment balances by MEASURED TIME rather than by
+package count: the measured long poles (`internal/daemon`,
+`internal/pipeline/steps`, `internal/pipeline`) are handed out one per shard,
+and the remaining packages are spread by a checksum of the package's own
+path, so a package always lands in the same shard and a failure reproduces in
+the same place. Every package runs in exactly one shard, and the suite's own
+contract test proves it. The job's wall-clock bound is 60 minutes, which
+leaves room for the runner's contention without hiding a hung test: a
+package that hangs is killed by the suite's own per-package timeout and
+reported as a failure.
+
 Every CI job checks out the exact PR head (or event SHA outside a PR) without
 persisting checkout credentials.
 
