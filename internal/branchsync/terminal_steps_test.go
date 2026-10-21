@@ -1,11 +1,12 @@
 package branchsync
 
 import (
-	"github.com/kunchenguid/no-mistakes/internal/custody"
-	"github.com/kunchenguid/no-mistakes/internal/types"
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/custody"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestCancelledStalePushOffersAndRecoversCustody(t *testing.T) {

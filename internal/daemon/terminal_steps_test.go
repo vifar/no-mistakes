@@ -1,12 +1,14 @@
 package daemon
 
 import (
-	"github.com/kunchenguid/no-mistakes/internal/types"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestAbortTerminalRunCleansStaleStepAndRemainsIdempotent(t *testing.T) {
@@ -169,5 +171,43 @@ func TestTerminalStepSweepDoesNotDelayActiveAbort(t *testing.T) {
 	}
 	if delayed {
 		t.Fatal("a blocked stale-row read held the ownership lock and delayed active abort")
+	}
+}
+
+func TestTerminalStepCleanupKeepsDocumentRetentionMeaning(t *testing.T) {
+	for _, actualFailure := range []bool{false, true} {
+		t.Run(fmt.Sprint(actualFailure), func(t *testing.T) {
+			f := newFaultFixture(t, "1")
+			run, err := f.d.InsertRun("fault-repo", "feature", f.head, f.head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := f.d.InsertStepResult(run.ID, types.StepDocument)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := f.d.StartStep(step.ID); err != nil {
+				t.Fatal(err)
+			}
+			if actualFailure {
+				if err := f.d.FailStep(step.ID, "cannot safely discard owner work", 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := f.d.RecordIneligibleTerminal(run.ID, "independent Resume failure", types.RunFailed, nil); err != nil {
+				t.Fatal(err)
+			}
+			stored, err := f.d.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			reason := worktreeRefusalCleanupReason(f.d, stored)
+			if actualFailure && reason == "" {
+				t.Fatal("genuine Document failure lost its retention guard")
+			}
+			if !actualFailure && reason != "" {
+				t.Fatalf("interrupted row invented a Document refusal: %s", reason)
+			}
+		})
 	}
 }
