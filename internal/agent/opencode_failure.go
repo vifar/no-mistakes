@@ -47,6 +47,10 @@ func (e *opencodeMessageFailure) StructuredOutputRejected() bool { return e.stru
 
 func (e *opencodeMessageFailure) TerminalProviderError() bool { return e.terminal }
 
+func (e *opencodeMessageFailure) Is(target error) bool {
+	return target == errOpencodeToolsAlreadyRan && e.toolActivity
+}
+
 func (e *opencodeMessageFailure) Error() string {
 	// StructuredOutputError keeps its own wording: the actionable fact is
 	// that opencode already spent its internal retries trying to make the
@@ -97,6 +101,9 @@ func (e *opencodeMessageFailure) label() string {
 // stops here rather than falling through to the substring matching - a 400
 // body quoting a provider's own rate-limit prose must not look transient.
 func classifyOpencodeTransient(err error) (string, bool) {
+	if opencodeReplayUnsafe(err) {
+		return "", false
+	}
 	var failure *opencodeMessageFailure
 	if errors.As(err, &failure) {
 		// A retry starts a FRESH opencode session (runOnce always calls
@@ -110,7 +117,7 @@ func classifyOpencodeTransient(err error) (string, bool) {
 		// Resuming the failed session instead is not a fix: opencode's
 		// message endpoint only appends another user message, so whether the
 		// model re-runs the tool stays its judgement rather than a guarantee.
-		if failure.retryable && !failure.terminal && !failure.toolActivity {
+		if failure.retryable && !failure.terminal {
 			return failure.label(), true
 		}
 		return "", false
@@ -120,9 +127,6 @@ func classifyOpencodeTransient(err error) (string, bool) {
 	// classifier with no verdict from opencode, and that classifier reads
 	// only text. The marker is the one place the tool evidence survives, so
 	// it is checked before the fall-through rather than at each call site.
-	if opencodeReplayUnsafe(err) {
-		return "", false
-	}
 	return classifyTransient(err)
 }
 
