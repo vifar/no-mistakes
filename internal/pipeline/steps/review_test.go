@@ -774,6 +774,9 @@ func TestReviewFix_PostAgentCommitUsesStepParentContext(t *testing.T) {
 	if got := strings.TrimSpace(gitCmd(t, dir, "show", "--format=%s", "--no-patch", "HEAD")); !strings.Contains(got, "fix timeout ownership") {
 		t.Fatalf("post-agent commit missing from HEAD: %q", got)
 	}
+	if body := gitCmd(t, dir, "show", "--format=%b", "--no-patch", "HEAD"); !strings.HasPrefix(body, "fix timeout ownership\n\n") {
+		t.Fatalf("post-agent commit lost the round rationale: %q", body)
+	}
 }
 
 func TestReviewStep_LateCompletionAfterInvocationDeadlineIsRejected(t *testing.T) {
