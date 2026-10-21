@@ -132,8 +132,9 @@ On narrow terminals, the log panel expands to fill the remaining vertical space 
 While the CI step is active, the TUI shows a dedicated CI panel instead of the generic findings view.
 It shows the PR label, the latest CI activity, and a log tail.
 When a real CI auto-fix attempt starts, the panel increments `CI auto-fixes: N`.
-Once the CI monitor reports readiness and known mergeability is clear, the panel shows `✓ Checks passed` with `still monitoring until merged or closed`, and the terminal title switches to `Checks passed`. The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns readiness and signal-clearing rules.
-That text means the CI monitor is still active; it can still pause later if the configured idle timeout elapses with no base-branch movement.
+When CI is ready and monitoring remains active, the panel shows `✓ Checks passed` with `still monitoring until merged or closed`, and the terminal title switches to `Checks passed`.
+A run that finishes at readiness instead shows `✓ Checks passed - PR ready to merge` in its outcome banner and terminal title; approved exceptions remain visible in the banner.
+The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns readiness, signal-clearing, and monitoring completion rules.
 The ready signal is persisted, so a fresh attach shows `Checks passed` without depending on delivery of an earlier log line.
 
 ### Local branch
