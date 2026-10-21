@@ -24,8 +24,7 @@ func (a *opencodeAgent) runV2(ctx context.Context, opts RunOpts, baseURL string)
 	if err != nil {
 		return nil, err
 	}
-	created := struct{ Data *opencodeV2Session }{Data: &opencodeV2Session{ID: sessionID}}
-	sessionURL := baseURL + "/api/session/" + url.PathEscape(created.Data.ID)
+	sessionURL := baseURL + "/api/session/" + url.PathEscape(sessionID)
 	defer func() {
 		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -51,7 +50,7 @@ func (a *opencodeAgent) runV2(ctx context.Context, opts RunOpts, baseURL string)
 	if response.StatusCode != http.StatusOK || !strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
 		return nil, agentSetupFailure(fmt.Errorf("opencode event stream: expected SSE response, got HTTP %d", response.StatusCode))
 	}
-	state := opencodeV2Stream{sessionID: created.Data.ID, parts: make(map[string]string), emitted: make(map[string]string), flushed: make(map[string]bool), usage: make(map[string]TokenUsage)}
+	state := opencodeV2Stream{sessionID: sessionID, parts: make(map[string]string), emitted: make(map[string]string), flushed: make(map[string]bool), usage: make(map[string]TokenUsage)}
 	streamDone := make(chan struct{})
 	go func() {
 		defer close(streamDone)
@@ -75,7 +74,7 @@ func (a *opencodeAgent) runV2(ctx context.Context, opts RunOpts, baseURL string)
 		}
 		return resultFromUsage(accumulateUsage(state.usage)), opencodeTurnFailure(evidence, fmt.Errorf("opencode admit prompt: %w", err))
 	}
-	if err := client.json(ctx, http.MethodPost, baseURL+"/api/experimental/session/"+url.PathEscape(created.Data.ID)+"/wait", nil, nil); err != nil {
+	if err := client.json(ctx, http.MethodPost, baseURL+"/api/experimental/session/"+url.PathEscape(sessionID)+"/wait", nil, nil); err != nil {
 		stopStream()
 		return resultFromUsage(accumulateUsage(state.usage)), opencodeTurnFailure(opencodeToolsUnknown, fmt.Errorf("opencode wait: %w", err))
 	}
@@ -86,7 +85,7 @@ func (a *opencodeAgent) runV2(ctx context.Context, opts RunOpts, baseURL string)
 		stopStream()
 		return resultFromUsage(accumulateUsage(state.usage)), opencodeTurnFailure(opencodeToolsUnknown, fmt.Errorf("opencode session outcome: %w", err))
 	}
-	if session.Data == nil || session.Data.ID != created.Data.ID {
+	if session.Data == nil || session.Data.ID != sessionID {
 		stopStream()
 		return resultFromUsage(accumulateUsage(state.usage)), opencodeTurnFailure(opencodeToolsUnknown, fmt.Errorf("opencode session outcome: missing or mismatched session identity"))
 	}
@@ -205,33 +204,9 @@ func (c opencodeV2Client) authenticate(request *http.Request) {
 }
 
 func (c opencodeV2Client) json(ctx context.Context, method, endpoint string, body, target any) error {
-	var input io.Reader
-	if body != nil {
-		encoded, err := json.Marshal(body)
-		if err != nil {
-			return err
-		}
-		input = bytes.NewReader(encoded)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, endpoint, input)
+	raw, err := c.raw(ctx, method, endpoint, body)
 	if err != nil {
 		return err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	c.authenticate(req)
-	response, err := opencodeV2HTTP.Do(req)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	raw, err := io.ReadAll(response.Body)
-	if err != nil {
-		return err
-	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("%s %s failed with HTTP %d", method, req.URL.Path, response.StatusCode)
 	}
 	if target != nil {
 		if err := json.Unmarshal(raw, target); err != nil {
@@ -239,6 +214,38 @@ func (c opencodeV2Client) json(ctx context.Context, method, endpoint string, bod
 		}
 	}
 	return nil
+}
+
+func (c opencodeV2Client) raw(ctx context.Context, method, endpoint string, body any) ([]byte, error) {
+	var input io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		input = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, input)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	c.authenticate(req)
+	response, err := opencodeV2HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("%s %s failed with HTTP %d", method, req.URL.Path, response.StatusCode)
+	}
+	return raw, nil
 }
 
 type opencodeV2Model struct {

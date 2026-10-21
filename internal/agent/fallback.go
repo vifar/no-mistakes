@@ -243,6 +243,13 @@ func isAgentUnavailableError(err error) bool {
 	if err == nil || IsStructuredOutputRejected(err) || opencodeReplayUnsafe(err) {
 		return false
 	}
+	// A provider's completed-turn verdict can quote setup-looking prose. It
+	// remains that agent's answer, even when the projection proves no tools ran.
+	var turnFailure *opencodeMessageFailure
+	if errors.As(err, &turnFailure) {
+		return false
+	}
+
 	if errors.Is(err, errAgentSetupFailure) {
 		return true
 	}

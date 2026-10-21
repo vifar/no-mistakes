@@ -66,11 +66,11 @@ func (v opencodeAPIVersion) String() string {
 // at startup. The 1.x server had no such protection unless
 // OPENCODE_SERVER_PASSWORD was set.
 //
-// The adapter must use the server's credential, never invent one: an
-// independent password would only produce a 401 that looks like a broken
-// model. ensureServer resolves it from the effective child environment or
-// captures the generated password from startup output. Only an unsecured
-// 1.x server needs no credential. Operator-facing environment semantics are
+// The adapter and server must share a credential: an independent client
+// password would only produce a misleading 401. ensureServer resolves the
+// effective child environment or supplies the same private credential to its
+// managed V2 child, and captures legacy generated startup passwords. Only an
+// unsecured 1.x server needs no credential. Operator-facing environment semantics are
 // owned by docs/src/content/docs/reference/environment.md.
 type opencodeAuth struct {
 	username string
@@ -191,7 +191,7 @@ func detectOpencodeAPIVersion(ctx context.Context, baseURL string, auth opencode
 	if header := auth.header(); header != "" {
 		req.Header.Set("Authorization", header)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := opencodeV2HTTP.Do(req)
 	if err != nil {
 		return opencodeAPIVersionUnknown, fmt.Errorf("opencode version probe: %w", err)
 	}
@@ -455,7 +455,7 @@ func (a *opencodeAgent) connectEventStream(ctx context.Context, baseURL string) 
 		req.Header.Set("Authorization", header)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := opencodeV2HTTP.Do(req)
 	if err != nil {
 		return nil, agentSetupFailure(fmt.Errorf("opencode event stream: %w", err))
 	}
@@ -487,7 +487,7 @@ func (a *opencodeAgent) deleteSession(baseURL, sessionID string) {
 	if header := a.auth().header(); header != "" {
 		req.Header.Set("Authorization", header)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := opencodeV2HTTP.Do(req)
 	if err == nil && resp != nil {
 		resp.Body.Close()
 	}
@@ -495,11 +495,7 @@ func (a *opencodeAgent) deleteSession(baseURL, sessionID string) {
 
 // doJSON makes an authenticated JSON request and returns the response body.
 func (a *opencodeAgent) doJSON(ctx context.Context, method, url string, body any) ([]byte, error) {
-	headers := map[string]string{}
-	if header := a.auth().header(); header != "" {
-		headers["Authorization"] = header
-	}
-	return doJSON(ctx, method, url, headers, body)
+	return (opencodeV2Client{authorization: a.auth().header()}).raw(ctx, method, url, body)
 }
 
 // routes returns the routes of the detected API generation.

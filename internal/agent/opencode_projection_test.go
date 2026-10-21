@@ -209,20 +209,16 @@ data: {"type":"session.text.delta","data":{"sessionID":"ses_fixture","assistantM
 	}
 }
 
-func TestOpencodeV2_EffortOnlyUsesTheLocationsDefaultModel(t *testing.T) {
+func TestOpencodeV2_EffortOnlyRequiresExplicitModelBeforeSessionCreation(t *testing.T) {
 	f := &opencodeV2Fixture{defaultModel: true, pages: []string{v2Page("OK")}}
 	a := v2Agent(f.server(t))
 	a.profile = agentcfg.Profile{Effort: "high"}
 	_, err := a.Run(context.Background(), RunOpts{CWD: t.TempDir(), Prompt: "answer"})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), "explicit provider/model") {
+		t.Fatalf("effort-only profile was not refused: %v", err)
 	}
-	var model opencodeV2Model
-	if err := json.Unmarshal(f.created["model"], &model); err != nil {
-		t.Fatal(err)
-	}
-	if model.ID != "default-fixture" || model.Variant != "high" {
-		t.Fatalf("effort default model lost: %+v", model)
+	if f.count("POST /api/session") != 0 || f.count("GET /api/model/default") != 0 {
+		t.Fatal("invalid profile reached server")
 	}
 }
 
@@ -383,10 +379,11 @@ data: {"type":"session.text.delta","data":{"sessionID":"ses_fixture","assistantM
 
 func TestOpencodeV2_RedirectCannotReceiveThePrivateServerCredential(t *testing.T) {
 	var forwarded atomic.Bool
+	auth := opencodeAuth{username: opencodeAuthUsername, password: "fixture-credential"}
 	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { forwarded.Store(true) }))
 	defer destination.Close()
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Basic fixture-credential" {
+		if r.Header.Get("Authorization") != auth.header() {
 			t.Error("owned server did not receive authentication")
 		}
 		w.Header().Set("Location", destination.URL)
@@ -394,9 +391,27 @@ func TestOpencodeV2_RedirectCannotReceiveThePrivateServerCredential(t *testing.T
 		fmt.Fprint(w, "fixture-credential must not appear in errors")
 	}))
 	defer origin.Close()
-	client := opencodeV2Client{authorization: "Basic fixture-credential"}
+	client := opencodeV2Client{authorization: auth.header()}
 	err := client.json(context.Background(), http.MethodGet, origin.URL+"/api/info", nil, nil)
 	if err == nil || forwarded.Load() || strings.Contains(err.Error(), "fixture-credential") {
 		t.Fatalf("unsafe redirect or error disclosure: forwarded=%v err=%v", forwarded.Load(), err)
+	}
+}
+
+func TestOpencodeV2_SessionSetupRefusesCredentialRedirect(t *testing.T) {
+	var forwarded atomic.Bool
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { forwarded.Store(true) }))
+	defer destination.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", destination.URL)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+		fmt.Fprint(w, "fixture-private-password")
+	}))
+	defer origin.Close()
+	a := &opencodeAgent{}
+	a.setAPI(opencodeAPIVersion2, opencodeAuth{username: opencodeAuthUsername, password: "fixture-private-password"})
+	_, err := a.createSession(context.Background(), origin.URL, t.TempDir())
+	if err == nil || !isAgentUnavailableError(err) || forwarded.Load() || strings.Contains(err.Error(), "fixture-private-password") {
+		t.Fatalf("unsafe setup redirect: forwarded=%v err=%v", forwarded.Load(), err)
 	}
 }

@@ -93,8 +93,12 @@ func TestFallbackAgent_DoesNotFallBackOnAWorkedTurn(t *testing.T) {
 		err  error
 	}{
 		{
+			name: "completed provider failure quotes setup wording",
+			err:  &opencodeMessageFailure{name: "provider.error", message: "agent start: failed"},
+		},
+		{
 			name: "quoted setup error in structured output",
-			err:  rejectStructuredOutput(errors.New("opencode create session: HTTP 405; agent start: failed")),
+			err:  RejectStructuredOutput(errors.New("opencode create session: HTTP 405; agent start: failed")),
 		},
 		{
 			name: "unsafe turn containing setup text",

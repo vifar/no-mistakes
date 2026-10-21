@@ -5,12 +5,13 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"log/slog"
 	"os/exec"
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 func (a *opencodeAgent) ensureServer(ctx context.Context, cwd string, env []string) (string, error) {
@@ -31,9 +32,8 @@ func (a *opencodeAgent) ensureServer(ctx context.Context, cwd string, env []stri
 	// The credential is read from the SAME environment the server is
 	// started with, so the server and the client always agree on it.
 	auth := resolveOpencodeAuth(gitSafeEnvWithOverlay(cwd, a.overlay(), env))
-	// A 2.x server generates a random password at startup unless one is
-	// configured, and prints it once on stdout. The client watches the
-	// output for that line, so the two always agree on the credential.
+	// Legacy servers may print a generated password at startup. V2 gets
+	// the same configured or private generated credential on both sides.
 	capture, sink := newOpencodePasswordCapture()
 	health := "/global/health"
 	options := managedServerOptions{output: sink}

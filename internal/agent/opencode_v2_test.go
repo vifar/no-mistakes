@@ -80,6 +80,19 @@ func newOpencodeV2Fake(t *testing.T, opts opencodeV2FakeOptions) *opencodeV2Fake
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"data":{"id":%q,"projectID":"p1","cost":0,"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1,"updated":1},"location":{"directory":"/tmp"}}}`, id)
 
+		case strings.HasPrefix(r.URL.Path, "/api/experimental/session/") && strings.HasSuffix(r.URL.Path, "/wait"):
+			if opts.incompleteStream {
+				http.Error(w, "execution did not complete", http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case strings.HasPrefix(r.URL.Path, "/api/session/") && r.Method == http.MethodGet && !strings.HasSuffix(r.URL.Path, "/message"):
+			outcome := "succeeded"
+			if opts.execError != nil {
+				outcome = "failed"
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": map[string]string{"id": strings.TrimPrefix(r.URL.Path, "/api/session/"), "outcome": outcome}})
+
 		case r.URL.Path == "/api/event" && r.Method == http.MethodGet:
 			if opts.eventStatus != 0 {
 				w.WriteHeader(opts.eventStatus)
@@ -140,21 +153,55 @@ func newOpencodeV2Fake(t *testing.T, opts opencodeV2FakeOptions) *opencodeV2Fake
 
 		case strings.HasPrefix(r.URL.Path, "/api/session/") && strings.HasSuffix(r.URL.Path, "/message") && r.Method == http.MethodGet:
 			fake.messages.Add(1)
-			if r.URL.Query().Get("order") != "desc" {
-				http.Error(w, "expected explicit descending order", http.StatusBadRequest)
+			if r.URL.Query().Get("order") != "asc" {
+				http.Error(w, "expected explicit chronological order", http.StatusBadRequest)
 				return
 			}
 			if opts.messageList != "" {
-				w.Header().Set("Content-Type", "application/json")
-				fmt.Fprint(w, opts.messageList)
+				// This legacy fixture is authored newest-first. Serve the
+				// complete chronological projection required by the V2 API.
+				var page struct {
+					Data []json.RawMessage `json:"data"`
+				}
+				if err := json.Unmarshal([]byte(opts.messageList), &page); err != nil {
+					t.Error(err)
+				}
+				for left, right := 0, len(page.Data)-1; left < right; left, right = left+1, right-1 {
+					page.Data[left], page.Data[right] = page.Data[right], page.Data[left]
+				}
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": page.Data, "cursor": map[string]any{}})
 				return
+			}
+			var messages []map[string]any
+			// Per-step usage is persisted in the projection as well as SSE.
+			// Session-wide usage snapshots are not extra assistant steps.
+			for _, raw := range opts.extraEvents {
+				var event struct {
+					Type string `json:"type"`
+					Data struct {
+						SessionID string          `json:"sessionID"`
+						ID        string          `json:"assistantMessageID"`
+						Tokens    json.RawMessage `json:"tokens"`
+					} `json:"data"`
+				}
+				if json.Unmarshal([]byte(raw), &event) == nil && (event.Type == "session.step.ended" || event.Type == "session.step.failed") && event.Data.SessionID == "v2s1" && event.Data.ID != "" {
+					messages = append(messages, map[string]any{"id": event.Data.ID, "type": "assistant", "content": []any{}, "tokens": event.Data.Tokens})
+				}
 			}
 			tokens := opts.assistantTokens
 			if tokens == "" {
 				tokens = `{"input":100,"output":50,"reasoning":0,"cache":{"read":0,"write":0}}`
 			}
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"data":[{"id":"m2","time":{"created":2,"completed":3},"type":"assistant","agent":"build","model":{"id":"minimax-m3.1-flash","providerID":"ollama-cloud"},"content":[{"type":"text","text":%q}],"finish":"stop","tokens":%s},{"id":"m1","time":{"created":1},"type":"user","text":"hi"}],"cursor":{}}`, opts.answer, tokens)
+			content := []map[string]string{{"type": "text", "text": opts.answer}}
+			if opts.toolRan {
+				content = append([]map[string]string{{"type": "tool"}}, content...)
+			}
+			message := map[string]any{"id": "m1", "type": "assistant", "content": content, "tokens": json.RawMessage(tokens)}
+			if opts.execError != nil {
+				message["error"] = opts.execError
+			}
+			messages = append(messages, message)
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": messages, "cursor": map[string]any{}})
 
 		case strings.HasPrefix(r.URL.Path, "/api/session/") && strings.HasSuffix(r.URL.Path, "/interrupt"):
 			fake.interrupts.Add(1)
