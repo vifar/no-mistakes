@@ -54,7 +54,7 @@ multi-user Nix with an active `nix-daemon` usable by the runner account. The `Ni
 workflow adds `/nix/var/nix/profiles/default/bin` to `GITHUB_PATH` by default.
 Administrators install these dependencies; the runner account does not gain
 sudo access. The default end-to-end suite shares a 40-minute budget inside
-the 45-minute job bound. With at least two daemon slots, the user-journey
+the 90-minute job bound. With at least two daemon slots, the user-journey
 matrix runs in two isolated Go test processes: Claude and Codex in one, all
 other agents in the other. The terminal-merge and retained-target continuity
 journey tables then share one Go test process alongside a separate
