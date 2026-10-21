@@ -3,7 +3,6 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -66,10 +65,29 @@ const documentCapNoticeDescription = "Document commit limit reached; further doc
 //     the gap is still visible and still decidable. The cap notice rides
 //     along as INFORMATIONAL, never as the actionable finding.
 //
+// The check's OWN verdict is the authority on the CURRENT gaps. An earlier
+// pass's finding is not re-appended: the check reads the current state, so a
+// gap it does not re-report is either gone (a later repair removed what
+// needed the documentation) or never was. Carrying the old one forward would
+// park a run whose documentation is accurate, which is the deadlock this
+// whole change exists to remove.
+//
 // A gap check that edits is not honored: the edits are discarded with the
 // same rollback the convergence path uses, so the cap still bounds the
 // commits.
-func (s *DocumentStep) runCapGapCheck(sctx *pipeline.StepContext, baseSHA, targetBranch string, previous Findings, combinedLint bool) (*pipeline.StepOutcome, error) {
+func (s *DocumentStep) runCapGapCheck(sctx *pipeline.StepContext, baseSHA, targetBranch string, combinedLint bool) (*pipeline.StepOutcome, error) {
+	return s.runCapGapCheckAttempt(sctx, baseSHA, targetBranch, combinedLint, false)
+}
+
+// runCapGapCheckAttempt runs the gap check. reassessing is true when this is
+// the SECOND attempt, made because the first one produced a verdict about
+// bytes the rollback removed.
+//
+// A check that edits is bounded to ONE reassessment: a check that edits
+// again has not produced a verdict about the current state, so the step
+// fails closed instead of looping on an agent that ignores its
+// instructions.
+func (s *DocumentStep) runCapGapCheckAttempt(sctx *pipeline.StepContext, baseSHA, targetBranch string, combinedLint bool, reassessing bool) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
 	headBefore := sctx.Run.HeadSHA
 	sctx.Log("Document commit limit reached; running a read-only gap check")
@@ -103,36 +121,29 @@ func (s *DocumentStep) runCapGapCheck(sctx *pipeline.StepContext, baseSHA, targe
 		schema = housekeepingFindingsSchema
 	}
 
-	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
+	result, runErr := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		JSONSchema: schema,
 		OnChunk:    sctx.LogChunk,
 		Purpose:    purpose,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("agent document gap check: %w", err)
+	// The rollback runs on an UNSUCCESSFUL invocation too. An agent that
+	// edited or committed and then failed must not leave that proposal in the
+	// worktree: the budget is exhausted, and a surviving commit would also
+	// break the head continuity of every later attempt.
+	proposed, rollbackErr := s.discardGapCheckProposal(sctx, headBefore, retainedScratch)
+	if rollbackErr != nil {
+		if runErr != nil {
+			return nil, fmt.Errorf("agent document gap check: %w (and the gap check's proposal could not be discarded: %v)", runErr, rollbackErr)
+		}
+		return nil, fmt.Errorf("discard the document gap check's proposal: %w", rollbackErr)
+	}
+	if runErr != nil {
+		return nil, fmt.Errorf("agent document gap check: %w", runErr)
 	}
 	if result == nil {
 		return nil, fmt.Errorf("agent document gap check returned no result")
-	}
-
-	// A gap check that edited is not honored: the edits are discarded and the
-	// cap still holds. The rollback is the same one the convergence path uses,
-	// so only this check's own proposal is touched.
-	paths, untracked, err := documentCandidatePaths(sctx, headBefore, retainedScratch)
-	if err != nil {
-		return nil, err
-	}
-	agentHead, err := stepGitRun(sctx, "rev-parse", "HEAD")
-	if err != nil {
-		return nil, err
-	}
-	if len(paths) > 0 || agentHead != headBefore {
-		sctx.Log("the read-only gap check edited the worktree; discarding its proposal")
-		if err := discardDocumentCandidate(sctx, headBefore, paths, untracked, retainedScratch); err != nil {
-			return nil, err
-		}
 	}
 
 	var reported Findings
@@ -143,25 +154,8 @@ func (s *DocumentStep) runCapGapCheck(sctx *pipeline.StepContext, baseSHA, targe
 	if combinedLint {
 		// The combined pass's lint half has its own gate; the Document gap
 		// check only speaks for the documentation half. The lint step falls
-		// back to its own pass, so neither duty is silently dropped.
+		// back to its own pass, so neither duty is never silently dropped.
 		gaps, _ = splitHousekeepingFindings(reported)
-	}
-	// A gap an EARLIER pass reported and the check did not repeat is still
-	// unresolved: the owner decided nothing about it, so it stays visible.
-	// The check only ever adds to the outstanding set, never removes from it.
-	for _, prior := range previous.Items {
-		found := false
-		for _, current := range gaps.Items {
-			priorKey, currentKey := prior, current
-			priorKey.ID, currentKey.ID = "", ""
-			if reflect.DeepEqual(priorKey, currentKey) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			gaps.Items = append(gaps.Items, prior)
-		}
 	}
 
 	// A gap the agent could not resolve is still a gap: it stays an ordinary
@@ -169,12 +163,59 @@ func (s *DocumentStep) runCapGapCheck(sctx *pipeline.StepContext, baseSHA, targe
 	// decision, because no fix round can ever clear it.
 	gaps = documentCapNotice(gaps)
 
+	// A check that edited produced its verdict against bytes the rollback
+	// just removed. Accepting that verdict would complete the step with the
+	// ORIGINAL stale documentation still in place - a check that repaired
+	// the documentation and then reported no gap would look like a clean
+	// pass. The restored bytes have to be reassessed, so the check runs
+	// again on them. A check that edits AGAIN has not judged the current
+	// state at all, so the step fails closed rather than looping.
+	if proposed {
+		if reassessing {
+			return nil, fmt.Errorf("the document gap check edited the worktree twice; it produced no verdict about the current documentation")
+		}
+		sctx.Log("the gap check's verdict described discarded changes; reassessing the restored bytes")
+		return s.runCapGapCheckAttempt(sctx, baseSHA, targetBranch, combinedLint, true)
+	}
+
 	if len(gaps.Items) == 0 {
 		sctx.Log("Document commit limit reached; the read-only gap check found no remaining documentation gap")
 		return documentCapOutcome(sctx, gaps, "Document commit limit reached; no remaining documentation gap"), nil
 	}
 	sctx.Log(fmt.Sprintf("Document commit limit reached; the read-only gap check found %d unresolved items", len(gaps.Items)))
 	return stoppedDocumentOutcome(sctx, gaps, "Document commit limit reached; stopping further commits"), nil
+}
+
+// discardGapCheckProposal rolls back everything the gap check proposed, and
+// reports whether it proposed ANYTHING.
+//
+// A check that edited is not honored: the edits are discarded and the cap
+// still holds. The rollback is the same one the convergence path uses, so
+// only this check's own proposal is touched.
+//
+// The second return value is the load-bearing one: a verdict produced
+// against bytes the rollback just removed describes a state that no longer
+// exists, so the caller must not accept it. A check that repaired the
+// documentation and then reported no gap would otherwise complete the step
+// with the ORIGINAL stale documentation still in place.
+func (s *DocumentStep) discardGapCheckProposal(sctx *pipeline.StepContext, headBefore string, retainedScratch []string) (bool, error) {
+	paths, untracked, err := documentCandidatePaths(sctx, headBefore, retainedScratch)
+	if err != nil {
+		return false, err
+	}
+	agentHead, err := stepGitRun(sctx, "rev-parse", "HEAD")
+	if err != nil {
+		return false, err
+	}
+	proposed := len(paths) > 0 || agentHead != headBefore
+	if !proposed {
+		return false, nil
+	}
+	sctx.Log("the read-only gap check edited the worktree; discarding its proposal")
+	if err := discardDocumentCandidate(sctx, headBefore, paths, untracked, retainedScratch); err != nil {
+		return true, err
+	}
+	return true, nil
 }
 
 // buildCapCheckPrompt assembles the read-only gap check's prompt: the

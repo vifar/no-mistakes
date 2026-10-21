@@ -412,6 +412,8 @@ func TestDocumentConvergenceSameFiles(t *testing.T) {
 	}
 }
 
+// The cap bounds the COMMITS a run may make, and the read-only gap check
+// spends none of them.
 func TestDocumentConvergenceCap(t *testing.T) {
 	for _, limit := range []int{0, 1, 2} {
 		t.Run(fmt.Sprint(limit), func(t *testing.T) {
@@ -419,6 +421,12 @@ func TestDocumentConvergenceCap(t *testing.T) {
 			calls := 0
 			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 				calls++
+				// The READ-ONLY gap check edits nothing: it only reports the
+				// gap that remains. A check that edited would be rolled back
+				// and its verdict about the discarded bytes would not count.
+				if calls > limit {
+					return &agent.Result{Output: json.RawMessage(`{"findings":[{"severity":"warning","description":"another gap remains","action":"ask-user"}],"summary":"add guide"}`)}, nil
+				}
 				if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("guide%d.md", calls)), []byte("guide\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}

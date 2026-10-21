@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,8 +38,17 @@ type documentCapAgent struct {
 	// editOnCheck makes the gap check edit the worktree, the way an agent
 	// that ignores its read-only instruction would.
 	editOnCheck bool
+	// editCalls limits how many gap checks edit. Zero means every one of them
+	// does.
+	editCalls int
+	// failOnCheck makes the gap check fail after it edited.
+	failOnCheck bool
+	// commitOnCheck makes the gap check commit its repair.
+	commitOnCheck bool
 	// firstOutput overrides the first pass's structured output.
 	firstOutput string
+	// checks counts the gap checks so far, INCLUDING the one running.
+	checks int
 }
 
 func (a *documentCapAgent) Name() string { return "test" }
@@ -54,11 +64,23 @@ func (a *documentCapAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 		}
 		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"update guide"}`)}, nil
 	}
+	a.checks++
 	a.checkPrompts = append(a.checkPrompts, opts.Prompt)
-	if a.editOnCheck {
+	// a.checks counts the gap checks so far, INCLUDING this one.
+	if a.editOnCheck && (a.editCalls == 0 || a.checks <= a.editCalls) {
 		if err := os.WriteFile(filepath.Join(a.dir, "README.md"), []byte("edited by the gap check\n"), 0o644); err != nil {
 			a.t.Fatal(err)
 		}
+	}
+	if a.commitOnCheck {
+		if err := os.WriteFile(filepath.Join(a.dir, "README.md"), []byte("repaired by the gap check\n"), 0o644); err != nil {
+			a.t.Fatal(err)
+		}
+		gitCmd(a.t, a.dir, "add", "README.md")
+		gitCmd(a.t, a.dir, "commit", "-qm", "gap check repair")
+	}
+	if a.failOnCheck {
+		return nil, fmt.Errorf("the gap check agent failed")
 	}
 	return &agent.Result{Output: json.RawMessage(a.gapOutput)}, nil
 }
@@ -271,9 +293,14 @@ func TestDocumentCapZeroBudgetStillChecksForGaps(t *testing.T) {
 	}
 }
 
-// A gap an EARLIER pass reported stays unresolved until somebody decides, so
-// the cap's gap check must not lose it.
-func TestDocumentCapKeepsAnEarlierUnresolvedGap(t *testing.T) {
+// The gap check's OWN verdict is the authority on the CURRENT gaps.
+//
+// An earlier pass's finding is not re-appended: the check reads the current
+// state, so a gap it does not re-report is either gone (a later repair
+// removed what needed the documentation) or never was. Carrying the old one
+// forward would park a run whose documentation is accurate - the very
+// deadlock this change removes.
+func TestDocumentCapGapCheckIsTheAuthorityOnCurrentGaps(t *testing.T) {
 	dir, base, head := setupGitRepo(t)
 	ag := &documentCapAgent{t: t, dir: dir, commit: true, gapOutput: `{"findings":[],"summary":"no gap"}`}
 	ag.firstOutput = `{"findings":[{"severity":"warning","description":"earlier gap still open","action":"ask-user"}],"summary":"gap remains"}`
@@ -292,20 +319,52 @@ func TestDocumentCapKeepsAnEarlierUnresolvedGap(t *testing.T) {
 	holder := &pipelineStepContext{dir: dir, sctx: sc}
 	advanceHead(t, holder, "feature.txt", "reviewed repair\n")
 
+	// The check now reports no gap: the earlier one does not survive it.
 	out, err = (&DocumentStep{}).Execute(sc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !out.NeedsApproval {
-		t.Fatalf("an earlier unresolved gap was lost at the cap: %+v", out)
+	if out.NeedsApproval {
+		t.Fatalf("an obsolete earlier gap was carried forward: %+v", out)
 	}
-	if !strings.Contains(out.Findings, "earlier gap still open") {
-		t.Fatalf("the earlier gap was dropped: %s", out.Findings)
+	if strings.Contains(out.Findings, "earlier gap still open") {
+		t.Fatalf("the obsolete gap was re-appended: %s", out.Findings)
+	}
+}
+
+// A gap the check DOES re-report stays visible and decidable.
+func TestDocumentCapGapCheckReReportedGapStillParks(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	ag := &documentCapAgent{t: t, dir: dir, commit: true, gapOutput: `{"findings":[{"severity":"warning","description":"still stale","action":"ask-user"}],"summary":"gap remains"}`}
+	ag.firstOutput = `{"findings":[{"severity":"warning","description":"still stale","action":"ask-user"}],"summary":"gap remains"}`
+	sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+	sc.Config.Document.MaxCommitsPerRun = 1
+
+	if _, err := (&DocumentStep{}).Execute(sc); err != nil {
+		t.Fatal(err)
+	}
+	holder := &pipelineStepContext{dir: dir, sctx: sc}
+	advanceHead(t, holder, "feature.txt", "reviewed repair\n")
+
+	out, err := (&DocumentStep{}).Execute(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.NeedsApproval {
+		t.Fatalf("a re-reported gap did not park: %+v", out)
+	}
+	if !strings.Contains(out.Findings, "still stale") {
+		t.Fatalf("the re-reported gap was lost: %s", out.Findings)
 	}
 }
 
 // A gap check that EDITS is not honored: the cap still bounds the commits, and
 // the check's own proposal is rolled back.
+//
+// A check that edits and then reports no gap produced its verdict about bytes
+// that no longer exist, so the step must NOT complete on it: it would finish
+// with the ORIGINAL stale documentation still in place. The restored bytes
+// are reassessed instead.
 func TestDocumentCapDiscardsAGapCheckThatEdits(t *testing.T) {
 	dir, base, head := setupGitRepo(t)
 	ag := &documentCapAgent{t: t, dir: dir, commit: true, gapOutput: `{"findings":[],"summary":"no gap"}`}
@@ -319,14 +378,16 @@ func TestDocumentCapDiscardsAGapCheckThatEdits(t *testing.T) {
 	advanceHead(t, holder, "feature.txt", "reviewed repair\n")
 	accepted := sc.Run.HeadSHA
 
-	// The gap check ignores its instructions and edits anyway.
+	// The gap check ignores its instructions and edits anyway. It edits on
+	// EVERY call, so the bounded reassessment fails the step closed rather
+	// than looping.
 	ag.editOnCheck = true
-	out, err := (&DocumentStep{}).Execute(sc)
-	if err != nil {
-		t.Fatal(err)
+	_, err := (&DocumentStep{}).Execute(sc)
+	if err == nil {
+		t.Fatal("a gap check that edited twice completed the step")
 	}
-	if out.NeedsApproval {
-		t.Fatalf("a gap check that edited parked the step: %s", out.Findings)
+	if !strings.Contains(err.Error(), "edited the worktree twice") {
+		t.Fatalf("unexpected refusal: %v", err)
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != accepted {
 		t.Fatalf("the gap check advanced the head: %s", got)
@@ -336,6 +397,116 @@ func TestDocumentCapDiscardsAGapCheckThatEdits(t *testing.T) {
 	}
 	if got := gitCmd(t, dir, "show", "HEAD:README.md"); got != "guide" {
 		t.Fatalf("the gap check changed the accepted documentation: %q", got)
+	}
+}
+
+// A gap check that edits and then FAILS must not leave its proposal in the
+// worktree: the budget is exhausted, and a surviving commit would also break
+// the head continuity of every later attempt.
+func TestDocumentCapRollsBackAGapCheckThatFails(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	ag := &documentCapAgent{t: t, dir: dir, commit: true, gapOutput: `{"findings":[],"summary":"no gap"}`}
+	sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+	sc.Config.Document.MaxCommitsPerRun = 1
+
+	if _, err := (&DocumentStep{}).Execute(sc); err != nil {
+		t.Fatal(err)
+	}
+	holder := &pipelineStepContext{dir: dir, sctx: sc}
+	advanceHead(t, holder, "feature.txt", "reviewed repair\n")
+	accepted := sc.Run.HeadSHA
+
+	// The check edits and then fails.
+	ag.editOnCheck = true
+	ag.failOnCheck = true
+	_, err := (&DocumentStep{}).Execute(sc)
+	if err == nil {
+		t.Fatal("a failed gap check completed the step")
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != accepted {
+		t.Fatalf("the failed gap check advanced the head: %s", got)
+	}
+	if got := gitStatusPorcelain(t, dir); got != "" {
+		t.Fatalf("the failed gap check left edits behind: %s", got)
+	}
+	if got := gitCmd(t, dir, "show", "HEAD:README.md"); got != "guide" {
+		t.Fatalf("the failed gap check changed the accepted documentation: %q", got)
+	}
+}
+
+// A gap check that COMMITS and then fails must not leave its commit behind:
+// the budget is exhausted, and a surviving commit would also break the head
+// continuity of every later attempt.
+func TestDocumentCapRollsBackAGapCheckThatCommitsAndFails(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	ag := &documentCapAgent{t: t, dir: dir, commit: true, gapOutput: `{"findings":[],"summary":"no gap"}`}
+	sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+	sc.Config.Document.MaxCommitsPerRun = 1
+
+	if _, err := (&DocumentStep{}).Execute(sc); err != nil {
+		t.Fatal(err)
+	}
+	holder := &pipelineStepContext{dir: dir, sctx: sc}
+	advanceHead(t, holder, "feature.txt", "reviewed repair\n")
+	accepted := sc.Run.HeadSHA
+
+	// The check commits its repair and then fails.
+	ag.commitOnCheck = true
+	ag.failOnCheck = true
+	_, err := (&DocumentStep{}).Execute(sc)
+	if err == nil {
+		t.Fatal("a failed gap check completed the step")
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != accepted {
+		t.Fatalf("the failed gap check left its commit behind: %s", got)
+	}
+	if got := gitCmd(t, dir, "rev-list", "--count", accepted+"..HEAD"); got != "0" {
+		t.Fatalf("the failed gap check left %s commits", got)
+	}
+	if got := gitStatusPorcelain(t, dir); got != "" {
+		t.Fatalf("the failed gap check left edits behind: %s", got)
+	}
+	if got := gitCmd(t, dir, "show", "HEAD:README.md"); got != "guide" {
+		t.Fatalf("the failed gap check changed the accepted documentation: %q", got)
+	}
+}
+
+// A check that edits ONCE and then reports the gap on the restored bytes is
+// honored: the second verdict describes the current state.
+func TestDocumentCapReassessesTheRestoredBytesAfterAnEdit(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	ag := &documentCapAgent{t: t, dir: dir, commit: true, gapOutput: `{"findings":[{"severity":"warning","description":"the restored guide is still stale","action":"ask-user"}],"summary":"gap remains"}`}
+	sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+	sc.Config.Document.MaxCommitsPerRun = 1
+
+	if _, err := (&DocumentStep{}).Execute(sc); err != nil {
+		t.Fatal(err)
+	}
+	holder := &pipelineStepContext{dir: dir, sctx: sc}
+	advanceHead(t, holder, "feature.txt", "reviewed repair\n")
+	accepted := sc.Run.HeadSHA
+
+	// The check edits on its FIRST call only.
+	ag.editOnCheck = true
+	ag.editCalls = 1
+	out, err := (&DocumentStep{}).Execute(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.NeedsApproval {
+		t.Fatalf("the reassessed gap did not park: %+v", out)
+	}
+	if !strings.Contains(out.Findings, "the restored guide is still stale") {
+		t.Fatalf("the reassessed gap was lost: %s", out.Findings)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != accepted {
+		t.Fatalf("the gap check advanced the head: %s", got)
+	}
+	if got := gitStatusPorcelain(t, dir); got != "" {
+		t.Fatalf("the gap check left edits behind: %s", got)
+	}
+	if ag.calls != 3 {
+		t.Fatalf("the check ran %d times, want 3 (one pass, one check, one reassessment)", ag.calls)
 	}
 }
 
