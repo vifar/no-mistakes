@@ -1237,26 +1237,20 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// ci.release_after_checks_pass opts into finishing here
 					// instead, which records the checks verdict and releases the
 					// run's worktree and lane.
-					if releaseAfterChecksPass {
-						if err := verifyCIMonitorComparison(sctx, host, checks); err != nil {
-							clearCIMonitorReady(sctx)
-							sctx.Log(fmt.Sprintf("warning: CI release comparison could not be verified: %v", err))
-							break
-						}
-						completeMsg := ciChecksPassedCompleteMsg
-						if declaredNoCI {
-							completeMsg = ciNoChecksPassedCompleteMsg
-						}
-						sctx.Log(completeMsg)
-						sctx.Log("validation complete: releasing the run now; the PR is ready for a human to merge")
-						return &pipeline.StepOutcome{CIReadyNoCI: &declaredNoCI}, nil
-					}
 					passedMsg := ciChecksPassedMsg
 					if !rollupObserved && sctx.Config != nil && sctx.Config.NoCI {
 						passedMsg = ciNoChecksPassedMsg
 					}
 					var comparisonErr error
-					lastMonitorLog, comparisonErr = logVerifiedCIMonitorStatus(sctx, host, checks, passedMsg, lastMonitorLog)
+					if releaseAfterChecksPass {
+						comparisonErr = verifyCIMonitorComparison(sctx, host, checks)
+						if comparisonErr != nil {
+							clearCIMonitorReady(sctx)
+							sctx.Log(fmt.Sprintf("warning: CI release comparison could not be verified: %v", comparisonErr))
+						}
+					} else {
+						lastMonitorLog, comparisonErr = logVerifiedCIMonitorStatus(sctx, host, checks, passedMsg, lastMonitorLog)
+					}
 					if errors.Is(comparisonErr, errCIReadinessReceiptMissing) {
 						receiptMissingObserved = true
 						if receiptMissingSince.IsZero() || receiptMissingHead != sctx.Run.HeadSHA {
@@ -1267,8 +1261,20 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 							return nil, fmt.Errorf("ci-readiness-receipt-missing: CI readiness could not be established because the current PR comparison receipt for head %s is missing after %s of otherwise-ready observations; re-run validation after recovering branch custody", receiptMissingHead, receiptTimeout)
 						}
 					}
-					if lastMonitorLog == passedMsg && sctx.PublishedHeadValidated != nil {
+					if comparisonErr != nil {
+						break
+					}
+					if sctx.PublishedHeadValidated != nil {
 						sctx.PublishedHeadValidated(pr.HeadSHA)
+					}
+					if releaseAfterChecksPass {
+						completeMsg := ciChecksPassedCompleteMsg
+						if declaredNoCI {
+							completeMsg = ciNoChecksPassedCompleteMsg
+						}
+						sctx.Log(completeMsg)
+						sctx.Log("validation complete: releasing the run now; the PR is ready for a human to merge")
+						return &pipeline.StepOutcome{CIReadyNoCI: &declaredNoCI}, nil
 					}
 				default:
 					clearCIMonitorReady(sctx)

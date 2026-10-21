@@ -69,6 +69,9 @@ func receiptTimeoutFixture(t *testing.T, timeout, state string) (*pipeline.StepC
 }
 
 func receiptCheckJSON(head, state string) string {
+	if state == "" {
+		return `{"values":[]}`
+	}
 	return `{"values":[{"name":"build","state":"` + state + `","links":{"commit":{"href":"https://api.bitbucket.org/2.0/repositories/test/repo/commit/` + head + `"}}}]}`
 }
 
@@ -184,5 +187,42 @@ func TestCIStepReceiptBoundResetsWhenChecksRunAgain(t *testing.T) {
 	_, err := step.Execute(c)
 	if err == nil || !strings.Contains(err.Error(), "ci-readiness-receipt-missing") || polls != 4 {
 		t.Fatalf("running-check observation failed to reset proof budget: polls=%d err=%v", polls, err)
+	}
+}
+
+func TestCIStepReleaseMissingReceiptTerminates(t *testing.T) {
+	for _, noCI := range []bool{false, true} {
+		t.Run(fmt.Sprintf("no_ci=%t", noCI), func(t *testing.T) {
+			state := "SUCCESSFUL"
+			if noCI {
+				state = ""
+			}
+			c, _, step, now := receiptTimeoutFixture(t, "2m", state)
+			c.Config.NoCI = noCI
+			c.Config.CI.ReleaseAfterChecksPass = true
+			c.PublishedHeadValidated = func(string) { t.Error("missing receipt must not validate a head") }
+			c.CIReadinessChanged = func(ready, _ bool) {
+				if ready {
+					t.Error("missing receipt must not publish readiness")
+				}
+			}
+			polls := 0
+			step.SetWaitForNextPoll(func(context.Context, time.Duration) error {
+				polls++
+				if polls > 3 {
+					return errors.New("test stopped unbounded release")
+				}
+				*now = now.Add(time.Minute)
+				return nil
+			})
+			outcome, err := step.Execute(c)
+			if outcome != nil || err == nil || !strings.Contains(err.Error(), "ci-readiness-receipt-missing") || !strings.Contains(err.Error(), c.Run.HeadSHA) || polls != 2 {
+				t.Fatalf("missing receipt must stop release after 2m: outcome=%+v polls=%d err=%v", outcome, polls, err)
+			}
+			run, err := c.DB.GetRun(c.Run.ID)
+			if err != nil || run == nil || run.CIReadyAt != nil || run.CIReleasedAt != nil {
+				t.Fatalf("missing receipt released the run: %+v %v", run, err)
+			}
+		})
 	}
 }

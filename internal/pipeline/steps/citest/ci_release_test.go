@@ -40,6 +40,8 @@ func TestCIStep_GreenChecksReleaseWithoutWaitingForTheMerge(t *testing.T) {
 	stepstest.BindCurrentPRComparison(t, sctx, prURL, "test/repo", "main")
 	sctx.Config.CITimeout = 10 * time.Minute
 	sctx.Config.CI.ReleaseAfterChecksPass = true
+	var validatedHeads []string
+	sctx.PublishedHeadValidated = func(sha string) { validatedHeads = append(validatedHeads, sha) }
 
 	var logs []string
 	sctx.Log = func(s string) { logs = append(logs, s) }
@@ -51,6 +53,9 @@ func TestCIStep_GreenChecksReleaseWithoutWaitingForTheMerge(t *testing.T) {
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatalf("CI step returned error: %v", err)
+	}
+	if len(validatedHeads) != 1 || validatedHeads[0] != headSHA {
+		t.Fatalf("validated heads = %v, want the released head %s exactly once", validatedHeads, headSHA)
 	}
 	if outcome == nil || outcome.NeedsApproval || outcome.AutoFixable || outcome.Findings != "" {
 		t.Fatalf("outcome = %#v, want a plain success verdict", outcome)
@@ -109,6 +114,8 @@ func TestCIStep_TrustedNoCIReleasesWithoutWaiting(t *testing.T) {
 	sctx.Config.CITimeout = 10 * time.Minute
 	sctx.Config.NoCI = true
 	sctx.Config.CI.ReleaseAfterChecksPass = true
+	var validatedHeads []string
+	sctx.PublishedHeadValidated = func(sha string) { validatedHeads = append(validatedHeads, sha) }
 
 	var logs []string
 	sctx.Log = func(s string) { logs = append(logs, s) }
@@ -120,6 +127,9 @@ func TestCIStep_TrustedNoCIReleasesWithoutWaiting(t *testing.T) {
 	outcome, err := step.Execute(sctx)
 	if err != nil {
 		t.Fatalf("CI step returned error: %v", err)
+	}
+	if len(validatedHeads) != 1 || validatedHeads[0] != headSHA {
+		t.Fatalf("validated heads = %v, want the released head %s exactly once", validatedHeads, headSHA)
 	}
 	if outcome == nil || outcome.NeedsApproval || outcome.AutoFixable || outcome.Findings != "" {
 		t.Fatalf("outcome = %#v, want a plain success verdict", outcome)
