@@ -107,7 +107,9 @@ func StripAIAttributionTrailers(message string, configured ...string) string {
 	changed := false
 	end := len(lines)
 	for end > 1 {
-		for end > 1 && strings.TrimSpace(lines[end-1]) == "" {
+		preserveParagraph := false
+		for end > 1 && (strings.TrimSpace(lines[end-1]) == "" || strings.HasPrefix(lines[end-1], "#")) {
+			preserveParagraph = preserveParagraph || strings.HasPrefix(lines[end-1], "#")
 			end--
 		}
 		start := end - 1
@@ -123,23 +125,38 @@ func StripAIAttributionTrailers(message string, configured ...string) string {
 		}
 		var entries []trailer
 		valid := true
+		nonTrailers := 0
+		recognized := false
 		for i := start; i < end; i++ {
 			line := lines[i]
-			if (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) && len(entries) > 0 {
+			gitGenerated := strings.HasPrefix(line, "Signed-off-by: ") || strings.HasPrefix(line, "(cherry picked from commit ")
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+				valid = false // A fenced body example is never attribution.
+				break
+			}
+			if strings.HasPrefix(line, "#") {
+				preserveParagraph = true
+				continue
+			}
+			if (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) && len(entries) > 0 && entries[len(entries)-1].end == i {
 				entry := &entries[len(entries)-1]
 				entry.text += " " + strings.TrimSpace(line)
 				entry.end = i + 1
-			} else if attributionTrailerKey.MatchString(line) || generatedAttribution.MatchString(line) {
+			} else if attributionTrailerKey.MatchString(line) || generatedAttribution.MatchString(line) || gitGenerated {
 				entries = append(entries, trailer{i, i + 1, line})
+				recognized = recognized || gitGenerated
 			} else {
-				valid = false
-				break
+				nonTrailers++
+				preserveParagraph = true
 			}
 		}
-		if !valid {
+		// Like Git, accept a mixed paragraph only with a recognized footer
+		// and at least 25% trailer entries. Unknown keys in prose stay prose.
+		if !valid || len(entries) == 0 || (nonTrailers > 0 && (!recognized || len(entries)*3 < nonTrailers)) {
 			break
 		}
-		allRemoved := true
+		allRemoved := !preserveParagraph
 		for _, entry := range entries {
 			if !IsAIAttributionTrailer(entry.text) && !configuredAttribution(entry.text, configured) {
 				allRemoved = false
