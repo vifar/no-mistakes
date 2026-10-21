@@ -24,8 +24,8 @@ func TestE2EWrapperTerminalMergeJourneyHasIndependentWorker(t *testing.T) {
 	if result.status != 0 {
 		t.Fatalf("wrapper failed: %s", result.output)
 	}
-	terminal := callContaining(t, result.calls, "-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$")
-	remainder := callContaining(t, result.calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$")
+	terminal := callContaining(t, result.calls, "-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$")
+	remainder := callContaining(t, result.calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$")
 	if !strings.Contains(terminal, "-timeout ") || !strings.Contains(remainder, "-timeout ") {
 		t.Fatalf("workers must retain the shared suite budget: %q", result.calls)
 	}
@@ -55,8 +55,8 @@ func TestE2EWrapperChargesStepWorkerTimeToShardBudget(t *testing.T) {
 		t.Fatalf("worker has no timeout: %s", call)
 		return 0
 	}
-	terminal := timeout(callContaining(t, result.calls, "-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$"))
-	shard := timeout(callContaining(t, result.calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$"))
+	terminal := timeout(callContaining(t, result.calls, "-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$"))
+	shard := timeout(callContaining(t, result.calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$"))
 	if shard <= 0 || terminal-shard < 2*time.Second {
 		t.Fatalf("terminal allowance=%s shard allowance=%s; step-worker time was not charged", terminal, shard)
 	}
@@ -71,8 +71,8 @@ func TestE2EWrapperBalancesRetainedTargetTable(t *testing.T) {
 	if result.status != 0 {
 		t.Fatalf("wrapper failed: %s", result.output)
 	}
-	callContaining(t, result.calls, "-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$")
-	callContaining(t, result.calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$")
+	callContaining(t, result.calls, "-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$")
+	callContaining(t, result.calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$")
 }
 
 func TestE2EWrapperDefaultPartitionsJourneyAndRunsRemainder(t *testing.T) {
@@ -101,7 +101,7 @@ func TestE2EWrapperDefaultPartitionsJourneyAndRunsRemainder(t *testing.T) {
 	if !strings.Contains(first, "-timeout 3600s") || !strings.Contains(second, "-timeout 3600s") || !strings.Contains(first, "./internal/e2e/...") || !strings.Contains(second, "./internal/e2e/...") {
 		t.Errorf("matrix invocations must each receive the full shared upper-bound timeout: %q", calls[:2])
 	}
-	remaining := callContaining(t, calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ ./internal/e2e/...")
+	remaining := callContaining(t, calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$ ./internal/e2e/...")
 	if !strings.Contains(remaining, "-timeout ") {
 		t.Errorf("remaining-suite timeout missing: %q", remaining)
 	}
@@ -397,7 +397,7 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 	goScript := "#!/bin/sh\n"
 	goScript += "case \" $* \" in *' run ./internal/e2edaemon/reapmain.go '*) printf 'cleanup\\n' >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0 ;; esac\n"
 	goScript += wrapperDiscoveryScript
-	goScript += "case \"$*\" in *' -skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ ./internal/e2e/...'*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=remaining ;; *'./internal/pipeline/steps/...'*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; printf 'step-tests-done\\n' >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0 ;; *' -run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=terminal ;; *' -run ^TestUserJourney$/(claude|codex)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=claude-codex ;; *' -run ^TestUserJourney$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=complement ;; *) exit 0 ;; esac\n"
+	goScript += "case \"$*\" in *' -skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$ ./internal/e2e/...'*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=remaining ;; *'./internal/pipeline/steps/...'*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; printf 'step-tests-done\\n' >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0 ;; *' -run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=terminal ;; *' -run ^TestUserJourney$/(claude|codex)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=claude-codex ;; *' -run ^TestUserJourney$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=complement ;; *) exit 0 ;; esac\n"
 	goScript += "export NM_E2E_FAKE_PARENT_PID=$$\n"
 	goScript += "\"$NM_E2E_FAKE_CHILD\" \"$selector\" &\nchild_pid=$!\n"
 	goScript += "trap 'wait \"$child_pid\" 2>/dev/null || true; printf \"parent-end:%s\\n\" \"$selector\" >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0' TERM INT\n"
@@ -576,7 +576,7 @@ type e2eWrapperResult struct {
 	events []string
 }
 
-const wrapperDiscoveredTests = "TestUserJourney TestTargetAdvanceTerminalMergeLiveJourney TestRetainedTargetContinuityLiveJourney TestAttachCommitStatusJourney TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary TestEvalJourney TestStepOnly TestCustomGateStructuredFindingsJourney TestCIScopeAutoDiscovery TestDocumentJourneyUnsafeAndStrictRestart TestOmitIntentJourney TestCertificationContentionProductionJourney"
+const wrapperDiscoveredTests = "TestUserJourney TestTargetAdvanceTerminalMergeLiveJourney TestRetainedTargetContinuityLiveJourney TestTargetAdvancePublishedGuardsLiveJourney TestAttachCommitStatusJourney TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary TestEvalJourney TestStepOnly TestCustomGateStructuredFindingsJourney TestCIScopeAutoDiscovery TestDocumentJourneyUnsafeAndStrictRestart TestOmitIntentJourney TestCertificationContentionProductionJourney"
 
 // These are external go-list responses, not substitutes for the wrapper.
 // Listing a steps-only name catches silently excluding an entire package.
@@ -585,7 +585,7 @@ const wrapperDiscoveredTests = "TestUserJourney TestTargetAdvanceTerminalMergeLi
 // the shard placement is exercised against a representative distribution:
 // a split that only balances a handful of equal-cost tests proves nothing
 // about a bucket where one journey costs more than the rest together.
-const wrapperDiscoveryScript = "case \" $* \" in *' -list '*) if [ \"${NM_E2E_FAKE_GO_FAIL_MATRIX:-}\" = discovery ]; then exit 23; fi; case \"$*\" in *'./internal/pipeline/steps/...'*) printf 'TestStepOnly\\n' ;; *) printf '%s\\n' 'TestUserJourney' 'TestTargetAdvanceTerminalMergeLiveJourney' 'TestRetainedTargetContinuityLiveJourney' 'TestAttachCommitStatusJourney' 'TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney' 'TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary' 'TestEvalJourney' 'TestCustomGateStructuredFindingsJourney' 'TestCIScopeAutoDiscovery' 'TestDocumentJourneyUnsafeAndStrictRestart' 'TestOmitIntentJourney' 'TestCertificationContentionProductionJourney' ;; esac; exit 0 ;; esac\n"
+const wrapperDiscoveryScript = "case \" $* \" in *' -list '*) if [ \"${NM_E2E_FAKE_GO_FAIL_MATRIX:-}\" = discovery ]; then exit 23; fi; case \"$*\" in *'./internal/pipeline/steps/...'*) printf 'TestStepOnly\\n' ;; *) printf '%s\\n' 'TestUserJourney' 'TestTargetAdvanceTerminalMergeLiveJourney' 'TestRetainedTargetContinuityLiveJourney' 'TestTargetAdvancePublishedGuardsLiveJourney' 'TestAttachCommitStatusJourney' 'TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney' 'TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary' 'TestEvalJourney' 'TestCustomGateStructuredFindingsJourney' 'TestCIScopeAutoDiscovery' 'TestDocumentJourneyUnsafeAndStrictRestart' 'TestOmitIntentJourney' 'TestCertificationContentionProductionJourney' ;; esac; exit 0 ;; esac\n"
 
 func runE2EWrapper(t *testing.T, failOnMatrix, explicit string) e2eWrapperResult {
 	t.Helper()
@@ -607,7 +607,7 @@ func runE2EWrapperWithCap(t *testing.T, failOnMatrix, explicit, cap string) e2eW
 	contents += wrapperDiscoveryScript
 	contents += "printf 'begin:%s\\n' \"$*\" >>\"$NM_E2E_FAKE_GO_EVENTS\"\nstatus=0\n"
 	contents += "case \"$NM_E2E_FAKE_GO_FAIL_MATRIX:$*\" in slow-steps:*'./internal/pipeline/steps/...'*) sleep 2 ;; esac\n"
-	contents += "case \"$NM_E2E_FAKE_GO_FAIL_MATRIX:$*\" in first:*\"-run ^TestUserJourney$/(claude|codex)$\"*) status=17 ;; terminal:*\"-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$\"*) status=19 ;; shard:*\"-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$\"*) status=29 ;; esac\n"
+	contents += "case \"$NM_E2E_FAKE_GO_FAIL_MATRIX:$*\" in first:*\"-run ^TestUserJourney$/(claude|codex)$\"*) status=17 ;; terminal:*\"-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$\"*) status=19 ;; shard:*\"-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$\"*) status=29 ;; esac\n"
 	contents += "printf 'end:%s:%s\\n' \"$*\" \"$status\" >>\"$NM_E2E_FAKE_GO_EVENTS\"\nexit \"$status\"\n"
 	if err := os.WriteFile(fakeGo, []byte(contents), 0o755); err != nil {
 		t.Fatal(err)
