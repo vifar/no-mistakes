@@ -674,6 +674,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	timeoutMergeConflict := false
 	lastMonitorLog := ""
 	lastScopeLog := ""
+	noCIHintLogged := false
 	consecutiveCheckErrs := 0
 	consecutiveBotCommentErrs := 0
 	timeoutOutcome := func() (*pipeline.StepOutcome, error) {
@@ -1129,6 +1130,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					clearCIMonitorReady(sctx)
 					lastMonitorLog = ""
 					sctx.Log("no CI checks reported yet, waiting for checks to register...")
+					if !noCIHintLogged && sctx.Run.Shipping == nil && (sctx.Config == nil || !sctx.Config.NoCI) {
+						sctx.Log("If this repository intentionally has no external CI, declare no_ci: true in .no-mistakes.yaml on the trusted default branch; missing workflow files alone do not prove that no CI is expected.")
+						noCIHintLogged = true
+					}
 				case len(checks) == 0 || scoped.Ready():
 					// Under ci.review_bot_comments: always, a review bot that
 					// concluded its check green, or has not registered one on
@@ -1185,7 +1190,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					}
 					sctx.DeferredFindings = ""
 					passedMsg := ciChecksPassedMsg
-					if len(checks) == 0 && !scoped.Ready() {
+					if !rollupObserved && sctx.Config != nil && sctx.Config.NoCI {
 						passedMsg = ciNoChecksPassedMsg
 					}
 					lastMonitorLog = logVerifiedCIMonitorStatus(sctx, host, checks, passedMsg, lastMonitorLog)

@@ -655,6 +655,7 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	fields = append(fields, awaitingPersonFields(rv)...)
 	fields = append(fields, toon.Field{Key: "head", Value: shortSHA(rv.HeadSHA)})
 	fields = append(fields, toon.Field{Key: "head_sha", Value: rv.HeadSHA}, toon.Field{Key: "target_advance_rewinds", Value: rv.TargetAdvanceRewinds})
+	fields = append(fields, toon.Field{Key: "ci_ready", Value: rv.CIReady}, toon.Field{Key: "ci_ready_no_ci", Value: rv.CIReadyNoCI})
 	if rv.Shipping != nil {
 		var sourceRepo, targetSHA, generation any
 		target := rv.Shipping.TargetBranch
@@ -668,7 +669,7 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 			}
 			target = c.TargetBranch
 		}
-		fields = append(fields, toon.Field{Key: "submitted_head_sha", Value: rv.SubmittedHeadSHA}, toon.Field{Key: "shipping_mode", Value: rv.Shipping.Mode}, toon.Field{Key: "source_repo", Value: sourceRepo}, toon.Field{Key: "source_branch", Value: strings.TrimPrefix(rv.Branch, "refs/heads/")}, toon.Field{Key: "target_branch", Value: target}, toon.Field{Key: "target_sha", Value: targetSHA}, toon.Field{Key: "review_generation", Value: generation}, toon.Field{Key: "ci_ready", Value: rv.CIReady}, toon.Field{Key: "ci_ready_no_ci", Value: rv.CIReadyNoCI})
+		fields = append(fields, toon.Field{Key: "submitted_head_sha", Value: rv.SubmittedHeadSHA}, toon.Field{Key: "shipping_mode", Value: rv.Shipping.Mode}, toon.Field{Key: "source_repo", Value: sourceRepo}, toon.Field{Key: "source_branch", Value: strings.TrimPrefix(rv.Branch, "refs/heads/")}, toon.Field{Key: "target_branch", Value: target}, toon.Field{Key: "target_sha", Value: targetSHA}, toon.Field{Key: "review_generation", Value: generation})
 	} else if rv.ReviewGeneration != nil {
 		fields = append(fields, toon.Field{Key: "review_generation", Value: *rv.ReviewGeneration})
 	}
