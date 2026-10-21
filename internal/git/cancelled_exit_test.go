@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -34,24 +33,21 @@ func TestCancelledExitRecordsOnlyTheContextsOwnStop(t *testing.T) {
 	for _, args := range [][]string{
 		{"-C", repo, "config", "user.email", "t@t.com"},
 		{"-C", repo, "config", "user.name", "T"},
-		{"-C", repo, "config", "alias.sleeper", "!echo $$ > " + started + "; exec sleep 30"},
+		{"-C", repo, "config", "alias.sleeper", "!echo $$ > '" + strings.ReplaceAll(started, "'", "'\\''") + "'; exec sleep 30"},
 		{"-C", repo, "commit", "--allow-empty", "-m", "init"},
 	} {
 		if err := exec.Command("git", args...).Run(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// waitForStart waits for the child to announce itself and returns its PID.
 	waitForStart := func(t *testing.T) int {
 		t.Helper()
 		deadline := time.Now().Add(20 * time.Second)
 		for {
-			if raw, err := os.ReadFile(started); err == nil {
-				pid, convErr := strconv.Atoi(strings.TrimSpace(string(raw)))
-				if convErr != nil {
-					t.Fatalf("the child wrote an unreadable pid: %q", raw)
+			if data, err := os.ReadFile(started); err == nil {
+				if pid, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && pid > 0 {
+					return pid
 				}
-				return pid
 			}
 			if time.Now().After(deadline) {
 				t.Fatal("the child never started")
@@ -69,6 +65,7 @@ func TestCancelledExitRecordsOnlyTheContextsOwnStop(t *testing.T) {
 	t.Run("a command this context stopped is marked", func(t *testing.T) {
 		resetStart(t)
 		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
 		done := make(chan error, 1)
 		go func() {
 			_, err := Run(ctx, repo, "sleeper")
@@ -107,16 +104,11 @@ func TestCancelledExitRecordsOnlyTheContextsOwnStop(t *testing.T) {
 			done <- err
 		}()
 		pid := waitForStart(t)
-		// Signal THAT child from outside the command's context, then cancel
-		// the context. The context never stopped this child, so the exit is
-		// not the cancellation's doing. Only the child this test started is
-		// signalled: signalling by command text would reach every unrelated
-		// process that happens to match it.
-		process, err := os.FindProcess(pid)
+		child, err := os.FindProcess(pid)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := process.Signal(syscall.SIGTERM); err != nil {
+		if err := child.Kill(); err != nil {
 			t.Fatal(err)
 		}
 		err = <-done

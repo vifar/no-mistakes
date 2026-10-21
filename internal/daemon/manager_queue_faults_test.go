@@ -526,13 +526,16 @@ func TestClaimedCancellationDoesNotRequireDatabaseAccess(t *testing.T) {
 					// so the custody is retained. A read-only connection can
 					// observe it, so the custody is released once the outcome
 					// is durable.
+					f.mgr.wg.Wait()
 					f.mgr.mu.Lock()
 					owned := f.mgr.runs[id]
 					f.mgr.mu.Unlock()
 					if fault == "closed" && owned == nil {
 						t.Fatal("unreadable storage released the run's custody")
 					}
-					f.mgr.wg.Wait()
+					if fault == "readonly" && owned != nil {
+						t.Fatal("readable durable outcome retained the run's custody")
+					}
 					if st := f.mgr.sched.stats(); st.Active != 0 {
 						t.Fatalf("stopped run retained capacity: %+v", st)
 					}

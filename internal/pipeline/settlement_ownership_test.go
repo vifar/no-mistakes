@@ -62,6 +62,24 @@ func TestQueuedWorkloadDoesNotInheritAnotherRunsSettlementFailure(t *testing.T) 
 			return d.RecordIneligibleTerminal(failing.ID, "the storage refused this run", types.RunFailed, nil)
 		})
 	}()
+	defer func() {
+		withSettlementLock(t, func() {
+			if _, err := control.Exec("DROP TRIGGER reject_one"); err != nil {
+				t.Errorf("restore terminal storage: %v", err)
+			}
+			if err := drainPublicationSettlements(); err != nil {
+				t.Errorf("drain restored storage: %v", err)
+			}
+		})
+		select {
+		case err := <-failed:
+			if err != nil {
+				t.Errorf("restored settlement failed: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Error("restored settlement never released its caller")
+		}
+	}()
 	// Wait for the settlement to be queued.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
@@ -107,32 +125,7 @@ func TestQueuedWorkloadDoesNotInheritAnotherRunsSettlementFailure(t *testing.T) 
 	// outcome.
 	select {
 	case err := <-failed:
-		if err == nil {
-			t.Fatal("the failing run's settlement reported success")
-		}
+		t.Fatalf("the failing run's settlement stopped waiting: %v", err)
 	case <-time.After(2 * time.Second):
 	}
-
-	// Restore the storage so the queued settlement can land, then let it
-	// finish. The recovery worker is still running and may be inside the
-	// settlement's write with the queue lock released, so the trigger is
-	// dropped first and the waiter is joined before the queue is touched: a
-	// settlement removed from under the worker would leave it slicing an
-	// empty queue, and its waiter would never be released.
-	if _, err := control.Exec(`DROP TRIGGER reject_one`); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case <-failed:
-	case <-time.After(15 * time.Second):
-		t.Fatal("the outstanding settlement never finished")
-	}
-	// Leave the queue clean for the next test, under the commit status lock
-	// so the recovery worker cannot be inside a settlement's write.
-	CommitStatusLock <- struct{}{}
-	terminalSettlementMu.Lock()
-	terminalSettlements = nil
-	rawPublicationSettlements = nil
-	terminalSettlementMu.Unlock()
-	<-CommitStatusLock
 }
