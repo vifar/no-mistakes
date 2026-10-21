@@ -46,6 +46,9 @@ type documentCapAgent struct {
 	// cancelDuringCheck cancels the run's context while the check runs, the
 	// way a daemon shutdown does.
 	cancelDuringCheck func()
+	// hideOnCheck makes the gap check hide a file from Git status behind an
+	// index flag.
+	hideOnCheck bool
 	// commitOnCheck makes the gap check commit its repair.
 	commitOnCheck bool
 	// firstOutput overrides the first pass's structured output.
@@ -74,6 +77,9 @@ func (a *documentCapAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 		if err := os.WriteFile(filepath.Join(a.dir, "README.md"), []byte("edited by the gap check\n"), 0o644); err != nil {
 			a.t.Fatal(err)
 		}
+	}
+	if a.hideOnCheck {
+		gitCmd(a.t, a.dir, "update-index", "--assume-unchanged", "README.md")
 	}
 	if a.commitOnCheck {
 		if err := os.WriteFile(filepath.Join(a.dir, "README.md"), []byte("repaired by the gap check\n"), 0o644); err != nil {
@@ -510,6 +516,34 @@ func TestDocumentCapRollbackSurvivesACancelledRunContext(t *testing.T) {
 	}
 	if got := gitStatusPorcelain(t, dir); got != "" {
 		t.Fatalf("the cancelled rollback left edits behind: %s", got)
+	}
+}
+
+// A gap check that HIDES a file behind an index flag and then edits it must
+// not have its verdict accepted: Git status cannot see a --assume-unchanged
+// or --skip-worktree entry, so the candidate discovery would find nothing
+// and the step would complete with the committed documentation still stale.
+func TestDocumentCapRefusesAGapCheckThatHidesTheIndex(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	ag := &documentCapAgent{t: t, dir: dir, commit: true, gapOutput: `{"findings":[],"summary":"no gap"}`}
+	sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+	sc.Config.Document.MaxCommitsPerRun = 1
+
+	if _, err := (&DocumentStep{}).Execute(sc); err != nil {
+		t.Fatal(err)
+	}
+	holder := &pipelineStepContext{dir: dir, sctx: sc}
+	advanceHead(t, holder, "feature.txt", "reviewed repair\n")
+
+	// The check hides README.md from status and then edits it.
+	ag.hideOnCheck = true
+	ag.editOnCheck = true
+	_, err := (&DocumentStep{}).Execute(sc)
+	if err == nil {
+		t.Fatal("a gap check that hid the index completed the step")
+	}
+	if !strings.Contains(err.Error(), "hidden from status by index flags") {
+		t.Fatalf("unexpected refusal: %v", err)
 	}
 }
 

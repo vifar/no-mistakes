@@ -45,8 +45,17 @@ func documentJourneyScenarioWith(t *testing.T, path string, action map[string]an
 	if err := yaml.Unmarshal(base, &scenario); err != nil {
 		t.Fatal(err)
 	}
+	// A nil extra is SKIPPED, not appended. A nil entry serializes as a null
+	// action, and the fake agent decodes it as an empty Action whose empty
+	// match catches EVERY prompt before the intended responses - so the run
+	// would never produce a structured finding.
 	var prepended []map[string]any
-	prepended = append(prepended, extra...)
+	for _, item := range extra {
+		if item == nil {
+			continue
+		}
+		prepended = append(prepended, item)
+	}
 	if action != nil {
 		action["match"] = "Find what this change made stale"
 		prepended = append(prepended, action)
