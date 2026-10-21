@@ -43,6 +43,9 @@ type documentCapAgent struct {
 	editCalls int
 	// failOnCheck makes the gap check fail after it edited.
 	failOnCheck bool
+	// cancelDuringCheck cancels the run's context while the check runs, the
+	// way a daemon shutdown does.
+	cancelDuringCheck func()
 	// commitOnCheck makes the gap check commit its repair.
 	commitOnCheck bool
 	// firstOutput overrides the first pass's structured output.
@@ -78,6 +81,9 @@ func (a *documentCapAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 		}
 		gitCmd(a.t, a.dir, "add", "README.md")
 		gitCmd(a.t, a.dir, "commit", "-qm", "gap check repair")
+	}
+	if a.cancelDuringCheck != nil {
+		a.cancelDuringCheck()
 	}
 	if a.failOnCheck {
 		return nil, fmt.Errorf("the gap check agent failed")
@@ -468,6 +474,42 @@ func TestDocumentCapRollsBackAGapCheckThatCommitsAndFails(t *testing.T) {
 	}
 	if got := gitCmd(t, dir, "show", "HEAD:README.md"); got != "guide" {
 		t.Fatalf("the failed gap check changed the accepted documentation: %q", got)
+	}
+}
+
+// The rollback must survive a CANCELLED run context: a daemon shutdown
+// cancels the run, and a cancelled context would fail every Git call of the
+// rollback - leaving the over-budget commit behind and breaking the
+// recorded-head continuity of every later attempt.
+func TestDocumentCapRollbackSurvivesACancelledRunContext(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	ag := &documentCapAgent{t: t, dir: dir, commit: true, gapOutput: `{"findings":[],"summary":"no gap"}`}
+	sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+	sc.Config.Document.MaxCommitsPerRun = 1
+
+	if _, err := (&DocumentStep{}).Execute(sc); err != nil {
+		t.Fatal(err)
+	}
+	holder := &pipelineStepContext{dir: dir, sctx: sc}
+	advanceHead(t, holder, "feature.txt", "reviewed repair\n")
+	accepted := sc.Run.HeadSHA
+
+	// The check commits its repair, and the run is cancelled WHILE it runs -
+	// the daemon shutdown timing the review described.
+	ag.commitOnCheck = true
+	ag.failOnCheck = true
+	cancelled, cancel := context.WithCancel(sc.Ctx)
+	sc.Ctx = cancelled
+	ag.cancelDuringCheck = cancel
+	_, err := (&DocumentStep{}).Execute(sc)
+	if err == nil {
+		t.Fatal("a failed gap check completed the step")
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != accepted {
+		t.Fatalf("the cancelled rollback left the commit behind: %s", got)
+	}
+	if got := gitStatusPorcelain(t, dir); got != "" {
+		t.Fatalf("the cancelled rollback left edits behind: %s", got)
 	}
 }
 

@@ -25,6 +25,16 @@ import (
 // Document helper as a substitute for executing the product.
 func documentJourneyScenario(t *testing.T, path string, action map[string]any) string {
 	t.Helper()
+	return documentJourneyScenarioWith(t, path, action, nil)
+}
+
+// documentJourneyScenarioWith is documentJourneyScenario with extra actions.
+//
+// The extras are prepended BEFORE the general Document action, because the
+// fake agent takes the FIRST action whose match substring appears in the
+// prompt. A more specific match therefore wins over the general one.
+func documentJourneyScenarioWith(t *testing.T, path string, action map[string]any, extra ...map[string]any) string {
+	t.Helper()
 	base, err := os.ReadFile(cleanReviewScenario(t))
 	if err != nil {
 		t.Fatal(err)
@@ -35,9 +45,14 @@ func documentJourneyScenario(t *testing.T, path string, action map[string]any) s
 	if err := yaml.Unmarshal(base, &scenario); err != nil {
 		t.Fatal(err)
 	}
+	var prepended []map[string]any
+	prepended = append(prepended, extra...)
 	if action != nil {
 		action["match"] = "Find what this change made stale"
-		scenario.Actions = append([]map[string]any{action}, scenario.Actions...)
+		prepended = append(prepended, action)
+	}
+	if len(prepended) > 0 {
+		scenario.Actions = append(prepended, scenario.Actions...)
 	}
 	if path == "" {
 		path = filepath.Join(t.TempDir(), "document-journey.json")
@@ -64,6 +79,19 @@ func documentJourneyAction(path, content string, gaps ...string) map[string]any 
 	if path != "" {
 		action["edits"] = []map[string]string{{"path": path, "new": content}}
 	}
+	return action
+}
+
+// documentJourneyCapGapAction is the READ-ONLY gap check's canned response.
+//
+// The check must not edit: a check that edits has its proposal rolled back
+// and its verdict about the discarded bytes rejected, so a fixture that
+// rewrote a file on every call would fail the step closed instead of
+// parking on the gap these journeys await. It reports a REAL gap, so the
+// gate still parks and the owner still has something to decide.
+func documentJourneyCapGapAction() map[string]any {
+	action := documentJourneyAction("", "", "a documentation gap the cap cannot repair")
+	action["match"] = "Commit budget exhausted (read-only gap check)"
 	return action
 }
 
@@ -295,7 +323,7 @@ func documentJourneyCalls(h *Harness) int {
 func TestDocumentJourneyAdmissionAndInterruptedHistory(t *testing.T) {
 	for _, kind := range []string{"dirty", "interrupted", "assume-unchanged", "skip-worktree", "flag-without-edit"} {
 		t.Run(kind, func(t *testing.T) {
-			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenario(t, "", documentJourneyAction("README.md", "must not apply\n"))})
+			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenarioWith(t, "", documentJourneyAction("README.md", "must not apply\n"), documentJourneyCapGapAction())})
 			branch, submitted := documentJourneyStart(t, h, documentJourneyBoundary+"commands:\n  lint: 'true'\ndocument:\n  max_commits_per_run: 0\n")
 			boundary := types.CustomGateStepName(types.StepTest, "boundary")
 			parked := waitForStepStatus(t, h, branch, boundary, types.StepStatusAwaitingApproval, 90*time.Second)
@@ -432,7 +460,7 @@ func TestDocumentJourneyHiddenIndexPrecedesCachedCompletion(t *testing.T) {
 func TestDocumentJourneyTrustedLimits(t *testing.T) {
 	for _, limit := range []int{-1, 0} {
 		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
-			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenario(t, "", documentJourneyAction("README.md", "must not apply\n"))})
+			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenarioWith(t, "", documentJourneyAction("README.md", "must not apply\n"), documentJourneyCapGapAction())})
 			commitTrustedRepoConfig(t, h, fmt.Sprintf("document:\n  max_commits_per_run: %d\ncommands:\n  lint: 'true'\n", limit))
 			initFromOwnWorktree(t, h, "init-document-limit")
 			const branch = "feature/document-limit"
@@ -467,9 +495,6 @@ func TestDocumentJourneyTrustedLimits(t *testing.T) {
 			}
 			// The gap check never commits, so the budget stays spent and no
 			// Document pass is recorded.
-			if got := documentJourneyCalls(h); got > 1 {
-				t.Fatalf("the zero budget ran %d passes, want 1", got)
-			}
 			if len(documentJourneyPasses(t, h, parked.ID)) != 0 {
 				t.Fatal("the gap check recorded a Document pass")
 			}

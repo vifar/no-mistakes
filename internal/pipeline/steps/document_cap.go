@@ -1,9 +1,11 @@
 package steps
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -48,6 +50,11 @@ Commit budget exhausted (read-only gap check):
 - Report ONLY the documentation gaps that remain unresolved, in the same findings format as the normal pass.
 - If the documentation is already accurate for this change, return an empty findings array.
 - Report every remaining gap, even one you would have been able to fix in an earlier pass: an unreported gap would let the change ship with stale documentation.`
+
+// documentCapRollbackTimeout bounds the gap check's rollback. The rollback
+// has to finish even when the run's own context is already cancelled, so it
+// runs on a cleanup context of its own.
+var documentCapRollbackTimeout = 60 * time.Second
 
 // documentCapNoticeDescription is the informational cap notice's text. It
 // names the bound, not a decision: no fix round and no approval can change
@@ -199,11 +206,20 @@ func (s *DocumentStep) runCapGapCheckAttempt(sctx *pipeline.StepContext, baseSHA
 // documentation and then reported no gap would otherwise complete the step
 // with the ORIGINAL stale documentation still in place.
 func (s *DocumentStep) discardGapCheckProposal(sctx *pipeline.StepContext, headBefore string, retainedScratch []string) (bool, error) {
-	paths, untracked, err := documentCandidatePaths(sctx, headBefore, retainedScratch)
+	// The rollback runs on a CLEANUP context: the run's own context is
+	// cancelled when the daemon shuts down, and a cancelled context would
+	// fail every Git call of the rollback - leaving the over-budget commit
+	// behind and breaking the recorded-head continuity of every later
+	// attempt. The rollback must complete even when the run is going away.
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(sctx.Ctx), documentCapRollbackTimeout)
+	defer cancel()
+	cleanup := *sctx
+	cleanup.Ctx = cleanupCtx
+	paths, untracked, err := documentCandidatePaths(&cleanup, headBefore, retainedScratch)
 	if err != nil {
 		return false, err
 	}
-	agentHead, err := stepGitRun(sctx, "rev-parse", "HEAD")
+	agentHead, err := stepGitRun(&cleanup, "rev-parse", "HEAD")
 	if err != nil {
 		return false, err
 	}
@@ -212,7 +228,7 @@ func (s *DocumentStep) discardGapCheckProposal(sctx *pipeline.StepContext, headB
 		return false, nil
 	}
 	sctx.Log("the read-only gap check edited the worktree; discarding its proposal")
-	if err := discardDocumentCandidate(sctx, headBefore, paths, untracked, retainedScratch); err != nil {
+	if err := discardDocumentCandidate(&cleanup, headBefore, paths, untracked, retainedScratch); err != nil {
 		return true, err
 	}
 	return true, nil
