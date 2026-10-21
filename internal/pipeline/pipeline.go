@@ -114,6 +114,9 @@ type StepContext struct {
 	// StepResultID is the DB row ID of the current step's step_results record.
 	// Steps use it to query their own round history for multi-round prompts.
 	StepResultID string
+	// RunLogDir holds private diagnostics under the run log retention policy.
+	// Unlike EvidenceDir, its contents are never published as test artifacts.
+	RunLogDir string
 	// EvidenceDir is where this run's test-evidence artifacts belong, always
 	// outside the worktree. The executor resolves the active generation from
 	// the app root (honoring test.evidence.local_root) so every consumer - the test step's

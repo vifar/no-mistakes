@@ -101,7 +101,11 @@ func DirtyPaths(run func(...string) (string, error), excludes []string) ([]strin
 			return nil, fmt.Errorf("invalid git status entry %q", entry)
 		}
 		file := entry[3:]
-		if entry[0] == '?' || entry[0] == 'A' {
+		// `?` is untracked and `A` is added to the index. Y=`A` is an
+		// intent-to-add path (`git add -N`): a new file whose content is still
+		// untracked, so the same scratch rules must classify it. Anything else
+		// in that position is a tracked path.
+		if entry[0] == '?' || entry[0] == 'A' || entry[1] == 'A' {
 			// An untracked path is scratch when its first new component marks
 			// scratch, or when it matches a staging exclude.
 			scratch, err := FirstNewComponent(run, headDirs, file, false)
