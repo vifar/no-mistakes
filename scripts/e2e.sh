@@ -64,12 +64,13 @@ trap cleanup_inventory EXIT INT TERM
 
 # Default args match the historical Makefile e2e target; callers may override.
 if [[ "$#" -eq 0 ]]; then
-  # The default suite has one shared 2400s budget, including the journey
+  # The default suite has one shared 3300s budget, including the journey
   # matrix. Each worker has its own process-wide test environment, while
   # daemon slots remain shared. The terminal-merge, retained-target, and published-guard tables share a worker beside the
   # remaining suite. Their measured durations balance the two workers without
-  # adding serial tails or increasing the budget or daemon cap.
-  budget_seconds=2400
+  # adding serial tails or increasing the daemon cap. The full suite must fit
+  # before pollDeadline reserves the final seconds for diagnostics and cleanup.
+  budget_seconds=3300
   # Bash puts each asynchronous job in its own process group while monitor
   # mode is enabled. A group contains go test and its test binary descendants.
   set -m

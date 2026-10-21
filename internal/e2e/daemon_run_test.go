@@ -18,6 +18,10 @@ import (
 
 func TestDaemonRunUsesProvidedRoot(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude"})
+	// This test starts only the explicit root below. Release the unused
+	// harness reservation before acquiring that root, even with a cap of one.
+	h.daemonOwn.Release()
+	h.daemonOwn = nil
 	base := os.TempDir()
 	if base == "/var/folders" || strings.HasPrefix(base, "/var/folders/") {
 		base = "/tmp"

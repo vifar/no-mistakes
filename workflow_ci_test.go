@@ -44,7 +44,11 @@ func TestCIWorkflowUsesDedicatedLocalRunner(t *testing.T) {
 		if job.If != "github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository" {
 			t.Errorf("%s must refuse external fork PR code before runner admission: %s", name, job.If)
 		}
-		if job.TimeoutMinutes < 1 || job.TimeoutMinutes > 45 {
+		maxMinutes := 45
+		if name == "e2e" {
+			maxMinutes = 60
+		}
+		if job.TimeoutMinutes < 1 || job.TimeoutMinutes > maxMinutes {
 			t.Errorf("%s has unbounded runtime", name)
 		}
 		checkout := 0

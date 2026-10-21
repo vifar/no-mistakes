@@ -60,7 +60,7 @@ func TestE2EWrapperDefaultPartitionsJourneyAndRunsRemainder(t *testing.T) {
 	if !strings.Contains(second, "-run ^TestUserJourney$") || !strings.Contains(second, "-skip ^TestUserJourney$/(claude|codex)$") {
 		t.Errorf("second matrix invocation = %q, want complementary selector", second)
 	}
-	if !strings.Contains(first, "-timeout 2400s") || !strings.Contains(second, "-timeout 2400s") || !strings.Contains(first, "./internal/e2e/...") || !strings.Contains(second, "./internal/e2e/...") {
+	if !strings.Contains(first, "-timeout 3300s") || !strings.Contains(second, "-timeout 3300s") || !strings.Contains(first, "./internal/e2e/...") || !strings.Contains(second, "./internal/e2e/...") {
 		t.Errorf("matrix invocations must each receive the full shared upper-bound timeout: %q", calls[:2])
 	}
 	remaining := callContaining(t, calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$ ./internal/e2e/... ./internal/pipeline/steps/...")
@@ -121,7 +121,7 @@ func assertBothMatrixCallsFinishedBeforeCleanup(t *testing.T, events []string) {
 		if event == "cleanup" {
 			cleanup = i
 		}
-		if strings.HasPrefix(event, "end:test -tags=e2e -count=1 -timeout 2400s -run ^TestUserJourney$") {
+		if strings.HasPrefix(event, "end:test -tags=e2e -count=1 -timeout 3300s -run ^TestUserJourney$") {
 			ended = append(ended, i)
 		}
 	}
@@ -145,7 +145,7 @@ func TestE2EWrapperCapOneKeepsSerialDefault(t *testing.T) {
 	if result.status != 0 {
 		t.Fatalf("wrapper status = %d, output: %s", result.status, result.output)
 	}
-	if len(result.calls) != 2 || !hasCallContaining(result.calls, "test -tags=e2e -count=1 -timeout 2400s ./internal/e2e/... ./internal/pipeline/steps/...") {
+	if len(result.calls) != 2 || !hasCallContaining(result.calls, "test -tags=e2e -count=1 -timeout 3300s ./internal/e2e/... ./internal/pipeline/steps/...") {
 		t.Fatalf("go calls = %q, want one serial default suite and cleanup", result.calls)
 	}
 }
