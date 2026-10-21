@@ -85,7 +85,7 @@ func TestCIMonitorReadinessRequiresFreshExactComparison(t *testing.T) {
 			sctx, host, _ := mutationComparisonFixture(t)
 			sctx.Log = func(string) {}
 			checks := []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass, HeadSHA: sctx.Run.HeadSHA}}
-			if got := logVerifiedCIMonitorStatus(sctx, host, checks, ciChecksPassedMsg, ""); got != ciChecksPassedMsg {
+			if got, err := logVerifiedCIMonitorStatus(sctx, host, checks, ciChecksPassedMsg, ""); got != ciChecksPassedMsg || err != nil {
 				t.Fatalf("current comparison did not publish readiness: %q", got)
 			}
 			current, err := sctx.DB.GetRun(sctx.Run.ID)
@@ -93,7 +93,7 @@ func TestCIMonitorReadinessRequiresFreshExactComparison(t *testing.T) {
 				t.Fatalf("current comparison readiness = %+v, %v", current, err)
 			}
 			tc.mutate(t, sctx, host)
-			if got := logVerifiedCIMonitorStatus(sctx, host, checks, ciChecksPassedMsg, ciChecksPassedMsg); got != "" {
+			if got, err := logVerifiedCIMonitorStatus(sctx, host, checks, ciChecksPassedMsg, ciChecksPassedMsg); got != "" || err == nil {
 				t.Fatalf("stale comparison retained green monitor state: %q", got)
 			}
 			current, err = sctx.DB.GetRun(sctx.Run.ID)
@@ -108,11 +108,11 @@ func TestCIMonitorReadinessRequiresChecksOnReceiptHead(t *testing.T) {
 	for _, checkedHead := range []string{"", strings.Repeat("a", 40)} {
 		sctx, host, _ := mutationComparisonFixture(t)
 		checks := []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass, HeadSHA: sctx.Run.HeadSHA}}
-		if got := logVerifiedCIMonitorStatus(sctx, host, checks, ciChecksPassedMsg, ""); got != ciChecksPassedMsg {
+		if got, err := logVerifiedCIMonitorStatus(sctx, host, checks, ciChecksPassedMsg, ""); got != ciChecksPassedMsg || err != nil {
 			t.Fatalf("current check did not publish readiness: %q", got)
 		}
 		checks[0].HeadSHA = checkedHead
-		if got := logVerifiedCIMonitorStatus(sctx, host, checks, ciChecksPassedMsg, ciChecksPassedMsg); got != "" {
+		if got, err := logVerifiedCIMonitorStatus(sctx, host, checks, ciChecksPassedMsg, ciChecksPassedMsg); got != "" || err == nil {
 			t.Fatalf("check on %q retained readiness: %q", checkedHead, got)
 		}
 		run, err := sctx.DB.GetRun(sctx.Run.ID)

@@ -39,6 +39,8 @@ import (
 const (
 	// DefaultCITimeout is the monitor's idle timeout when ci_timeout is unset.
 	DefaultCITimeout = 7 * 24 * time.Hour
+	// DefaultCIReadinessReceiptTimeout bounds missing proof after checks settle.
+	DefaultCIReadinessReceiptTimeout = 10 * time.Minute
 	// DefaultStepQuietWarning is how long a running/fixing step can go without
 	// a new log or lifecycle activity before AXI status marks it quiet.
 	DefaultStepQuietWarning = 10 * time.Minute
@@ -238,6 +240,7 @@ type GlobalConfig struct {
 	// capacity, so no pushed branch may widen or shrink it.
 	Daemon                    Daemon        `yaml:"-"`
 	CITimeout                 time.Duration `yaml:"-"`
+	CIReadinessReceiptTimeout time.Duration `yaml:"-"`
 	StepQuietWarning          time.Duration `yaml:"-"`
 	AgentTimeout              time.Duration `yaml:"-"`
 	ReviewAgentTimeout        time.Duration `yaml:"-"`
@@ -309,6 +312,7 @@ type globalConfigRaw struct {
 	Worktree                  WorktreeRaw                `yaml:"worktree"`
 	Daemon                    DaemonRaw                  `yaml:"daemon"`
 	CITimeout                 string                     `yaml:"ci_timeout"`
+	CIReadinessReceiptTimeout string                     `yaml:"ci_readiness_receipt_timeout"`
 	DaemonConnectTimeout      string                     `yaml:"daemon_connect_timeout"`
 	BranchSyncRemoteTimeout   string                     `yaml:"branch_sync_remote_timeout"`
 	GateReconcileInterval     string                     `yaml:"gate_reconcile_interval"`
@@ -919,6 +923,7 @@ type Config struct {
 	AgentConfig               map[string]agentcfg.Profile
 	ReviewAgents              map[string]ReviewAgent
 	CITimeout                 time.Duration
+	CIReadinessReceiptTimeout time.Duration
 	StepQuietWarning          time.Duration
 	AgentTimeout              time.Duration
 	ReviewAgentTimeout        time.Duration
@@ -1589,6 +1594,10 @@ forgejo_axi_path: forgejo-axi
 # non-positive duration to monitor until the PR is merged, closed, or the run is
 # aborted with: no-mistakes axi abort --run <id>
 ci_timeout: "168h"
+
+# Bound missing current-head comparison proof only after checks otherwise qualify.
+# Must be positive; running checks retain their normal CI timeout.
+ci_readiness_receipt_timeout: "10m"
 
 # AXI status marks a running/fixing step as quiet when no step log or native
 # agent lifecycle activity has appeared for this long. This is observability
@@ -2572,24 +2581,25 @@ func EnsureDefaultGlobalConfig(path string) {
 // DefaultGlobalConfig returns the built-in global defaults.
 func DefaultGlobalConfig() *GlobalConfig {
 	return &GlobalConfig{
-		Agent:                   types.AgentAuto,
-		Agents:                  []types.AgentName{types.AgentAuto},
-		ForgejoAXIPath:          "forgejo-axi",
-		CITimeout:               DefaultCITimeout,
-		StepQuietWarning:        DefaultStepQuietWarning,
-		AgentTimeout:            DefaultAgentTimeout,
-		AgentStallTimeout:       DefaultAgentStallTimeout,
-		ReviewAgentTimeout:      DefaultReviewAgentTimeout,
-		TestAgentTimeout:        DefaultTestAgentTimeout,
-		DaemonConnectTimeout:    DefaultDaemonConnectTimeout,
-		BranchSyncRemoteTimeout: DefaultBranchSyncRemoteTimeout,
-		GateReconcileInterval:   DefaultGateReconcileInterval,
-		GateReconcileTimeout:    DefaultGateReconcileTimeout,
-		LogLevel:                "info",
-		SessionReuse:            true,
-		Eval:                    evalDefaults(),
-		Worktree:                worktreeDefaults(),
-		Daemon:                  daemonDefaults(),
+		Agent:                     types.AgentAuto,
+		Agents:                    []types.AgentName{types.AgentAuto},
+		ForgejoAXIPath:            "forgejo-axi",
+		CITimeout:                 DefaultCITimeout,
+		CIReadinessReceiptTimeout: DefaultCIReadinessReceiptTimeout,
+		StepQuietWarning:          DefaultStepQuietWarning,
+		AgentTimeout:              DefaultAgentTimeout,
+		AgentStallTimeout:         DefaultAgentStallTimeout,
+		ReviewAgentTimeout:        DefaultReviewAgentTimeout,
+		TestAgentTimeout:          DefaultTestAgentTimeout,
+		DaemonConnectTimeout:      DefaultDaemonConnectTimeout,
+		BranchSyncRemoteTimeout:   DefaultBranchSyncRemoteTimeout,
+		GateReconcileInterval:     DefaultGateReconcileInterval,
+		GateReconcileTimeout:      DefaultGateReconcileTimeout,
+		LogLevel:                  "info",
+		SessionReuse:              true,
+		Eval:                      evalDefaults(),
+		Worktree:                  worktreeDefaults(),
+		Daemon:                    daemonDefaults(),
 	}
 }
 
@@ -2833,6 +2843,13 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.CITimeout = d
+	}
+	if raw.CIReadinessReceiptTimeout != "" {
+		d, err := parsePositiveDuration("ci_readiness_receipt_timeout", raw.CIReadinessReceiptTimeout)
+		if err != nil {
+			return nil, err
+		}
+		cfg.CIReadinessReceiptTimeout = d
 	}
 	if raw.StepQuietWarning != "" {
 		d, err := time.ParseDuration(raw.StepQuietWarning)
@@ -4092,6 +4109,7 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		AgentConfig:               global.AgentConfig,
 		ReviewAgents:              global.ReviewAgents,
 		CITimeout:                 global.CITimeout,
+		CIReadinessReceiptTimeout: global.CIReadinessReceiptTimeout,
 		StepQuietWarning:          global.StepQuietWarning,
 		AgentTimeout:              global.AgentTimeout,
 		ReviewAgentTimeout:        global.ReviewAgentTimeout,

@@ -37,6 +37,7 @@ agent_args_override:
     - service_tier="priority"
 
 ci_timeout: "168h"
+ci_readiness_receipt_timeout: "10m"
 
 step_quiet_warning: "10m"
 
@@ -599,6 +600,19 @@ If the PR is merged or closed externally, an eligible stale gate returns to CI e
 Set it to `unlimited` (`none`, `off`, and `never` are accepted aliases), `0`, or any non-positive duration to monitor until the PR is merged, closed, or the run is aborted with `no-mistakes axi abort --run <id>`.
 
 Legacy alias: `babysit_timeout`.
+
+### ci_readiness_receipt_timeout
+
+How long an ordinary run tolerates a missing current-head PR comparison receipt while checks otherwise qualify as ready.
+
+|         |                         |
+| ------- | ----------------------- |
+| Type    | positive Go duration    |
+| Default | `10m`                   |
+
+This is a global-only proof bound, independent of `ci_timeout` even when that timeout is unlimited. It starts at the first otherwise-ready observation missing the receipt, and fails with `ci-readiness-receipt-missing` on a subsequent such observation at or after the bound. The error names the full head and is recorded in `axi status`. Recover branch custody through the offered `axi sync` action, then re-run validation; this failure does not waive comparison proof or authorize a blind `axi respond`.
+
+Queued or running checks never spend this budget. A poll that cannot establish the live target, checks, mergeability, or other comparison facts resets it, as does a changed run head or a successful comparison. Default-branch movement does not extend a missing-receipt wait. Increase the duration if comparison receipt persistence needs a longer recovery window; zero, negative values, and unlimited keywords are rejected. Strict shipping retains its existing comparison validation.
 
 ### step_quiet_warning
 
