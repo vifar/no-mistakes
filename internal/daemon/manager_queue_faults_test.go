@@ -524,6 +524,16 @@ func TestClaimedCancellationDoesNotRequireDatabaseAccess(t *testing.T) {
 					if run.Error == nil || *run.Error != reason {
 						t.Fatalf("cancellation reason = %v, want %s", run.Error, reason)
 					}
+					// The workload is over, so the cancellation is
+					// acknowledged. The CUSTODY is separate: the run keeps
+					// its ownership entry until its outcome is durable, and
+					// the storage that holds the outcome is closed.
+					f.mgr.mu.Lock()
+					owned := f.mgr.runs[id]
+					f.mgr.mu.Unlock()
+					if owned == nil {
+						t.Fatal("unreadable storage released the run's custody")
+					}
 					f.mgr.wg.Wait()
 					if st := f.mgr.sched.stats(); st.Active != 0 {
 						t.Fatalf("stopped run retained capacity: %+v", st)

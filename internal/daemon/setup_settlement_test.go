@@ -161,8 +161,13 @@ END`, function))
 				if owned == nil {
 					t.Fatal("setup ownership disappeared before settlement")
 				}
-				if mode != "unadmitted" && mgr.sched.stats().Active != 1 {
-					t.Fatal("setup slot released before settlement")
+				if mode != "unadmitted" && mgr.sched.stats().Active != 0 {
+					// The slot is not the custody: it is freed as soon as the
+					// workload stops, so a later run is not held behind a
+					// settlement that waits on storage. The run's handle and
+					// its worktree are the custody, and they are asserted
+					// above and below.
+					t.Fatal("setup kept the slot before settlement")
 				}
 				if captured != nil {
 					select {
@@ -301,8 +306,12 @@ func TestSetupSettlementClosedDatabaseRetainsOwnership(t *testing.T) {
 				default:
 				}
 			}
-			if mode != "unadmitted" && mgr.sched.stats().Active != 1 {
-				t.Fatal("closed database released slot")
+			if mode != "unadmitted" && mgr.sched.stats().Active != 0 {
+				// The slot is not the custody: it is freed as soon as the
+				// workload stops, so a later run is not held behind a
+				// settlement that waits on storage. The run's handle and its
+				// worktree are the custody, and they are asserted above.
+				t.Fatal("closed database kept the slot")
 			}
 		})
 	}

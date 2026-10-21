@@ -381,10 +381,15 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 			// caller waiting for the run to stop must not be held by that
 			// wait.
 			//
-			// The SLOT is the custody here, and it is held until the run
-			// settles: an unresolved setup failure keeps its capacity, so a
-			// later run does not start while this one is still unresolved.
+			// Report the boundary and free the slot BEFORE the settlement
+			// below, which can still be waiting on storage to record the
+			// terminal outcome. A later run must not be held behind a
+			// settlement that waits on storage.
+			//
+			// The CUSTODY is the run's handle and its worktree, not the
+			// slot: both are retained until the outcome is durable.
 			handle.reportWorkloadStopped()
+			slot.Release()
 		}
 		if r := recover(); r != nil {
 			slog.Error("panic launching queued run", "run_id", runID, "panic", r)
@@ -404,8 +409,6 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 			m.mu.Unlock()
 			handle.cancel(nil)
 			close(handle.done)
-			// The run settled, so it no longer holds its capacity.
-			slot.Release()
 		}
 	}()
 	if cause := context.Cause(handle.runCtx); cause != nil {
@@ -2708,12 +2711,17 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 			// waiting on storage to record the terminal outcome. A caller
 			// waiting for the run to stop must not be held by that wait.
 			//
-			// The SLOT is the custody here, and it is held until the run
-			// settles: an unresolved setup failure keeps its capacity, so a
-			// later run does not start while this one is still unresolved.
-			// The settlement is retried by the publication recovery loop, and
-			// the slot is freed when it lands.
+			// Report the boundary and free the slot BEFORE the settlement
+			// below, which can still be waiting on storage to record the
+			// terminal outcome. A later run must not be held behind a
+			// settlement that waits on storage.
+			//
+			// The CUSTODY is the run's handle and its worktree, not the
+			// slot: both are retained until the outcome is durable, so an
+			// unresolved setup failure is still recoverable and still owns
+			// its worktree.
 			handle.reportWorkloadStopped()
+			slot.Release()
 			if err != nil {
 				err = errors.Join(err, m.failRunSetup(setupCtx, run.ID, started, err))
 			}
@@ -2723,7 +2731,6 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 			if cleanupWorktree != nil {
 				cleanupWorktree()
 			}
-			slot.Release()
 		}
 	}()
 
