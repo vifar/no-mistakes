@@ -3314,6 +3314,12 @@ func (e *Executor) completeRun(ctx context.Context, run *db.Run, repo *db.Repo) 
 	if err != nil {
 		return err
 	}
+	// The run's work is over: it has decided to complete. Report the boundary
+	// BEFORE the readback below, which can still be waiting on storage to
+	// confirm the outcome. A caller waiting for the run to stop must not be
+	// held by a readback that waits on storage; the custody - the outcome
+	// being durable - is settled separately.
+	e.reportWorkloadDone()
 	durable, err := ReadSettledRun(e.db, run.ID)
 	if err != nil {
 		return err
@@ -3326,10 +3332,6 @@ func (e *Executor) completeRun(ctx context.Context, run *db.Run, repo *db.Repo) 
 		e.reportPublishedHeadStatus(context.Background(), run, repo, "success")
 		e.emitRunEvent(ipc.EventRunCompleted, run, repo)
 	}
-	// The run's work is over: it has decided to complete and the outcome is
-	// recorded. A caller that must not be held hostage by the recording waits
-	// for this boundary.
-	e.reportWorkloadDone()
 	if run.Status != types.RunCompleted {
 		if run.Error != nil {
 			return errors.New(*run.Error)
