@@ -6,12 +6,14 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -21,7 +23,7 @@ import (
 func TestSetupFailureProvenanceSurvivesPublicationDelay(t *testing.T) {
 	for _, boundary := range []string{"unadmitted", "unstarted", "started"} {
 		for _, shutdown := range []string{"operator", "planned", "raw"} {
-			for _, provenance := range []string{"independent", "joined", "cancellation"} {
+			for _, provenance := range []string{"independent", "joined", "cancellation", "git-cancellation", "git-joined"} {
 				t.Run(boundary+"/"+shutdown+"/"+provenance, func(t *testing.T) {
 					p := paths.WithRoot(t.TempDir())
 					if err := p.EnsureDirs(); err != nil {
@@ -59,6 +61,16 @@ func TestSetupFailureProvenanceSurvivesPublicationDelay(t *testing.T) {
 						setupErr = errors.Join(setupErr, context.Canceled)
 					case "cancellation":
 						setupErr = fmt.Errorf("setup interrupted: %w", context.Canceled)
+					case "git-cancellation", "git-joined":
+						stopped := &git.CommandError{
+							Command: "worktree add",
+							Err:     errors.Join(&git.CancelledExitError{ExitError: &exec.ExitError{}}, context.Canceled),
+						}
+						if provenance == "git-joined" {
+							setupErr = errors.Join(setupErr, stopped)
+						} else {
+							setupErr = stopped
+						}
 					}
 					pipeline.CommitStatusLock <- struct{}{}
 					locked := true
@@ -101,7 +113,7 @@ func TestSetupFailureProvenanceSurvivesPublicationDelay(t *testing.T) {
 						t.Fatal("settlement did not finish")
 					}
 					wantStatus, wantMessage := types.RunFailed, setupErr.Error()
-					if provenance == "cancellation" {
+					if provenance == "cancellation" || provenance == "git-cancellation" {
 						wantStatus, wantMessage = types.RunCancelled, cause.Error()
 						if shutdown == "raw" {
 							wantStatus, wantMessage = types.RunFailed, db.RawShutdownReason

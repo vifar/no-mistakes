@@ -3167,7 +3167,7 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		if cause == nil || cause == context.Canceled {
 			continue
 		}
-		if !cancellationAttributable(err, cause) {
+		if !CancellationAttributable(err, cause) {
 			continue
 		}
 		errMsg = cause.Error()
@@ -3216,7 +3216,7 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 				// own outcome even when the cancellation was observed
 				// afterwards.
 				cause := context.Cause(ctx)
-				if cause != nil && cancellationAttributable(executionErr, cause) {
+				if cause != nil && CancellationAttributable(executionErr, cause) {
 					errMsg = db.RawShutdownReason
 					runStatus = types.RunFailed
 					explicitCancellation = false

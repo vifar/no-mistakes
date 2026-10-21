@@ -140,10 +140,13 @@ func (m *RunManager) prepareControlledShutdown(ctx context.Context, expected ipc
 		// that is merely present in the database - seeded by a caller, left by a
 		// previous instance, or written by another tool - was never cancelled or
 		// awaited here, so refusing to stop for it would leave the daemon
-		// unstoppable while it settles nothing. The owned set is the union of the
-		// runs bound to this preparation and the runs deliberately left for the
-		// next start's recovery.
-		owned := make(map[string]bool, len(preparation.ids)+len(left))
+		// unstoppable while it settles nothing.
+		m.mu.Lock()
+		owned := make(map[string]bool, len(m.runs)+len(preparation.ids)+len(left))
+		for id := range m.runs {
+			owned[id] = true
+		}
+		m.mu.Unlock()
 		for _, id := range preparation.ids {
 			owned[id] = true
 		}

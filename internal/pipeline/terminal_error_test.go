@@ -98,8 +98,8 @@ func TestCancellationAttributable(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := cancellationAttributable(tc.err, cause); got != tc.want {
-				t.Fatalf("cancellationAttributable(%v) = %v, want %v", tc.err, got, tc.want)
+			if got := CancellationAttributable(tc.err, cause); got != tc.want {
+				t.Fatalf("CancellationAttributable(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
 	}
@@ -111,7 +111,7 @@ func TestCancellationAttributableIgnoresAWrapperAroundAnIndependentCause(t *test
 	cause := errors.New("daemon shutting down")
 	inner := fmt.Errorf("wrapped: %w", errors.New("the ref was already deleted"))
 	err := &stepExecutionError{step: "push", message: "push failed", cause: inner}
-	if cancellationAttributable(err, cause) {
+	if CancellationAttributable(err, cause) {
 		t.Fatalf("an independent failure was attributed to the cancellation: %v", err)
 	}
 }
@@ -127,7 +127,7 @@ func TestCancellationAttributableAcceptsAStoppedSubprocess(t *testing.T) {
 	cause := errors.New("daemon shutting down")
 	stopped := &git.CancelledExitError{ExitError: killedProcessExit(t)}
 	err := &stepExecutionError{step: "document", message: "git rev-parse: signal: terminated", cause: stopped}
-	if !cancellationAttributable(err, cause) {
+	if !CancellationAttributable(err, cause) {
 		t.Fatalf("a subprocess the context stopped was not attributed to the cancellation: %v", err)
 	}
 	transport := &git.CommandError{
@@ -135,7 +135,7 @@ func TestCancellationAttributableAcceptsAStoppedSubprocess(t *testing.T) {
 		Stderr:  "signal: terminated",
 		Err:     errors.Join(stopped, context.Canceled),
 	}
-	if !cancellationAttributable(transport, cause) {
+	if !CancellationAttributable(transport, cause) {
 		t.Fatalf("the marker was not read through git's transport wrapper: %v", transport)
 	}
 }

@@ -93,7 +93,7 @@ type MeaningfulFailure interface {
 	AddsMeaning() bool
 }
 
-// cancellationAttributable reports whether a run's failure IS the
+// CancellationAttributable reports whether a run's failure IS the
 // cancellation, and so must be recorded as the cancellation's reason.
 //
 // The rule is deliberately narrow. A step that was cut off mid-flight
@@ -116,7 +116,7 @@ type MeaningfulFailure interface {
 // failure and keeps its own reason. An error that joins an independent
 // failure to the cancellation is also independent: the failure would have
 // happened anyway, and the cancellation only arrived alongside it.
-func cancellationAttributable(err, cause error) bool {
+func CancellationAttributable(err, cause error) bool {
 	if err == nil || cause == nil {
 		return false
 	}
@@ -133,7 +133,7 @@ func cancellationAttributable(err, cause error) bool {
 			return false
 		}
 		for _, child := range children {
-			if !cancellationAttributable(child, cause) {
+			if !CancellationAttributable(child, cause) {
 				return false
 			}
 		}
@@ -151,7 +151,7 @@ func cancellationAttributable(err, cause error) bool {
 		if inner == nil {
 			return false
 		}
-		return cancellationAttributable(inner, cause)
+		return CancellationAttributable(inner, cause)
 	}
 	// A wrapper that says something the cause does not is the failure, and
 	// it is decided FIRST: a meaningful wrapper in between means the failure
@@ -178,7 +178,7 @@ func cancellationAttributable(err, cause error) bool {
 		if inner == nil {
 			return false
 		}
-		return cancellationAttributable(inner, cause)
+		return CancellationAttributable(inner, cause)
 	}
 	if _, ok := err.(interface{ Unwrap() error }); ok {
 		// Any other wrapper adds MEANING around the real cause. So the

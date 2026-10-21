@@ -102,7 +102,6 @@ func TestSetupFailurePreservesCancellation(t *testing.T) {
 				case "abort":
 					_, err = f.mgr.handleCancelWithAttribution(id, &types.RunEndingEvent{Caller: "setup-caller", Client: "axi", Reason: "explicit setup stop"})
 				case "signal":
-					wantStatus, wantReason = types.RunFailed, "signal:"
 					err = f.mgr.HandleCancel(id)
 				case "supersede":
 					wantReason = types.RunCancelReasonSuperseded

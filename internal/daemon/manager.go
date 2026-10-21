@@ -473,7 +473,7 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 			}
 		}
 		m.mu.Unlock()
-		cancelled := pipeline.CancellationOnly(setupErr, cause)
+		cancelled := pipeline.CancellationAttributable(setupErr, cause)
 		if cancelled {
 			status, message = types.RunCancelled, cause.Error()
 			var planned *pipeline.ControlledShutdownCause
