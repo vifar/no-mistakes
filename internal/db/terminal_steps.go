@@ -5,7 +5,17 @@ import (
 	"database/sql"
 
 	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+const terminalStepInterruptedActivity = "terminal run: interrupted step"
+
+// InterruptedByTerminalRun distinguishes an administratively closed row from a
+// step that itself failed. In particular, interruption must not invent a
+// Document refusal that changes the existing worktree preservation policy.
+func (s *StepResult) InterruptedByTerminalRun() bool {
+	return s != nil && s.Status == types.StepStatusFailed && s.LastActivity != nil && *s.LastActivity == terminalStepInterruptedActivity
+}
 
 // closeExecutingSteps is used only after the executor has stopped. Keep the
 // run outcome and its executing rows atomic; pending and finished rows retain
@@ -14,7 +24,7 @@ func closeExecutingSteps(ctx context.Context, tx *sql.Tx, runID, reason string, 
 	_, err := tx.ExecContext(ctx, `UPDATE step_results SET status='failed', error=?,
  completed_at=?, last_activity_at=?, last_activity=?, agent_pid=NULL, pending_response=NULL
  WHERE run_id=? AND status IN ('running','fixing','awaiting_approval','fix_review')`,
-		reason, ts, ts, reason, runID)
+		reason, ts, ts, terminalStepInterruptedActivity, runID)
 	return err
 }
 

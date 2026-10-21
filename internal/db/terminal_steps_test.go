@@ -2,8 +2,9 @@ package db
 
 import (
 	"context"
-	"github.com/kunchenguid/no-mistakes/internal/types"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // Issue #102: cancelling the run must settle the executing row in the same write.
