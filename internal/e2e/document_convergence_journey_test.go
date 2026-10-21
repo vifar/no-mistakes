@@ -719,9 +719,12 @@ func TestDocumentJourneyUnsafeAndStrictRestart(t *testing.T) {
 			if kind == "strict" {
 				wt := h.AddWorktree(branch)
 				out, err := h.RunInDir(wt, "axi", "run", "--shipping-mode", "full", "--intent", "verify strict documentation restart", "--wait", "2s")
-				// A bounded CLI hold reports elapsed as exit 1 while its daemon
-				// continues. Independently await and assert publication below.
-				if err != nil && !strings.Contains(out, "wait of 2s elapsed") {
+				// A bounded CLI hold may expire during subscription setup after
+				// the launch receipt has already confirmed admission. Independently
+				// await and assert publication below in either timeout case.
+				admittedTimeout := strings.Contains(out, "launch_receipt:") &&
+					(strings.Contains(out, "wait of 2s elapsed") || strings.Contains(out, "context deadline exceeded"))
+				if err != nil && !admittedTimeout {
 					t.Fatalf("strict run: %v\n%s", err, out)
 				}
 				t.Logf("strict CLI output:\n%s", out)
