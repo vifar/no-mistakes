@@ -6,6 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -21,27 +24,34 @@ func TestCancelledExitRecordsOnlyTheContextsOwnStop(t *testing.T) {
 	if err := exec.Command("git", "init", repo).Run(); err != nil {
 		t.Fatal(err)
 	}
-	// The sleeper announces that it is up, so the test can cancel the context
-	// only once the child is running. A fixed sleep would race the child's
-	// start on a loaded runner, and a cancellation that arrives before the
-	// child is up is a different case: the command never ran.
+	// The sleeper announces that it is up, and writes its own PID, so the
+	// test can cancel the context only once the child is running and can
+	// signal that child alone. A fixed sleep would race the child's start on
+	// a loaded runner, and a cancellation that arrives before the child is
+	// up is a different case: the command never ran. Signalling by command
+	// text would reach every unrelated process that happens to match it.
 	started := filepath.Join(dir, "started")
 	for _, args := range [][]string{
 		{"-C", repo, "config", "user.email", "t@t.com"},
 		{"-C", repo, "config", "user.name", "T"},
-		{"-C", repo, "config", "alias.sleeper", "!touch " + started + "; sleep 30"},
+		{"-C", repo, "config", "alias.sleeper", "!echo $$ > " + started + "; exec sleep 30"},
 		{"-C", repo, "commit", "--allow-empty", "-m", "init"},
 	} {
 		if err := exec.Command("git", args...).Run(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	waitForStart := func(t *testing.T) {
+	// waitForStart waits for the child to announce itself and returns its PID.
+	waitForStart := func(t *testing.T) int {
 		t.Helper()
 		deadline := time.Now().Add(20 * time.Second)
 		for {
-			if _, err := os.Stat(started); err == nil {
-				return
+			if raw, err := os.ReadFile(started); err == nil {
+				pid, convErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+				if convErr != nil {
+					t.Fatalf("the child wrote an unreadable pid: %q", raw)
+				}
+				return pid
 			}
 			if time.Now().After(deadline) {
 				t.Fatal("the child never started")
@@ -96,12 +106,20 @@ func TestCancelledExitRecordsOnlyTheContextsOwnStop(t *testing.T) {
 			_, err := Run(ctx, repo, "sleeper")
 			done <- err
 		}()
-		waitForStart(t)
-		// Kill the child from outside the command's context, then cancel the
-		// context. The context never stopped this child, so the exit is not
-		// the cancellation's doing.
-		_ = exec.Command("pkill", "-TERM", "-f", "sleep 30").Run()
-		err := <-done
+		pid := waitForStart(t)
+		// Signal THAT child from outside the command's context, then cancel
+		// the context. The context never stopped this child, so the exit is
+		// not the cancellation's doing. Only the child this test started is
+		// signalled: signalling by command text would reach every unrelated
+		// process that happens to match it.
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := process.Signal(syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		err = <-done
 		if err == nil {
 			t.Fatal("killed command reported success")
 		}

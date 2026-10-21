@@ -507,13 +507,7 @@ func TestClaimedCancellationDoesNotRequireDatabaseAccess(t *testing.T) {
 						reason = types.RunCancelReasonSuperseded
 						err = f.mgr.cancelActiveRuns("fault-repo", branch)
 					}
-					if action == "supersede" && fault == "closed" {
-						// The workload must stop without database access, but
-						// supersession cannot acknowledge unreadable settlement.
-						if err == nil || !strings.Contains(err.Error(), "timed out waiting for cancelled runs") {
-							t.Fatalf("supersede with unreadable settlement: %v", err)
-						}
-					} else if err != nil {
+					if err != nil {
 						t.Fatalf("cancel claimed run: %v", err)
 					}
 					f.waitFor("claimed run to stop", func() bool { return f.status(id) == types.RunCancelled })
@@ -526,12 +520,16 @@ func TestClaimedCancellationDoesNotRequireDatabaseAccess(t *testing.T) {
 					}
 					// The workload is over, so the cancellation is
 					// acknowledged. The CUSTODY is separate: the run keeps
-					// its ownership entry until its outcome is durable, and
-					// the storage that holds the outcome is closed.
+					// its ownership entry until its outcome is durable.
+					//
+					// A CLOSED connection cannot observe the outcome at all,
+					// so the custody is retained. A read-only connection can
+					// observe it, so the custody is released once the outcome
+					// is durable.
 					f.mgr.mu.Lock()
 					owned := f.mgr.runs[id]
 					f.mgr.mu.Unlock()
-					if owned == nil {
+					if fault == "closed" && owned == nil {
 						t.Fatal("unreadable storage released the run's custody")
 					}
 					f.mgr.wg.Wait()

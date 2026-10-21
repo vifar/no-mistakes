@@ -113,9 +113,26 @@ func TestQueuedWorkloadDoesNotInheritAnotherRunsSettlementFailure(t *testing.T) 
 	case <-time.After(2 * time.Second):
 	}
 
-	// Leave the queue clean for the next test.
+	// Restore the storage so the queued settlement can land, then let it
+	// finish. The recovery worker is still running and may be inside the
+	// settlement's write with the queue lock released, so the trigger is
+	// dropped first and the waiter is joined before the queue is touched: a
+	// settlement removed from under the worker would leave it slicing an
+	// empty queue, and its waiter would never be released.
+	if _, err := control.Exec(`DROP TRIGGER reject_one`); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-failed:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the outstanding settlement never finished")
+	}
+	// Leave the queue clean for the next test, under the commit status lock
+	// so the recovery worker cannot be inside a settlement's write.
+	CommitStatusLock <- struct{}{}
 	terminalSettlementMu.Lock()
 	terminalSettlements = nil
 	rawPublicationSettlements = nil
 	terminalSettlementMu.Unlock()
+	<-CommitStatusLock
 }
