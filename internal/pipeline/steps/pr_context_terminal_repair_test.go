@@ -27,12 +27,20 @@ import (
 // publication record proves the advance, so the receipt must follow it.
 func TestPRContextGuardAcceptsTerminalCIRepairAdvanceOnAMergedPR(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		merged  bool
-		publish bool
+		name          string
+		merged        bool
+		publish       bool
+		advanceTarget bool
+		changeMerge   bool
+		retarget      bool
+		wantError     string
 	}{
 		{name: "merged with a pipeline-published repair", merged: true, publish: true},
 		{name: "closed with a pipeline-published repair", publish: true},
+		{name: "merged before another target advance", merged: true, publish: true, advanceTarget: true},
+		{name: "merge changed the repair", merged: true, publish: true, changeMerge: true, wantError: "merged PR tree differs"},
+		{name: "merged into a different branch", merged: true, publish: true, retarget: true, wantError: "matching PR receipt"},
+		{name: "closed after retargeting", publish: true, retarget: true, wantError: "matching PR receipt"},
 		// The negative: the SAME head advance, but the run never published it
 		// (no durable publication record), so the proof is absent and the
 		// guard must still fail closed.
@@ -90,10 +98,25 @@ func TestPRContextGuardAcceptsTerminalCIRepairAdvanceOnAMergedPR(t *testing.T) {
 				// prove the merge tree against the reviewed comparison.
 				gitCmd(t, dir, "checkout", "main")
 				gitCmd(t, dir, "merge", "--no-ff", "feature", "-m", "merge published repair")
+				if tc.changeMerge {
+					if err := os.WriteFile(filepath.Join(dir, "repair.txt"), []byte("broken again\n"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+					gitCmd(t, dir, "add", "repair.txt")
+					gitCmd(t, dir, "commit", "--amend", "--no-edit")
+				}
 				mergedSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+				if tc.advanceTarget {
+					gitCmd(t, dir, "commit", "--allow-empty", "-m", "later target commit")
+				}
 				gitCmd(t, dir, "checkout", "feature")
 			}
-			facts := fmt.Sprintf(`{"number":42,"html_url":%q,"state":"closed","merged":%t,"merge_commit_sha":%q,"head":{"ref":"feature","sha":%q,"repo":{"full_name":"test/repo"}},"base":{"ref":"main"}}`, prURL, merged, mergedSHA, repairHead)
+			targetBranch := "main"
+			if tc.retarget {
+				targetBranch = "release"
+				gitCmd(t, dir, "branch", targetBranch, "main")
+			}
+			facts := fmt.Sprintf(`{"number":42,"html_url":%q,"state":"closed","merged":%t,"merge_commit_sha":%q,"head":{"ref":"feature","sha":%q,"repo":{"full_name":"test/repo"}},"base":{"ref":%q}}`, prURL, merged, mergedSHA, repairHead, targetBranch)
 			binDir := fakeCLIBinDir(t)
 			linkTestBinary(t, binDir, "gh")
 			sctx.Env = fakeCLIEnv(binDir, map[string]string{
@@ -116,6 +139,21 @@ func TestPRContextGuardAcceptsTerminalCIRepairAdvanceOnAMergedPR(t *testing.T) {
 				}
 				return
 			}
+			if tc.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+					t.Fatalf("expected %q, got decision %+v, error %v", tc.wantError, decision, err)
+				}
+				if tc.retarget {
+					unchanged, readErr := sctx.DB.GetRunPRContext(sctx.Run.ID)
+					if readErr != nil {
+						t.Fatal(readErr)
+					}
+					if unchanged.PRContextCandidate != receipt.PRContextCandidate {
+						t.Fatalf("retarget replaced receipt: %+v", unchanged)
+					}
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("terminal guard refused a pipeline-published repair: %v", err)
 			}
@@ -126,6 +164,12 @@ func TestPRContextGuardAcceptsTerminalCIRepairAdvanceOnAMergedPR(t *testing.T) {
 			advanced, err := sctx.DB.GetRunPRContext(sctx.Run.ID)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if advanced.TargetBranch != receipt.TargetBranch || advanced.TargetSHA != receipt.TargetSHA || advanced.MergeBaseSHA != receipt.MergeBaseSHA {
+				t.Fatalf("advance lost the original target comparison: before %+v, after %+v", receipt, advanced)
+			}
+			if advanced.DiffDigest == receipt.DiffDigest {
+				t.Fatal("advance kept the pre-repair diff digest")
 			}
 			if advanced.LocalHeadSHA != repairHead {
 				t.Fatalf("receipt did not follow the pipeline's own advance: %+v", advanced)
