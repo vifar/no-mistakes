@@ -221,9 +221,9 @@ func TestDaemonStopLiveFailedFixtureCleanup(t *testing.T) {
 		t.Fatalf("failed fixture cleanup left daemon owners: %v %v", owners, err)
 	}
 	for path, want := range map[string]string{
-		"logs/daemon.log": "shutdown",
-		"logs/cli.log": "stop",
-		"diagnostics/daemon.pid": parts[1],
+		"logs/daemon.log":                "shutdown",
+		"logs/cli.log":                   "stop",
+		"diagnostics/daemon.pid":         parts[1],
 		"diagnostics/command-output.log": "isolated live probe access denied",
 	} {
 		data, err := os.ReadFile(filepath.Join(root, "h", path))
