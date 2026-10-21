@@ -186,7 +186,7 @@ func TestAxiSyncRecoverPublishedEquivalentDivergenceStillRefuses(t *testing.T) {
 	if err == nil || !asExitError(err, &ee) || ee.code != 1 {
 		t.Fatalf("equivalent recovery error = %#v; want exit 1:\n%s", err, out)
 	}
-	for _, want := range []string{"safety: blocked_recover_diverged", "changed: false", f.pushed, f.old, "ancestry", "three-way merge"} {
+	for _, want := range []string{"safety: blocked_recover_diverged", "changed: false", f.pushed, f.old, "ancestry", "three-way merge", "patch-ID matches", "a lead for the operator, not a finding of containment", "this needs an operator decision"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("equivalent refusal missing %q:\n%s", want, out)
 		}

@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -122,5 +123,38 @@ func TestCommitPatchIDsCoversTheRange(t *testing.T) {
 	}
 	if _, present := ids[base]; present {
 		t.Fatal("a commit outside the range was reported")
+	}
+}
+
+func TestCommitPatchIDsRejectsInvalidRangeAndCancellation(t *testing.T) {
+	dir := initTestRepo(t)
+	ids, err := CommitPatchIDs(context.Background(), dir, "refs/heads/missing")
+	if err == nil || ids != nil {
+		t.Fatalf("invalid range returned %v, %v", ids, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ids, err = CommitPatchIDs(ctx, dir, "HEAD")
+	if !errors.Is(err, context.Canceled) || ids != nil {
+		t.Fatalf("cancelled range returned %v, %v", ids, err)
+	}
+}
+
+func TestCommitPatchIDsReadsBareRangeAndEmptyRange(t *testing.T) {
+	dir := initTestRepo(t)
+	writeFile(t, filepath.Join(dir, "file.txt"), "one\n")
+	run(t, dir, "git", "add", "-A")
+	run(t, dir, "git", "commit", "-m", "one")
+	one := run(t, dir, "git", "rev-parse", "HEAD")
+	bare := filepath.Join(t.TempDir(), "bare.git")
+	run(t, dir, "git", "clone", "--bare", dir, bare)
+	ctx := context.Background()
+	ids, err := CommitPatchIDs(ctx, bare, one+"^.."+one)
+	if err != nil || len(ids) != 1 || ids[one] == "" {
+		t.Fatalf("bare range returned %v, %v", ids, err)
+	}
+	ids, err = CommitPatchIDs(ctx, bare, one+".."+one)
+	if err != nil || len(ids) != 0 {
+		t.Fatalf("empty range returned %v, %v", ids, err)
 	}
 }

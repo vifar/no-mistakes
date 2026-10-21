@@ -2,6 +2,7 @@ package branchsync
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -135,8 +136,31 @@ func TestRecoverDivergedRefusalNamesBothHeadsAndTheTestsThatRan(t *testing.T) {
 // is still not stamped.
 func TestRecoverDivergedRefusalReportsAPatchMatchAsADiagnosticOnly(t *testing.T) {
 	t.Parallel()
+	checkRecoverPatchMatchDiagnostic(t, 0)
+}
 
+func TestRecoverDivergedRefusalReportsAPatchMatchBeyondFormerCutoff(t *testing.T) {
+	t.Parallel()
+	checkRecoverPatchMatchDiagnostic(t, 501)
+}
+
+func checkRecoverPatchMatchDiagnostic(t *testing.T, padding int) {
+	t.Helper()
 	f := newRewrittenCopyRecoverFixture(t)
+	if padding > 0 {
+		configureIdentity(t, f.gate)
+		tree := mustRun(t, f.gate, "rev-parse", f.preserved+"^{tree}")
+		for i := 0; i < padding; i++ {
+			f.preserved = mustRun(t, f.gate, "commit-tree", tree, "-p", f.preserved, "-m", fmt.Sprintf("later history %d", i))
+		}
+		if err := f.db.UpdateRunHeadSHA(f.run.ID, f.preserved); err != nil {
+			t.Fatal(err)
+		}
+		if err := f.db.UpdateRunStatusWithVerifiedHead(f.run.ID, types.RunCancelled, f.preserved); err != nil {
+			t.Fatal(err)
+		}
+		mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.preserved)
+	}
 	mustRun(t, f.gate, "update-ref", f.anchorRef(), f.preserved)
 
 	refused := f.service.Recover(f.ctx, false)
@@ -147,7 +171,7 @@ func TestRecoverDivergedRefusalReportsAPatchMatchAsADiagnosticOnly(t *testing.T)
 	if !strings.Contains(refused.Error, f.rewritten) {
 		t.Errorf("divergence refusal does not name the commit carrying the same patch (%s): %q", f.rewritten, refused.Error)
 	}
-	for _, want := range []string{f.localHead, f.preserved, "ancestry", "three-way merge"} {
+	for _, want := range []string{f.localHead, f.preserved, "ancestry", "three-way merge", "patch-ID matches", "a lead for the operator, not a finding of containment", "hunk locations and whitespace", "this needs an operator decision"} {
 		if !strings.Contains(refused.Error, want) {
 			t.Errorf("divergence refusal does not name %q: %q", want, refused.Error)
 		}
@@ -181,7 +205,7 @@ func TestRecoverDivergedRefusalClaimsNoPatchMatchWhenNoneExists(t *testing.T) {
 	if refused.Safety != "blocked_recover_diverged" {
 		t.Fatalf("recover diverged = %#v", refused)
 	}
-	if strings.Contains(refused.Error, "same patch") {
+	if strings.Contains(refused.Error, "patch-ID matches") {
 		t.Errorf("divergence refusal claims a patch match that does not exist: %q", refused.Error)
 	}
 }
