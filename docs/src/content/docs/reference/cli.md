@@ -593,6 +593,10 @@ Active runs on other branches are left alone.
 no-mistakes axi abort
 ```
 
+`--owner <session-or-thread>` records the cancellation caller (default: `NO_MISTAKES_OWNER`); `--reason <text>` records the operator's reason. The client is recorded as `axi`. If no caller is supplied, a known launch owner is used with `attribution_source: launch_owner`; it is a fallback responsibility, not proof of who sent the IPC request. Without either identity, the caller is absent and the source is `unavailable`. These fields grant no authority and do not change cancellation behavior.
+
+`axi status --run <id>` (including `--json`) exposes the persisted `ending_event`. It contains the caller, client, reason, attribution source and authenticated IPC peer PID where available. Older clients can still cancel without metadata. A daemon predating this feature ignores the optional request fields and cannot persist attribution; update the daemon before relying on the audit record.
+
 If there is no active run, this succeeds as a no-op.
 
 Pass `--run <id>` to cancel a specific run by its id instead of resolving the current branch:

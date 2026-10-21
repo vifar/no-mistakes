@@ -3139,6 +3139,9 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
 	executionErr := err
 	writeTerminal := func() error {
+		if err := RecordCancellationAttribution(e.db, run.ID, ctxs...); err != nil {
+			return err
+		}
 		if infrastructure {
 			// Revoke cancellation eligibility before settling the canonical storage
 			// outcome and active steps through the shared infrastructure path.

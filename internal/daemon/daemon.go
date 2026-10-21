@@ -1674,7 +1674,7 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		closed, err := mgr.handleCancelWithCleanup(p.RunID)
+		closed, err := mgr.handleCancelWithAttribution(p.RunID, &types.RunEndingEvent{Caller: p.Caller, Client: p.Client, Reason: p.Reason, PeerPID: ipc.PeerPID(ctx)})
 		if err != nil {
 			return nil, err
 		}
@@ -1753,6 +1753,7 @@ func gateContextResult(result gatecontext.Result) ipc.GateContextResult {
 
 func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 	info := &ipc.RunInfo{
+		EndingEvent:          r.EndingEvent,
 		Owner:                r.Owner(),
 		TargetAdvanceRewinds: r.TargetAdvanceRewinds,
 		Shipping:             r.Shipping,

@@ -2139,6 +2139,8 @@ func newAxiAbortCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&runID, "run", "", "cancel this run id directly, without resolving the current branch or worktree")
+	bindOwnerFlag(cmd)
+	cmd.Flags().String("reason", "", "record why this cancellation was requested")
 	return cmd
 }
 
@@ -2179,7 +2181,7 @@ func runAxiAbort(cmd *cobra.Command, runID string) error {
 	}
 
 	var result ipc.CancelRunResult
-	if err := env.client.Call(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: active.Run.ID}, &result); err != nil {
+	if err := env.client.Call(ipc.MethodCancelRun, cancelRunParams(cmd, active.Run.ID), &result); err != nil {
 		return emitError(cmd, 1, fmt.Sprintf("abort run: %v", err))
 	}
 	// Success and the final ownership state may only be reported after the
@@ -2341,7 +2343,7 @@ func runAxiAbortByRunID(cmd *cobra.Command, runID string) error {
 	defer client.Close()
 
 	var result ipc.CancelRunResult
-	if err := client.Call(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: runID}, &result); err != nil {
+	if err := client.Call(ipc.MethodCancelRun, cancelRunParams(cmd, runID), &result); err != nil {
 		// The daemon reports an unknown/inactive run id as "no active run
 		// <id>". That result alone is not terminal truth: resolve the exact
 		// run's durable state before deciding between the idempotent

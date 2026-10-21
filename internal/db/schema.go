@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS runs (
     id                   TEXT PRIMARY KEY,
     repo_id              TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
     branch               TEXT NOT NULL,
+    ending_event TEXT,
     head_sha                TEXT NOT NULL,
     base_sha                TEXT NOT NULL,
     worktree_dir            TEXT,
@@ -566,6 +567,7 @@ var migrationStatements = append([]string{
 // A statement added here must ALSO be applied to a fresh database, so it
 // belongs in `schemaSQL` (the fresh-database DDL) as well.
 var additiveMigrationStatements = []string{
+	`ALTER TABLE runs ADD COLUMN ending_event TEXT`,
 	// How many times this run committed a predecessor's leftover validation
 	// edits as a pipeline correction. It bounds the loop: each such commit
 	// sends the head through revalidation. An agent that keeps writing files

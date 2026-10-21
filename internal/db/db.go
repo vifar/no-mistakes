@@ -25,7 +25,7 @@ var (
 // or additiveMigrationStatements changes. Version zero is the historical,
 // unversioned schema; its complete upgrade runs once before the stamp is
 // committed. Current opens execute no DDL or backfill DML.
-const schemaVersion = 5
+const schemaVersion = 6
 
 // DB wraps a SQLite database connection.
 type DB struct {

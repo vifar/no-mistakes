@@ -343,7 +343,10 @@ type SlotsResult struct {
 
 // CancelRunParams cancels an active pipeline run.
 type CancelRunParams struct {
-	RunID string `json:"run_id"`
+	RunID  string `json:"run_id"`
+	Caller string `json:"caller,omitempty"`
+	Client string `json:"client,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // GateContextParams asks the daemon to classify the authenticated caller.
@@ -544,6 +547,7 @@ type ShutdownResult struct {
 
 // RunInfo is the IPC representation of a pipeline run.
 type RunInfo struct {
+	EndingEvent          *types.RunEndingEvent      `json:"ending_event,omitempty"`
 	OwnerAdmission       *types.OwnerAdmissionEvent `json:"owner_admission_event,omitempty"`
 	OwnerAdmissionError  string                     `json:"owner_admission_error,omitempty"`
 	Owner                string                     `json:"owner"`

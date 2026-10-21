@@ -120,6 +120,7 @@ type stepView struct {
 
 // runView is a render-ready view of a pipeline run.
 type runView struct {
+	EndingEvent          *types.RunEndingEvent
 	OwnerAdmission       *types.OwnerAdmissionEvent
 	OwnerAdmissionError  string
 	OwnerPolicyWarning   string
@@ -173,6 +174,7 @@ func ordinaryReviewGeneration(r *ipc.RunInfo) *int64 {
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
 	rv := runView{
+		EndingEvent:    r.EndingEvent,
 		OwnerAdmission: r.OwnerAdmission, OwnerAdmissionError: r.OwnerAdmissionError,
 		Owner:                 r.Owner,
 		TargetAdvanceRewinds:  r.TargetAdvanceRewinds,
@@ -242,6 +244,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 	rv := runView{
 		Owner:                r.Owner(),
+		EndingEvent:          r.EndingEvent,
 		TargetAdvanceRewinds: r.TargetAdvanceRewinds,
 		Shipping:             r.Shipping,
 		SubmittedHeadSHA:     r.SubmittedHeadSHA,
@@ -1072,6 +1075,9 @@ func gateIdentityFields(g types.GateIdentity) []toon.Field {
 // Admission evidence is persisted history, independent of current owner policy.
 func ownerAdmissionFields(rv runView) []toon.Field {
 	var fields []toon.Field
+	if rv.EndingEvent != nil {
+		fields = append(fields, toon.Field{Key: "ending_event", Value: rv.EndingEvent})
+	}
 	if rv.OwnerAdmission != nil {
 		fields = append(fields, toon.Field{Key: "owner_admission_event", Value: rv.OwnerAdmission}, toon.Field{Key: "owner_policy_warning", Value: rv.OwnerAdmission.Warning})
 	}
