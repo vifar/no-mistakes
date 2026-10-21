@@ -218,6 +218,14 @@ If checks still appear on a declared no-CI repository, their actual states are p
 This field is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`.
 A feature branch cannot self-declare `no_ci: true` to bypass checks, and cannot clear a trusted declaration either.
 
+For a repository with no external CI, commit this declaration to the default branch before starting a new run:
+
+```yaml
+no_ci: true
+```
+
+The pipeline's own `no-mistakes` commit status is already excluded from check collection; it does not need an `external_checks` entry. When no other checks are observed, the declaration records `ci_ready_at` and `ci_ready_no_ci = 1`, including when the target requires only that self-status. Ordinary `axi status` exposes `ci_ready: true` and `ci_ready_no_ci: true`, and `axi run` returns `checks-passed`. The validated head can receive `no-mistakes: success` while the run continues monitoring for a human merge; run completion is not a prerequisite for that status. Pending real checks still withhold readiness (`ci_ready: false`, `ci_ready_no_ci: false`).
+
 ### pr.base_branch
 
 Select the branch that newly created pull requests target.
