@@ -177,10 +177,13 @@ func (h *Host) Available(ctx context.Context) error {
 			return fmt.Errorf("gh CLI is not on PATH: %w", err)
 		}
 		detail := strings.TrimSpace(stderr.String())
-		if detail != "" {
-			return fmt.Errorf("gh CLI is not authenticated: %s: %w", detail, err)
+		if isKeyringTimeout(detail) {
+			return fmt.Errorf("gh auth status: %w: %w", scm.ErrTransientTimeout, err)
 		}
-		return fmt.Errorf("gh CLI is not authenticated: %w", err)
+		if detail != "" {
+			return fmt.Errorf("%w: %s: %w", scm.ErrUnauthenticated, detail, err)
+		}
+		return fmt.Errorf("%w: %w", scm.ErrUnauthenticated, err)
 	}
 	return nil
 }
@@ -268,7 +271,7 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 	cmd := h.cmd(ctx, "gh", args...)
 	out, detail, err := stdoutOnly(cmd)
 	if err != nil {
-		return nil, fmt.Errorf("gh pr list: %s: %w", detail, err)
+		return nil, prReadError(ctx, "gh pr list", detail, err)
 	}
 	var prs []struct {
 		Number              int    `json:"number"`
@@ -444,9 +447,9 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "state", "--jq", ".state")
 	cmd := h.cmd(ctx, "gh", args...)
-	out, err := cmd.Output()
+	out, detail, err := stdoutOnly(cmd)
 	if err != nil {
-		return "", fmt.Errorf("gh pr view: %w", err)
+		return "", prReadError(ctx, "gh pr view state", detail, err)
 	}
 	return normalizePRState(strings.TrimSpace(string(out))), nil
 }
@@ -458,9 +461,9 @@ func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) 
 	}
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "baseRefName", "--jq", ".baseRefName")
-	out, err := h.cmd(ctx, "gh", args...).Output()
+	out, detail, err := stdoutOnly(h.cmd(ctx, "gh", args...))
 	if err != nil {
-		return "", fmt.Errorf("gh pr view base branch: %w", err)
+		return "", prReadError(ctx, "gh pr view base branch", detail, err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }

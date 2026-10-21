@@ -22,7 +22,7 @@ func ResolvePRTarget(sctx *pipeline.StepContext) (pipeline.PRTargetSelection, er
 	if host == nil {
 		return pipeline.PRTargetSelection{}, fmt.Errorf("read pull request target: %s", reason)
 	}
-	if err := host.Available(sctx.Ctx); err != nil {
+	if _, err := pipeline.ReadPRContext(sctx.Ctx, sctx.Log, func() (struct{}, error) { return struct{}{}, host.Available(sctx.Ctx) }); err != nil {
 		return pipeline.PRTargetSelection{}, fmt.Errorf("read pull request target: %w", err)
 	}
 	reader, ok := host.(scm.PRFactsReader)
@@ -73,7 +73,7 @@ func resolvePRTargetWithReader(sctx *pipeline.StepContext, reader scm.PRFactsRea
 	selected := pipeline.PRTargetSelection{SourceRepo: sourceRepo, SourceBranch: branch}
 	owned := runPRURL(sctx)
 	if owned != "" {
-		facts, err := reader.ReadPRFacts(sctx.Ctx, prFromOwnedURL(owned))
+		facts, err := pipeline.ReadPRContext(sctx.Ctx, sctx.Log, func() (scm.PRFacts, error) { return reader.ReadPRFacts(sctx.Ctx, prFromOwnedURL(owned)) })
 		if err != nil {
 			return pipeline.PRTargetSelection{}, fmt.Errorf("read recorded pull request %s: %w", owned, err)
 		}
@@ -90,7 +90,7 @@ func resolvePRTargetWithReader(sctx *pipeline.StepContext, reader scm.PRFactsRea
 		return selected, nil
 	}
 
-	candidates, err := reader.FindOpenPRFacts(sctx.Ctx, sourceRepo, branch)
+	candidates, err := pipeline.ReadPRContext(sctx.Ctx, sctx.Log, func() ([]scm.PRFacts, error) { return reader.FindOpenPRFacts(sctx.Ctx, sourceRepo, branch) })
 	if err != nil {
 		return pipeline.PRTargetSelection{}, fmt.Errorf("find open pull requests for %s on %s: %w", sourceRepo, branch, err)
 	}
@@ -162,10 +162,10 @@ func currentPRTargetBranch(sctx *pipeline.StepContext) (string, error) {
 	if host == nil {
 		return "", fmt.Errorf("read pull request %s target: %s", owned, reason)
 	}
-	if err := host.Available(sctx.Ctx); err != nil {
+	if _, err := pipeline.ReadPRContext(sctx.Ctx, sctx.Log, func() (struct{}, error) { return struct{}{}, host.Available(sctx.Ctx) }); err != nil {
 		return "", fmt.Errorf("read pull request %s target: %w", owned, err)
 	}
-	state, err := host.GetPRState(sctx.Ctx, prFromOwnedURL(owned))
+	state, err := pipeline.ReadPRContext(sctx.Ctx, sctx.Log, func() (scm.PRState, error) { return host.GetPRState(sctx.Ctx, prFromOwnedURL(owned)) })
 	if err != nil {
 		return "", fmt.Errorf("read pull request %s state: %w", owned, err)
 	}
@@ -173,7 +173,7 @@ func currentPRTargetBranch(sctx *pipeline.StepContext) (string, error) {
 		return "", fmt.Errorf("recorded pull request %s is %s", owned, strings.ToLower(string(state)))
 	}
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
-	discovered, err := host.FindPR(sctx.Ctx, branch, "")
+	discovered, err := pipeline.ReadPRContext(sctx.Ctx, sctx.Log, func() (*scm.PR, error) { return host.FindPR(sctx.Ctx, branch, "") })
 	if err != nil {
 		return "", fmt.Errorf("find pull request for %s: %w", branch, err)
 	}
@@ -187,7 +187,7 @@ func currentPRTargetBranch(sctx *pipeline.StepContext) (string, error) {
 		if !ok {
 			return "", fmt.Errorf("provider cannot read pull request %s target", owned)
 		}
-		base, err = reader.GetPRBaseBranch(sctx.Ctx, pr)
+		base, err = pipeline.ReadPRContext(sctx.Ctx, sctx.Log, func() (string, error) { return reader.GetPRBaseBranch(sctx.Ctx, pr) })
 		if err != nil {
 			return "", fmt.Errorf("read pull request %s target: %w", owned, err)
 		}

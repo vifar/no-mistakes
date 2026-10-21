@@ -67,7 +67,7 @@ func verifyStrictPRBaseBranch(ctx context.Context, sctx *pipeline.StepContext, h
 	if !ok {
 		return fmt.Errorf("strict shipping requires a provider that can read the live PR target")
 	}
-	actual, err := reader.GetPRBaseBranch(ctx, pr)
+	actual, err := pipeline.ReadPRContext(ctx, sctx.Log, func() (string, error) { return reader.GetPRBaseBranch(ctx, pr) })
 	if err != nil {
 		return fmt.Errorf("read strict shipping PR target: %w", err)
 	}

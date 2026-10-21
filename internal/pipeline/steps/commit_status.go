@@ -335,6 +335,9 @@ func commitStatusReporter(sctx *pipeline.StepContext, publication *db.CommitStat
 			}
 		case "failure":
 			description = "no-mistakes pipeline failed or cancelled"
+			if durableRun.Error != nil && pipeline.PRContextReadTimedOut(*durableRun.Error) {
+				description = "PR-context unavailable: transient keyring timeout; validation incomplete"
+			}
 		}
 		if err := host.PostCommitStatus(bounded, sha, state, description, targetURL); err != nil {
 			statusWarning(log, state+" for "+sha, err)
