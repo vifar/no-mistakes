@@ -438,10 +438,12 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 		m.mu.Lock()
 		defer m.mu.Unlock()
 		status, message := types.RunFailed, setupErr.Error()
-		cause := context.Cause(ctx)
+		attributionCtx := ctx
+		cause := context.Cause(attributionCtx)
 		if owned := m.runs[runID]; owned != nil && owned.handle != nil {
 			if original := context.Cause(owned.handle.runCtx); original != nil {
 				cause = original
+				attributionCtx = owned.handle.runCtx
 			}
 		}
 		cancelled := pipeline.CancellationOnly(setupErr, cause)
@@ -452,7 +454,7 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 				status = types.RunFailed
 			}
 		}
-		if err := pipeline.RecordCancellationAttribution(m.db, runID, ctx); err != nil {
+		if err := pipeline.RecordCancellationAttribution(m.db, runID, attributionCtx); err != nil {
 			return err
 		}
 		revoked, err := m.db.RawShutdownSuperseded(runID)
@@ -648,7 +650,9 @@ func (m *RunManager) cancelManagedRun(runID, reason string, events ...*types.Run
 	event.CreatedAt = time.Now().Unix()
 	if reason == types.RunCancelReasonSuperseded {
 		event.Event = "run_superseded"
-		event.AttributionSource = "push"
+		if event.AttributionSource == "" {
+			event.AttributionSource = "unavailable"
+		}
 	} else {
 		event.Event = "run_cancel_requested"
 		owner := ""
@@ -2460,8 +2464,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
-	supersession := &types.RunEndingEvent{SupersedingRunID: run.ID, SupersedingSHA: headSHA, SupersedingRef: "refs/heads/" + branch, SupersedingGeneration: run.PushGeneration, SupersedingValidationGeneration: run.LaunchValidationGeneration}
+	supersession := &types.RunEndingEvent{AttributionSource: trigger, SupersedingRunID: run.ID, SupersedingGeneration: run.PushGeneration, SupersedingValidationGeneration: run.LaunchValidationGeneration}
 	if retained != nil {
+		supersession.AttributionSource = "push"
+		supersession.SupersedingSHA = retained.Record.Params.New
+		supersession.SupersedingRef = retained.Record.Params.Ref
 		supersession.PushNotificationID = retained.ID
 		supersession.SupersedingOldSHA = retained.Record.Params.Old
 	}

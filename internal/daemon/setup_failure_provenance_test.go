@@ -46,7 +46,7 @@ func TestSetupFailureProvenanceSurvivesPublicationDelay(t *testing.T) {
 					if boundary != "unadmitted" {
 						mgr.runs[run.ID] = &managedRun{run: run, state: ownershipClaimed, handle: &runHandle{runCtx: ctx, cancel: cancel, done: make(chan struct{})}}
 					}
-					var cause error = errors.New(types.RunCancelReasonAbortedByUser)
+					var cause error = &pipeline.RunCancelCause{Reason: types.RunCancelReasonAbortedByUser, Event: &types.RunEndingEvent{Event: "run_cancel_requested", Caller: "settlement-caller", Reason: "explicit delayed stop", AttributionSource: "caller"}}
 					if shutdown != "operator" {
 						cause = &pipeline.ControlledShutdownCause{Instance: mgr.runtimeInstance, Lifecycle: "planned"}
 						if err := d.PrepareControlledShutdown([]string{run.ID}, mgr.runtimeInstance, "planned", cause.Error()); err != nil {
@@ -110,6 +110,12 @@ func TestSetupFailureProvenanceSurvivesPublicationDelay(t *testing.T) {
 					stored, err = d.GetRun(run.ID)
 					if err != nil || stored.Status != wantStatus || stored.Error == nil || *stored.Error != wantMessage {
 						t.Fatalf("settlement = %+v, %v; want %s %q", stored, err, wantStatus, wantMessage)
+					}
+					if shutdown == "operator" {
+						e := endingPayload(t, stored)
+						if e["caller"] != "settlement-caller" || e["reason"] != "explicit delayed stop" {
+							t.Fatalf("delayed settlement attribution lost: %#v", e)
+						}
 					}
 				})
 			}

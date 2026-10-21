@@ -1,0 +1,132 @@
+2026/10/21 11:44:18 INFO daemon process launched pid=4438
+2026/10/21 11:44:18 INFO daemon startup phase complete phase=orphan_servers duration_ms=0
+2026/10/21 11:44:18 INFO daemon startup phase complete phase=gate_migration duration_ms=0 gate_count=0 current=0 migrated=0 rejected=0 failed=0
+2026/10/21 11:44:18 INFO daemon startup phase complete phase=parked_runs duration_ms=0 preserved=0
+2026/10/21 11:44:18 INFO daemon startup phase complete phase=stale_runs duration_ms=0 recovered=0
+2026/10/21 11:44:19 INFO daemon startup phase complete phase=orphan_processes duration_ms=192
+2026/10/21 11:44:19 INFO daemon startup phase complete phase=worktree_cleanup duration_ms=0
+2026/10/21 11:44:19 INFO daemon startup phase complete phase=evidence_cleanup duration_ms=0
+2026/10/21 11:44:19 INFO daemon startup phase complete phase=ipc_bind duration_ms=0
+2026/10/21 11:44:19 INFO daemon startup phase complete phase=ipc_health duration_ms=3
+2026/10/21 11:44:19 INFO daemon ready socket=/var/folders/1c/5wdcbgjn15gbwv9jwjs_4vbr0000gn/T/dtest1858143116/socket pid=4438 startup_ms=211
+2026/10/21 11:44:19 INFO push received ref=refs/heads/holder old=0000000000000000000000000000000000000000 new=f7385c8b53ad12c109cd1c2816e2d85c23e71358 gate=/var/folders/1c/5wdcbgjn15gbwv9jwjs_4vbr0000gn/T/dtest1858143116/repos/sched-repo.git
+2026/10/21 11:44:19 WARN repository URL refresh skipped; continuing with existing registration repo_id=sched-repo reason=remote_unreadable
+2026/10/21 11:44:19 WARN launch has no owner; nobody is recorded to drive approval gates repo_id=sched-repo branch=holder
+2026/10/21 11:44:20 INFO ipc request method=push_received
+2026/10/21 11:44:20 INFO push received ref=refs/heads/main old=0000000000000000000000000000000000000000 new=f7385c8b53ad12c109cd1c2816e2d85c23e71358 gate=/var/folders/1c/5wdcbgjn15gbwv9jwjs_4vbr0000gn/T/dtest1858143116/repos/sched-repo.git
+2026/10/21 11:44:20 WARN repository URL refresh skipped; continuing with existing registration repo_id=sched-repo reason=remote_unreadable
+2026/10/21 11:44:20 WARN launch has no owner; nobody is recorded to drive approval gates repo_id=sched-repo branch=main
+2026/10/21 11:44:20 INFO ipc request method=push_received
+2026/10/21 11:44:20 WARN repository URL refresh skipped; continuing with existing registration repo_id=sched-repo reason=remote_unreadable
+2026/10/21 11:44:20 WARN launch has no owner; nobody is recorded to drive approval gates repo_id=sched-repo branch=main
+2026/10/21 11:44:20 INFO run ending requested event=run_superseded run_id=01M5FNJX8KBPFRB9TJPFFGCC03 caller="" client="" reason="cancelled: superseded by new push" attribution_source=push peer_pid=0 ending_event="&{Event:run_superseded Caller: Client: AttributionSource:push PeerPID:0 Reason:cancelled: superseded by new push SupersedingRunID:01M5FNJXEXKTZH60K0W9B085N9 SupersedingSHA:f7385c8b53ad12c109cd1c2816e2d85c23e71358 SupersedingRef:refs/heads/main SupersedingOldSHA: SupersedingGeneration:<nil> SupersedingValidationGeneration:<nil> PushNotificationID: CreatedAt:1792601060}"
+2026/10/21 11:44:20 INFO ipc request method=rerun
+2026/10/21 11:44:21 ERROR pipeline failed run_id=01M5FNJWFJ3WYSS0Y7ND2B86HG error="step review failed: cancelled: planned daemon shutdown"
+2026/10/21 11:44:21 INFO ipc request method=shutdown
+2026/10/21 11:44:21 INFO shutting down reason="ipc request"
+2026/10/21 11:44:21 INFO daemon stopped
+2026/10/21 11:44:21 INFO daemon process launched pid=4438
+2026/10/21 11:44:21 INFO daemon startup phase complete phase=orphan_servers duration_ms=0
+2026/10/21 11:44:21 INFO daemon startup phase complete phase=gate_migration duration_ms=0 gate_count=0 current=0 migrated=0 rejected=0 failed=0
+2026/10/21 11:44:21 INFO daemon startup phase complete phase=parked_runs duration_ms=0 preserved=0
+2026/10/21 11:44:21 INFO daemon startup phase complete phase=stale_runs duration_ms=0 recovered=0
+2026/10/21 11:44:21 INFO daemon startup phase complete phase=orphan_processes duration_ms=148
+2026/10/21 11:44:21 INFO daemon startup phase complete phase=worktree_cleanup duration_ms=0
+2026/10/21 11:44:21 INFO daemon startup phase complete phase=evidence_cleanup duration_ms=0
+2026/10/21 11:44:21 INFO daemon startup phase complete phase=ipc_bind duration_ms=0
+2026/10/21 11:44:21 INFO daemon startup phase complete phase=ipc_health duration_ms=1
+2026/10/21 11:44:21 INFO daemon ready socket=/var/folders/1c/5wdcbgjn15gbwv9jwjs_4vbr0000gn/T/dtest461112459/socket pid=4438 startup_ms=174
+2026/10/21 11:44:23 INFO push received ref=refs/heads/main old=0000000000000000000000000000000000000000 new=868516c938dea8aff9db8686435bbfb4d1f27042 gate=/var/folders/1c/5wdcbgjn15gbwv9jwjs_4vbr0000gn/T/dtest461112459/repos/sched-repo.git
+2026/10/21 11:44:23 WARN repository URL refresh skipped; continuing with existing registration repo_id=sched-repo reason=remote_unreadable
+2026/10/21 11:44:23 WARN launch has no owner; nobody is recorded to drive approval gates repo_id=sched-repo branch=main
+2026/10/21 11:44:24 INFO ipc request method=push_received
+2026/10/21 11:44:27 WARN repository URL refresh skipped; continuing with existing registration repo_id=sched-repo reason=remote_unreadable
+2026/10/21 11:44:27 WARN launch has no owner; nobody is recorded to drive approval gates repo_id=sched-repo branch=main
+2026/10/21 11:44:27 INFO run ending requested event=run_superseded run_id=01M5FNJZS8A89JN20JK3CY5WR8 caller="" client="" reason="cancelled: superseded by new push" attribution_source=push peer_pid=0 ending_event="&{Event:run_superseded Caller: Client: AttributionSource:push PeerPID:0 Reason:cancelled: superseded by new push SupersedingRunID:01M5FNK3YSR94VXQMP66HBQ0F8 SupersedingSHA:868516c938dea8aff9db8686435bbfb4d1f27042 SupersedingRef:refs/heads/main SupersedingOldSHA: SupersedingGeneration:<nil> SupersedingValidationGeneration:<nil> PushNotificationID: CreatedAt:1792601067}"
+2026/10/21 11:44:27 ERROR pipeline failed run_id=01M5FNJZS8A89JN20JK3CY5WR8 error="step review failed: cancelled: superseded by new push"
+2026/10/21 11:44:28 INFO ipc request method=rerun
+2026/10/21 11:44:28 ERROR pipeline failed run_id=01M5FNK3YSR94VXQMP66HBQ0F8 error="step review failed: cancelled: planned daemon shutdown"
+2026/10/21 11:44:29 INFO ipc request method=shutdown
+2026/10/21 11:44:29 INFO shutting down reason="ipc request"
+2026/10/21 11:44:29 INFO daemon stopped
+2026/10/21 11:44:29 INFO daemon process launched pid=4438
+2026/10/21 11:44:29 INFO daemon startup phase complete phase=orphan_servers duration_ms=0
+2026/10/21 11:44:29 INFO daemon startup phase complete phase=gate_migration duration_ms=0 gate_count=0 current=0 migrated=0 rejected=0 failed=0
+2026/10/21 11:44:29 INFO daemon startup phase complete phase=parked_runs duration_ms=0 preserved=0
+2026/10/21 11:44:29 INFO daemon startup phase complete phase=stale_runs duration_ms=0 recovered=0
+2026/10/21 11:44:29 INFO daemon startup phase complete phase=orphan_processes duration_ms=150
+2026/10/21 11:44:29 INFO daemon startup phase complete phase=worktree_cleanup duration_ms=0
+2026/10/21 11:44:29 INFO daemon startup phase complete phase=evidence_cleanup duration_ms=0
+2026/10/21 11:44:29 INFO daemon startup phase complete phase=ipc_bind duration_ms=0
+2026/10/21 11:44:29 INFO daemon startup phase complete phase=ipc_health duration_ms=1
+2026/10/21 11:44:29 INFO daemon ready socket=/var/folders/1c/5wdcbgjn15gbwv9jwjs_4vbr0000gn/T/dtest3997308397/socket pid=4438 startup_ms=170
+2026/10/21 11:44:30 INFO push received ref=refs/heads/holder old=0000000000000000000000000000000000000000 new=68f3cc75da36e70a0504c15d0344062ac22c92f8 gate=/var/folders/1c/5wdcbgjn15gbwv9jwjs_4vbr0000gn/T/dtest3997308397/repos/sched-repo.git
+2026/10/21 11:44:30 WARN repository URL refresh skipped; continuing with existing registration repo_id=sched-repo reason=remote_unreadable
+2026/10/21 11:44:30 WARN launch has no owner; nobody is recorded to drive approval gates repo_id=sched-repo branch=holder
+2026/10/21 11:44:31 INFO ipc request method=push_received
+2026/10/21 11:44:31 INFO push received ref=refs/heads/main old=0000000000000000000000000000000000000000 new=68f3cc75da36e70a0504c15d0344062ac22c92f8 gate=/var/folders/1c/5wdcbgjn15gbwv9jwjs_4vbr0000gn/T/dtest3997308397/repos/sched-repo.git
+2026/10/21 11:44:31 WARN repository URL refresh skipped; continuing with existing registration repo_id=sched-repo reason=remote_unreadable
+2026/10/21 11:44:31 WARN launch has no owner; nobody is recorded to drive approval gates repo_id=sched-repo branch=main
+2026/10/21 11:44:31 INFO ipc request method=push_received
+2026/10/21 11:44:32 WARN repository URL refresh skipped; continuing with existing registration repo_id=sched-repo reason=remote_unreadable
+2026/10/21 11:44:32 WARN launch has no owner; nobody is recorded to drive approval gates repo_id=sched-repo branch=main
+2026/10/21 11:44:32 INFO run ending requested event=run_superseded run_id=01M5FNK88QEASGTD9WWWCZ17R9 caller="" client="" reason="cancelled: superseded by new push" attribution_source=push peer_pid=0 ending_event="&{Event:run_superseded Caller: Client: AttributionSource:push PeerPID:0 Reason:cancelled: superseded by new push SupersedingRunID:01M5FNK8D0M7P7BNVMH24F1S92 SupersedingSHA:68f3cc75da36e70a0504c15d0344062ac22c92f8 SupersedingRef:refs/heads/main SupersedingOldSHA: SupersedingGeneration:<nil> SupersedingValidationGeneration:0x4d533d20b0d0 PushNotificationID: CreatedAt:1792601072}"
+2026/10/21 11:44:32 INFO ipc request method=start_fresh_run
+2026/10/21 11:44:32 ERROR pipeline failed run_id=01M5FNK6WHJTJN6BGWGV677E9N error="step review failed: cancelled: planned daemon shutdown"
+2026/10/21 11:44:32 INFO ipc request method=shutdown
+2026/10/21 11:44:32 INFO shutting down reason="ipc request"
+2026/10/21 11:44:32 INFO daemon stopped
+2026/10/21 11:44:32 INFO daemon process launched pid=4438
+2026/10/21 11:44:32 INFO daemon startup phase complete phase=orphan_servers duration_ms=0
+2026/10/21 11:44:32 INFO daemon startup phase complete phase=gate_migration duration_ms=0 gate_count=0 current=0 migrated=0 rejected=0 failed=0
+2026/10/21 11:44:32 INFO daemon startup phase complete phase=parked_runs duration_ms=0 preserved=0
+2026/10/21 11:44:32 INFO daemon startup phase complete phase=stale_runs duration_ms=0 recovered=0
+2026/10/21 11:44:32 INFO daemon startup phase complete phase=orphan_processes duration_ms=163
+2026/10/21 11:44:32 INFO daemon startup phase complete phase=worktree_cleanup duration_ms=1
+2026/10/21 11:44:32 INFO daemon startup phase complete phase=evidence_cleanup duration_ms=0
+2026/10/21 11:44:32 INFO daemon startup phase complete phase=ipc_bind duration_ms=7
+2026/10/21 11:44:32 INFO daemon startup phase complete phase=ipc_health duration_ms=3
+2026/10/21 11:44:32 INFO daemon ready socket=/var/folders/1c/5wdcbgjn15gbwv9jwjs_4vbr0000gn/T/dtest3725173586/socket pid=4438 startup_ms=207
+2026/10/21 11:44:33 INFO push received ref=refs/heads/main old=0000000000000000000000000000000000000000 new=d3a69c682183bbf54b49928ced12e73cf6a5f53f gate=/var/folders/1c/5wdcbgjn15gbwv9jwjs_4vbr0000gn/T/dtest3725173586/repos/sched-repo.git
+2026/10/21 11:44:33 WARN repository URL refresh skipped; continuing with existing registration repo_id=sched-repo reason=remote_unreadable
+2026/10/21 11:44:33 WARN launch has no owner; nobody is recorded to drive approval gates repo_id=sched-repo branch=main
+2026/10/21 11:44:34 INFO ipc request method=push_received
+2026/10/21 11:44:34 WARN repository URL refresh skipped; continuing with existing registration repo_id=sched-repo reason=remote_unreadable
+2026/10/21 11:44:34 WARN launch has no owner; nobody is recorded to drive approval gates repo_id=sched-repo branch=main
+2026/10/21 11:44:34 INFO run ending requested event=run_superseded run_id=01M5FNKA1MQ5HM89Z91BHV3H95 caller="" client="" reason="cancelled: superseded by new push" attribution_source=push peer_pid=0 ending_event="&{Event:run_superseded Caller: Client: AttributionSource:push PeerPID:0 Reason:cancelled: superseded by new push SupersedingRunID:01M5FNKAQF8031GE4RPHHCFGF6 SupersedingSHA:d3a69c682183bbf54b49928ced12e73cf6a5f53f SupersedingRef:refs/heads/main SupersedingOldSHA: SupersedingGeneration:<nil> SupersedingValidationGeneration:0x4d533c9ecec0 PushNotificationID: CreatedAt:1792601074}"
+2026/10/21 11:44:34 ERROR pipeline failed run_id=01M5FNKA1MQ5HM89Z91BHV3H95 error="step review failed: cancelled: superseded by new push"
+2026/10/21 11:44:35 INFO ipc request method=start_fresh_run
+2026/10/21 11:44:35 ERROR pipeline failed run_id=01M5FNKAQF8031GE4RPHHCFGF6 error="step review failed: cancelled: planned daemon shutdown"
+2026/10/21 11:44:36 INFO ipc request method=shutdown
+2026/10/21 11:44:36 INFO shutting down reason="ipc request"
+2026/10/21 11:44:36 INFO daemon stopped
+--- FAIL: TestEndingSupersessionNamesNonPushTrigger (17.21s)
+    --- FAIL: TestEndingSupersessionNamesNonPushTrigger/rerun/queued (2.79s)
+        ending_attribution_test.go:356: wrong supersession trigger: map[string]interface {}{"attribution_source":"push", "created_at":1.79260106e+09, "event":"run_superseded", "reason":"cancelled: superseded by new push", "superseding_ref":"refs/heads/main", "superseding_run_id":"01M5FNJXEXKTZH60K0W9B085N9", "superseding_sha":"f7385c8b53ad12c109cd1c2816e2d85c23e71358"}
+        ending_attribution_test.go:360: invented superseding_sha for rerun: map[string]interface {}{"attribution_source":"push", "created_at":1.79260106e+09, "event":"run_superseded", "reason":"cancelled: superseded by new push", "superseding_ref":"refs/heads/main", "superseding_run_id":"01M5FNJXEXKTZH60K0W9B085N9", "superseding_sha":"f7385c8b53ad12c109cd1c2816e2d85c23e71358"}
+        ending_attribution_test.go:360: invented superseding_ref for rerun: map[string]interface {}{"attribution_source":"push", "created_at":1.79260106e+09, "event":"run_superseded", "reason":"cancelled: superseded by new push", "superseding_ref":"refs/heads/main", "superseding_run_id":"01M5FNJXEXKTZH60K0W9B085N9", "superseding_sha":"f7385c8b53ad12c109cd1c2816e2d85c23e71358"}
+    --- FAIL: TestEndingSupersessionNamesNonPushTrigger/rerun/admitted (7.59s)
+        ending_attribution_test.go:356: wrong supersession trigger: map[string]interface {}{"attribution_source":"push", "created_at":1.792601067e+09, "event":"run_superseded", "reason":"cancelled: superseded by new push", "superseding_ref":"refs/heads/main", "superseding_run_id":"01M5FNK3YSR94VXQMP66HBQ0F8", "superseding_sha":"868516c938dea8aff9db8686435bbfb4d1f27042"}
+        ending_attribution_test.go:360: invented superseding_sha for rerun: map[string]interface {}{"attribution_source":"push", "created_at":1.792601067e+09, "event":"run_superseded", "reason":"cancelled: superseded by new push", "superseding_ref":"refs/heads/main", "superseding_run_id":"01M5FNK3YSR94VXQMP66HBQ0F8", "superseding_sha":"868516c938dea8aff9db8686435bbfb4d1f27042"}
+        ending_attribution_test.go:360: invented superseding_ref for rerun: map[string]interface {}{"attribution_source":"push", "created_at":1.792601067e+09, "event":"run_superseded", "reason":"cancelled: superseded by new push", "superseding_ref":"refs/heads/main", "superseding_run_id":"01M5FNK3YSR94VXQMP66HBQ0F8", "superseding_sha":"868516c938dea8aff9db8686435bbfb4d1f27042"}
+    --- FAIL: TestEndingSupersessionNamesNonPushTrigger/fresh/queued (3.14s)
+        ending_attribution_test.go:356: wrong supersession trigger: map[string]interface {}{"attribution_source":"push", "created_at":1.792601072e+09, "event":"run_superseded", "reason":"cancelled: superseded by new push", "superseding_ref":"refs/heads/main", "superseding_run_id":"01M5FNK8D0M7P7BNVMH24F1S92", "superseding_sha":"68f3cc75da36e70a0504c15d0344062ac22c92f8", "superseding_validation_generation":"fresh-validation"}
+        ending_attribution_test.go:360: invented superseding_sha for fresh: map[string]interface {}{"attribution_source":"push", "created_at":1.792601072e+09, "event":"run_superseded", "reason":"cancelled: superseded by new push", "superseding_ref":"refs/heads/main", "superseding_run_id":"01M5FNK8D0M7P7BNVMH24F1S92", "superseding_sha":"68f3cc75da36e70a0504c15d0344062ac22c92f8", "superseding_validation_generation":"fresh-validation"}
+        ending_attribution_test.go:360: invented superseding_ref for fresh: map[string]interface {}{"attribution_source":"push", "created_at":1.792601072e+09, "event":"run_superseded", "reason":"cancelled: superseded by new push", "superseding_ref":"refs/heads/main", "superseding_run_id":"01M5FNK8D0M7P7BNVMH24F1S92", "superseding_sha":"68f3cc75da36e70a0504c15d0344062ac22c92f8", "superseding_validation_generation":"fresh-validation"}
+    --- FAIL: TestEndingSupersessionNamesNonPushTrigger/fresh/admitted (3.70s)
+        ending_attribution_test.go:356: wrong supersession trigger: map[string]interface {}{"attribution_source":"push", "created_at":1.792601074e+09, "event":"run_superseded", "reason":"cancelled: superseded by new push", "superseding_ref":"refs/heads/main", "superseding_run_id":"01M5FNKAQF8031GE4RPHHCFGF6", "superseding_sha":"d3a69c682183bbf54b49928ced12e73cf6a5f53f", "superseding_validation_generation":"fresh-validation"}
+        ending_attribution_test.go:360: invented superseding_sha for fresh: map[string]interface {}{"attribution_source":"push", "created_at":1.792601074e+09, "event":"run_superseded", "reason":"cancelled: superseded by new push", "superseding_ref":"refs/heads/main", "superseding_run_id":"01M5FNKAQF8031GE4RPHHCFGF6", "superseding_sha":"d3a69c682183bbf54b49928ced12e73cf6a5f53f", "superseding_validation_generation":"fresh-validation"}
+        ending_attribution_test.go:360: invented superseding_ref for fresh: map[string]interface {}{"attribution_source":"push", "created_at":1.792601074e+09, "event":"run_superseded", "reason":"cancelled: superseded by new push", "superseding_ref":"refs/heads/main", "superseding_run_id":"01M5FNKAQF8031GE4RPHHCFGF6", "superseding_sha":"d3a69c682183bbf54b49928ced12e73cf6a5f53f", "superseding_validation_generation":"fresh-validation"}
+2026/10/21 11:44:37 WARN repository URL refresh skipped; continuing with existing registration repo_id=fault-repo reason=remote_unreadable
+2026/10/21 11:44:37 WARN launch has no owner; nobody is recorded to drive approval gates repo_id=fault-repo branch=holder
+2026/10/21 11:44:38 WARN repository URL refresh skipped; continuing with existing registration repo_id=fault-repo reason=remote_unreadable
+2026/10/21 11:44:38 WARN launch has no owner; nobody is recorded to drive approval gates repo_id=fault-repo branch=setup
+2026/10/21 11:44:38 INFO pipeline completed run_id=01M5FNKDG5Q0Z2BSFYYZ64F0F9
+2026/10/21 11:44:38 INFO run ending requested event=run_cancel_requested run_id=01M5FNKE8MNBV1ZNN3RF6TB025 caller=setup-caller client=axi reason="explicit setup stop" attribution_source=caller peer_pid=0 ending_event="&{Event:run_cancel_requested Caller:setup-caller Client:axi AttributionSource:caller PeerPID:0 Reason:explicit setup stop SupersedingRunID: SupersedingSHA: SupersedingRef: SupersedingOldSHA: SupersedingGeneration:<nil> SupersedingValidationGeneration:<nil> PushNotificationID: CreatedAt:1792601078}"
+2026/10/21 11:44:39 INFO run ending requested event=run_cancel_requested run_id=01M5FNKFNMSVAPNMN5TSN3BS4J caller=setup-caller client=axi reason="explicit setup stop" attribution_source=caller peer_pid=0 ending_event="&{Event:run_cancel_requested Caller:setup-caller Client:axi AttributionSource:caller PeerPID:0 Reason:explicit setup stop SupersedingRunID: SupersedingSHA: SupersedingRef: SupersedingOldSHA: SupersedingGeneration:<nil> SupersedingValidationGeneration:<nil> PushNotificationID: CreatedAt:1792601079}"
+--- FAIL: TestSetupFailurePreservesCancellation (3.67s)
+    --- FAIL: TestSetupFailurePreservesCancellation/inline/abort (0.93s)
+        manager_setup_failure_test.go:130: run 01M5FNKFNMSVAPNMN5TSN3BS4J has no ending attribution in durable record (status=cancelled error=0x4d533c9eccc0)
+FAIL
+FAIL	github.com/kunchenguid/no-mistakes/internal/daemon	21.464s
+FAIL

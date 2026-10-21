@@ -321,3 +321,49 @@ func TestEndingCancelWithoutInMemoryRecordStillSignals(t *testing.T) {
 	delete(m.runs, run.ID)
 	m.mu.Unlock()
 }
+
+func TestEndingSupersessionNamesNonPushTrigger(t *testing.T) {
+	for _, trigger := range []string{"rerun", "fresh"} {
+		for _, state := range []string{"queued", "admitted"} {
+			t.Run(trigger+"/"+state, func(t *testing.T) {
+				f := newSchedFixture(t, "daemon:\n  max_concurrent_runs: 1\n")
+				if state == "queued" {
+					holder, _ := f.push("holder")
+					f.waitStarted(holder)
+				}
+				old, _ := f.push("main")
+				if state == "queued" {
+					f.waitStatus(old, types.RunQueued)
+				} else {
+					f.waitStarted(old)
+				}
+				var replacement string
+				if trigger == "rerun" {
+					var result ipc.RerunResult
+					if err := f.client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: f.repoID, Branch: "main", PreviousRunID: old}, &result); err != nil {
+						t.Fatal(err)
+					}
+					replacement = result.RunID
+				} else {
+					var result ipc.StartFreshRunResult
+					if err := f.client.Call(ipc.MethodStartFreshRun, &ipc.StartFreshRunParams{RepoID: f.repoID, Branch: "main", HeadSHA: f.head, LaunchNonce: "fresh-nonce", ValidationGeneration: "fresh-validation", Intent: "replace active work"}, &result); err != nil {
+						t.Fatal(err)
+					}
+					replacement = result.Receipt.RunID
+				}
+				e := endingPayload(t, endingRun(t, f, old))
+				if e["event"] != "run_superseded" || e["attribution_source"] != trigger || e["superseding_run_id"] != replacement || replacement == "" {
+					t.Errorf("wrong supersession trigger: %#v", e)
+				}
+				for _, key := range []string{"superseding_sha", "superseding_ref", "superseding_old_sha", "push_notification_id", "superseding_generation"} {
+					if e[key] != nil {
+						t.Errorf("invented %s for %s: %#v", key, trigger, e)
+					}
+				}
+				if trigger == "fresh" && e["superseding_validation_generation"] != "fresh-validation" {
+					t.Errorf("lost validation generation: %#v", e)
+				}
+			})
+		}
+	}
+}
