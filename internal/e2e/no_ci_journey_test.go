@@ -20,11 +20,11 @@ import (
 // while a real pending check must keep waiting. Exercise the CLI, daemon,
 // config trust selection, run row and status HTTP boundary together.
 func TestNoCIReadinessJourney(t *testing.T) {
-	for _, name := range []string{"declared", "declared-self-status", "undeclared", "real-pending", "real-green"} {
+	for _, name := range []string{"declared", "declared-self-status", "undeclared", "real-pending", "real-green", "real-failing", "branch-declared"} {
 		t.Run(name, func(t *testing.T) {
 			j := newScopeJourney(t, SetupOpts{Agent: "claude", Scenario: certifiedWatcherScenario(t)})
 			configureLocalGitHubSSH(t, j.h)
-			declared := name != "undeclared"
+			declared := name != "undeclared" && name != "branch-declared"
 			extra := "commands:\n  test: 'true'\n  lint: 'true'\nci:\n  external_checks: [no-mistakes]\n"
 			if declared {
 				extra += "no_ci: true\n"
@@ -44,6 +44,8 @@ func TestNoCIReadinessJourney(t *testing.T) {
 				forge.Checks = []forgeCheck{runningCheck("build")}
 			case "real-green":
 				forge.Checks = []forgeCheck{greenCheck("build")}
+			case "real-failing":
+				forge.Checks = []forgeCheck{redCheck("build")}
 			}
 			j.setForge(forge)
 			posts := &journeyStatusServer{t: t}
@@ -52,13 +54,22 @@ func TestNoCIReadinessJourney(t *testing.T) {
 			t.Setenv("FAKEAGENT_GH_STATUS_URL", server.URL)
 			j.init()
 			branch := "feature/no-ci-" + name
+			if name == "branch-declared" {
+				j.h.CommitChange(branch, ".no-mistakes.yaml", extra+"no_ci: true\n", "try a feature-branch no-CI declaration")
+			}
 			j.push(branch)
 			defer j.finish(branch)
-			ready := name != "undeclared" && name != "real-pending"
+			ready := declared && name != "real-pending" && name != "real-failing"
 			noCI := ready && name != "real-green"
 			var runID string
 			if ready {
 				runID = j.expectReady(branch, scopeCheckWaitTime).ID
+			} else if name == "real-failing" {
+				run, checks := j.expectGate(branch)
+				if !sameSet(checks, "build") {
+					t.Fatalf("no_ci must retain the failing build finding, got %v", checks)
+				}
+				runID = run.ID
 			} else {
 				waiting := "no CI checks reported yet, waiting for checks to register..."
 				if name == "real-pending" {
@@ -85,6 +96,7 @@ func TestNoCIReadinessJourney(t *testing.T) {
 			if err != nil {
 				t.Fatalf("axi status: %v\n%s", err, out)
 			}
+			t.Logf("ordinary axi status:\n%s", out)
 			var status struct {
 				Run struct {
 					Ready *bool `toon:"ci_ready"`
@@ -99,6 +111,7 @@ func TestNoCIReadinessJourney(t *testing.T) {
 			}
 			if ready {
 				out, err := j.h.Run("axi", "run", "--intent", "Validate issue 122 no-CI readiness", "--wait", "5s")
+				t.Logf("agent-facing axi output:\n%s", out)
 				if err != nil || !strings.Contains(out, "outcome: checks-passed") {
 					t.Errorf("no terminal agent-facing readiness outcome: %v\n%s", err, out)
 				}
