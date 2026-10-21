@@ -521,7 +521,7 @@ func TestOpencodeTurnFailure_GatesTheSharedClassifier(t *testing.T) {
 		if _, retry := classifyOpencodeTransient(conflict); retry {
 			t.Errorf("a thinking conflict with evidence %v must not be retried", evidence)
 		}
-		if !opencodeReplayUnsafe(conflict) {
+		if !IsReplayUnsafe(conflict) {
 			t.Errorf("a thinking conflict with evidence %v must block the fresh-session fallback", evidence)
 		}
 		if !opencodeFallbackTrigger(conflict) {
@@ -531,17 +531,17 @@ func TestOpencodeTurnFailure_GatesTheSharedClassifier(t *testing.T) {
 		if _, retry := classifyOpencodeTransient(rejection); retry {
 			t.Errorf("an only-auto rejection with evidence %v must not be retried", evidence)
 		}
-		if !opencodeReplayUnsafe(rejection) {
+		if !IsReplayUnsafe(rejection) {
 			t.Errorf("an only-auto rejection with evidence %v must block the fresh-session fallback", evidence)
 		}
 		if !opencodeFallbackTrigger(rejection) {
 			t.Errorf("an only-auto rejection with evidence %v must trigger the prompt-only fallback", evidence)
 		}
 	}
-	if opencodeReplayUnsafe(thinkingConflict(opencodeToolsNone, nil)) {
+	if IsReplayUnsafe(thinkingConflict(opencodeToolsNone, nil)) {
 		t.Error("a conflict proven to be before any tool ran must still reach the fallback")
 	}
-	if opencodeReplayUnsafe(forcedToolChoiceConflict(opencodeToolsNone, nil)) {
+	if IsReplayUnsafe(forcedToolChoiceConflict(opencodeToolsNone, nil)) {
 		t.Error("a rejection proven to be before any tool ran must still reach the fallback")
 	}
 }

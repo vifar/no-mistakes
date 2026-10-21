@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -550,6 +551,87 @@ func TestRetryableAgentCrash(t *testing.T) {
 	cancel()
 	if retryableAgentCrash(ctx, &agentInvocationFailure{err: processExitError{"crash"}}, false) {
 		t.Fatal("cancelled run retried")
+	}
+}
+
+func TestExecutor_AgentCrashRetryHonorsReplayEvidence(t *testing.T) {
+	for _, evidence := range []struct {
+		name string
+		err  error
+	}{
+		{"safe", nil},
+		{"tools ran", agent.ErrOpencodeToolsAlreadyRan},
+		{"unknown tools", agent.ErrOpencodeToolActivityUnknown},
+	} {
+		for _, cause := range []string{"timeout", "process exit"} {
+			for _, envelope := range []string{"direct", "wrapped", "joined first", "joined last"} {
+				t.Run(evidence.name+"/"+cause+"/"+envelope, func(t *testing.T) {
+					database, p, _, repo := setupTest(t)
+					work := t.TempDir()
+					initGitRepo(t, work)
+					head, err := git.HeadSHA(context.Background(), work)
+					if err != nil {
+						t.Fatal(err)
+					}
+					run, err := database.InsertRun(repo.ID, "replay-evidence", head, head)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+						t.Fatal(err)
+					}
+					sr, err := database.InsertStepResult(run.ID, types.StepReview)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var failure error
+					if cause == "timeout" {
+						failure = &agentInvocationError{message: "default invocation deadline", bound: "silent budget", cause: ErrAgentTimeout, adapter: evidence.err}
+					} else {
+						failure = &agentInvocationFailure{err: errors.Join(&exec.ExitError{}, evidence.err)}
+					}
+					switch envelope {
+					case "wrapped":
+						failure = fmt.Errorf("review invocation: %w", failure)
+					case "joined first":
+						failure = errors.Join(failure, errors.New("additional diagnostic"))
+					case "joined last":
+						failure = errors.Join(errors.New("additional diagnostic"), failure)
+					}
+					calls := 0
+					ag := &hangingAgent{name: "fixture", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+						calls++
+						if calls == 1 {
+							return nil, failure
+						}
+						return &agent.Result{}, nil
+					}}
+					step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+						_, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{})
+						return &StepOutcome{}, err
+					}}
+					cfg := &config.Config{AgentCrashRetries: 3}
+					executor := NewExecutor(database, p, cfg, ag, []Step{step}, nil)
+					sctx := &StepContext{Ctx: context.Background(), DB: database, Run: run, Config: cfg, WorkDir: work, StepResultID: sr.ID, Agent: ag, Log: func(string) {}}
+					proof, err := executor.crashRetryProof(sctx)
+					if err != nil {
+						t.Fatalf("fixture cannot prove a safe unchanged retry: %v", err)
+					}
+					remaining := 3
+					_, err = executor.executeWithCrashRetry(step, sctx, &remaining)
+					if evidence.err != nil {
+						if !errors.Is(err, failure) || calls != 1 || remaining != 3 {
+							t.Fatalf("unsafe execution replayed or consumed budget: err=%v calls=%d remaining=%d", err, calls, remaining)
+						}
+					} else if err != nil || calls != 2 || remaining != 2 {
+						t.Fatalf("safe crash lost its retry: err=%v calls=%d remaining=%d", err, calls, remaining)
+					}
+					if after, err := executor.crashRetryProof(sctx); err != nil || after != proof {
+						t.Fatalf("fixture changed its head/config/evidence proof: %v", err)
+					}
+				})
+			}
+		}
 	}
 }
 

@@ -344,7 +344,7 @@ func isTerminalRetryError(msg string) bool {
 // concrete shapes may trigger the quota-aware mid-run switch - transient
 // overload, unavailability, and parse failures never do.
 func IsQuotaExhaustionError(err error) bool {
-	if err == nil || IsStructuredOutputRejected(err) || opencodeReplayUnsafe(err) {
+	if err == nil || IsStructuredOutputRejected(err) || IsReplayUnsafe(err) {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

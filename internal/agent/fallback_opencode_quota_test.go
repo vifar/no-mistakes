@@ -85,9 +85,9 @@ func TestFallbackQuotaSwitchRefusesUnsafeOpencodeExecutions(t *testing.T) {
 							switches++
 						}
 					}})
-					marker := errOpencodeToolsAlreadyRan
+					marker := ErrOpencodeToolsAlreadyRan
 					if evidence == opencodeToolsUnknown {
-						marker = errOpencodeToolActivityUnknown
+						marker = ErrOpencodeToolActivityUnknown
 					}
 					if adapterErr == nil || !errors.Is(adapterErr, marker) || !errors.Is(err, adapterErr) {
 						t.Fatalf("adapter execution evidence lost: adapter=%v result=%v", adapterErr, err)

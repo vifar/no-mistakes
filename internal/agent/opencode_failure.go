@@ -48,7 +48,7 @@ func (e *opencodeMessageFailure) StructuredOutputRejected() bool { return e.stru
 func (e *opencodeMessageFailure) TerminalProviderError() bool { return e.terminal }
 
 func (e *opencodeMessageFailure) Is(target error) bool {
-	return target == errOpencodeToolsAlreadyRan && e.toolActivity
+	return target == ErrOpencodeToolsAlreadyRan && e.toolActivity
 }
 
 func (e *opencodeMessageFailure) Error() string {
@@ -101,7 +101,7 @@ func (e *opencodeMessageFailure) label() string {
 // stops here rather than falling through to the substring matching - a 400
 // body quoting a provider's own rate-limit prose must not look transient.
 func classifyOpencodeTransient(err error) (string, bool) {
-	if opencodeReplayUnsafe(err) {
+	if IsReplayUnsafe(err) {
 		return "", false
 	}
 	var failure *opencodeMessageFailure
@@ -189,16 +189,16 @@ func (e opencodeToolEvidence) reason() string {
 // away can ask errors.Is instead of threading the value through.
 func (e opencodeToolEvidence) marker() error {
 	if e == opencodeToolsRan {
-		return errOpencodeToolsAlreadyRan
+		return ErrOpencodeToolsAlreadyRan
 	}
-	return errOpencodeToolActivityUnknown
+	return ErrOpencodeToolActivityUnknown
 }
 
-// opencodeReplayUnsafe reports whether err belongs to a turn that must not be
+// IsReplayUnsafe reports whether err belongs to a turn that must not be
 // replayed in a fresh session: it ran a tool, or nothing available proves it
 // did not.
-func opencodeReplayUnsafe(err error) bool {
-	return errors.Is(err, errOpencodeToolsAlreadyRan) || errors.Is(err, errOpencodeToolActivityUnknown)
+func IsReplayUnsafe(err error) bool {
+	return errors.Is(err, ErrOpencodeToolsAlreadyRan) || errors.Is(err, ErrOpencodeToolActivityUnknown)
 }
 
 // resolveOpencodeToolEvidence answers the gate's question from what the

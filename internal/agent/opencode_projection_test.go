@@ -239,7 +239,7 @@ func TestOpencodeV2_PaginationFindsEarlierToolEffectsBeforeRejectingFinalOutput(
 		v2Page("503 temporarily unavailable"),
 	}}
 	result, err := v2Agent(f.server(t)).Run(context.Background(), RunOpts{CWD: t.TempDir(), Prompt: "do work", JSONSchema: json.RawMessage(`{"type":"object"}`)})
-	if err == nil || !IsStructuredOutputRejected(err) || !opencodeReplayUnsafe(err) {
+	if err == nil || !IsStructuredOutputRejected(err) || !IsReplayUnsafe(err) {
 		t.Fatalf("schema failure lost tool-evidence fence: %v", err)
 	}
 	if result == nil || result.Usage.InputTokens != 27 {
@@ -280,7 +280,7 @@ func TestOpencodeV2_CancellationInterruptsAndDeletesOnlyItsOwnedSession(t *testi
 func TestOpencodeV2_ProjectionWithoutContentCannotProveNoTools(t *testing.T) {
 	f := &opencodeV2Fixture{pages: []string{`{"data":[{"id":"msg_bad","type":"assistant"}],"cursor":{}}`}}
 	_, err := v2Agent(f.server(t)).Run(context.Background(), RunOpts{CWD: t.TempDir(), Prompt: "work"})
-	if err == nil || !opencodeReplayUnsafe(err) {
+	if err == nil || !IsReplayUnsafe(err) {
 		t.Fatalf("incomplete evidence did not fail closed: %v", err)
 	}
 }

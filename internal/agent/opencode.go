@@ -22,17 +22,17 @@ var errOpencodeThinkingToolChoiceConflict = errors.New("opencode provider reject
 // into the same prompt-only structured-output fallback.
 var errOpencodeForcedToolChoiceUnsupported = errors.New("opencode provider supports only auto tool choice")
 
-// errOpencodeToolsAlreadyRan annotates a failure whose turn had already
+// ErrOpencodeToolsAlreadyRan annotates a failure whose turn had already
 // invoked a tool. The prompt-only fallback re-runs the whole prompt in a
 // fresh session, so it must not be taken past this marker.
-var errOpencodeToolsAlreadyRan = errors.New("the failed turn already ran tools")
+var ErrOpencodeToolsAlreadyRan = errors.New("the failed turn already ran tools")
 
-// errOpencodeToolActivityUnknown annotates a failure whose turn could not be
+// ErrOpencodeToolActivityUnknown annotates a failure whose turn could not be
 // read at all: no tool part observed, and no complete record of the turn to
-// prove none ran. It withholds the same replays as errOpencodeToolsAlreadyRan
+// prove none ran. It withholds the same replays as ErrOpencodeToolsAlreadyRan
 // - an unverified turn is not a turn that did nothing - and stays a separate
 // sentinel so the surfaced error says which of the two it was.
-var errOpencodeToolActivityUnknown = errors.New("could not verify the failed turn ran no tools")
+var ErrOpencodeToolActivityUnknown = errors.New("could not verify the failed turn ran no tools")
 
 // thinkingConflict builds the fallback trigger, carrying the turn's tool
 // evidence. A session.error can arrive at any point in a turn, so the
@@ -160,7 +160,7 @@ func (a *opencodeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, err
 	// whose tool activity could not be established. Same reasoning as
 	// classifyOpencodeTransient, and the same fail-closed answer: report the
 	// conflict and let the operator decide.
-	if opencodeReplayUnsafe(err) {
+	if IsReplayUnsafe(err) {
 		return result, err
 	}
 

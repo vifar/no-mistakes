@@ -566,7 +566,7 @@ func TestOpencodeAgent_V2PromptAndStreamFailures(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			_, err := a.Run(ctx, RunOpts{Prompt: "do work", CWD: t.TempDir()})
-			if err == nil || !opencodeReplayUnsafe(err) || isAgentUnavailableError(err) {
+			if err == nil || !IsReplayUnsafe(err) || isAgentUnavailableError(err) {
 				t.Fatalf("Run error = %v, want an unsafe turn failure without fallback", err)
 			}
 			if ctx.Err() != nil {
