@@ -1624,6 +1624,12 @@ func fixRoundLine(stepName types.StepName, r *db.StepRound) string {
 // followed by any test command details for the test step.
 func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Findings, flavor prBodyFlavor) {
 	for _, f := range findings.Items {
+		if sr.StepName == types.StepReview {
+			// Filter the raw display copy before escaping. Recorded findings
+			// remain intact for the audit trail and review decisions.
+			f.File = stripReviewAIAttribution(f.File, nil)
+			f.Description = stripReviewAIAttribution(f.Description, nil)
+		}
 		emoji := severityEmoji(f.Severity)
 		loc := ""
 		if f.File != "" {
