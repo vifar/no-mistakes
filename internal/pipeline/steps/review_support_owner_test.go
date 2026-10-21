@@ -644,3 +644,49 @@ func TestCIOwnerResolvesPublishedForwardClaimWithoutRelabeling(t *testing.T) {
 		t.Fatalf("moved target = %+v, %v", got, err)
 	}
 }
+
+func TestCarriedReviewSupportStillReachesItsEvidenceOwner(t *testing.T) {
+	for _, claimType := range []types.FindingClaimType{types.FindingClaimTest, types.FindingClaimCI} {
+		t.Run(string(claimType), func(t *testing.T) {
+			claim := pendingReviewTestClaim("go test ./internal/types")
+			if claimType == types.FindingClaimCI {
+				claim = pendingReviewCIClaim("run-42", strings.Repeat("a", 40))
+			}
+			sctx, receipt := completedReviewSupportFixture(t, claim)
+			rows, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("source rows: %v %v", rows, err)
+			}
+			review := rows[0]
+			for range 2 {
+				next, err := sctx.DB.InsertRun(sctx.Run.RepoID, sctx.Run.Branch, sctx.Run.HeadSHA, sctx.Run.BaseSHA)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := sctx.DB.BindRunPRContext(next.ID, receipt.PRContextCandidate, types.StepReview); err != nil {
+					t.Fatal(err)
+				}
+				if err := sctx.DB.UpdateRunReviewApprovedHeadSHA(next.ID, next.HeadSHA); err != nil {
+					t.Fatal(err)
+				}
+				carried, err := sctx.DB.InsertCarriedStepResult(next.ID, review)
+				if err != nil {
+					t.Fatal(err)
+				}
+				sctx.Run = next
+				sctx.PRContext, err = sctx.DB.GetRunPRContext(next.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				claims, _, err := currentReviewSupportClaims(sctx, claimType)
+				if err != nil || len(claims) != 1 || claims[0].ID != claim.ID {
+					t.Fatalf("carried claim disappeared before owner validation: %+v, %v", claims, err)
+				}
+				review, err = sctx.DB.GetStepResult(carried.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}

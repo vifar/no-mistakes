@@ -130,9 +130,9 @@ func (d *DB) InsertStepResult(runID string, stepName types.StepName) (*StepResul
 
 // InsertCarriedStepResult records source - a completed or skipped step of the
 // run a retry continues - on runID without executing it. The carried row keeps
-// the source's outcome and approval facts but none of its findings or log, so
-// statistics never count the source's work twice; its rounds stay on the
-// source row, which carried_from names - or, when source is itself carried, the
+// the source's outcome and approval facts. Review findings also survive because
+// their pending support claims remain enforcement obligations. Logs are not
+// copied; its rounds stay on the source row, which carried_from names - or, when source is itself carried, the
 // row it was carried from.
 func (d *DB) InsertCarriedStepResult(runID string, source *StepResult) (*StepResult, error) {
 	if source == nil || (source.Status != types.StepStatusCompleted && source.Status != types.StepStatusSkipped) {
@@ -155,9 +155,12 @@ func (d *DB) InsertCarriedStepResult(runID string, source *StepResult) (*StepRes
 		SkipReason:     source.SkipReason,
 		CarriedFrom:    &origin,
 	}
+	if source.StepName == types.StepReview {
+		s.FindingsJSON = source.FindingsJSON
+	}
 	_, err := sqlitewrite.Exec(context.Background(), d.sql, "InsertCarriedStepResult",
-		`INSERT INTO step_results (id, run_id, step_name, step_order, status, exit_code, duration_ms, started_at, completed_at, auto_fix_limit, override_reason, approval_reason, skip_reason, carried_from) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.ID, s.RunID, s.StepName, s.StepOrder, s.Status, s.ExitCode, s.DurationMS, s.StartedAt, s.CompletedAt, s.AutoFixLimit, s.OverrideReason, s.ApprovalReason, s.SkipReason, s.CarriedFrom,
+		`INSERT INTO step_results (id, run_id, step_name, step_order, status, exit_code, duration_ms, started_at, completed_at, auto_fix_limit, override_reason, approval_reason, skip_reason, carried_from, findings_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		s.ID, s.RunID, s.StepName, s.StepOrder, s.Status, s.ExitCode, s.DurationMS, s.StartedAt, s.CompletedAt, s.AutoFixLimit, s.OverrideReason, s.ApprovalReason, s.SkipReason, s.CarriedFrom, s.FindingsJSON,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert carried step result: %w", err)

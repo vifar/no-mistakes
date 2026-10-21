@@ -115,3 +115,48 @@ func TestPreviousRunReviewRoundsFollowACarriedRowToItsOrigin(t *testing.T) {
 		t.Fatalf("previous = %+v (err %v), want the carried row's rounds from %s", previous, err, original.ID)
 	}
 }
+
+func TestCarriedReviewPreservesPendingSupportAcrossRetries(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/tmp/repo", "origin", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := d.InsertStepResult(first.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const findings = `{"findings":[{"id":"claim-test","severity":"warning","action":"no-op","category":"review-support-pending","description":"needs Test proof","support":{"claim_type":"test","test":{"command":"go test ./internal/types"}}},{"id":"claim-ci","severity":"warning","action":"no-op","category":"review-support-pending","description":"needs CI proof","support":{"claim_type":"ci","ci":{"check_id":"42","head_sha":"head"}}}]}`
+	if err := d.SetStepFindings(review.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteStepWithStatus(review.ID, types.StepStatusCompleted, 0, 10, ""); err != nil {
+		t.Fatal(err)
+	}
+	review, err = d.GetStepResult(review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := review.ID
+	for range 2 {
+		next, err := d.InsertRun(repo.ID, "feature", "head", "base")
+		if err != nil {
+			t.Fatal(err)
+		}
+		carried, err := d.InsertCarriedStepResult(next.ID, review)
+		if err != nil {
+			t.Fatal(err)
+		}
+		review, err = d.GetStepResult(carried.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if review.FindingsJSON == nil || *review.FindingsJSON != findings || review.RoundsStepID() != origin {
+			t.Fatalf("carried Review lost enforcement payload or lineage: %+v", review)
+		}
+	}
+}

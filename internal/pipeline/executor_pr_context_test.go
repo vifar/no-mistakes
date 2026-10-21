@@ -1004,3 +1004,44 @@ func TestExecutorTargetRewindArchivesJustProducedReviewVerdict(t *testing.T) {
 		t.Fatalf("mock guard should rerun invalidated step, got %d", reviewCalls)
 	}
 }
+
+func TestExecutorCarriedReviewStillRequiresSupportEvidence(t *testing.T) {
+	for _, owner := range []types.StepName{types.StepTest, types.StepCI} {
+		t.Run(string(owner), func(t *testing.T) {
+			database, paths, source, repo := setupTest(t)
+			review, err := database.InsertStepResult(source.ID, types.StepReview)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claim := types.Finding{ID: "pending-claim", Severity: types.FindingSeverityWarning, Action: types.ActionNoOp, Category: types.FindingCategoryReviewSupportPending, Description: "requires current evidence", Support: &types.FindingSupport{ClaimType: types.FindingClaimTest, Test: &types.FindingTestSupport{Command: "go test ./internal/types"}}}
+			if owner == types.StepCI {
+				claim.Support = &types.FindingSupport{ClaimType: types.FindingClaimCI, CI: &types.FindingCISupport{CheckID: "42", HeadSHA: source.HeadSHA}}
+			}
+			findings, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{claim}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.SetStepFindings(review.ID, findings); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.CompleteStepWithStatus(review.ID, types.StepStatusCompleted, 0, 1, ""); err != nil {
+				t.Fatal(err)
+			}
+			review, err = database.GetStepResult(review.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			next, err := database.InsertRun(repo.ID, source.Branch, source.HeadSHA, source.BaseSHA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := database.InsertCarriedStepResult(next.ID, review); err != nil {
+				t.Fatal(err)
+			}
+			executor := NewExecutor(database, paths, nil, nil, nil, nil)
+			if err := executor.validateReviewSupportOwners(next.ID, owner); err == nil {
+				t.Fatal("carried Review passed its publication boundary without support evidence")
+			}
+		})
+	}
+}
