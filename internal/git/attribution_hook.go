@@ -17,6 +17,7 @@ import (
 )
 
 type attributionPolicy struct {
+	GitDir        string
 	Submitted     string
 	Configured    []string
 	OriginalHooks string
@@ -68,6 +69,17 @@ func HandleAttributionHook(args []string) (bool, error) {
 	}
 	name, hookArgs := args[2], args[3:]
 	run := func(args ...string) (string, error) { return Run(context.Background(), ".", args...) }
+	metadata, err := run("rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return true, err
+	}
+	metadata, err = filepath.EvalSymlinks(metadata)
+	if err != nil {
+		return true, err
+	}
+	if policy.GitDir == "" || metadata != policy.GitDir {
+		return true, fmt.Errorf("attribution hook does not own this Git directory")
+	}
 	var input []byte
 	if name == "post-rewrite" {
 		input, err = io.ReadAll(os.Stdin)
@@ -264,6 +276,10 @@ func AttributionHookEnv(dir string, env []string, run func(...string) (string, e
 	if err != nil {
 		return nil, err
 	}
+	metadata, err = filepath.EvalSymlinks(metadata)
+	if err != nil {
+		return nil, err
+	}
 	root := filepath.Join(metadata, "no-mistakes-attribution")
 	var previous attributionPolicy
 	previousData, readErr := os.ReadFile(filepath.Join(root, "policy.json"))
@@ -321,7 +337,7 @@ func AttributionHookEnv(dir string, env []string, run func(...string) (string, e
 			pinned = append(pinned, target)
 		}
 	}
-	policy := attributionPolicy{Submitted: submitted, Configured: configured, OriginalHooks: original, Targets: pinned}
+	policy := attributionPolicy{GitDir: metadata, Submitted: submitted, Configured: configured, OriginalHooks: original, Targets: pinned}
 	data, err := json.Marshal(policy)
 	if err != nil {
 		return nil, err
@@ -352,7 +368,13 @@ func AttributionHookEnv(dir string, env []string, run func(...string) (string, e
 			parameters = value
 		}
 	}
-	env = append(append([]string(nil), env...), "GIT_CONFIG_PARAMETERS="+strings.TrimSpace(parameters+" "+quote("core.hooksPath="+filepath.ToSlash(root))+" "+quote("commit.cleanup=verbatim")))
+	configPath := filepath.Join(root, "config")
+	content := fmt.Sprintf("[core]\n\thooksPath = %q\n[commit]\n\tcleanup = verbatim\n", filepath.ToSlash(root))
+	if err := writeAttributionFile(configPath, []byte(content), 0600); err != nil {
+		return nil, err
+	}
+	pattern := strings.NewReplacer("\\", "\\\\", "*", "\\*", "?", "\\?", "[", "\\[").Replace(filepath.ToSlash(metadata))
+	env = append(append([]string(nil), env...), "GIT_CONFIG_PARAMETERS="+strings.TrimSpace(parameters+" "+quote("includeIf.gitdir:"+pattern+".path")+"="+quote(filepath.ToSlash(configPath))))
 	return env, nil
 }
 
@@ -361,6 +383,10 @@ func ValidateCommitAttribution(before, after string, run func(...string) (string
 		return nil
 	}
 	metadata, err := run("rev-parse", "--absolute-git-dir")
+	if err != nil {
+		return err
+	}
+	metadata, err = filepath.EvalSymlinks(metadata)
 	if err != nil {
 		return err
 	}

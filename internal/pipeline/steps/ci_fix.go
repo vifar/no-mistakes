@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
@@ -287,8 +288,18 @@ CI logs:
 	prompt += executionContextPromptSection(sctx.WorkDir)
 	prompt = fixerPrompt(testguidance.LateRepairPrompt(string(s.Name()), prompt))
 
+	var attributionEnv []string
+	if rebase {
+		attributionEnv, err = sctx.CommitAttributionEnv(nil, func(args ...string) (string, error) {
+			return git.Run(ctx, sctx.WorkDir, args...)
+		}, rebaseBaseSHA)
+		if err != nil {
+			return ciRepairResult{}, err
+		}
+	}
 	sctx.Log("running agent to fix CI issues...")
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
+		Env:        attributionEnv,
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		JSONSchema: ciFixConclusionSchema,
