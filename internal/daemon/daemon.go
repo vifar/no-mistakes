@@ -1086,14 +1086,14 @@ func worktreeRefusalCleanupReason(d *db.DB, run *db.Run) string {
 		return fmt.Sprintf("cannot read worktree refusals for run %s: %v", run.ID, err)
 	}
 	for _, step := range results {
-		// Rebase and Document fail closed when entry or rollback cannot prove that
+		// Document fails closed when entry or rollback cannot prove that
 		// work is safe to discard. A failed pass therefore cannot authorize
 		// forced cleanup, even without a protected-path finding. Keep this
 		// decision durable across terminal cleanup, reaping, and restart.
-		// Administrative interruption is not a refusal by Rebase or Document; protected
+		// Administrative interruption is not a refusal by Document; protected
 		// path findings below still retain their ordinary preservation guard.
-		if (step.StepName == types.StepRebase || step.StepName == types.StepDocument) && step.Status == types.StepStatusFailed && !step.InterruptedByTerminalRun() {
-			return fmt.Sprintf("run %s has a failed %s step; preserving index and worktree", run.ID, step.StepName)
+		if step.StepName == types.StepDocument && step.Status == types.StepStatusFailed && !step.InterruptedByTerminalRun() {
+			return fmt.Sprintf("run %s has a failed Document step; preserving index and worktree", run.ID)
 		}
 		if step.FindingsJSON == nil || !pipeline.HasProtectedPathRefusal(*step.FindingsJSON) || step.Status == types.StepStatusCompleted {
 			continue
