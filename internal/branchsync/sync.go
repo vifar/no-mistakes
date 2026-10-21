@@ -700,7 +700,12 @@ func (s *Service) BindRecoveryArchive(ctx context.Context, archiveRef string) St
 // head never changed from the submitted head needs no recovery at all, so
 // Recover treats that user_owned state as an idempotent no-op success.
 //
-// The decision matrix, by worktree relation to the preserved pipeline head P
+// An already-returned terminal run whose current head equals its pushed head
+// instead uses apply(ctx, true) for plain recovery: ownership alone does not
+// prove the local branch contains the published fix. See Custody recovery in
+// docs/src/content/docs/reference/cli.md for the user-facing contract.
+//
+// The unpublished-head decision matrix, by worktree relation to preserved head P
 // (the terminally verified run head, pinned by its private recovery ref):
 //
 //	relation   worktree  default                        --keep-local
@@ -1545,8 +1550,9 @@ func (s *Service) recoverAdoptPreserved(ctx context.Context, run *db.Run, state 
 // Its success decision is an allowlist. Recovered is true only when (a) the
 // explicit recover_remote_rewritten rebind committed, or (b) a fresh live
 // check proved the binding already equals the live head, in which case the
-// caller's ordinary idempotent path decides (handled=false). Every other fresh
-// outcome refuses with Recovered=false and never reaches a cached no-op.
+// caller's custody or strict published-head path decides (handled=false).
+// Every other fresh outcome refuses with Recovered=false and never reaches
+// a cached no-op.
 // Runs whose head moved past an unpublished binding keep the ordinary custody
 // recovery (handled=false without a live check).
 //
