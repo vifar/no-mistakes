@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -156,5 +157,42 @@ func TestCommitPatchIDsReadsBareRangeAndEmptyRange(t *testing.T) {
 	ids, err = CommitPatchIDs(ctx, bare, one+".."+one)
 	if err != nil || len(ids) != 0 {
 		t.Fatalf("empty range returned %v, %v", ids, err)
+	}
+}
+
+func TestCommitPatchIDsIgnoreDiffPresentationConfiguration(t *testing.T) {
+	for _, setting := range []struct{ key, value string }{
+		{"color.ui", "always"},
+		{"color.diff", "always"},
+		{"diff.external", "printf 'not a Git diff'"},
+		{"diff.custom.command", "printf 'not a Git diff'"},
+		{"diff.custom.textconv", "printf 'converted bytes'"},
+		{"pager.log", "true"},
+	} {
+		t.Run(setting.key, func(t *testing.T) {
+			dir := initTestRepo(t)
+			ctx := context.Background()
+			writeFile(t, filepath.Join(dir, "file.txt"), "feature\n")
+			run(t, dir, "git", "add", "file.txt")
+			run(t, dir, "git", "commit", "-m", "feature")
+			head := run(t, dir, "git", "rev-parse", "HEAD")
+			const patch = "diff --git a/file.txt b/file.txt\nnew file mode 100644\n--- /dev/null\n+++ b/file.txt\n@@ -0,0 +1 @@\n+feature\n"
+			oracle, err := RunWithInput(ctx, dir, patch, "patch-id", "--stable")
+			if err != nil || len(strings.Fields(oracle)) != 2 {
+				t.Fatalf("Git identity of the specified added-file patch: %q, %v", oracle, err)
+			}
+			want := strings.Fields(oracle)[0]
+			writeFile(t, filepath.Join(dir, ".git", "info", "attributes"), "file.txt diff=custom\n")
+			run(t, dir, "git", "config", setting.key, setting.value)
+			t.Setenv("GIT_PAGER", "printf 'pager output'")
+			got, err := CommitPatchID(ctx, dir, head)
+			if err != nil || got != want {
+				t.Fatalf("single identity = %q, %v; want %s", got, err, want)
+			}
+			ids, err := CommitPatchIDs(ctx, dir, head+"^.."+head)
+			if err != nil || len(ids) != 1 || ids[head] != want {
+				t.Fatalf("range identities = %v, %v; want %s: %s", ids, err, head, want)
+			}
+		})
 	}
 }

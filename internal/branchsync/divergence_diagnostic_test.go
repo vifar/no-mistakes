@@ -161,6 +161,28 @@ func checkRecoverPatchMatchDiagnostic(t *testing.T, padding int) {
 		}
 		mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.preserved)
 	}
+	assertRecoverPatchMatchDiagnostic(t, f)
+}
+
+func TestRecoverDivergedRefusalReportsPatchMatchesWithConfiguredDiff(t *testing.T) {
+	t.Parallel()
+	for _, setting := range []struct{ key, value string }{
+		{"color.ui", "always"},
+		{"diff.external", "printf 'not a Git diff'"},
+		{"diff.custom.command", "printf 'not a Git diff'"},
+		{"diff.custom.textconv", "printf 'converted bytes'"},
+	} {
+		t.Run(setting.key, func(t *testing.T) {
+			f := newRewrittenCopyRecoverFixture(t)
+			mustWrite(t, filepath.Join(f.local, ".git", "info", "attributes"), "file.txt diff=custom\n")
+			mustRun(t, f.local, "config", setting.key, setting.value)
+			assertRecoverPatchMatchDiagnostic(t, f)
+		})
+	}
+}
+
+func assertRecoverPatchMatchDiagnostic(t *testing.T, f *rewrittenCopyFixture) {
+	t.Helper()
 	mustRun(t, f.gate, "update-ref", f.anchorRef(), f.preserved)
 
 	refused := f.service.Recover(f.ctx, false)
