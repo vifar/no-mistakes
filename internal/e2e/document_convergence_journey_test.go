@@ -300,7 +300,7 @@ func TestDocumentJourneyAdmissionAndInterruptedHistory(t *testing.T) {
 			boundary := types.CustomGateStepName(types.StepTest, "boundary")
 			parked := waitForStepStatus(t, h, branch, boundary, types.StepStatusAwaitingApproval, 90*time.Second)
 			worktree := paths.WithRoot(h.NMHome).WorktreeDir(parked.RepoID, parked.ID)
-			cause := "1 entries are hidden from status by index flags"
+			cause := "worktree has 1 entries hidden from status by index flags"
 			wantPasses := 0
 			if kind == "interrupted" {
 				gateJourneyDaemon(t, h, "stop")
@@ -374,7 +374,7 @@ func TestDocumentJourneyMidPassFlagsPreserveProposal(t *testing.T) {
 			action["git"] = [][]string{{"update-index", flag, "feature.txt"}, {"add", "README.md"}, {"commit", "-m", "first proposal"}, {"add", "guide.md"}, {"commit", "-m", "second proposal"}}
 			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenario(t, "", action)})
 			branch, submitted := documentJourneyStart(t, h, "document:\n  max_commits_per_run: 1\ncommands:\n  lint: 'true'\n")
-			failed := documentJourneyFailed(t, h, branch, "1 entries are hidden from status by index flags")
+			failed := documentJourneyFailed(t, h, branch, "worktree has 1 entries hidden from status by index flags")
 			worktree := paths.WithRoot(h.NMHome).WorktreeDir(failed.RepoID, failed.ID)
 			if count := gitIn(t, h, worktree, "rev-list", "--count", submitted+"..HEAD"); count != "2" {
 				t.Fatalf("refusal lost proposal commits: %s", count)
@@ -416,7 +416,7 @@ func TestDocumentJourneyHiddenIndexPrecedesCachedCompletion(t *testing.T) {
 			}
 			flags := gitIn(t, h, worktree, "ls-files", "-v")
 			documentJourneyReplay(t, h, parked.ID)
-			failed := documentJourneyFailed(t, h, branch, "1 entries are hidden from status by index flags")
+			failed := documentJourneyFailed(t, h, branch, "worktree has 1 entries hidden from status by index flags")
 			got, err := os.ReadFile(filepath.Join(worktree, "feature.txt"))
 			if err != nil || string(got) != hidden || gitIn(t, h, worktree, "rev-parse", "HEAD") != accepted || gitIn(t, h, worktree, "ls-files", "-v") != flags {
 				t.Fatalf("cached-entry refusal changed hidden work: bytes=%q error=%v", got, err)
@@ -775,4 +775,28 @@ func TestDocumentJourneyDiscardKeepsCombinedLintDuty(t *testing.T) {
 		t.Fatalf("combined duty was lost: Document=%d Lint=%d", documentJourneyCalls(h), lintCalls)
 	}
 	documentJourneyStatus(t, h, parked.ID)
+}
+
+// A no-gap verdict cannot certify a file hidden by the agent during the pass,
+// even when no ordinary proposal exists to trigger convergence rollback.
+func TestDocumentJourneyMidPassFlagsRefuseCleanVerdict(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			const hidden = "owner bytes hidden during an otherwise clean pass\n"
+			action := documentJourneyAction("feature.txt", hidden)
+			action["git"] = [][]string{{"update-index", flag, "feature.txt"}}
+			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenario(t, "", action)})
+			branch, submitted := documentJourneyStart(t, h, "commands:\n  lint: 'true'\n")
+			failed := documentJourneyFailed(t, h, branch, "worktree has 1 entries hidden from status by index flags")
+			worktree := paths.WithRoot(h.NMHome).WorktreeDir(failed.RepoID, failed.ID)
+			got, err := os.ReadFile(filepath.Join(worktree, "feature.txt"))
+			if err != nil || string(got) != hidden || gitIn(t, h, worktree, "rev-parse", "HEAD") != submitted {
+				t.Fatalf("refusal changed hidden bytes or head: bytes=%q error=%v", got, err)
+			}
+			passes := documentJourneyPasses(t, h, failed.ID)
+			if len(passes) != 1 || passes[0].ToHeadSHA != nil {
+				t.Fatalf("unverifiable pass recorded as complete: %+v", passes)
+			}
+		})
+	}
 }

@@ -1,8 +1,10 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,7 +86,7 @@ func TestDocumentHiddenIndexEntryRefusesBeforeAgentOrEarlyReturn(t *testing.T) {
 				}
 				callsBefore := calls
 				out, err := (&DocumentStep{}).Execute(sc)
-				if err == nil || !strings.Contains(err.Error(), "1 entries are hidden from status by index flags") || !strings.Contains(err.Error(), path) || out != nil {
+				if err == nil || !strings.Contains(err.Error(), "worktree has 1 entries hidden from status by index flags") || !strings.Contains(err.Error(), path) || out != nil {
 					t.Errorf("hidden entry lacked named refusal: outcome=%+v error=%v", out, err)
 				}
 				if calls != callsBefore || gitCmd(t, dir, "rev-parse", "HEAD") != headBefore {
@@ -125,7 +127,7 @@ func TestDocumentHiddenIndexIntroducedDuringProposalRefusesRollback(t *testing.T
 			sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
 			sc.Config.Document.MaxCommitsPerRun = 1
 			out, err := (&DocumentStep{}).Execute(sc)
-			if err == nil || !strings.Contains(err.Error(), "1 entries are hidden from status by index flags") || !strings.Contains(err.Error(), "feature.txt") || out != nil {
+			if err == nil || !strings.Contains(err.Error(), "worktree has 1 entries hidden from status by index flags") || !strings.Contains(err.Error(), "feature.txt") || out != nil {
 				t.Errorf("unsafe rollback was not refused: outcome=%+v error=%v", out, err)
 			}
 			if got, err := os.ReadFile(filepath.Join(dir, "feature.txt")); err != nil || string(got) != "hidden during proposal\n" {
@@ -144,5 +146,113 @@ func TestDocumentHiddenIndexIntroducedDuringProposalRefusesRollback(t *testing.T
 				t.Errorf("unsafe rollback was marked completed: %+v, %v", passes, err)
 			}
 		})
+	}
+}
+
+// Issue #90's oracle is raw byte preservation, not porcelain status. The
+// admission check ran before the agent; accepting this pass would certify
+// bytes that neither the proposal enumeration nor the input tree can see.
+func TestDocumentHiddenIndexIntroducedDuringAcceptedPass(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		for _, edit := range []bool{false, true} {
+			t.Run(flag+"/edit="+fmt.Sprint(edit), func(t *testing.T) {
+				dir, base, head := setupGitRepo(t)
+				want, err := os.ReadFile(filepath.Join(dir, "feature.txt"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					gitCmd(t, dir, "update-index", flag, "--", "feature.txt")
+					if edit {
+						want = []byte("hidden owner bytes must survive\n")
+						if err := os.WriteFile(filepath.Join(dir, "feature.txt"), want, 0o644); err != nil {
+							t.Fatal(err)
+						}
+					}
+					return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"no remaining gap"}`)}, nil
+				}}
+				sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+				out, err := (&DocumentStep{}).Execute(sc)
+				if err == nil || out != nil || !strings.Contains(err.Error(), "worktree has 1 entries hidden from status by index flags; Document cannot verify a clean entry") {
+					t.Errorf("accepted an unverifiable pass: outcome=%+v error=%v", out, err)
+				}
+				if got, err := os.ReadFile(filepath.Join(dir, "feature.txt")); err != nil || !bytes.Equal(got, want) {
+					t.Fatalf("hidden bytes lost: got=%q want=%q error=%v", got, want, err)
+				}
+				if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != head {
+					t.Fatalf("refusal changed HEAD: %s", got)
+				}
+				passes, err := sc.DB.GetDocumentPasses(sc.Run.ID)
+				if err != nil || len(passes) != 1 || passes[0].ToHeadSHA != nil {
+					t.Fatalf("unverifiable pass marked complete: %+v error=%v", passes, err)
+				}
+			})
+		}
+	}
+}
+
+func TestDocumentHiddenIndexCannotProveRepeatedInput(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		writeAndCommit("README.md", "accepted guide\n")(t, dir)
+		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"guide repaired"}`)}, nil
+	}}
+	sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+	if _, err := (&DocumentStep{}).Execute(sc); err != nil {
+		t.Fatal(err)
+	}
+	passes, err := sc.DB.GetDocumentPasses(sc.Run.ID)
+	if err != nil || len(passes) != 1 {
+		t.Fatalf("accepted pass: %+v %v", passes, err)
+	}
+	gitCmd(t, dir, "update-index", "--assume-unchanged", "feature.txt")
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("different raw input\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repeated, err := documentRepeatsUnchangedInputs(sc, &passes[0], sc.Run.HeadSHA, []string{"README.md"})
+	if err == nil || repeated {
+		t.Fatalf("hidden input certified as repeated: repeated=%v error=%v", repeated, err)
+	}
+}
+
+// This directly exercises the rollback boundary so a future admission check
+// cannot mask a destructive reset. Replacing rollback with the #69 version
+// really destroys feature.txt and this test reports the lost bytes.
+func TestDocumentRollbackPreservesHiddenOwnerBytes(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	sc := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{Lint: "true"})
+	gitCmd(t, dir, "update-index", "--assume-unchanged", "feature.txt")
+	const want = "pre-existing hidden owner bytes\n"
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte(want), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeAndCommit("README.md", "rejected proposal\n")(t, dir)
+	proposalHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	err := discardDocumentCandidate(sc, head, []string{"README.md"}, nil, nil)
+	if got, readErr := os.ReadFile(filepath.Join(dir, "feature.txt")); readErr != nil || string(got) != want {
+		t.Errorf("rollback destroyed hidden owner edit: got=%q want=%q error=%v", got, want, readErr)
+	}
+	if err == nil {
+		t.Error("rollback must refuse hidden index flags")
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != proposalHead {
+		t.Errorf("unsafe rollback moved head: %s", got)
+	}
+}
+
+func TestDocumentHiddenIndexAdmissionCountsEveryFlaggedEntry(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	// Include a newline to prove enumeration counts NUL-delimited index entries,
+	// rather than lines in status output. Both flags together produce 's'.
+	path := "guide\nwith newline.md"
+	writeAndCommit(path, "unchanged bytes\n")(t, dir)
+	head = gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "update-index", "--assume-unchanged", "--", path)
+	gitCmd(t, dir, "update-index", "--skip-worktree", "--", path)
+	gitCmd(t, dir, "update-index", "--assume-unchanged", "--", "feature.txt")
+	sc := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{Lint: "true"})
+	out, err := (&DocumentStep{}).Execute(sc)
+	if out != nil || err == nil || !strings.Contains(err.Error(), "worktree has 2 entries hidden from status by index flags; Document cannot verify a clean entry") {
+		t.Fatalf("wrong hidden entry count: outcome=%+v error=%v", out, err)
 	}
 }
