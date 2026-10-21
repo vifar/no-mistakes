@@ -8,6 +8,8 @@ installer prefers setting it up as a managed background service, and
 `no-mistakes`, `init`, `attach`, `rerun`, and `update` keep that service
 installed and running for you when that path is available.
 
+The daemon checks for leftover executing rows in terminal runs once a minute. It closes a row after at least five minutes without recorded activity or a log modification, provided no executor owns the run and any recorded process is confirmed stopped. Recent logs, unreadable logs, live or unverifiable processes, and all active runs remain untouched. This cleanup records an interrupted step as failed; it never validates work or publishes commits.
+
 ## Why a daemon exists
 
 The daemon exists so `git push no-mistakes` stays fast and the gate can keep
