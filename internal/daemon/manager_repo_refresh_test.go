@@ -28,6 +28,10 @@ func TestRunStartRefreshesCloneURLWithoutMutatingRemotes(t *testing.T) {
 	gitCmd(t, repo.WorkingPath, "remote", "add", "origin", currentURL)
 	gitCmd(t, p.RepoDir(repo.ID), "remote", "set-url", "origin", oldURL)
 	gitCmd(t, p.RepoDir(repo.ID), "config", "url."+p.RepoDir(repo.ID)+".insteadOf", currentURL)
+	// This is deliberate fixture enrollment, before any step executes.
+	if err := git.RecordSharedConfigBaseline(context.Background(), p.RepoDir(repo.ID)); err != nil {
+		t.Fatal(err)
+	}
 
 	seen := make(chan *db.Repo, 1)
 	manager := NewRunManager(database, p, func() []pipeline.Step {
