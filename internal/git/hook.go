@@ -362,6 +362,10 @@ func MarkGateConfigCurrent(bareDir string) error {
 	if err := ValidateBareRepository(context.Background(), bareDir); err != nil {
 		return err
 	}
+	stamp, err := gateConfigStampContent(bareDir)
+	if err != nil {
+		return err
+	}
 	// The legacy isolation helper intentionally leaves shared hooksPath alone.
 	// Finish enrollment separately: once the bare's hook intent is pinned in
 	// per-worktree scope, shared hooksPath no longer belongs in the baseline.
@@ -378,10 +382,7 @@ func MarkGateConfigCurrent(bareDir string) error {
 	if err := RecordSharedConfigBaseline(context.Background(), bareDir); err != nil {
 		return err
 	}
-	stamp, err := gateConfigStampContent(bareDir)
-	if err != nil {
-		return err
-	}
+
 	return writeGateFileAtomic(
 		filepath.Join(bareDir, gateConfigStampFile),
 		[]byte(stamp),

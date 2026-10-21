@@ -209,3 +209,33 @@ func TestIssue121BareInitializationIgnoresInheritedCommonDirectory(t *testing.T)
 		t.Fatal(err)
 	}
 }
+
+func TestIssue131EnrollmentRefusesNonGateBeforeWritingConfig(t *testing.T) {
+	ctx := context.Background()
+	bare := filepath.Join(t.TempDir(), "foreign.git")
+	if err := InitBare(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	if err := IsolateHooksPath(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	runGitOrFatal(t, bare, "config", "--local", "core.hooksPath", ".husky/_")
+	path := filepath.Join(bare, "config")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := MarkGateConfigCurrent(bare); err == nil {
+		t.Fatal("accepted a repository outside the managed gate layout")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("refused enrollment changed the shared config before validating gate ownership")
+	}
+	if _, err := os.Stat(filepath.Join(bare, sharedConfigBaselineFile)); !os.IsNotExist(err) {
+		t.Fatalf("refused enrollment wrote a baseline: %v", err)
+	}
+}
