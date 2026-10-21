@@ -189,7 +189,18 @@ func StripAIAttributionTrailers(message string, configured ...string) string {
 
 func configuredAttribution(line string, sources []string) bool {
 	for _, source := range sources {
-		tmpl, err := template.New("attribution").Parse(strings.TrimSpace(source))
+		candidate := line
+		source = strings.TrimSpace(source)
+		if key, value, ok := strings.Cut(source, ":"); ok && attributionTrailerKey.MatchString(source) {
+			candidateKey, candidateValue, ok := strings.Cut(line, ":")
+			if !ok || !strings.EqualFold(strings.TrimSpace(key), strings.TrimSpace(candidateKey)) {
+				continue
+			}
+			source = strings.TrimSpace(value)
+			candidate = strings.TrimSpace(candidateValue)
+			source = regexp.MustCompile("\n[ \t]+").ReplaceAllString(source, " ")
+		}
+		tmpl, err := template.New("attribution").Parse(source)
 		if err != nil || tmpl.Tree == nil || tmpl.Tree.Root == nil {
 			continue
 		}
@@ -210,7 +221,7 @@ func configuredAttribution(line string, sources []string) bool {
 			}
 		}
 		if valid {
-			match, err := regexp.MatchString(pattern+"$", line)
+			match, err := regexp.MatchString(pattern+"$", candidate)
 			if err == nil && match {
 				return true
 			}

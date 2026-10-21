@@ -81,7 +81,7 @@ func HandleAttributionHook(args []string) (bool, error) {
 			return true, fmt.Errorf("missing commit message path")
 		}
 		source.MessageFile = hookArgs[0]
-		if len(hookArgs) > 1 && (hookArgs[1] == "message" || hookArgs[1] == "commit") {
+		if len(hookArgs) > 1 && (hookArgs[1] == "message" || hookArgs[1] == "commit" || hookArgs[1] == "merge") {
 			donePath, err := run("rev-parse", "--git-path", "rebase-merge/done")
 			if err != nil {
 				return true, err
@@ -91,9 +91,15 @@ func HandleAttributionHook(args []string) (bool, error) {
 				return true, readErr
 			}
 			lines := strings.Split(strings.TrimSpace(string(done)), "\n")
-			pick := strings.Fields(lines[len(lines)-1])
-			if readErr == nil && len(pick) >= 2 && (pick[0] == "pick" || pick[0] == "p") {
-				original, err := run("rev-parse", "--verify", pick[1]+"^{commit}")
+			command := strings.Fields(lines[len(lines)-1])
+			candidate := ""
+			if len(command) >= 2 && (command[0] == "pick" || command[0] == "p") && hookArgs[1] != "merge" {
+				candidate = command[1]
+			} else if len(command) >= 3 && (command[0] == "merge" || command[0] == "m") && (command[1] == "-C" || command[1] == "-c") {
+				candidate = command[2]
+			}
+			if readErr == nil && candidate != "" {
+				original, err := run("rev-parse", "--verify", candidate+"^{commit}")
 				if err != nil {
 					return true, err
 				}
@@ -194,6 +200,23 @@ func HandleAttributionHook(args []string) (bool, error) {
 			if original == "" {
 				continue
 			}
+			prior, err := existingReplayOriginal(root, pair[1], policy, run)
+			if err != nil {
+				return true, err
+			}
+			if prior != "" {
+				canonical, err := attributionCommitMessage(prior, run)
+				if err != nil {
+					return true, err
+				}
+				message, err := attributionCommitMessage(pair[1], run)
+				if err != nil {
+					return true, err
+				}
+				if bytes.Equal(message, canonical) {
+					continue
+				}
+			}
 			if err := os.MkdirAll(filepath.Join(root, "replays"), 0700); err != nil {
 				return true, err
 			}
@@ -289,12 +312,7 @@ func AttributionHookEnv(dir string, env []string, run func(...string) (string, e
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
-	targets, err := run("for-each-ref", "--format=%(objectname)", "refs/remotes/")
-	if err != nil {
-		return nil, err
-	}
-	protected := append(append([]string(nil), previous.Targets...), strings.Fields(targets)...)
-	protected = append(protected, imported...)
+	protected := append(append([]string(nil), previous.Targets...), imported...)
 	seen := map[string]bool{}
 	pinned := make([]string, 0, len(protected))
 	for _, target := range protected {
