@@ -65,3 +65,22 @@ func TestIssue100UnrelatedTimeoutTextIsNotRetryable(t *testing.T) {
 		}
 	}
 }
+
+func TestIssue100MergeabilityPreservesReadDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		detail  string
+		timeout bool
+	}{
+		{"Timeout trying to log in to github.com account test (keyring)", true},
+		{"HTTP 401: Bad credentials", false},
+		{"You are not logged into any GitHub hosts", false},
+	} {
+		host := New(githubTestCmdFactory(map[string]githubTestResponse{
+			`gh pr view 42 --json mergeable,mergeStateStatus --jq .mergeable + " " + .mergeStateStatus`: {stderr: tc.detail, code: 1},
+		}), nil, "", "")
+		_, err := host.GetMergeableState(context.Background(), &scm.PR{Number: "42"})
+		if err == nil || errors.Is(err, scm.ErrTransientTimeout) != tc.timeout || !tc.timeout && !strings.Contains(err.Error(), tc.detail) {
+			t.Fatalf("detail=%q error=%v", tc.detail, err)
+		}
+	}
+}

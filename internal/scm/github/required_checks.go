@@ -151,7 +151,7 @@ func (h *Host) apiGET(ctx context.Context, endpoint string, extra ...string) ([]
 		if strings.Contains(text, "HTTP 404") || strings.Contains(text, "HTTP 403") {
 			return nil, fmt.Errorf("%w: %s", scm.ErrRequiredChecksUnavailable, strings.TrimSpace(text))
 		}
-		return nil, fmt.Errorf("gh api %s: %s: %w", endpoint, strings.TrimSpace(text), err)
+		return nil, prReadError(ctx, "gh api "+endpoint, strings.TrimSpace(text), err)
 	}
 	return out, nil
 }

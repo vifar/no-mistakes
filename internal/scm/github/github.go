@@ -1449,9 +1449,9 @@ func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.Mergeable
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "mergeable,mergeStateStatus", "--jq", `.mergeable + " " + .mergeStateStatus`)
 	cmd := h.cmd(ctx, "gh", args...)
-	out, err := cmd.Output()
+	out, detail, err := stdoutOnly(cmd)
 	if err != nil {
-		return "", fmt.Errorf("gh pr view mergeable: %w", err)
+		return "", prReadError(ctx, "gh pr view mergeable", detail, err)
 	}
 	return parseMergeableState(string(out)), nil
 }

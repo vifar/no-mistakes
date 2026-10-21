@@ -136,3 +136,92 @@ func TestIssue100PostReviewAuthTimeoutContinuesTheSameRun(t *testing.T) {
 		}
 	}
 }
+
+func TestIssue100PublishedTargetRetentionRetriesReadTimeouts(t *testing.T) {
+	for _, source := range []string{"protection", "rules", "mergeable"} {
+		for _, tc := range []struct {
+			name, detail       string
+			failures, attempts int
+		}{
+			{"recovers", "Timeout trying to log in to github.com account test (keyring)", 1, 2},
+			{"exhausts", "Timeout trying to log in to github.com account test (keyring)", 9, 3},
+			{"credentials", "HTTP 401: Bad credentials", 9, 1},
+		} {
+			t.Run(source+"/"+tc.name, func(t *testing.T) {
+				c, selection, receipt := retainedTargetFixture(t)
+				gitCmd(t, c.WorkDir, "checkout", "main")
+				gitCmd(t, c.WorkDir, "commit", "--allow-empty", "-m", "advance target")
+				target := gitCmd(t, c.WorkDir, "rev-parse", "HEAD")
+				gitCmd(t, c.WorkDir, "checkout", "feature")
+				bin := fakeCLIBinDir(t)
+				linkTestBinary(t, bin, "gh")
+				calls := 0
+				var starts []time.Time
+				host := github.New(func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+					operation, stdout := "", ""
+					joined := strings.Join(args, " ")
+					switch {
+					case strings.Contains(joined, "/protection/required_status_checks"):
+						operation, stdout = "protection", `{"strict":false}`
+					case strings.Contains(joined, "/rules/branches/"):
+						operation, stdout = "rules", `[[]]`
+					case strings.Contains(joined, "mergeable,mergeStateStatus"):
+						operation, stdout = "mergeable", "MERGEABLE CLEAN"
+					default:
+						t.Fatalf("unexpected read: %v", args)
+					}
+					code, stderr := 0, ""
+					if operation == source {
+						calls++
+						starts = append(starts, time.Now())
+						if calls <= tc.failures {
+							code, stdout, stderr = 1, "", tc.detail
+						}
+					}
+					cmd := exec.CommandContext(ctx, filepath.Join(bin, "gh"), args...)
+					cmd.Env = fakeCLIEnv(bin, map[string]string{"FAKE_CLI_MODE": "pr-context-read", "FAKE_CLI_STDOUT": stdout, "FAKE_CLI_STDERR": stderr, "FAKE_CLI_EXIT_CODE": fmt.Sprint(code)})
+					return cmd
+				}, nil, "github.com", "test/repo")
+				var logs []string
+				c.Log = func(s string) { logs = append(logs, s) }
+				err := verifyCurrentPRComparison(c, host, selection, receipt, nil)
+				if (err == nil) != (tc.name == "recovers") || calls != tc.attempts {
+					t.Fatalf("calls=%d err=%v; want attempts=%d", calls, err, tc.attempts)
+				}
+				for i := 1; i < len(starts); i++ {
+					if starts[i].Sub(starts[i-1]) < time.Duration(i)*time.Second {
+						t.Fatalf("missing backoff: %v", starts)
+					}
+				}
+				if tc.attempts > 1 && !strings.Contains(strings.Join(logs, "\n"), "transient keyring timeout") {
+					t.Fatalf("missing transient log: %v", logs)
+				}
+				if tc.name == "exhausts" {
+					if !pipeline.PRContextReadTimedOut(err.Error()) {
+						t.Fatalf("lost timeout diagnostic: %v", err)
+					}
+					if e := c.DB.UpdateRunErrorStatus(c.Run.ID, err.Error(), types.RunFailed); e != nil {
+						t.Fatal(e)
+					}
+					requests := postCommitStatus(t, c, db.CommitStatusPublication{SHA: receipt.LocalHeadSHA, Host: "github.com", Repo: "test/repo"}, "failure", false)
+					if len(requests) != 1 || requests[0].State != "failure" || requests[0].Description != "PR-context unavailable: transient keyring timeout; validation incomplete" {
+						t.Fatalf("status=%+v", requests)
+					}
+				}
+				wantTarget := ""
+				if err == nil {
+					wantTarget = target
+				}
+				if got, e := c.DB.GetRetainedPRTarget(c.Run.ID, receipt); e != nil || got != wantTarget {
+					t.Fatalf("retained target=%q want=%q err=%v", got, wantTarget, e)
+				}
+				if after, e := c.DB.GetRunPRContext(c.Run.ID); e != nil || *after != *receipt {
+					t.Fatalf("comparison changed: %+v err=%v", after, e)
+				}
+				if run, e := c.DB.GetRun(c.Run.ID); e != nil || run.ReviewApprovedHeadSHA == nil || *run.ReviewApprovedHeadSHA != receipt.LocalHeadSHA || run.HeadSHA != receipt.LocalHeadSHA {
+					t.Fatalf("completed review or head changed: %+v err=%v", run, e)
+				}
+			})
+		}
+	}
+}
