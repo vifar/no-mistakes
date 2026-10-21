@@ -88,6 +88,9 @@ func (s *LintStep) executeRepositoryLint(sctx *pipeline.StepContext) (*pipeline.
 				return lintOutcomeFromHousekeeping(sctx, stash)
 			}
 		}
+		if err := ensurePrepared(sctx, s.Name()); err != nil {
+			return nil, fmt.Errorf("prepare agent lint dependencies: %w", err)
+		}
 		sctx.Log("no lint command configured, asking agent to lint and fix...")
 		reassessHistory := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
 		prompt := fmt.Sprintf(

@@ -207,6 +207,11 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		purpose = "housekeeping"
 	}
 
+	// This agent may run documentation checks and the combined lint duty.
+	// Prepare before its pass starts so setup artifacts cannot become proposals.
+	if err := ensurePrepared(sctx, s.Name()); err != nil {
+		return nil, fmt.Errorf("prepare document dependencies: %w", err)
+	}
 	passID, err := sctx.DB.BeginDocumentPass(sctx.Run.ID, headBefore)
 	if err != nil {
 		return nil, err

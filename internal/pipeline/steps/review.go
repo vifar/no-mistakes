@@ -146,6 +146,9 @@ func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// unresolved.
 	var fixSummary string
 	if sctx.Fixing && !sctx.SkipFixExecution {
+		if err := ensurePrepared(sctx, s.Name()); err != nil {
+			return nil, fmt.Errorf("prepare review fix dependencies: %w", err)
+		}
 		previousFindings := sanitizedPreviousFindingsForPrompt(sctx.PreviousFindings)
 		historySection := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx) + planSection + testguidance.Rule
 		fixPrompt := fmt.Sprintf(
