@@ -122,6 +122,29 @@ func TestCIMonitorReadinessRequiresChecksOnReceiptHead(t *testing.T) {
 	}
 }
 
+func TestCIMonitorUnpublishedRepairKeepsMissingReceipt(t *testing.T) {
+	sctx, host, _ := mutationComparisonFixture(t)
+	oldHead := sctx.Run.HeadSHA
+	gitCmd(t, sctx.WorkDir, "commit", "--allow-empty", "-m", "unpublished repair")
+	newHead := gitCmd(t, sctx.WorkDir, "rev-parse", "HEAD")
+	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, newHead); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run.HeadSHA = newHead
+	// Local edits do not earn a comparison receipt, even if checks claim
+	// success. Keep the missing-receipt signal that bounds the monitor's wait.
+	for _, checkedHead := range []string{oldHead, newHead} {
+		checks := []scm.Check{{Name: "build", Bucket: scm.CheckBucketPass, HeadSHA: checkedHead}}
+		if err := verifyCIMonitorComparison(sctx, host, checks); !errors.Is(err, errCIReadinessReceiptMissing) {
+			t.Fatalf("unpublished head with checks at %s: %v; want missing receipt", checkedHead, err)
+		}
+	}
+	receipt, err := sctx.DB.GetRunPRContext(sctx.Run.ID)
+	if err != nil || receipt == nil || receipt.LocalHeadSHA != oldHead {
+		t.Fatalf("unpublished repair changed receipt: %+v, %v", receipt, err)
+	}
+}
+
 func TestPRMutationComparisonRejectsChangedLiveEvidence(t *testing.T) {
 	for _, change := range []struct {
 		name   string

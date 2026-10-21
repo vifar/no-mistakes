@@ -1360,17 +1360,21 @@ func verifyCIMonitorComparison(sctx *pipeline.StepContext, host scm.Host, checks
 	if err != nil {
 		return err
 	}
-	if receipt == nil || receipt.PRURL == "" || sctx.Run.HeadSHA != receipt.LocalHeadSHA {
+	if receipt == nil || receipt.PRURL == "" {
 		return errCIReadinessReceiptMissing
 	}
 	durable, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
 		return err
 	}
-	if durable == nil || durable.HeadSHA != receipt.LocalHeadSHA {
+	if sctx.Run.HeadSHA != receipt.LocalHeadSHA && (durable == nil || durable.HeadSHA != sctx.Run.HeadSHA ||
+		durable.LastPushedSHA == nil || *durable.LastPushedSHA != sctx.Run.HeadSHA) {
+		return errCIReadinessReceiptMissing
+	}
+	if durable == nil || durable.HeadSHA != sctx.Run.HeadSHA {
 		return fmt.Errorf("durable run head differs from CI readiness comparison")
 	}
-	if err := scm.ValidateCheckHeads(checks, receipt.LocalHeadSHA); err != nil {
+	if err := scm.ValidateCheckHeads(checks, sctx.Run.HeadSHA); err != nil {
 		return err
 	}
 	reader, ok := host.(scm.PRFactsReader)
@@ -1386,6 +1390,21 @@ func verifyCIMonitorComparison(sctx *pipeline.StepContext, host scm.Host, checks
 	}
 	selection := pipeline.PRTargetSelection{PRURL: facts.PR.URL, State: facts.State, SourceRepo: facts.SourceRepository,
 		SourceBranch: facts.SourceBranch, ForgeHeadSHA: facts.HeadSHA, TargetBranch: facts.BaseBranch}
+	if sctx.Run.HeadSHA != receipt.LocalHeadSHA {
+		// A CI repair resumes polling within this step, before the executor's
+		// next comparison boundary. Use that same guard to follow only a
+		// proven publication by this run, with the live forge and target facts.
+		if _, err := guardPRContextWithSelection(sctx, types.StepCI, selection, false); err != nil {
+			return err
+		}
+		receipt, err = sctx.DB.GetRunPRContext(sctx.Run.ID)
+		if err != nil {
+			return err
+		}
+		if receipt == nil || receipt.LocalHeadSHA != sctx.Run.HeadSHA {
+			return errCIReadinessReceiptMissing
+		}
+	}
 	return verifyCurrentPRComparison(sctx, host, selection, receipt, &facts)
 }
 
