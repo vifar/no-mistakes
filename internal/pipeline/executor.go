@@ -3155,6 +3155,13 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	}
 	explicitCancellation := false
 	var controlled *ControlledShutdownCause
+	// cancelledByOperator records that the run's OWN cancellation cause is the
+	// operator's abort or the supersession. The run's status is decided by
+	// that cause, never by comparing the error TEXT: a step that was stopped
+	// mid-flight can produce a message that happens to read like a
+	// cancellation reason, and matching the text would mark an independent
+	// failure as a cancellation.
+	cancelledByOperator := false
 	for _, ctx := range ctxs {
 		if infrastructure {
 			break
@@ -3168,6 +3175,7 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		}
 		errMsg = cause.Error()
 		explicitCancellation = cause.Error() == types.RunCancelReasonAbortedByUser
+		cancelledByOperator = explicitCancellation || cause.Error() == types.RunCancelReasonSuperseded
 		if planned, ok := cause.(*ControlledShutdownCause); ok && planned.Instance != "" && planned.Instance == e.runtimeInstance {
 			matches, matchErr := e.db.ControlledShutdownMatches(run.ID, planned.Instance, planned.Lifecycle, planned.Error())
 			if matchErr == nil && matches {
@@ -3178,7 +3186,7 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		break
 	}
 	runStatus := types.RunFailed
-	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded || controlled != nil {
+	if cancelledByOperator || controlled != nil {
 		runStatus = types.RunCancelled
 	}
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)

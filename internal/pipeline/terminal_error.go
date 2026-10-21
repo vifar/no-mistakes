@@ -4,9 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 
-	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -77,22 +75,26 @@ func shutdownCancellationOnly(err error, ctxs ...context.Context) bool {
 	return false
 }
 
-// cancellationAttributable reports whether a run's failure is the
-// cancellation itself, and so must be recorded as the cancellation's reason.
+// cancellationAttributable reports whether a run's failure IS the
+// cancellation, and so must be recorded as the cancellation's reason.
 //
-// A step that was cut off mid-flight reports the failure it was in the middle
-// of - a terminated git command, a closed pipe - and that message is
-// decoration around the cancellation, not an independent failure. The
-// cancellation is the cause; the step's text only says what the process
-// happened to be doing when it was stopped. A cancelled subprocess reports
-// context.Canceled in its own chain, so the chain still carries the
-// cancellation even though the step added its own message on top.
+// The rule is deliberately narrow. A step that was cut off mid-flight
+// reports the failure it was in the middle of - a terminated git command, a
+// closed pipe - and that failure is the step's own: the operation it was
+// doing did not succeed. A shutdown that arrives while a read is in flight
+// does not make the read succeed, so the read keeps its own outcome.
 //
-// An error with NO cancellation anywhere in its chain is an independent
-// failure and keeps its own reason: a shutdown must never overwrite a failure
-// that would have happened anyway. An error that joins an independent failure
-// to the cancellation is also independent: the failure would have happened
-// anyway, and the cancellation only arrived alongside it.
+// What IS decoration is a wrapper that adds a MESSAGE around the
+// cancellation. A step that reports "step document failed: daemon shutting
+// down" says the same thing the cancellation says, with a prefix. So the
+// question is asked of the error's own cause: a wrapper is asked of what it
+// wraps, a joined error is attributable only when EVERY part of it is, and a
+// leaf is the cancellation only if it IS the cancellation.
+//
+// An error with no cancellation anywhere in its chain is an independent
+// failure and keeps its own reason. An error that joins an independent
+// failure to the cancellation is also independent: the failure would have
+// happened anyway, and the cancellation only arrived alongside it.
 func cancellationAttributable(err, cause error) bool {
 	if err == nil || cause == nil {
 		return false
@@ -101,38 +103,19 @@ func cancellationAttributable(err, cause error) bool {
 		return true
 	}
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		// A joined error is attributable when the cancellation is among its
-		// parts and every OTHER part is process noise rather than an
-		// independent failure. A subprocess that was killed by the
-		// cancellation reports its exit alongside the cancellation, and that
-		// exit is what the cancellation caused, not a failure that would have
-		// happened anyway.
+		// A joined error is attributable only when EVERY part of it is. One
+		// independent part among the cancellations makes the whole thing an
+		// independent failure.
 		children := joined.Unwrap()
 		if len(children) == 0 {
 			return false
 		}
-		cancelled := false
 		for _, child := range children {
-			if isCancellationLeaf(child, cause) {
-				cancelled = true
-				continue
+			if !cancellationAttributable(child, cause) {
+				return false
 			}
-			if isProcessNoise(child) {
-				continue
-			}
-			// A child that is ITSELF attributable carries the cancellation
-			// too, even when the cancellation is deeper in its chain - a
-			// cleanup path that joins a cancelled command error onto a
-			// successful cleanup still reports the cancellation. The join
-			// must see that, or the enclosing join would reject an error
-			// that is purely the cancellation.
-			if cancellationAttributable(child, cause) {
-				cancelled = true
-				continue
-			}
-			return false
 		}
-		return cancelled
+		return true
 	}
 	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
 		// A wrapper adds a message around the real cause. What matters is
@@ -146,58 +129,6 @@ func cancellationAttributable(err, cause error) bool {
 	}
 	// A leaf: it is the cancellation only if it IS the cancellation.
 	return err == cause || err == context.Canceled
-}
-
-// isCancellationLeaf reports whether an error is the cancellation itself.
-func isCancellationLeaf(err, cause error) bool {
-	if err == nil {
-		return false
-	}
-	return err == cause || err == context.Canceled
-}
-
-// isProcessNoise reports whether an error is a subprocess's exit rather than a
-// failure of its own. A command CANCELLED by the context reports its exit
-// alongside the cancellation, and that exit says what the process was doing
-// when it was stopped, not that it failed on its own.
-//
-// The provenance comes from the execution boundary, not from the shape of the
-// error: a git command records that its own context cancelled it. A signal
-// alone does not prove it - a child can die of SIGSEGV on its own and then
-// race a shutdown that happened to observe the context afterwards - so a
-// signalled exit whose provenance is unknown keeps its own outcome.
-func isProcessNoise(err error) bool {
-	if err == nil {
-		return false
-	}
-	if git.CancelledByContext(err) {
-		return true
-	}
-	if exit, ok := err.(*exec.ExitError); ok {
-		return processWasSignaled(exit)
-	}
-	if joined, ok := err.(interface{ Unwrap() []error }); ok {
-		// Every part must be noise: one independent part among the exits
-		// makes the whole thing an independent failure.
-		children := joined.Unwrap()
-		if len(children) == 0 {
-			return false
-		}
-		for _, child := range children {
-			if !isProcessNoise(child) {
-				return false
-			}
-		}
-		return true
-	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		inner := wrapped.Unwrap()
-		if inner == nil {
-			return false
-		}
-		return isProcessNoise(inner)
-	}
-	return false
 }
 
 func watcherCancellation(err error) bool {

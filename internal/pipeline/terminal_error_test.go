@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// A run cut off mid-step reports the failure it was in the middle of, so the
-// shutdown's reason must win over the step's message. A failure that would
-// have happened anyway must keep its own outcome.
+// A run's failure is the cancellation only when the cancellation IS the whole
+// story. A step that was cut off mid-flight reports the failure it was in the
+// middle of, and that failure is its own.
 func TestCancellationAttributable(t *testing.T) {
 	cause := errors.New("daemon shutting down")
 	independent := errors.New("the ref was already deleted")
@@ -32,43 +32,43 @@ func TestCancellationAttributable(t *testing.T) {
 		},
 		{
 			name: "a step that wraps the cancellation",
-			err:  &stepExecutionError{step: "document", message: "the step stopped", cause: cause},
+			// The step's message says the same thing the cancellation says,
+			// with a prefix. That is decoration, not an independent failure.
+			err:  &stepExecutionError{step: "document", message: "daemon shutting down", cause: cause},
 			want: true,
 		},
 		{
-			name: "a cancelled subprocess that was killed",
-			// The process was stopped by the cancellation, so its exit is
-			// process noise and not a failure of its own.
+			name: "a wrapper that adds its own message around the cancellation",
+			err:  fmt.Errorf("fatal gate reconciliation: %w", cause),
+			want: true,
+		},
+		{
+			name: "a cleanup path that joins a cancelled command error onto a successful cleanup",
+			// The join is still the cancellation, so the enclosing join must
+			// see that rather than reject it.
+			err:  errors.Join(&stepExecutionError{step: "document", message: "daemon shutting down", cause: cause}, nil),
+			want: true,
+		},
+		{
+			name: "a subprocess that was killed",
+			// The command was doing real work when it was stopped, and that
+			// work did not succeed. The read failed; the cancellation only
+			// arrived alongside it.
 			err:  errors.Join(killedProcessExit(t), context.Canceled),
-			want: true,
+			want: false,
 		},
 		{
-			name: "a cancelled subprocess wrapped by a step",
+			name: "a killed subprocess wrapped by a step",
 			err: &stepExecutionError{step: "document", message: "git rev-parse: signal: terminated",
 				cause: errors.Join(killedProcessExit(t), context.Canceled)},
-			want: true,
+			want: false,
 		},
 		{
-			name: "a killed subprocess behind a wrapper that adds its own message",
-			// The shape a git command reports: the command's own error, with
-			// the context's cancellation joined onto it, behind a message.
-			err: fmt.Errorf("fatal gate reconciliation: %w",
-				errors.Join(killedProcessExit(t), context.Canceled)),
-			want: true,
-		},
-		{
-			name: "a subprocess that failed on its own and then saw the cancellation",
-			// The command exited 128 because the ref was rejected. That
-			// failure would have happened anyway, so the cancellation that
-			// was observed afterwards does not replace it.
+			name: "a subprocess that failed on its own",
 			err:  errors.Join(failedProcessExit(t), context.Canceled),
 			want: false,
 		},
 		{
-			name: "a subprocess that failed on its own behind a wrapper",
-			err:  fmt.Errorf("fatal gate reconciliation: %w", errors.Join(failedProcessExit(t), context.Canceled)),
-			want: false,
-		}, {
 			name: "an independent failure",
 			err:  independent,
 			want: false,
@@ -112,7 +112,7 @@ func TestCancellationAttributableIgnoresAWrapperAroundAnIndependentCause(t *test
 }
 
 // killedProcessExit runs a process that is killed by a signal and returns its
-// exit error, which is what a subprocess stopped by a cancellation reports.
+// exit error, which is what a subprocess stopped mid-flight reports.
 func killedProcessExit(t *testing.T) error {
 	t.Helper()
 	cmd := exec.Command("/bin/sh", "-c", "kill -TERM $$")

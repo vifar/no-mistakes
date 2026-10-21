@@ -376,11 +376,13 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		// workload signal, and reporting it here too would close the channel a
 		// second time.
 		if !handle.consumed {
-			// Report the boundary and free the slot FIRST, before the
-			// settlement below, which can still be waiting on storage to
-			// record the terminal outcome.
+			// Report the boundary FIRST, before the settlement below, which
+			// can still be waiting on storage to record the terminal outcome.
+			//
+			// The SLOT is not released here: an unsettled setup failure keeps
+			// its capacity, because the run keeps its custody until its
+			// outcome is durable.
 			handle.reportWorkloadStopped()
-			slot.Release()
 		}
 		if r := recover(); r != nil {
 			slog.Error("panic launching queued run", "run_id", runID, "panic", r)
@@ -400,6 +402,8 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 			m.mu.Unlock()
 			handle.cancel(nil)
 			close(handle.done)
+			// The run settled, so it no longer holds its capacity.
+			slot.Release()
 		}
 	}()
 	if cause := context.Cause(handle.runCtx); cause != nil {
@@ -2698,12 +2702,15 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				err = fmt.Errorf("internal panic: %v", r)
 			}
 			// The run's workload never started, so it is already over. Report
-			// the boundary and free the slot BEFORE the settlement below,
-			// which can still be waiting on storage to record the terminal
-			// outcome. Holding the slot across that wait would keep every
-			// later run from starting while the storage stays unhealthy.
+			// the boundary BEFORE the settlement below, which can still be
+			// waiting on storage to record the terminal outcome. A caller
+			// waiting for the run to stop must not be held by that wait.
+			//
+			// The SLOT is not released here: an unsettled setup failure keeps
+			// its capacity, because the run keeps its custody until its
+			// outcome is durable. Releasing it would let a later run start
+			// while this one is still unresolved.
 			handle.reportWorkloadStopped()
-			slot.Release()
 			if err != nil {
 				err = errors.Join(err, m.failRunSetup(setupCtx, run.ID, started, err))
 			}
@@ -2713,6 +2720,7 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 			if cleanupWorktree != nil {
 				cleanupWorktree()
 			}
+			slot.Release()
 		}
 	}()
 
