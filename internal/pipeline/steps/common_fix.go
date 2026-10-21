@@ -405,7 +405,9 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return false, err
 	}
-	status, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+	// This is a work-preservation decision, not a display preference: intended
+	// untracked files must reach guarded staging even when Git hides them.
+	status, err := git.Run(ctx, sctx.WorkDir, "status", "--porcelain", "--untracked-files=all")
 	if err != nil {
 		return false, fmt.Errorf("check %s changes: %w", stepName, err)
 	}
