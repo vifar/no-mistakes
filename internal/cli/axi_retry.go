@@ -46,8 +46,8 @@ func newAxiRetryCmd() *cobra.Command {
 			"and model are still the ones a new run would use. A failure\n" +
 			"about the change itself - a review finding, a failing test, a refused\n" +
 			"policy, a human decision - is never retried. Neither is a timeout, a\n" +
-			"cancellation, a structured-output rejection, or a typed provider\n" +
-			"usage-limit signal.\n\n" +
+			"cancellation, a structured-output rejection, native structured-output\n" +
+			"retry exhaustion, or a typed provider usage-limit signal.\n\n" +
 			"The new run records which run, step, and round it continues. Like `axi\n" +
 			"run`, retry then blocks until the next gate, CI-ready decision point, or\n" +
 			"final outcome, bounded by --wait (default 8m).",
