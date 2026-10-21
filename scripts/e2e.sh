@@ -212,6 +212,11 @@ if [[ "$#" -eq 0 ]]; then
   else
     daemon_cap=4
   fi
+  # The NORMALIZED cap is exported, so the workers see the same number the
+  # plan was built on. A child that read the original value would fall back
+  # to the package's own default of two slots, and the workers would
+  # compete for slots the plan never allocated.
+  export NM_E2E_DAEMON_MAX="$daemon_cap"
 
   if [[ "$daemon_cap" == 0 || "$daemon_cap" == 1 ]]; then
     go test -tags=e2e -count=1 -timeout "${budget_seconds}s" ./internal/e2e/... ./internal/pipeline/steps/... &

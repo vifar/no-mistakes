@@ -107,6 +107,21 @@ func TestRaceWrapperFailsOnAnUnlistableInventory(t *testing.T) {
 	}
 }
 
+// A listing that reports a failure while STILL printing the healthy packages
+// is the same failure. `go list` can list the packages that are fine and
+// report the erroneous ones on stderr, so a check on the output alone would
+// accept a partial inventory and the suite would report success without
+// ever checking the package that failed to list.
+func TestRaceWrapperFailsOnAPartialInventory(t *testing.T) {
+	result := runRaceWrapper(t, "partiallist")
+	if result.status != 1 {
+		t.Fatalf("wrapper status = %d, want a partial inventory to reject the suite: %s", result.status, result.output)
+	}
+	if len(raceWrapperShards(result.calls)) != 0 {
+		t.Fatalf("a partial inventory launched shards: %q", result.calls)
+	}
+}
+
 // raceWrapperPoles are the measured long poles the wrapper must place one
 // per shard.
 var raceWrapperPoles = []string{
@@ -185,7 +200,10 @@ func runRaceWrapper(t *testing.T, failShard string) raceWrapperResult {
 		t.Fatal(err)
 	}
 	contents := "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$NM_RACE_FAKE_GO_LOG\"\n"
-	contents += "case \" $* \" in *' list '*) if [ \"${NM_RACE_FAKE_GO_FAIL_SHARD:-}\" = nolist ]; then exit 31; fi; cat \"$NM_RACE_FAKE_GO_LIST\"; exit 0 ;; esac\n"
+	// A listing that reports a failure while still printing the healthy
+	// packages: `go list` can do exactly that, and the wrapper must not
+	// accept the partial inventory.
+	contents += "case \" $* \" in *' list '*) case \"${NM_RACE_FAKE_GO_FAIL_SHARD:-}\" in nolist) exit 31 ;; partiallist) cat \"$NM_RACE_FAKE_GO_LIST\"; exit 31 ;; esac; cat \"$NM_RACE_FAKE_GO_LIST\"; exit 0 ;; esac\n"
 	contents += "status=0\n"
 	contents += "case \"$NM_RACE_FAKE_GO_FAIL_SHARD\" in second) case \" $* \" in *'github.com/kunchenguid/no-mistakes/internal/pipeline/steps'*) status=29 ;; esac ;; esac\n"
 	contents += "exit \"$status\"\n"

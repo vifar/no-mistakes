@@ -61,7 +61,19 @@ slow_packages=(
 # Every package of the suite. The list is the suite's inventory: a package
 # that is not in a shard does not run, so the inventory is built ONCE and
 # every package lands in exactly one shard.
-all_packages="$(go list ./... 2>/dev/null | grep -v '/internal/e2e\($\|/\)')"
+#
+# The EXIT STATUS of `go list` is checked, not only whether the output is
+# empty. `go list` can list the healthy packages and report the erroneous
+# ones on stderr, so a partial inventory with a non-empty stdout would be
+# accepted and the suite would report success without ever checking the
+# package that failed to list.
+all_packages="$(go list ./... 2>/dev/null)"
+list_status=$?
+if (( list_status != 0 )); then
+  echo "race suite could not list the packages (exit $list_status)" >&2
+  exit 1
+fi
+all_packages="$(printf '%s\n' "$all_packages" | grep -v '/internal/e2e\($\|/\)')"
 if [[ -z "$all_packages" ]]; then
   echo "race suite could not list the packages" >&2
   exit 1
