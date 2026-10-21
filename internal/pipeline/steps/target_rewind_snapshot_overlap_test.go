@@ -146,3 +146,83 @@ func TestTargetRewindSnapshotExcludesIntentToAddScratch(t *testing.T) {
 		t.Fatal("snapshot captured scratch")
 	}
 }
+
+func TestTargetRewindSnapshotReplacementExcludesScratch(t *testing.T) {
+	for _, intentToAdd := range []bool{false, true} {
+		name := "staged"
+		if intentToAdd {
+			name = "intent-to-add"
+		}
+		t.Run(name, func(t *testing.T) {
+			c, _ := rewindFixture(t)
+			c.RunLogDir = t.TempDir()
+			head := c.Run.HeadSHA
+			parent := filepath.Join(c.WorkDir, "feature.txt")
+			if err := os.Remove(parent); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(parent, ".journal-live"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			for path, content := range map[string]string{
+				"real[1].txt":                "replacement content\n",
+				".journal-live/postgres.log": "private scratch content\n",
+			} {
+				if err := os.WriteFile(filepath.Join(parent, path), []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if intentToAdd {
+				gitCmd(t, c.WorkDir, "add", "-N", "-A")
+			} else {
+				gitCmd(t, c.WorkDir, "add", "-A")
+			}
+			if err := snapshotLeftoverValidationEdits(c, "test", head); err != nil {
+				t.Fatal(err)
+			}
+			files, err := filepath.Glob(filepath.Join(c.RunLogDir, "leftover-validation-*.json"))
+			if err != nil || len(files) != 1 {
+				t.Fatalf("snapshot: %v %v", files, err)
+			}
+			data, err := os.ReadFile(files[0])
+			if err != nil {
+				t.Fatal(err)
+			}
+			var record leftoverValidationSnapshot
+			if err := json.Unmarshal(data, &record); err != nil {
+				t.Fatal(err)
+			}
+			for _, patch := range [][]byte{record.StagedPatch, record.UnstagedPatch} {
+				if bytes.Contains(patch, []byte("private scratch content")) || bytes.Contains(patch, []byte(".journal-live")) {
+					t.Fatalf("recovery patch retained excluded scratch: %s", patch)
+				}
+			}
+			if bytes.Contains(record.Status, []byte(".journal-live")) || len(record.Untracked) != 0 || len(record.Paths) != 2 {
+				t.Fatalf("unexpected recovery scope: %+v", record)
+			}
+			if err := os.RemoveAll(c.WorkDir); err != nil {
+				t.Fatal(err)
+			}
+			recovery := t.TempDir()
+			gitCmd(t, recovery, "clone", c.Repo.UpstreamURL, ".")
+			gitCmd(t, recovery, "checkout", "--detach", head)
+			for _, patch := range [][]byte{record.StagedPatch, record.UnstagedPatch} {
+				if len(patch) == 0 {
+					continue
+				}
+				file := filepath.Join(t.TempDir(), "recover.patch")
+				if err := os.WriteFile(file, patch, 0600); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, recovery, "apply", "--index", file)
+			}
+			got, err := os.ReadFile(filepath.Join(recovery, "feature.txt", "real[1].txt"))
+			if err != nil || string(got) != "replacement content\n" {
+				t.Fatalf("replacement not recovered exactly once: %q %v", got, err)
+			}
+			if _, err := os.Stat(filepath.Join(recovery, "feature.txt", ".journal-live")); !os.IsNotExist(err) {
+				t.Fatalf("scratch restored by recovery: %v", err)
+			}
+		})
+	}
+}

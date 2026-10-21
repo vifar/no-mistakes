@@ -65,10 +65,16 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 		return err
 	}
 	entries := map[string][]string{}
+	var excluded []string
 	for _, entry := range strings.Split(string(status), "\x00") {
-		if len(entry) >= 4 && entry[2] == ' ' && wanted[entry[3:]] {
+		if len(entry) < 4 || entry[2] != ' ' {
+			continue
+		}
+		if wanted[entry[3:]] {
 			entries[entry[3:]] = append(entries[entry[3:]], entry)
 			snapshot.Status = append(snapshot.Status, []byte(entry+"\x00")...)
+		} else {
+			excluded = append(excluded, ":(top,exclude,literal)"+entry[3:])
 		}
 	}
 	// Literal pathspecs and disabled external diff/textconv prevent source
@@ -76,7 +82,7 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 	// Recovery consumes a standard patch, regardless of display preferences.
 	// Submodule settings can otherwise omit gitlinks or emit log summaries
 	// that git apply cannot consume, in either patch stream.
-	patchArgs := []string{"--literal-pathspecs", "diff", "--no-color", "--binary",
+	patchArgs := []string{"diff", "--no-color", "--binary",
 		"--no-ext-diff", "--no-textconv", "--no-renames", "--no-relative",
 		"--ignore-submodules=none", "--submodule=short",
 		"--src-prefix=a/", "--dst-prefix=b/", "--unified=3",
@@ -88,14 +94,19 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 	// The covering set keeps every surviving pathspec free of another selected
 	// path's prefix, so batches cannot overlap either.
 	for _, batch := range pathBatches(coveringLeftoverPaths(paths)) {
+		selected := make([]string, 0, len(batch)+len(excluded))
+		for _, path := range batch {
+			selected = append(selected, ":(top,literal)"+path)
+		}
+		selected = append(selected, excluded...)
 		stagedArgs := append(append([]string{}, patchArgs...), "--cached", head, "--")
-		staged, err := git.RunRaw(c.Ctx, c.WorkDir, append(stagedArgs, batch...)...)
+		staged, err := git.RunRaw(c.Ctx, c.WorkDir, append(stagedArgs, selected...)...)
 		if err != nil {
 			return err
 		}
 		snapshot.StagedPatch = append(snapshot.StagedPatch, staged...)
 		unstagedArgs := append(append([]string{}, patchArgs...), "--")
-		unstaged, err := git.RunRaw(c.Ctx, c.WorkDir, append(unstagedArgs, batch...)...)
+		unstaged, err := git.RunRaw(c.Ctx, c.WorkDir, append(unstagedArgs, selected...)...)
 		if err != nil {
 			return err
 		}
