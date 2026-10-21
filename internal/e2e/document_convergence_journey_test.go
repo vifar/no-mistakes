@@ -675,7 +675,11 @@ func TestDocumentJourneyUnsafeAndStrictRestart(t *testing.T) {
 				path = "guides/feature.md"
 			}
 			action := documentJourneyAction(path, "updated\n")
-			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenario(t, "", action)})
+			// The READ-ONLY gap check gets its own response: it must report a
+			// gap without editing, because a check that edits has its
+			// proposal rolled back and its verdict rejected, and a check that
+			// edits twice fails the step closed.
+			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenarioWith(t, "", action, documentJourneyCapGapAction())})
 			// A trusted broad path selection still cannot admit executable or
 			// instruction changes. Strict runs use the real shipping CLI.
 			trustedPaths := "['**']"
@@ -686,11 +690,11 @@ func TestDocumentJourneyUnsafeAndStrictRestart(t *testing.T) {
 			if kind == "intermediate-code-revert" {
 				action["edits"] = []map[string]string{{"path": "README.md", "new": "updated\n"}, {"path": "feature.txt", "new": "temporary code change\n"}}
 				action["git"] = [][]string{{"add", "feature.txt"}, {"commit", "-m", "intermediate executable change"}, {"restore", "--source=HEAD^", "--staged", "--worktree", "--", "feature.txt"}, {"add", "README.md"}, {"commit", "-m", "restore feature and document"}}
-				documentJourneyScenario(t, h.Scenario, action)
+				documentJourneyScenarioWith(t, h.Scenario, action, documentJourneyCapGapAction())
 			}
 			if kind == "executable-document" {
 				action["git"] = [][]string{{"config", "core.filemode", "false"}, {"add", "README.md"}, {"update-index", "--chmod=+x", "README.md"}, {"commit", "-m", "executable documentation"}}
-				documentJourneyScenario(t, h.Scenario, action)
+				documentJourneyScenarioWith(t, h.Scenario, action, documentJourneyCapGapAction())
 			}
 			if kind == "hidden-gitlink" {
 				// A gitlink need not have .gitmodules or a checked-out directory.
@@ -703,7 +707,7 @@ func TestDocumentJourneyUnsafeAndStrictRestart(t *testing.T) {
 				gitIn(t, h, h.WorkDir, "update-index", "--add", "--cacheinfo", "160000,"+old+",module")
 				gitIn(t, h, h.WorkDir, "commit", "-m", "seed hidden gitlink")
 				gitIn(t, h, h.WorkDir, "push", "origin", "main")
-				documentJourneyScenario(t, h.Scenario, action)
+				documentJourneyScenarioWith(t, h.Scenario, action, documentJourneyCapGapAction())
 			}
 			state := setupStatefulGitHub(t, h)
 			initFromOwnWorktree(t, h, "init-document-restart")
