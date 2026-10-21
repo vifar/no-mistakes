@@ -66,7 +66,12 @@ func commitLeftoverValidationEdits(c *pipeline.StepContext) (bool, error) {
 	// the correction budget. A refusal must retain the same evidence as a
 	// successful correction, independently of disposable-worktree cleanup.
 	if err := snapshotLeftoverValidationEdits(c, producer, head); err != nil {
-		return false, fmt.Errorf("save leftover validation evidence: %w", err)
+		// A terminal error would let cleanup delete the only copy of the
+		// unsaved edits. Use the existing automatic-commit refusal gate.
+		return false, &pipeline.ProtectedPathError{
+			Rule:   "leftover validation evidence",
+			Detail: fmt.Sprintf("save leftover validation evidence: %v; index and worktree preserved, restore the snapshot destination before retrying", err),
+		}
 	}
 	if err := unstageIndexedScratch(c); err != nil {
 		return false, err

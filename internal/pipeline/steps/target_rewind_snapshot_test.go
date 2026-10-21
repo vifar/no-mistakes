@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -204,6 +205,15 @@ func TestTargetRewindEvidenceFailurePreservesTheWorktree(t *testing.T) {
 	_, err := (&RebaseStep{}).Execute(c)
 	if err == nil || !strings.Contains(err.Error(), "save leftover validation evidence") || !strings.Contains(err.Error(), "test step left uncommitted edits") || !strings.Contains(err.Error(), "feature.txt") {
 		t.Fatalf("missing attributed evidence failure: %v", err)
+	}
+	// A plain error terminalizes the run and lets cleanup delete these edits.
+	// The refusal must use the existing worktree-preserving approval gate.
+	outcome := pipeline.ProtectedPathOutcome(err)
+	if outcome == nil || !outcome.NeedsApproval || !pipeline.HasProtectedPathRefusal(outcome.Findings) {
+		t.Fatalf("evidence failure permits terminal cleanup: %v", err)
+	}
+	if allowed, err := c.DB.CanCommitLeftoverValidationEdits(c.Run.ID); err != nil || !allowed {
+		t.Fatalf("evidence failure spent the correction budget: %v", err)
 	}
 	if got := gitCmd(t, c.WorkDir, "rev-parse", "HEAD"); got != head {
 		t.Fatalf("evidence failure moved head: %s", got)
