@@ -32,9 +32,8 @@ flowchart TD
 
 Review has an additional step-specific outstanding condition during carry-forward verification; missing coverage or silence can keep its gate parked even when no blocking-severity finding is reported. A clean review that omits its coverage record parks for approval the same way rather than certifying the head. See the [Review step reference](/no-mistakes/reference/pipeline-steps/#review) for the authoritative carry-forward contract.
 
-The document step applies fixes during its initial pass instead of relying on a follow-up automatic fix loop.
-When `commands.lint` is empty, that same invocation is a combined documentation-and-lint housekeeping pass: it updates documentation, detects relevant linters and formatters, applies safe fixes, verifies both duties, and categorizes any unresolved findings for the document or lint gate.
-The lint step consumes a usable lint result from that pass instead of starting a second cold agent invocation; when the combined pass is skipped, cannot produce trustworthy structured output, or loses its in-memory result across a daemon restart, lint falls back to its own agent pass.
+The document step applies fixes during repair passes instead of relying on a follow-up automatic fix loop; the [Document commit cap](/no-mistakes/reference/repo-config/#documentmax_commits_per_run) governs when it can make repairs.
+The [Document and Lint step reference](/no-mistakes/reference/pipeline-steps/#document) owns combined housekeeping and standalone lint fallback behavior.
 Unresolved documentation findings and unresolved blocking lint findings pause for approval instead of entering another automatic fix loop.
 
 ## Before the agent: deterministic CI reruns

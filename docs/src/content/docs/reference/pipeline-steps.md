@@ -252,7 +252,7 @@ The [finding-action model](/no-mistakes/concepts/auto-fix/#finding-actions) owns
 
 ## Document
 
-Before launching its agent, Document ensures configured [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) has succeeded for the worktree, including when the agent also performs lint.
+Document repair passes use the setup rules owned by [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare).
 
 Updates matching documentation for code changes and reports unresolved gaps or owner decisions.
 

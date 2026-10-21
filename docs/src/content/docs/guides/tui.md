@@ -78,7 +78,7 @@ Step status icons:
 
 Completed steps show their duration.
 Configured repository gates appear immediately after their anchor under names such as `gate.test.mutation-budget`.
-When no lint command is configured, the Document row is labeled `Document + Lint housekeeping`; its duration is the shared documentation-and-lint agent invocation, while Lint shows only its cached-result handoff duration.
+A combined pass labels the Document row `Document + Lint housekeeping`; its duration is the shared documentation-and-lint agent invocation. When Lint consumes that result, it shows only its cached-result handoff duration. See the [step reference](/no-mistakes/reference/pipeline-steps/#document) for combined-pass and fallback behavior.
 Steps with fixed findings, and steps currently fixing reported findings, show a right-aligned count such as `2/3 fixed` or `0/3 fixed`.
 The first number counts completed fixes, not findings selected for an in-progress fix.
 Connectors (`│`) between steps are hidden when the terminal height is under 30 lines.

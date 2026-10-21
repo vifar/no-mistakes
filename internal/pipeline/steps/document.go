@@ -13,9 +13,9 @@ import (
 )
 
 // DocumentStep keeps documentation accurate for the change under its
-// placement policy, and - when no deterministic lint command is configured -
-// also performs the agent-driven lint duty in the same invocation so the
-// pipeline pays one cold agent pass for housekeeping instead of two.
+// placement policy. Repair passes also perform the agent-driven lint duty
+// when no deterministic lint command is configured, sharing one invocation
+// for housekeeping.
 type DocumentStep struct{}
 
 func (s *DocumentStep) Name() types.StepName { return types.StepDocument }
@@ -105,7 +105,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		ignorePatterns = strings.Join(sctx.Config.IgnorePatterns, ", ")
 	}
 
-	// Combine the agent-driven lint duty into this pass when no deterministic
+	// Combine the agent-driven lint duty into a repair pass when no deterministic
 	// lint command is configured; the lint step then consumes the result
 	// instead of paying its own cold agent invocation.
 	combinedLint := sctx.Config.Commands.Lint == ""

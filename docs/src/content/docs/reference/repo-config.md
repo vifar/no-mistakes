@@ -374,7 +374,7 @@ Optional dependency-preparation command for isolated run worktrees. Run via the 
 | Type | `string` |
 | Default | Empty (no preparation command) |
 
-When set, no-mistakes runs this command before the first Review fix round, Document agent turn (including combined lint), standalone agent-driven Lint, or configured Test, Lint, or Format command that the pipeline reaches, including machine-local additional Test or Lint checks.
+When set, no-mistakes runs this command before the first Review fix round, Document repair turn (including combined lint), standalone agent-driven Lint, or configured Test, Lint, or Format command that the pipeline reaches, including machine-local additional Test or Lint checks.
 It is a lazy hook rather than an additional pipeline step: a read-only Review pass does not trigger preparation, and a successful setup is reused by later fix rounds and steps in the same worktree. Repositories without a preparation command keep their existing behavior.
 Trusted `test.prepare: true` also triggers it eagerly before agent-only Test while leaving `commands.test` unset.
 A successful result is shared by all later preparation callers in that isolated worktree, including after daemon recovery.
@@ -413,8 +413,8 @@ Explicit lint command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /
 | Default | Empty (agent auto-detects) |
 
 When set, the lint step runs this exact command and checks the exit code.
-When empty, the agent-driven lint duty is folded into the document step's combined housekeeping pass: one agent invocation covers both documentation and lint, and the lint step consumes that result, reporting lint-category findings with the same gate semantics (blocking findings park for a decision).
-Neither responsibility is skipped: when the document step has nothing to run against (or its structured output cannot be trusted), the lint step runs its own agent pass as before.
+When empty, Document repair passes include the agent-driven lint duty: one agent invocation covers both documentation and lint, and the lint step consumes that result, reporting lint-category findings with the same gate semantics (blocking findings park for a decision).
+Neither responsibility is skipped: when no usable combined result exists, the lint step runs its own agent pass. This includes the [read-only check at the Document commit cap](#documentmax_commits_per_run).
 
 ### commands.format
 
