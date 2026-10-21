@@ -59,17 +59,17 @@ func (e *Executor) terminalizeCertifiedWatcher(run *db.Run, message string, stat
 	defer cancel()
 	clean, err := git.Run(ctx, e.workDir, "status", "--porcelain")
 	if err != nil {
-		return err
+		return &terminalPreparationError{cause: err}
 	}
 	if strings.TrimSpace(clean) != "" {
-		return e.db.RecordIneligibleTerminal(run.ID, message, status, &head)
+		return &terminalPreparationError{cause: fmt.Errorf("terminal watcher worktree changed")}
 	}
 	observed, err := git.HeadSHA(ctx, e.workDir)
 	if err != nil {
-		return err
+		return &terminalPreparationError{cause: err}
 	}
 	if observed != head {
-		return fmt.Errorf("terminal watcher head changed")
+		return &terminalPreparationError{cause: fmt.Errorf("terminal watcher head changed")}
 	}
 	var binding *db.ControlledShutdownBinding
 	if controlled != nil {

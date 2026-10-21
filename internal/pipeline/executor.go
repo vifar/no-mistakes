@@ -3138,7 +3138,7 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	}
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
 	executionErr := err
-	writeTerminal := func(allowProof bool) error {
+	writeTerminal := func() error {
 		if infrastructure {
 			// Revoke cancellation eligibility before settling the canonical storage
 			// outcome and active steps through the shared infrastructure path.
@@ -3166,10 +3166,19 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 			}
 		}
 
-		if allowProof && verified && explicitCancellation && watcherCancellation(executionErr) {
+		if verified && explicitCancellation && watcherCancellation(executionErr) {
 			if prepareErr := e.terminalizeCertifiedWatcher(run, errMsg, runStatus, verifiedHead, controlled); prepareErr == nil {
 				return nil
 			} else {
+				var preparation *terminalPreparationError
+				if !errors.As(prepareErr, &preparation) {
+					// A failed durable write says nothing about validation. Retry
+					// the same decision, rechecking proof under the publication lock.
+					return prepareErr
+				}
+				// Once inspection cannot prove an unchanged watcher, a later
+				// settlement retry must not restore its cancellation eligibility.
+				explicitCancellation = false
 				slog.Warn("strict terminal proof unavailable; recording failure outcome", "run", run.ID, "error", prepareErr)
 				verifiedHead, verified = e.reconcileTerminalRunHead(run)
 			}
@@ -3180,11 +3189,11 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		}
 		return e.db.RecordIneligibleTerminal(run.ID, errMsg, runStatus, head)
 	}
-	dbErr := WithCommitStatusLock(context.Background(), func() error { return writeTerminal(true) })
+	dbErr := WithCommitStatusLock(context.Background(), writeTerminal)
 	if dbErr != nil {
-		slog.Warn("settling ineligible terminal outcome", "run", run.ID, "error", dbErr)
+		slog.Warn("retrying terminal outcome settlement", "run", run.ID, "error", dbErr)
 		err = errors.Join(err, dbErr)
-		dbErr = SettleTerminalWrite(e.db, func() error { return writeTerminal(false) })
+		dbErr = SettleTerminalWrite(e.db, writeTerminal)
 	}
 	if dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
