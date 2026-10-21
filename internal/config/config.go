@@ -856,21 +856,12 @@ type CI struct {
 	// docs/src/content/docs/reference/repo-config.md.
 	CarryReviewOnReplay bool
 
-	// ReleaseAfterChecksPass makes the CI step finish the run at its checks
-	// verdict instead of monitoring the pull request until it is merged or
-	// closed.
-	//
-	// false (default): the step records readiness and keeps polling, bounded
-	// by ci_timeout. Target movement and conflict repair follow the comparison
-	// rules in docs/src/content/docs/reference/pipeline-steps.md; monitoring
-	// alone does not authorize refreshing a changed comparison.
-	//
-	// true: the green observation ends the step, and the run completes with the
-	// checks_passed status, releasing its worktree and its lane while the merge
-	// decision stays with a human. It is opt-in because it changes how long a
-	// run lives and how much a caller may assume a still-active run is watching
-	// (see VISION.md's cost and consent rules). A trusted repository config may
-	// set it for its own workflow.
+	// ReleaseAfterChecksPass opts ordinary runs into ending at CI readiness;
+	// ciReleaseAfterChecksPass in the CI step excludes strict shipping.
+	// It is opt-in because it changes how long a caller may assume the run is
+	// watching the PR (see VISION.md's cost and consent rules). Completion and
+	// configuration semantics are owned by ci.release_after_checks_pass in
+	// docs/src/content/docs/reference/repo-config.md.
 	ReleaseAfterChecksPass bool
 	// RequiredChecks selects which checks on the PR head decide readiness and
 	// repair.
