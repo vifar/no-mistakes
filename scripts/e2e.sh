@@ -378,6 +378,18 @@ if [[ "$#" -eq 0 ]]; then
     exit "$steps_status"
   fi
 
+  # The budget is recomputed AGAIN, because the step worker's time is the
+  # suite's time too. Handing the shards the allowance that was computed
+  # before the step worker ran would give them the step worker's elapsed
+  # time a second time, and the shards could then run past the job's own
+  # bound.
+  shard_seconds=$(( budget_seconds - (SECONDS - start_seconds) ))
+  if (( shard_seconds <= 0 )); then
+    echo "e2e suite budget exhausted before the shards started" >&2
+    wait "$terminal_pid" || true
+    exit 1
+  fi
+
   shard_pids=()
   shard_statuses=()
   shard_index=0
@@ -387,7 +399,7 @@ if [[ "$#" -eq 0 ]]; then
       continue
     fi
     shard_pattern="$(printf '%s\n' "${shard_tests[$shard_index]}" | paste -sd'|' -)"
-    go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
+    go test -tags=e2e -count=1 -timeout "${shard_seconds}s" \
       -run "^(${shard_pattern})$" \
       -skip '^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$' \
       ./internal/e2e/... &

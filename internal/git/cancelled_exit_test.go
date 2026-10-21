@@ -131,40 +131,122 @@ func TestCancelledExitRecordsOnlyTheContextsOwnStop(t *testing.T) {
 // gone: the run was cancelled, but the failure it recorded was the refusal
 // rather than the cancellation, so the run read as failed instead of
 // cancelled.
+//
+// The oracle is the STANDARD LIBRARY's own report, obtained from a real
+// exec.CommandContext whose Cancel hook refuses. The test never builds the
+// message the recogniser looks for, so a recogniser that looked for the
+// wrong text would fail here.
 func TestCancelledExitRecordsARefusedStop(t *testing.T) {
-	// The refusal is what the standard library reports when the cancel
-	// hook's kill is refused.
-	refusal := errors.New("operation not permitted")
-	wrapped := &cancelRefusal{refusal: refusal}
-	if !isCancelRefusal(wrapped) {
-		t.Fatalf("the refusal was not recognised: %v", wrapped)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The child finishes on its own, so the command's own outcome is a
+	// success. The stop is refused, so the standard library reports the
+	// refusal INSTEAD of the success - and that report is the shape this
+	// failure takes: the command was interrupted, and the interruption
+	// could not reach the child.
+	cmd := exec.CommandContext(ctx, "true")
+	cmd.Cancel = func() error { return errors.New("operation not permitted") }
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
 	}
-	if isCancelRefusal(refusal) {
+	cancel()
+	err := cmd.Wait()
+	if err == nil {
+		t.Fatal("the refused stop reported success")
+	}
+	// The standard library's own report is the oracle: the test never
+	// builds the text the recogniser looks for, so a recogniser that
+	// looked for the wrong text would fail here.
+	if !isCancelRefusal(err) {
+		t.Fatalf("the standard library's refusal was not recognised: %v", err)
+	}
+	// The refusal is the standard library's, not the test's: its text
+	// carries the refusal the hook returned.
+	if !strings.Contains(err.Error(), "operation not permitted") {
+		t.Fatalf("the refusal does not carry the hook's own error: %v", err)
+	}
+	// An error that is not the refusal is the command's own.
+	if isCancelRefusal(errors.New("operation not permitted")) {
 		t.Fatal("an unrelated error was read as a refusal")
 	}
 	if isCancelRefusal(nil) {
 		t.Fatal("no error was read as a refusal")
 	}
-
-	// The marker carries the refusal, so a caller can tell the refusal
-	// apart from a command that failed on its own.
-	marker := &CancelledExitError{Refused: wrapped}
-	if marker.Error() == "" {
-		t.Fatal("the marker reported no reason")
-	}
-	var found *CancelledExitError
-	if !errors.As(error(marker), &found) {
-		t.Fatal("the marker was not found through the error chain")
-	}
-	if found.Refused == nil {
-		t.Fatal("the marker did not carry the refusal")
-	}
 }
 
-// cancelRefusal is the standard library's report of a refused stop: a
-// wrapper whose text is the refusal's own.
-type cancelRefusal struct{ refusal error }
-
-func (e *cancelRefusal) Error() string { return cancelRefusalPrefix + ": " + e.refusal.Error() }
-
-func (e *cancelRefusal) Unwrap() error { return e.refusal }
+// The marker is attached on the refused-stop path, so a caller can tell a
+// refused stop from a command that failed on its own. The marker is built by
+// the PRODUCTION path: the git package's own command, whose stop was
+// refused.
+//
+// The refusal reaches the caller only when it IS the error. When the child
+// is still running, the standard library reports the refusal and the
+// child is killed by the shell package's group termination, so the child
+// produced an exit status as well - and the exit status is what the
+// standard library prefers. The marker then carries the exit, and the
+// refusal is what the stop's own hook returned. Either way the failure is
+// the cancellation's, which is what the marker says.
+func TestCancelledExitMarkerCarriesTheRefusedStop(t *testing.T) {
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "repo")
+	if err := exec.Command("git", "init", repo).Run(); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"-C", repo, "config", "user.email", "t@t.com"},
+		{"-C", repo, "config", "user.name", "T"},
+		{"-C", repo, "commit", "--allow-empty", "-m", "init"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The refusal is injected by the package's own stop path, so the
+	// marker is the production one.
+	refuseStops.Store(true)
+	defer refuseStops.Store(false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := filepath.Join(dir, "started")
+	for _, args := range [][]string{
+		{"-C", repo, "config", "alias.sleeper", "!echo $$ > '" + strings.ReplaceAll(started, "'", "'\\''") + "'; exec sleep 30"},
+	} {
+		if err := exec.Command("git", args...).Run(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := Run(ctx, repo, "sleeper")
+		done <- err
+	}()
+	// The cancel lands while the child is running, so the stop is the
+	// context's doing.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the child never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	err := <-done
+	if err == nil {
+		t.Fatal("the refused stop reported success")
+	}
+	var cancelled *CancelledExitError
+	if !errors.As(err, &cancelled) {
+		t.Fatalf("a refused stop was not marked: %v", err)
+	}
+	if cancelled.Error() == "" {
+		t.Fatal("the marker reported no reason")
+	}
+	// The marker says the failure is the cancellation's, and the run
+	// reads it as the cancellation rather than as an independent failure.
+	if cancelled.ExitError == nil && cancelled.Refused == nil {
+		t.Fatal("the marker carried neither the exit nor the refusal")
+	}
+}

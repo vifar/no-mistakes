@@ -35,7 +35,7 @@ func TestRaceWrapperRunsEveryPackageExactlyOnce(t *testing.T) {
 	seen := map[string]int{}
 	for _, call := range shards {
 		for _, pkg := range strings.Fields(call) {
-			if !strings.HasPrefix(pkg, "./") {
+			if !strings.HasPrefix(pkg, "github.com/") {
 				continue
 			}
 			seen[pkg]++
@@ -109,7 +109,11 @@ func TestRaceWrapperFailsOnAnUnlistableInventory(t *testing.T) {
 
 // raceWrapperPoles are the measured long poles the wrapper must place one
 // per shard.
-var raceWrapperPoles = []string{"./internal/daemon", "./internal/pipeline/steps", "./internal/pipeline"}
+var raceWrapperPoles = []string{
+	"github.com/kunchenguid/no-mistakes/internal/daemon",
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps",
+	"github.com/kunchenguid/no-mistakes/internal/pipeline",
+}
 
 // raceWrapperShards returns the wrapper's go test invocations, leaving out
 // the inventory listing.
@@ -143,15 +147,20 @@ type raceWrapperResult struct {
 	calls  []string
 }
 
-// raceWrapperInventory is the fake go list's package inventory.
+// raceWrapperInventory is the fake go list's package inventory. The
+// identities are the ones `go list` emits - the full import path - because
+// that is the contract the wrapper's own list has. A fixture that answered
+// with relative paths would let a mismatch between the two representations
+// pass unnoticed: the long poles would never be excluded from the checksum
+// placement, and the expensive package would run twice.
 var raceWrapperInventory = []string{
-	"./cmd/fakeagent",
-	"./internal/agent",
-	"./internal/cli",
-	"./internal/daemon",
-	"./internal/pipeline",
-	"./internal/pipeline/steps",
-	"./internal/scm/github",
+	"github.com/kunchenguid/no-mistakes/cmd/fakeagent",
+	"github.com/kunchenguid/no-mistakes/internal/agent",
+	"github.com/kunchenguid/no-mistakes/internal/cli",
+	"github.com/kunchenguid/no-mistakes/internal/daemon",
+	"github.com/kunchenguid/no-mistakes/internal/pipeline",
+	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps",
+	"github.com/kunchenguid/no-mistakes/internal/scm/github",
 }
 
 // runRaceWrapper runs scripts/race.sh against a fake go that records its
@@ -178,7 +187,7 @@ func runRaceWrapper(t *testing.T, failShard string) raceWrapperResult {
 	contents := "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$NM_RACE_FAKE_GO_LOG\"\n"
 	contents += "case \" $* \" in *' list '*) if [ \"${NM_RACE_FAKE_GO_FAIL_SHARD:-}\" = nolist ]; then exit 31; fi; cat \"$NM_RACE_FAKE_GO_LIST\"; exit 0 ;; esac\n"
 	contents += "status=0\n"
-	contents += "case \"$NM_RACE_FAKE_GO_FAIL_SHARD\" in second) case \" $* \" in *'./internal/pipeline/steps'*) status=29 ;; esac ;; esac\n"
+	contents += "case \"$NM_RACE_FAKE_GO_FAIL_SHARD\" in second) case \" $* \" in *'github.com/kunchenguid/no-mistakes/internal/pipeline/steps'*) status=29 ;; esac ;; esac\n"
 	contents += "exit \"$status\"\n"
 	if err := os.WriteFile(fakeGo, []byte(contents), 0o755); err != nil {
 		t.Fatal(err)

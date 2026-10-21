@@ -46,10 +46,16 @@ shard_count=3
 # The measured long poles of the suite, one per shard. Each of these costs
 # more than the rest of a shard together, so two of them in one shard would
 # make that shard the suite's long pole.
+#
+# The identities are the ones `go list` emits - the full import path - so
+# every package in the inventory is named the same way. A relative path here
+# would never match the inventory, and the long pole would then be assigned
+# by the checksum as well: the expensive package would run twice and the
+# balance would be defeated.
 slow_packages=(
-  ./internal/daemon
-  ./internal/pipeline/steps
-  ./internal/pipeline
+  github.com/kunchenguid/no-mistakes/internal/daemon
+  github.com/kunchenguid/no-mistakes/internal/pipeline/steps
+  github.com/kunchenguid/no-mistakes/internal/pipeline
 )
 
 # Every package of the suite. The list is the suite's inventory: a package

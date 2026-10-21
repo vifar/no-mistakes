@@ -36,6 +36,16 @@ func (e *CommandError) Error() string {
 
 func (e *CommandError) Unwrap() error { return e.Err }
 
+// refuseStops makes the package's own stop REFUSED. It is a test hook: the
+// refusal is what a stop of an already-gone process group looks like, and
+// the provenance has to be recorded on that path too. The hook exists so the
+// production recording path is exercised, rather than a test that builds the
+// marker by hand.
+var refuseStops atomic.Bool
+
+// errRefusedStop is the refusal a stopped command reports.
+var errRefusedStop = errors.New("operation not permitted")
+
 // CancelledExitError is the exit of a subprocess that THIS command's context
 // stopped.
 //
@@ -192,6 +202,18 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	cancelCommand := cmd.Cancel
 	cmd.Cancel = func() error {
 		cancelled.Store(true)
+		if refuseStops.Load() {
+			// The stop is refused, exactly as a kill of an
+			// already-gone process group is refused. The refusal
+			// is what the standard library reports when the
+			// process is already done, and it is the shape of
+			// this failure: the context interrupted the command,
+			// and the stop could not reach the child.
+			//
+			// The context still interrupted the command, so the
+			// refusal is still the cancellation's doing.
+			return errRefusedStop
+		}
 		return cancelCommand()
 	}
 	out, err := shellenv.OutputShellCommand(cmd)
