@@ -1090,7 +1090,9 @@ func worktreeRefusalCleanupReason(d *db.DB, run *db.Run) string {
 		// work is safe to discard. A failed pass therefore cannot authorize
 		// forced cleanup, even without a protected-path finding. Keep this
 		// decision durable across terminal cleanup, reaping, and restart.
-		if step.StepName == types.StepDocument && step.Status == types.StepStatusFailed {
+		// Administrative interruption is not a refusal by Document; protected
+		// path findings below still retain their ordinary preservation guard.
+		if step.StepName == types.StepDocument && step.Status == types.StepStatusFailed && !step.InterruptedByTerminalRun() {
 			return fmt.Sprintf("run %s has a failed Document step; preserving index and worktree", run.ID)
 		}
 		if step.FindingsJSON == nil || !pipeline.HasProtectedPathRefusal(*step.FindingsJSON) || step.Status == types.StepStatusCompleted {
@@ -1672,10 +1674,11 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
-		if err := mgr.HandleCancel(p.RunID); err != nil {
+		closed, err := mgr.handleCancelWithCleanup(p.RunID)
+		if err != nil {
 			return nil, err
 		}
-		return &ipc.CancelRunResult{OK: true}, nil
+		return &ipc.CancelRunResult{OK: true, StepsClosed: closed}, nil
 	})
 
 	srv.HandleStream(ipc.MethodSubscribe, func(ctx context.Context, params json.RawMessage) (ipc.StreamFunc, error) {

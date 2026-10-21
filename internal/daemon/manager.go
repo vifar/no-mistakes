@@ -50,17 +50,22 @@ var fetchRecoveredDefaultBranchSHA = fetchTrustedDefaultBranchSHA
 // RunManager tracks active pipeline executors and manages run lifecycle.
 type RunManager struct {
 	// beforeAnswerRespond is a test scheduling barrier, nil in production.
-	beforeAnswerRespond func()
+	beforeAnswerRespond     func()
+	beforeTerminalStepsRead func(context.Context) // test barrier for a blocked stale-row query
 
-	runtimeInstance  string
-	runtimeStartedAt time.Time
-	mu               sync.Mutex
-	runs             map[string]*managedRun
-	wg               sync.WaitGroup // tracks background run goroutines
-	shutdownState    atomic.Int32   // prevents new runs during shutdown
-	db               *db.DB
-	paths            *paths.Paths
-	steps            StepFactory
+	terminalProcessRunning func(context.Context, int) (bool, error)
+	maintenanceGate        chan struct{}
+	maintenanceCtx         context.Context
+	maintenanceCancel      context.CancelFunc
+	runtimeInstance        string
+	runtimeStartedAt       time.Time
+	mu                     sync.Mutex
+	runs                   map[string]*managedRun
+	wg                     sync.WaitGroup // tracks background run goroutines
+	shutdownState          atomic.Int32   // prevents new runs during shutdown
+	db                     *db.DB
+	paths                  *paths.Paths
+	steps                  StepFactory
 
 	// shutdownPreparation is the in-flight instance-bound planned shutdown.
 	shutdownPreparation *controlledShutdownPreparation
@@ -170,6 +175,8 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		stateRevs:       make(map[string]int64),
 		completedRuns:   make(map[string]bool),
 	}
+	m.maintenanceCtx, m.maintenanceCancel = context.WithCancel(context.Background())
+	m.maintenanceGate = make(chan struct{}, 1)
 	m.beforeAnswerRespond = defaultBeforeAnswerRespond
 	m.limitsCache = runLimits{max: config.DefaultMaxConcurrentRuns}
 	m.claimQueued = database.ClaimQueuedRun
@@ -251,7 +258,7 @@ var limitWatchInterval = 2 * time.Second
 func (m *RunManager) StartLimitWatcher() {
 	m.watchOnce.Do(func() {
 		m.watchStop = make(chan struct{})
-		m.wg.Add(1)
+		m.wg.Add(2)
 		go func() {
 			defer m.wg.Done()
 			ticker := time.NewTicker(limitWatchInterval)
@@ -262,6 +269,22 @@ func (m *RunManager) StartLimitWatcher() {
 					return
 				case <-ticker.C:
 					m.sched.dispatch()
+				}
+			}
+		}()
+		go func() {
+			defer m.wg.Done()
+			timer := time.NewTimer(limitWatchInterval)
+			defer timer.Stop()
+			for {
+				select {
+				case <-m.maintenanceCtx.Done():
+					return
+				case at := <-timer.C:
+					if _, err := m.sweepTerminalSteps(m.maintenanceCtx, at, terminalStepQuietAge); err != nil && m.maintenanceCtx.Err() == nil {
+						slog.Warn("terminal step sweep failed", "error", err)
+					}
+					timer.Reset(time.Until(at.Add(terminalStepSweepInterval)))
 				}
 			}
 		}()
@@ -3430,14 +3453,26 @@ func (m *RunManager) releaseShutdownForRecovery(runID string) bool {
 
 // HandleCancel stops an active run and propagates cancellation to the executor.
 func (m *RunManager) HandleCancel(runID string) error {
+	_, err := m.handleCancelWithCleanup(runID)
+	return err
+}
+
+func (m *RunManager) handleCancelWithCleanup(runID string) (int, error) {
 	m.mu.Lock()
 	owned := m.runs[runID]
 	m.mu.Unlock()
 	if owned == nil {
-		return fmt.Errorf("no active run %s", runID)
+		closed, err := m.repairTerminalSteps(m.maintenanceCtx, runID, time.Now(), 0)
+		if err != nil {
+			return closed, err
+		}
+		if closed > 0 {
+			return closed, nil
+		}
+		return 0, fmt.Errorf("no active run %s", runID)
 	}
 	_, err := m.cancelManagedRun(runID, types.RunCancelReasonAbortedByUser)
-	return err
+	return 0, err
 }
 
 // cancelActiveRuns cancels any in-progress runs for the given repo+branch

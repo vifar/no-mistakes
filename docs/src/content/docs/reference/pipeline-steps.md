@@ -498,7 +498,7 @@ Each step progresses through these statuses:
 | `fix_review` | Paused after a fix cycle, showing results for review |
 | `completed` | Finished successfully |
 | `skipped` | Pre-skipped for the run, skipped by the user, or skipped automatically by the pipeline |
-| `failed` | Step failed; the step log includes the returned error message so command stderr and provider errors are visible in the per-step log, not only in the daemon log |
+| `failed` | Step failed or was administratively interrupted; see the [daemon's terminal-step cleanup rules](/no-mistakes/concepts/daemon/). For step failures, the step log includes the returned error message so command stderr and provider errors are visible in the per-step log, not only in the daemon log |
 
 Every non-abort response retains the identity of the gate that accepted it through queueing, slot admission, and recovery. Dispatch compares that identity under the gate's publication lock. Clearing or replacing a gate drains queued responses; a response already dequeued is checked again and discarded with a log message if its gate was replaced. The replacement stays parked. A discarded answer response leaves the answer recorded for the reviewer's next checkpoint and starts no extra finalization round.
 

@@ -503,9 +503,10 @@ type AnswerReviewQuestionResult struct {
 	Note       string `json:"note,omitempty"`
 }
 
-// CancelRunResult confirms the run cancellation request was accepted.
+// CancelRunResult confirms cancellation or repairs on an already-terminal run.
 type CancelRunResult struct {
-	OK bool `json:"ok"`
+	OK          bool `json:"ok"`
+	StepsClosed int  `json:"steps_closed,omitempty"`
 }
 
 // GateContextResult is the privacy-safe execution-context classification.
