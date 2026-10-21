@@ -82,8 +82,8 @@ const documentCapNoticeDescription = "Document commit limit reached; further doc
 // A gap check that edits is not honored: the edits are discarded with the
 // same rollback the convergence path uses, so the cap still bounds the
 // commits.
-func (s *DocumentStep) runCapGapCheck(sctx *pipeline.StepContext, baseSHA, targetBranch string, combinedLint bool) (*pipeline.StepOutcome, error) {
-	return s.runCapGapCheckAttempt(sctx, baseSHA, targetBranch, combinedLint, false)
+func (s *DocumentStep) runCapGapCheck(sctx *pipeline.StepContext, baseSHA, targetBranch string) (*pipeline.StepOutcome, error) {
+	return s.runCapGapCheckAttempt(sctx, baseSHA, targetBranch, false)
 }
 
 // runCapGapCheckAttempt runs the gap check. reassessing is true when this is
@@ -94,7 +94,7 @@ func (s *DocumentStep) runCapGapCheck(sctx *pipeline.StepContext, baseSHA, targe
 // again has not produced a verdict about the current state, so the step
 // fails closed instead of looping on an agent that ignores its
 // instructions.
-func (s *DocumentStep) runCapGapCheckAttempt(sctx *pipeline.StepContext, baseSHA, targetBranch string, combinedLint bool, reassessing bool) (*pipeline.StepOutcome, error) {
+func (s *DocumentStep) runCapGapCheckAttempt(sctx *pipeline.StepContext, baseSHA, targetBranch string, reassessing bool) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
 	headBefore := sctx.Run.HeadSHA
 	sctx.Log("Document commit limit reached; running a read-only gap check")
@@ -118,15 +118,18 @@ func (s *DocumentStep) runCapGapCheckAttempt(sctx *pipeline.StepContext, baseSHA
 	}
 
 	prompt := s.buildCapCheckPrompt(sctx, baseSHA, targetBranch)
+	// The gap check is a DOCUMENT review, and it says so in its prompt: it
+	// asks which documentation gaps remain. It performs no lint duty, so it
+	// uses the DOCUMENT schema - the housekeeping schema's category enum
+	// would ask the agent to classify a finding the prompt never mentions,
+	// and the lint half of the combined pass belongs to the lint step, which
+	// falls back to its own pass (the documented fallback).
+	//
+	// It must not claim the housekeeping purpose either: the presentation
+	// surfaces read that purpose as "this invocation did both duties", and
+	// this one did not.
 	schema := findingsSchema
-	// The gap check is NOT a housekeeping pass: it performs no lint duty, so
-	// it must not claim the housekeeping purpose that the presentation
-	// surfaces read as "this invocation did both duties". The lint step
-	// falls back to its own pass, which is the documented fallback.
 	purpose := "document-gap-check"
-	if combinedLint {
-		schema = housekeepingFindingsSchema
-	}
 
 	result, runErr := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
@@ -157,13 +160,9 @@ func (s *DocumentStep) runCapGapCheckAttempt(sctx *pipeline.StepContext, baseSHA
 	if err := validateDocumentAnalyzerFindings(result.Output, &reported, false); err != nil {
 		return nil, fmt.Errorf("validate document gap check findings: %w", err)
 	}
+	// Every finding the check reported is a documentation gap. Nothing is
+	// filtered out: a finding the check dropped would be a gap nobody sees.
 	gaps := reported
-	if combinedLint {
-		// The combined pass's lint half has its own gate; the Document gap
-		// check only speaks for the documentation half. The lint step falls
-		// back to its own pass, so neither duty is silently dropped.
-		gaps, _ = splitHousekeepingFindings(reported)
-	}
 
 	// A gap the agent could not resolve is still a gap: it stays an ordinary
 	// finding so the owner can decide. The cap notice never carries the
@@ -182,7 +181,7 @@ func (s *DocumentStep) runCapGapCheckAttempt(sctx *pipeline.StepContext, baseSHA
 			return nil, fmt.Errorf("the document gap check edited the worktree twice; it produced no verdict about the current documentation")
 		}
 		sctx.Log("the gap check's verdict described discarded changes; reassessing the restored bytes")
-		return s.runCapGapCheckAttempt(sctx, baseSHA, targetBranch, combinedLint, true)
+		return s.runCapGapCheckAttempt(sctx, baseSHA, targetBranch, true)
 	}
 
 	if len(gaps.Items) == 0 {

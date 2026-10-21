@@ -344,6 +344,34 @@ func TestDocumentCapGapCheckIsTheAuthorityOnCurrentGaps(t *testing.T) {
 	}
 }
 
+// The gap check is a DOCUMENT review: it must not drop a finding because of
+// its category. The combined pass's lint half belongs to the lint step, but a
+// finding the CHECK reported is a documentation gap, and dropping it would
+// park nothing and report nothing.
+func TestDocumentCapGapCheckKeepsEveryReportedFinding(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	ag := &documentCapAgent{t: t, dir: dir, commit: true, gapOutput: `{"findings":[{"severity":"warning","description":"a categorized gap","action":"ask-user","category":"lint"}],"summary":"gap remains"}`}
+	sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+	sc.Config.Document.MaxCommitsPerRun = 1
+
+	if _, err := (&DocumentStep{}).Execute(sc); err != nil {
+		t.Fatal(err)
+	}
+	holder := &pipelineStepContext{dir: dir, sctx: sc}
+	advanceHead(t, holder, "feature.txt", "reviewed repair\n")
+
+	out, err := (&DocumentStep{}).Execute(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.NeedsApproval {
+		t.Fatalf("the gap check dropped a reported finding: %+v", out)
+	}
+	if !strings.Contains(out.Findings, "a categorized gap") {
+		t.Fatalf("the reported finding was filtered out: %s", out.Findings)
+	}
+}
+
 // A gap the check DOES re-report stays visible and decidable.
 func TestDocumentCapGapCheckReReportedGapStillParks(t *testing.T) {
 	dir, base, head := setupGitRepo(t)

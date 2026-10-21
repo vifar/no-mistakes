@@ -196,7 +196,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		// it the step parks on a finding no agent can resolve (issue #123),
 		// and strict shipping refuses to approve that finding, so the run
 		// could never finish.
-		return s.runCapGapCheck(sctx, baseSHA, targetBranch, combinedLint)
+		return s.runCapGapCheck(sctx, baseSHA, targetBranch)
 	}
 
 	if combinedLint {
