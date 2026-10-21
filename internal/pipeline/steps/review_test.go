@@ -754,7 +754,7 @@ func TestReviewFix_PostAgentCommitUsesStepParentContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("post-agent commit inherited invocation context: %v", err)
 	}
-	if summary != changesAppliedSummary {
+	if summary != "fix timeout ownership" {
 		t.Fatalf("summary = %q", summary)
 	}
 	if invocationDeadline.IsZero() {

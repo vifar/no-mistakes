@@ -400,6 +400,7 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 // agent invocation that made them. A nil producer commits without trailers.
 func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string, producer *agent.Result) (bool, error) {
 	ctx := sctx.Ctx
+	recordedHead := sctx.Run.HeadSHA
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return false, err
 	}
@@ -415,7 +416,10 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 		if err != nil {
 			return false, fmt.Errorf("resolve agent head: %w", err)
 		}
-		return false, recordAgentFixHead(sctx, stepName, headSHA)
+		if err := recordAgentFixHead(sctx, stepName, headSHA); err != nil {
+			return false, err
+		}
+		return headSHA != recordedHead, nil
 	}
 	summary = git.StripAIAttributionTrailers(summary, sctx.Config.Commit.Trailers...)
 	if summary == "" {
@@ -462,7 +466,7 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if err := recordAgentFixHead(sctx, stepName, headSHA); err != nil {
 		return false, err
 	}
-	return headSHA != headBeforeCommit, nil
+	return headSHA != recordedHead, nil
 }
 
 func runPipelineCorrectionAgent(sctx *pipeline.StepContext, invoke func() (*agent.Result, error)) (*agent.Result, error) {
@@ -596,13 +600,11 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		Purpose:    purpose,
 		Workload:   opts.Workload,
 	}
-	var startingHead string
+	startingHead, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve head before %s fix: %w", stepName, err)
+	}
 	if opts.RequireVerification {
-		head, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
-		if err != nil {
-			return "", fmt.Errorf("resolve head before %s fix: %w", stepName, err)
-		}
-		startingHead = head
 		runOpts.JSONSchema = verifiedFixSummarySchema
 	}
 	if opts.RequireVerification {
@@ -614,7 +616,6 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		}()
 	}
 	var result *agent.Result
-	var err error
 	result, err = runPipelineCorrectionAgent(sctx, func() (*agent.Result, error) {
 		if opts.RunAgent != nil {
 			return opts.RunAgent(runOpts)
@@ -644,9 +645,13 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 			return "", err
 		}
 	}
-	committed, err := commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result)
+	_, err = commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result)
 	if err != nil {
 		return "", err
+	}
+	committed := sctx.Run.HeadSHA != startingHead
+	if committed && stepName == types.StepReview && summary != "" && !strings.HasPrefix(strings.ToLower(summary), NoChangesAppliedSummary) {
+		return summary, nil
 	}
 	return fixResultSummary(committed), nil
 }

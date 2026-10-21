@@ -1289,7 +1289,7 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 	}
 
 	if findingsCleared {
-		result := buildFixResultText(rounds)
+		result := buildFixResultText(sr.StepName, rounds)
 		line := fmt.Sprintf("🔧 **%s** - %s ✅", name, result)
 		return buildDetail(line)
 	}
@@ -1398,7 +1398,7 @@ func roundsHaveParseFailure(rounds []*db.StepRound) bool {
 	return false
 }
 
-func buildFixResultText(rounds []*db.StepRound) string {
+func buildFixResultText(step types.StepName, rounds []*db.StepRound) string {
 	// Count findings in round 1.
 	var initialCount int
 	if len(rounds) > 0 && rounds[0].FindingsJSON != nil {
@@ -1412,7 +1412,7 @@ func buildFixResultText(rounds []*db.StepRound) string {
 		if !r.IsFixRound() {
 			continue
 		}
-		switch fixRoundOutcome(r) {
+		switch fixRoundOutcome(step, r) {
 		case fixOutcomeNoChange:
 			noChangeRounds++
 		case fixOutcomeApplied:
@@ -1469,7 +1469,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 	for _, r := range rounds {
 		isFixRound := r.IsFixRound()
 		if isFixRound {
-			inner.WriteString(fixRoundLine(r))
+			inner.WriteString(fixRoundLine(sr.StepName, r))
 			inner.WriteString("\n")
 		}
 
@@ -1555,10 +1555,7 @@ const (
 	fixOutcomeApplied
 )
 
-func fixRoundOutcome(r *db.StepRound) fixOutcome {
-	if r.StartingHeadSHA != nil && r.ReviewedHeadSHA != nil && *r.StartingHeadSHA != "" && *r.ReviewedHeadSHA != "" && *r.StartingHeadSHA != *r.ReviewedHeadSHA {
-		return fixOutcomeApplied
-	}
+func fixRoundOutcome(step types.StepName, r *db.StepRound) fixOutcome {
 	if r.FixSummary == nil || strings.TrimSpace(*r.FixSummary) == "" {
 		return fixOutcomeUnreported
 	}
@@ -1568,13 +1565,16 @@ func fixRoundOutcome(r *db.StepRound) fixOutcome {
 	case changesAppliedSummary:
 		return fixOutcomeApplied
 	default:
+		if step == types.StepReview {
+			return fixOutcomeApplied
+		}
 		return fixOutcomeUnreported
 	}
 }
 
 // fixRoundLine renders the one-line result of a fix round.
-func fixRoundLine(r *db.StepRound) string {
-	switch fixRoundOutcome(r) {
+func fixRoundLine(step types.StepName, r *db.StepRound) string {
+	switch fixRoundOutcome(step, r) {
 	case fixOutcomeNoChange:
 		return "🔧 No changes applied."
 	case fixOutcomeApplied:

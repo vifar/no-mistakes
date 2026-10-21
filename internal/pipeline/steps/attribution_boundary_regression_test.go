@@ -265,7 +265,7 @@ func TestAttributionBoundaryPersistedReviewOutcome(t *testing.T) {
 			if step != types.StepReview {
 				summary = changesAppliedSummary
 			}
-			if _, err := sctx.DB.InsertReviewStepRoundWithProvenance(sr.ID, 2, "auto_fix", nil, &summary, sctx.Run.HeadSHA, head, "", nil, nil, 0); err != nil {
+			if _, err := sctx.DB.InsertReviewStepRound(sr.ID, 2, "auto_fix", nil, &summary, sctx.Run.HeadSHA, 0); err != nil {
 				t.Fatal(err)
 			}
 			sr.Status = types.StepStatusCompleted

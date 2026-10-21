@@ -795,17 +795,20 @@ func shouldSkipRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef
 	if err != nil {
 		return false, fmt.Errorf("get target head %s: %w", targetRef, err)
 	}
+	if _, err := sctx.CommitAttributionEnv(nil, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }, targetSHA); err != nil {
+		return false, err
+	}
 	if localSHA == targetSHA {
 		sctx.Log(fmt.Sprintf("already up-to-date with %s", targetRef))
 		return true, nil
 	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", targetRef, "HEAD"); err == nil {
+	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", targetSHA, "HEAD"); err == nil {
 		sctx.Log(fmt.Sprintf("already ahead of %s", targetRef))
 		return true, nil
 	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", "HEAD", targetRef); err == nil {
+	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", "HEAD", targetSHA); err == nil {
 		sctx.Log(fmt.Sprintf("fast-forwarding to %s", targetRef))
-		if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", targetRef); err != nil {
+		if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", targetSHA); err != nil {
 			return false, fmt.Errorf("fast-forward to %s: %w", targetRef, err)
 		}
 		return true, nil

@@ -29,7 +29,7 @@ func TestAttributionHookCommitTime(t *testing.T) {
 				}
 			}
 			run(t, dir, "git", "config", "core.hooksPath", original)
-			env, err := AttributionHookEnv(dir, os.Environ(), func(args ...string) (string, error) { return Run(context.Background(), dir, args...) }, submitted, "Originated-by: bespoke-bot")
+			env, err := AttributionHookEnv(dir, os.Environ(), func(args ...string) (string, error) { return Run(context.Background(), dir, args...) }, submitted, nil, "Originated-by: bespoke-bot")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -100,7 +100,7 @@ func TestAttributionBoundaryWorktreeHookCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env, err := AttributionHookEnv(worktree, os.Environ(), gitRun, head)
+	env, err := AttributionHookEnv(worktree, os.Environ(), gitRun, head, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
