@@ -1,0 +1,61 @@
+# Measured cost of the end-to-end journeys, in seconds.
+#
+# The suite is split across shards, and the split balances by MEASURED TIME
+# rather than by test count: a single journey can cost more than every other
+# test in a shard together, so a count-based split leaves one shard as the
+# suite's long pole and the rest idle.
+#
+# These numbers are the measured cost of each journey on the CI runner, taken
+# from a full run of the bucket. A journey that is not listed costs its
+# default below, which is small on purpose: an UNMEASURED journey is
+# expected to be an ordinary one, and a missing entry must not let a journey
+# dominate a shard.
+#
+# The placement is the LONGEST-PROCESSING-TIME-FIRST rule: the measured
+# journeys go to the least loaded shard, one at a time, and the rest follow
+# in the same order. The result is deterministic - the same measurements
+# always produce the same split - and it is a function of the measurements
+# alone, so a journey does not move when an unrelated one is added.
+#
+# A journey that is not measured costs default_journey_seconds. Raising a
+# number here is a measurement, not a guess: the value is what the journey
+# actually cost.
+default_journey_seconds=15
+
+# The journeys the suite measures, in the order they were measured.
+# Format: <seconds> <test name>
+journey_seconds=(
+  617 TestRetainedTargetContinuityLiveJourney
+  113 TestCustomGateStructuredFindingsJourney
+  89 TestAttachCommitStatusJourney
+  84 TestCIScopeAutoDiscovery
+  81 TestDocumentJourneyUnsafeAndStrictRestart
+  68 TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary
+  65 TestCustomGateWatcherProofProductionJourneys
+  65 TestOmitIntentJourney
+  56 TestCertificationContentionProductionJourney
+  42 TestRerunIntentProvenanceJourney
+  40 TestAcceptedTestGapCommitStatusJourney
+  38 TestCIScopeExternalOverridesAndAllExcludedRestriction
+  37 TestCIScopeApprovalAndReceiptEnforceRecordedScope
+  32 TestCertifiedWatcherProductionLifecycle
+  31 TestDocumentJourneyAdmissionAndInterruptedHistory
+  30 TestClosingIssueRefsGitHubJourney
+  29 TestDocumentJourneyRecursiveSubmoduleRollback
+  27 TestClosingIssueRefsReattachAfterComposeIsRefused
+  27 TestGateIdentityJourney_PendingResponseRecovery
+  23 TestCustomGatesJourney
+  22 TestDocumentJourneyRecoveredHistorySummaryContract
+  22 TestCIScopeActionsLinkedStatusStillBlocksReadiness
+  21 TestPlannedStopIgnoresAnUnownedRunOnRealDaemon
+  21 TestDefaultFixtureVerificationAllowsReviewFixCommit
+  20 TestStorageBlockedFailureReleasesCapacityOnRealDaemon
+  20 TestSetupStorageOutageReleasesCapacityOnRealDaemon
+  19 TestSupersessionDoesNotWaitForBlockedSettlementOnRealDaemon
+  18 TestPlannedStopCancelsRealGitSetup
+  18 TestPlannedStopRefusesOwnedAdmissionFailureOnRealDaemon
+  17 TestPlannedStopKeepsAnUnownedRowUntouched
+  16 TestGateIdentityJourney
+  15 TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney
+  14 TestEvalJourney
+)

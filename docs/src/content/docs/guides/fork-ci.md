@@ -65,15 +65,32 @@ sudo access. The default end-to-end suite shares a 40-minute budget inside
 the 45-minute job bound. With at least two daemon slots, the user-journey
 matrix runs in two isolated Go test processes: Claude and Codex in one, all
 other agents in the other. The terminal-merge and retained-target continuity
-journey tables then share one Go test process alongside three parallel shards
-for the remaining e2e and pipeline-step tests. The wrapper discovers test names
+journey tables then share one Go test process alongside parallel shards for
+the remaining e2e and pipeline-step tests. The wrapper discovers test names
 from both package trees before starting these workers and fails if discovery
-fails or returns no tests. It distributes the slow journeys explicitly and
-assigns other tests by a stable hash of their names. All four workers use the
-budget remaining after the matrix and discovery. All workers share
-the same daemon cap. With one daemon slot, the complete suite runs in a single
-process with the same budget. Each run retains the shared
-temporary-daemon inventory and cleanup trap.
+fails or returns no tests.
+
+The shards are balanced by the journey's MEASURED cost, not by test count.
+The measurements live in `scripts/e2e-journey-costs.txt` and the placement is
+the longest-processing-time-first rule: the most expensive journey goes to
+the least loaded shard, one at a time, and the rest follow in the same order.
+The placement is a function of the measurements alone, so it is
+deterministic: a journey does not move when an unrelated one is added, and a
+failure reproduces in the same place. A count-based split is not enough here:
+the retained-target journey alone costs more than ten minutes, so a split
+that only balances the number of tests leaves one shard as the suite's long
+pole while the rest idle, and the suite costs the sum of its shards instead
+of the time of its slowest one.
+
+The shard count is bounded by what the daemon cap leaves. The terminal worker
+runs alongside the shards and takes one of the cap's slots, and each shard is
+a whole Go test process that needs a slot of its own. A shard that cannot get
+a slot does not wait - it fails, and the suite reports a failure that has
+nothing to do with the code under test. With one daemon slot, the complete
+suite runs in a single process with the same budget. All workers use the
+budget remaining after the matrix and discovery, and all workers share the
+same daemon cap. Each run retains the shared temporary-daemon inventory and
+cleanup trap.
 
 ## Required execution policy
 

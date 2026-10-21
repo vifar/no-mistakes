@@ -49,7 +49,12 @@ func TestE2EWrapperDefaultPartitionsJourneyAndRunsRemainder(t *testing.T) {
 		t.Fatalf("wrapper status = %d, output: %s", result.status, result.output)
 	}
 	calls := result.calls
-	if len(calls) != 9 { // two matrix processes, two discovery calls, terminal, three shards, cleanup
+	// Two matrix processes, two discovery calls, the terminal journey, one
+	// shard per remaining daemon slot, and the cleanup. The shard count is
+	// bounded by what the daemon cap leaves - the terminal worker takes one
+	// slot - and by the runner's own capacity, so this fixture's cap of 8
+	// yields the maximum of three shards.
+	if len(calls) != 9 {
 		t.Fatalf("go calls = %q, want matrix, discovery, terminal journey, three shards, and cleanup", calls)
 	}
 	assertBothMatrixCallsFinishedBeforeCleanup(t, result.events)
@@ -101,6 +106,104 @@ func TestE2EWrapperDefaultPartitionsJourneyAndRunsRemainder(t *testing.T) {
 	}
 }
 
+// The shards are balanced by MEASURED TIME. A count-based split leaves one
+// shard as the suite's long pole while the rest idle, and the suite then
+// costs the sum of its shards instead of the time of its slowest one. The
+// two shards must be within a small fraction of each other.
+func TestE2EWrapperBalancesShardsByMeasuredTime(t *testing.T) {
+	result := runE2EWrapperWithCap(t, "", "", "08")
+	if result.status != 0 {
+		t.Fatalf("wrapper status = %d, output: %s", result.status, result.output)
+	}
+	costs := e2eJourneyCosts(t)
+	loads := []int{}
+	for _, call := range result.calls {
+		fields := strings.Fields(call)
+		if len(fields) == 0 || fields[0] != "test" {
+			continue
+		}
+		run, skip := "", ""
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "-run" {
+				run = fields[i+1]
+			}
+			if fields[i] == "-skip" {
+				skip = fields[i+1]
+			}
+		}
+		if run == "" || skip == "" {
+			// A matrix invocation, not a shard.
+			continue
+		}
+		pattern := regexp.MustCompile(strings.Trim(run, "^$"))
+		skipPattern := regexp.MustCompile(strings.Trim(skip, "^$"))
+		load := 0
+		for name, cost := range costs {
+			if pattern.MatchString(name) && !skipPattern.MatchString(name) {
+				load += cost
+			}
+		}
+		if load > 0 {
+			loads = append(loads, load)
+		}
+	}
+	if len(loads) < 2 {
+		t.Fatalf("shards = %v, want at least two shards to compare", loads)
+	}
+	low, high := loads[0], loads[0]
+	for _, load := range loads[1:] {
+		if load < low {
+			low = load
+		}
+		if load > high {
+			high = load
+		}
+	}
+	// The spread is bounded: a shard may not carry more than a quarter more
+	// than the lightest one, or the suite is paying for the imbalance.
+	if high > low+low/4 {
+		t.Errorf("shard loads = %v, want the spread within a quarter of the lightest shard", loads)
+	}
+}
+
+// e2eJourneyCosts reads the suite's measured journey costs.
+func e2eJourneyCosts(t *testing.T) map[string]int {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "scripts", "e2e-journey-costs.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	costs := map[string]int{}
+	inList := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "journey_seconds=(") {
+			inList = true
+			continue
+		}
+		if inList && line == ")" {
+			inList = false
+			continue
+		}
+		if !inList {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		seconds, err := strconv.Atoi(fields[0])
+		if err != nil {
+			t.Fatalf("journey cost %q is not a number: %v", fields[0], err)
+		}
+		costs[fields[1]] = seconds
+	}
+	if len(costs) == 0 {
+		t.Fatal("the suite read no measured journey costs")
+	}
+	return costs
+}
+
 func TestE2EWrapperWaitsForBothMatrixProcessesAndPropagatesFailure(t *testing.T) {
 	result := runE2EWrapper(t, "first", "")
 	if result.status != 17 {
@@ -120,7 +223,11 @@ func TestE2EWrapperPropagatesTerminalJourneyFailure(t *testing.T) {
 	if result.status != 19 {
 		t.Fatalf("wrapper status = %d, want terminal failure 19; output: %s", result.status, result.output)
 	}
-	if len(result.calls) != 9 || result.events[len(result.events)-1] != "cleanup" {
+	// The default fixture's daemon cap is 2: the terminal worker takes one
+	// slot, so exactly one shard runs beside it. The calls are the two
+	// matrix processes, the two discovery calls, the terminal worker, the
+	// shard, and the cleanup.
+	if len(result.calls) != 7 || result.events[len(result.events)-1] != "cleanup" {
 		t.Fatalf("both remaining workers must finish before cleanup: calls=%q events=%q", result.calls, result.events)
 	}
 }
@@ -140,7 +247,7 @@ func TestE2EWrapperShardFailureWaitsForWorkersAndFailsTheSuite(t *testing.T) {
 	if result.status != 29 {
 		t.Fatalf("wrapper status = %d, want shard failure 29: %s", result.status, result.output)
 	}
-	if len(result.calls) != 9 || result.events[len(result.events)-1] != "cleanup" {
+	if len(result.calls) != 7 || result.events[len(result.events)-1] != "cleanup" {
 		t.Fatalf("shard failure lost workers or cleanup: calls=%q events=%q", result.calls, result.events)
 	}
 }
@@ -304,7 +411,10 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 		reader := bufio.NewReader(ready)
 		wantLines := 4
 		if stage == "remaining" {
-			wantLines = 8 // terminal worker plus three shards, each with a child
+			// The terminal worker plus the shards that run beside it. The
+			// fixture's daemon cap is 2, and the terminal worker takes one
+			// slot, so exactly one shard runs beside it.
+			wantLines = 4
 		}
 		lines := make([]string, 0, wantLines)
 		for len(lines) < wantLines {
@@ -324,7 +434,7 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 	}
 	wantJobs := 2
 	if stage == "remaining" {
-		wantJobs = 4
+		wantJobs = 2
 	}
 	if len(readyLines) != wantJobs*2 {
 		t.Fatalf("ready lines = %q, want %d parent and child readiness reports", readyLines, wantJobs)
@@ -422,11 +532,16 @@ type e2eWrapperResult struct {
 	events []string
 }
 
-const wrapperDiscoveredTests = "TestUserJourney TestTargetAdvanceTerminalMergeLiveJourney TestRetainedTargetContinuityLiveJourney TestAttachCommitStatusJourney TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary TestEvalJourney TestStepOnly"
+const wrapperDiscoveredTests = "TestUserJourney TestTargetAdvanceTerminalMergeLiveJourney TestRetainedTargetContinuityLiveJourney TestAttachCommitStatusJourney TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary TestEvalJourney TestStepOnly TestCustomGateStructuredFindingsJourney TestCIScopeAutoDiscovery TestDocumentJourneyUnsafeAndStrictRestart TestOmitIntentJourney TestCertificationContentionProductionJourney"
 
 // These are external go-list responses, not substitutes for the wrapper.
 // Listing a steps-only name catches silently excluding an entire package.
-const wrapperDiscoveryScript = "case \" $* \" in *' -list '*) if [ \"${NM_E2E_FAKE_GO_FAIL_MATRIX:-}\" = discovery ]; then exit 23; fi; case \"$*\" in *'./internal/pipeline/steps/...'*) printf 'TestStepOnly\\n' ;; *) printf '%s\\n' 'TestUserJourney' 'TestTargetAdvanceTerminalMergeLiveJourney' 'TestRetainedTargetContinuityLiveJourney' 'TestAttachCommitStatusJourney' 'TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney' 'TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary' 'TestEvalJourney' ;; esac; exit 0 ;; esac\n"
+//
+// The inventory carries the MEASURED journeys as well as the small ones, so
+// the shard placement is exercised against a representative distribution:
+// a split that only balances a handful of equal-cost tests proves nothing
+// about a bucket where one journey costs more than the rest together.
+const wrapperDiscoveryScript = "case \" $* \" in *' -list '*) if [ \"${NM_E2E_FAKE_GO_FAIL_MATRIX:-}\" = discovery ]; then exit 23; fi; case \"$*\" in *'./internal/pipeline/steps/...'*) printf 'TestStepOnly\\n' ;; *) printf '%s\\n' 'TestUserJourney' 'TestTargetAdvanceTerminalMergeLiveJourney' 'TestRetainedTargetContinuityLiveJourney' 'TestAttachCommitStatusJourney' 'TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney' 'TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary' 'TestEvalJourney' 'TestCustomGateStructuredFindingsJourney' 'TestCIScopeAutoDiscovery' 'TestDocumentJourneyUnsafeAndStrictRestart' 'TestOmitIntentJourney' 'TestCertificationContentionProductionJourney' ;; esac; exit 0 ;; esac\n"
 
 func runE2EWrapper(t *testing.T, failOnMatrix, explicit string) e2eWrapperResult {
 	t.Helper()

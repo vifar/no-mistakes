@@ -62,6 +62,96 @@ cleanup_inventory() {
 }
 trap cleanup_inventory EXIT INT TERM
 
+# place_shards assigns every discovered test to exactly one shard, balancing
+# by the journey's MEASURED cost.
+#
+# The rule is longest-processing-time-first: the most expensive journey goes
+# to the least loaded shard, one at a time, and the rest follow in the same
+# order. The result is a function of the measurements alone, so it is
+# deterministic - a journey does not move when an unrelated one is added, and
+# a failure reproduces in the same place.
+#
+# The measured costs live in scripts/e2e-journey-costs.txt. A test that is
+# not listed there costs the default, which is small on purpose: an
+# UNMEASURED test is expected to be an ordinary one, and a missing entry must
+# not let it dominate a shard.
+place_shards() {
+  local costs_file="$ROOT/scripts/e2e-journey-costs.txt"
+  if [[ ! -f "$costs_file" ]]; then
+    echo "e2e suite is missing its measured journey costs: $costs_file" >&2
+    exit 1
+  fi
+  local default_cost
+  default_cost="$(awk -F= '/^default_journey_seconds=/{print $2; exit}' "$costs_file")"
+  if [[ -z "$default_cost" ]]; then
+    echo "e2e suite could not read the default journey cost" >&2
+    exit 1
+  fi
+
+  # The cost of every test: the measured ones from the costs file, and the
+  # default for the rest. The costs are read into a temp file rather than
+  # passed as an awk variable, because a shell variable cannot carry the
+  # newlines awk would then have to unescape.
+  local cost_file
+  cost_file="$(mktemp)"
+  awk '
+    /^journey_seconds=\(/ { in_list = 1; next }
+    in_list && /^\)/ { in_list = 0; next }
+    in_list { print $1, $2; next }
+  ' "$costs_file" >"$cost_file"
+  if [[ ! -s "$cost_file" ]]; then
+    rm -f "$cost_file"
+    echo "e2e suite read no measured journey costs" >&2
+    exit 1
+  fi
+
+  # The discovered tests, most expensive first. The sort is by the measured
+  # cost and then by name, so the order is total and deterministic.
+  #
+  # The journeys the terminal worker owns are left out: they run in that
+  # worker, not in a shard, and counting their cost against a shard would
+  # skew the balance away from the journeys that shard really runs.
+  local placed
+  placed="$(printf '%s\n' "$all_tests" | awk -v costs="$cost_file" -v fallback="$default_cost" '
+    BEGIN {
+      while ((getline line < costs) > 0) {
+        split(line, fields, " ")
+        if (fields[1] != "" && fields[2] != "") { cost[fields[2]] = fields[1] + 0 }
+      }
+    }
+    {
+      name = $0
+      if (name == "TestUserJourney" || name == "TestTargetAdvanceTerminalMergeLiveJourney" || name == "TestRetainedTargetContinuityLiveJourney") { next }
+      c = (name in cost) ? cost[name] : fallback + 0
+      printf "%d\t%s\n", c, name
+    }' | sort -rn -k1,1 -k2,2 | cut -f2-)"
+
+  local name target cost
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    cost="$(awk -v want="$name" '$2 == want { print $1; exit }' "$cost_file")"
+    if [[ -z "$cost" ]]; then
+      cost="$default_cost"
+    fi
+    # The least loaded shard takes it.
+    target=0
+    local candidate
+    for (( candidate = 1; candidate < shard_count; candidate++ )); do
+      if (( shard_load[$candidate] < shard_load[$target] )); then
+        target=$candidate
+      fi
+    done
+    if [[ -z "${shard_tests[$target]}" ]]; then
+      shard_tests[$target]="$name"
+    else
+      shard_tests[$target]="${shard_tests[$target]}
+$name"
+    fi
+    shard_load[$target]=$(( shard_load[$target] + cost ))
+  done <<<"$placed"
+  rm -f "$cost_file"
+}
+
 # Default args match the historical Makefile e2e target; callers may override.
 if [[ "$#" -eq 0 ]]; then
   # The default suite has one shared 2400s budget, including the journey
@@ -76,12 +166,9 @@ if [[ "$#" -eq 0 ]]; then
   # one slow journey can no longer consume the whole bucket's allowance, and
   # the shards finish in the time of the slowest one instead of their sum.
   #
-  # The shard count is deliberately small: each shard is a whole go test
-  # process with its own test environment, and the daemon cap is shared, so more
-  # shards than the cap supports only adds contention. It is a measured
-  # count, not a knob: an unsupported value could skip shards or break the
-  # arithmetic that places the long poles.
-  shard_count=3
+  # The shard count is set once the daemon cap is known: see below. It is a
+  # measured count, not a knob: an unsupported value could skip shards or
+  # break the arithmetic that places the journeys.
   # Bash puts each asynchronous job in its own process group while monitor
   # mode is enabled. A group contains go test and its test binary descendants.
   set -m
@@ -123,6 +210,23 @@ if [[ "$#" -eq 0 ]]; then
     wait "$serial_pid"
     serial_status=$?
     exit "$serial_status"
+  fi
+
+  # The shard count is bounded by what the daemon cap leaves for the shards.
+  # The terminal worker runs alongside them and takes one slot, and each
+  # shard is a whole go test process that needs a slot of its own. A shard
+  # that cannot get a slot does not wait - it fails, and the suite reports a
+  # failure that has nothing to do with the code under test. So the shards
+  # never outnumber the slots that are left.
+  shard_count=$(( daemon_cap - 1 ))
+  if (( shard_count < 1 )); then
+    shard_count=1
+  fi
+  if (( shard_count > 3 )); then
+    # More shards than this only adds contention on a small runner, and the
+    # measured bucket does not need them: two shards already fit the
+    # measured total inside the budget with room to spare.
+    shard_count=3
   fi
 
   start_seconds=$SECONDS
@@ -185,9 +289,15 @@ if [[ "$#" -eq 0 ]]; then
     exit 1
   fi
 
-  # The terminal-merge and retained-target journeys keep their own worker: they
-  # are the two slowest live journeys, and sharing a worker with the rest of
-  # the bucket is what made that worker the suite's long pole.
+  # The terminal-merge and retained-target journeys keep their own worker:
+  # they are the two slowest live journeys, and sharing a worker with the
+  # rest of the bucket is what made that worker the suite's long pole.
+  #
+  # That worker runs ALONGSIDE the shards, so it takes one of the daemon
+  # cap's slots for as long as it runs. The shard count is bounded by what is
+  # left of the cap, so a shard can always get a slot: a shard that cannot
+  # get one does not wait - it fails, and the suite reports a failure that
+  # has nothing to do with the code under test.
   go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
     -run '^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$' ./internal/e2e/... &
   terminal_pid=$!
@@ -197,65 +307,40 @@ if [[ "$#" -eq 0 ]]; then
   # the allowance of the others, and the bucket costs the time of its slowest
   # shard rather than the sum of all of them.
   #
-  # The split balances by MEASURED TIME, not by test count. The journeys
-  # below are the measured long pole of the bucket - each one costs more than
-  # the rest of a shard together - so they are assigned round robin across
-  # shards explicitly. Everything else is spread by a checksum of the test's own
-  # name, which is stable across runs, so a test always lands in the same
-  # shard and a failure reproduces in the same place.
-  slow_journeys=(
-    TestAttachCommitStatusJourney
-    TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney
-    TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary
-    TestEvalJourney
-  )
-
-  # Every measured long pole is placed, round robin over the shards, so a
-  # shard count that does not match the number of long poles still places each
-  # one of them exactly once.
-  shard_slow=()
-  slow_index=0
-  while (( slow_index < ${#slow_journeys[@]} )); do
-    target=$((slow_index % shard_count))
-    if [[ -z "${shard_slow[$target]-}" ]]; then
-      shard_slow[$target]="${slow_journeys[$slow_index]}"
-    else
-      shard_slow[$target]="${shard_slow[$target]}
-${slow_journeys[$slow_index]}"
-    fi
-    slow_index=$((slow_index + 1))
+  # The split balances by MEASURED TIME, not by test count. A single journey
+  # can cost more than every other test in a shard together - the
+  # retained-target journey alone costs more than ten minutes - so a
+  # count-based split leaves one shard as the suite's long pole while the
+  # rest idle. The measured cost of each journey lives in
+  # scripts/e2e-journey-costs.txt, and the placement is the
+  # longest-processing-time-first rule: the most expensive journey goes to
+  # the least loaded shard, one at a time, and the rest follow in the same
+  # order.
+  #
+  # The placement is a function of the measurements alone, so it is
+  # deterministic: a journey does not move when an unrelated one is added,
+  # and a failure reproduces in the same place.
+  shard_tests=()
+  shard_load=()
+  shard_index=0
+  while (( shard_index < shard_count )); do
+    shard_tests[$shard_index]=""
+    shard_load[$shard_index]=0
+    shard_index=$((shard_index + 1))
   done
+
+  # The measured cost of every discovered test, and the placement.
+  place_shards
 
   shard_pids=()
   shard_statuses=()
   shard_index=0
   while (( shard_index < shard_count )); do
-    shard_tests="${shard_slow[$shard_index]-}"
-    # The rest of the shard is the remaining tests whose name hashes into it.
-    rest="$(printf '%s\n' "$all_tests" | awk -v shard="$shard_index" -v count="$shard_count" -v slow="${slow_journeys[*]}" '
-      BEGIN { n = split(slow, names, " "); for (i = 1; i <= n; i++) skip[names[i]] = 1 }
-      {
-        name = $0
-        if (name in skip) { next }
-        checksum = 0
-        for (i = 1; i <= length(name); i++) {
-          checksum = (checksum * 31 + index("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", substr(name, i, 1))) % 1000003
-        }
-        if (checksum % count == shard) { print name }
-      }')"
-    if [[ -n "$rest" ]]; then
-      if [[ -n "$shard_tests" ]]; then
-        shard_tests="$shard_tests
-$rest"
-      else
-        shard_tests="$rest"
-      fi
-    fi
-    if [[ -z "$shard_tests" ]]; then
+    if [[ -z "${shard_tests[$shard_index]}" ]]; then
       shard_index=$((shard_index + 1))
       continue
     fi
-    shard_pattern="$(printf '%s\n' "$shard_tests" | paste -sd'|' -)"
+    shard_pattern="$(printf '%s\n' "${shard_tests[$shard_index]}" | paste -sd'|' -)"
     go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
       -run "^(${shard_pattern})$" \
       -skip '^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$' \
