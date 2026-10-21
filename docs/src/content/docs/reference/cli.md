@@ -633,9 +633,9 @@ Strict shipping requires a full rerun and refuses checkpoint retry. Ordinary ret
 no-mistakes axi retry --run <id>
 ```
 
-An agent invocation failure is an error the agent call returned while its context was still live: a provider processing error, a usage or quota limit, a transport failure, or the agent process exiting.
+An eligible agent invocation failure is an error the agent call returned while its context was still live: a provider processing error, a transport failure, or the agent process exiting, subject to the exclusions below.
 The executor records that cause on the failed step when the step fails with that error.
-A timeout, a cancellation, a structured-output rejection by the adapter or step, and every failure about the change itself - a review finding, a failing test or lint, a refused policy, a human decision at a gate - record no eligible cause and cannot use checkpoint retry; use [`no-mistakes rerun`](#no-mistakes-rerun) or address them first.
+A timeout, a cancellation, a structured-output rejection by the adapter or step, Claude's native structured-output retry exhaustion, a typed provider usage-limit signal, and every failure about the change itself - a review finding, a failing test or lint, a refused policy, a human decision at a gate - record no eligible cause and cannot use checkpoint retry; use [`no-mistakes rerun`](#no-mistakes-rerun) or address them first. Claude's rejected rate-limit signal remains disqualifying even when the process exits without a final result or the event stream cannot be read completely. A quota diagnostic from an adapter without a typed usage-limit signal can still record an eligible invocation failure.
 
 The retry starts a new run at the failed run's preserved head, so every correction the pipeline already committed is kept:
 
@@ -839,6 +839,8 @@ no-mistakes stats
 ```
 
 Displays total changes, rescued changes, rescue rate, reported and fixed mistakes, fixes by pipeline step, and the top repos by rescue activity.
+
+Historical finding and rescue totals count executed steps only. Steps carried by a [checkpoint retry](#no-mistakes-axi-retry) retain their source's reported and fixed counts in individual step output, but do not add those counts again to global, repository, or pipeline-step totals, even across repeated retries.
 
 Runs with [quota-aware routing](/no-mistakes/reference/global-config/#quota_routing) records also show the chosen agent order, candidate evidence, routing reason, and recorded mid-run switches. `--run <id>` limits that output to one run.
 

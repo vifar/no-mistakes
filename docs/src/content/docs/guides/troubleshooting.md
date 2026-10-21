@@ -165,7 +165,7 @@ Symptom: a run stops with a failed step.
 
 See [daemon logging](/no-mistakes/concepts/daemon/#logging) for per-step logs and where to find database infrastructure-failure diagnostics.
 
-### A run failed on a provider error, usage limit, or agent exit
+### A run failed during an agent invocation
 
 For an ordinary run that meets the [checkpoint retry proofs](/no-mistakes/reference/cli/#no-mistakes-axi-retry), continue from the failed step:
 

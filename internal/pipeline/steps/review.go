@@ -465,8 +465,9 @@ Risk assessment (after listing all findings):
 	// The finalize turn's prompt is the WHOLE review prompt plus the answers,
 	// not a bare "here are your answers" message, because a resume can fail
 	// (dead session id, an adapter without resume support, session_reuse off).
-	// RunSessions then re-runs the same turn cold, and a self-sufficient prompt
-	// makes that a slower review rather than a meaningless one.
+	// Any eligible cold fallback still needs a self-sufficient prompt to make
+	// that a slower review rather than a meaningless one. RunSessions owns
+	// whether the resume error permits that fallback.
 	//
 	// A review whose final JSON fails validation is a formatting slip, not a
 	// verdict, so it is rerun with the same prompt plus the validation error,

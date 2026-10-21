@@ -222,10 +222,10 @@ func claudeExitError(waitErr error, stderr string, apiErr *claudeAPIError) error
 	return fmt.Errorf("claude exited: %w: %s: %w", waitErr, strings.TrimSpace(stderr), apiErr)
 }
 
-// terminalAPIError returns the API error the result event reports, or nil when
-// the invocation did not end on one. The fields are decoded apart from
-// claudeEvent so a change of their wire type costs only this diagnostic and
-// never the result event itself.
+// terminalAPIError preserves result-level failure classification even when the
+// process exits nonzero. API status and diagnostic text are decoded separately
+// so malformed optional fields cannot erase native schema exhaustion or the
+// rate-limit signal already read from the stream.
 func (r *claudeResult) terminalAPIError() *claudeAPIError {
 	if r == nil || (!r.IsError && r.Subtype == "success") {
 		return nil
@@ -446,6 +446,8 @@ const claudeStructuredOutputTool = "StructuredOutput"
 
 // parseClaudeEvents reads JSONL from the reader and dispatches events.
 // It accumulates token usage and captures the final result event.
+// The returned rate-limit rejection state is independent of that result: a
+// failed or truncated stream must not turn a known limit into a replayable exit.
 func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, result **claudeResult) (bool, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), claudeScannerMaxTokenSize)

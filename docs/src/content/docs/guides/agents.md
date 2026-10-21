@@ -161,7 +161,7 @@ When CI returns, including with findings, the boundary guard rejects the changed
 The monitor does not automatically repair or revalidate that changed comparison.
 After termination, restart from the current target and head; never hand-rebase.
 See [`no-mistakes rerun`](/no-mistakes/reference/cli/#no-mistakes-rerun) for restart and custody conditions.
-A run that failed before Push only because an agent invocation failed - a provider error, a usage limit, or the agent process exiting - can instead continue from its failed step with [`no-mistakes axi retry --run <id>`](/no-mistakes/reference/cli/#no-mistakes-axi-retry); it refuses with the failed proof whenever continuing is not provably safe.
+See [`no-mistakes axi retry`](/no-mistakes/reference/cli/#no-mistakes-axi-retry) for checkpoint continuation eligibility and refusal handling.
 The agent must not use `no-mistakes axi run` to refresh a still-active PR: after `checks-passed` it reattaches to the running monitor with HEAD unchanged and returns the monitor output without rebasing.
 
 In task-first mode, if the repo is on the default branch, the skill tells the agent to create a feature branch before committing because the gate validates committed history on a non-default branch.
@@ -214,9 +214,8 @@ Six global config fields tune resolution and invocation, and the [Global Config 
 
 ## Review session reuse
 
-With the default `session_reuse: true`, Claude, Codex, Grok, Pi, Omp, and Antigravity keep one durable review-fixer session per run, and resume failures fall back to a fresh fixer session instead of skipping the fix turn. Pi stores its native fixer transcript in Pi's session directory; no-mistakes persists only the minimum session identity needed to resume it.
-Review turns always run in fresh, session-free invocations: a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them.
 The [`session_reuse` field reference](/no-mistakes/reference/global-config/#session_reuse) owns the exact reuse, fallback, privacy, and restart-recovery semantics.
+For the reviewer session used to finalize answers within one pass, see the [review conversation lifecycle](/no-mistakes/concepts/review-conversation/#session-lifecycle).
 
 ## Agent interface
 
