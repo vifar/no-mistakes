@@ -18,7 +18,7 @@ import (
 
 func TestDaemonForceStopWithRealExitDuringStateProbe(t *testing.T) {
 	h := NewHarness(t, SetupOpts{})
-	statusCommand(t, h, h.WorkDir, "init")
+	statusCommand(t, h, h.WorkDir, "daemon", "start")
 	pid := daemonPIDForRoot(t, h)
 	realPS, err := exec.LookPath("ps")
 	if err != nil {
