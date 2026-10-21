@@ -206,6 +206,7 @@ type retryFixtureOptions struct {
 	profile      *agentcfg.PiProfile
 	plan         *verificationplan.Snapshot
 	failInTest   bool
+	prBaseBranch string
 	twoHop       bool
 	globalYAML   string
 	// repoYAML replaces the effective repository configuration the review
@@ -233,7 +234,7 @@ func newRetryFixture(t *testing.T, opts retryFixtureOptions) *retryFixture {
 	if opts.profile != nil {
 		profiles = append(profiles, opts.profile)
 	}
-	source, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "main", submitted, submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, "", "", "", "", false, opts.plan, profiles...)
+	source, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "main", submitted, submitted, &db.RunIntent{Summary: "keep it", Source: db.RunIntentSourceAgent, Score: 1}, "", "", "", opts.prBaseBranch, false, opts.plan, profiles...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -665,6 +666,52 @@ func TestRetryStartsWhenEveryProofHolds(t *testing.T) {
 	}
 	if got := f.executions.Load(); got != 2 {
 		t.Fatalf("executed %d steps, want review and test only", got)
+	}
+}
+
+func TestRetryPreservesPRBaseBranchRequest(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the agent stand-ins are POSIX shell scripts")
+	}
+	for _, queued := range []bool{false, true} {
+		for _, requested := range []bool{false, true} {
+			t.Run(fmt.Sprintf("queued=%t/requested=%t", queued, requested), func(t *testing.T) {
+				f := newRetryFixture(t, retryFixtureOptions{failInTest: true, prBaseBranch: "main", beforeSource: func(t *testing.T, f *retryFixture) {
+					writeFakeAgents(t, f.p, "claude", "", "claude")
+				}})
+				if !requested {
+					if err := f.d.ConsumePRBaseBranchRequest(f.source.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				m := f.manager(t, &countingStep{name: types.StepTest, count: f.executions})
+				var holder *runSlot
+				if queued {
+					m.sched.limits = func() (int, bool) { return 1, false }
+					var ok bool
+					holder, ok = m.sched.tryAdmit("capacity-holder")
+					if !ok {
+						t.Fatal("could not hold capacity")
+					}
+					defer holder.Release()
+				}
+				link, err := m.HandleRetry(context.Background(), f.repo.ID, "main", f.source.ID, f.callerHead)
+				if err != nil {
+					t.Fatalf("retry: %v", err)
+				}
+				if queued {
+					run, err := f.d.GetRun(link.RunID)
+					if err != nil || run == nil || run.Status != types.RunQueued || run.PRBaseBranchRequested != requested {
+						t.Fatalf("queued retry lost request state: %+v, %v", run, err)
+					}
+					holder.Release()
+				}
+				run := waitForRunTerminalState(t, f.d, link.RunID)
+				if run.Status != types.RunCompleted || run.PRBaseBranch == nil || *run.PRBaseBranch != "main" || run.PRBaseBranchRequested != requested {
+					t.Fatalf("retry lost base or request state: %+v", run)
+				}
+			})
+		}
 	}
 }
 

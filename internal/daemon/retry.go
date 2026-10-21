@@ -115,7 +115,7 @@ func (m *RunManager) HandleRetry(ctx context.Context, repoID, branch, runID, cal
 		if source.PiProfile != nil {
 			profiles = append(profiles, source.PiProfile)
 		}
-		continuation, err := m.startRunWithIntentSourceLocked(ctx, repo, branch, source.HeadSHA, source.BaseSHA, "retry", nil, "", "", "", "", "", prBaseBranch, prBaseBranch != "", source.OmitIntent, "", inheritablePRURL(source), "", source.ClosingIssueRefs, launch, profiles...)
+		continuation, err := m.startRunWithIntentSourceLocked(ctx, repo, branch, source.HeadSHA, source.BaseSHA, "retry", nil, "", "", "", "", "", prBaseBranch, source.PRBaseBranchRequested, source.OmitIntent, "", inheritablePRURL(source), "", source.ClosingIssueRefs, launch, profiles...)
 		link = launch.link
 		link.RunID = continuation
 		return continuation, err
