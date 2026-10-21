@@ -129,7 +129,8 @@ func stringValue(value *string) string {
 
 // A stop or forced restart while a run monitors CI for an open PR must keep
 // that run as ci_monitor_interrupted across the restart, not fail it, while a
-// parked run still resumes and a run cut off mid-step still fails.
+// parked run still resumes and a run cut off mid-step is cancelled by the
+// planned shutdown.
 func TestShutdown_CIMonitorRunSurvivesRestartAsInterrupted(t *testing.T) {
 	p, d := newParkedRunEnv(t)
 	repo, headSHA := setupTestGitRepo(t, p, d, "shutdown-ci-monitor")
@@ -172,8 +173,9 @@ func TestShutdown_CIMonitorRunSurvivesRestartAsInterrupted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if agent.Status != types.RunFailed || stringValue(agent.Error) != pipeline.ErrDaemonShutdown.Error() {
-		t.Errorf("mid-step run after stop = %s (%q), want failed with %q", agent.Status, stringValue(agent.Error), pipeline.ErrDaemonShutdown)
+	const wantReason = "cancelled: planned daemon shutdown"
+	if agent.Status != types.RunCancelled || stringValue(agent.Error) != wantReason {
+		t.Errorf("mid-step run after stop = %s (%q), want cancelled with %q", agent.Status, stringValue(agent.Error), wantReason)
 	}
 
 	// The next start records the CI-monitor run as interrupted and resumes the

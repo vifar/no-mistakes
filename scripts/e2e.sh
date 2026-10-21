@@ -66,7 +66,7 @@ trap cleanup_inventory EXIT INT TERM
 if [[ "$#" -eq 0 ]]; then
   # The default suite has one shared 2400s budget, including the journey
   # matrix. Each worker has its own process-wide test environment, while
-  # daemon slots remain shared. The terminal-merge and retained-target tables share a worker beside the
+  # daemon slots remain shared. The terminal-merge, retained-target, and published-guard tables share a worker beside the
   # remaining suite. Their measured durations balance the two workers without
   # adding serial tails or increasing the budget or daemon cap.
   budget_seconds=2400
@@ -140,10 +140,10 @@ if [[ "$#" -eq 0 ]]; then
   fi
 
   go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
-    -run '^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$' ./internal/e2e/... &
+    -run '^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$' ./internal/e2e/... &
   terminal_pid=$!
   go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
-    -skip '^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$' ./internal/e2e/... ./internal/pipeline/steps/... &
+    -skip '^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$' ./internal/e2e/... ./internal/pipeline/steps/... &
   remaining_pid=$!
   terminal_status=0
   remaining_status=0
