@@ -35,9 +35,11 @@ journey_seconds=(
   564 TestCIReceiptRecoveryJourneys
   382 TestTargetAdvancePublishedGuardsLiveJourney
   313 TestTargetAdvanceAcceptedGapRecoversLiveJourney
+  133 TestTargetAdvancePublishedCIRestartJourney
   128 TestSQLiteParkedGateExhaustionSettlesTerminalTruth
   119 TestCIScopeAutoDiscovery
   119 TestCustomGateStructuredFindingsJourney
+  115 TestWatcherCertificateBoundaryJourneys
   105 TestPushTargetAdvanceLiveJourney
   100 TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney
   94 TestNativeTestCompletionOnRealBinary
@@ -45,26 +47,33 @@ journey_seconds=(
   81 TestCIScopeRequiredChecksBlockReadiness
   81 TestDocumentJourneyUnsafeAndStrictRestart
   73 TestNoCIReadinessJourney
+  64 TestTerminalStepBlockedProbeAllowsLiveAbortJourney
   63 TestLeftoverTargetAdvanceLiveJourney
   61 TestCustomGateWatcherProofProductionJourneys
+  61 TestTargetAdvanceRewindSafetyOrderingJourney
   58 TestOmitIntentJourney
   57 TestSQLiteContentionOnRealDaemon
   56 TestCertificationContentionProductionJourney
   51 TestCIScopeExternalOverridesAndAllExcludedRestriction
   48 TestAcceptedTestGapCommitStatusJourney
+  47 TestTargetAdvanceRewindJourney
   44 TestGateStepCannotStartRecursivePipeline
   43 TestRerunIntentProvenanceJourney
   42 TestCIScopeActionsLinkedStatusStillBlocksReadiness
   41 TestClosingIssueRefsGitHubJourney
   40 TestCIReceiptTimeoutStatusJourney
+  39 TestAxiTestApprovalExceptionJourney
   39 TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary
   38 TestProviderPluginJourney
   38 TestRecoveredRewriteSafetyLiveJourney
+  38 TestTargetAdvanceExistingPRJourney
   37 TestDaemonRetainsIndependentFailureUntilStorageRecovers
   36 TestCustomGatesJourney
   36 TestTargetAdvanceDuringReviewFixLiveJourney
   35 TestSiblingPollingReportsConditionBeforePackageTimeout
   34 TestCertifiedWatcherProductionLifecycle
+  34 TestTargetAdvanceAdditionalPreservationJourney
+  33 TestTestBaseAttributionJourney
   32 TestDocumentJourneyAdmissionAndInterruptedHistory
   31 TestMachineLocalCommandOverridesJourney
   30 TestDocumentJourneyRecursiveSubmoduleRollback
@@ -74,17 +83,14 @@ journey_seconds=(
   27 TestPushCorrectionTargetAdvanceLiveJourney
   26 TestDocumentJourneySameFileContentContext
   26 TestGateIdentityJourney_PendingResponseRecovery
+  25 TestTargetAdvanceRecoveredCustomGateJourney
   23 TestDocumentJourneyRecoveredHistorySummaryContract
+  23 TestTargetAdvanceUpgradeProvenanceJourney
   22 TestReviewConversationTUIYoloLeavesTheQuestionOpen
   22 TestReviewConversationUnreadableQuestionHistoryNeedsAHuman
   22 TestRunOwnerReceiveJourney
-  21 TestDefaultFixtureVerificationAllowsReviewFixCommit
-  21 TestPlannedStopIgnoresAnUnownedRunOnRealDaemon
   20 TestRepoConfigCommandsFromDefaultBranch
-  20 TestSetupStorageOutageReleasesCapacityOnRealDaemon
-  20 TestStorageBlockedFailureReleasesCapacityOnRealDaemon
   19 TestCIScopeCarriedReplayKeepsAppBoundRequiredRepair
-  19 TestSupersessionDoesNotWaitForBlockedSettlementOnRealDaemon
   19 TestTargetAdvanceInitialObservationURLLiveJourney
   18 TestDocumentAnalyzerSummaryContractOnRealBinary
   18 TestDocumentJourneyOverBudgetDiscardSurvivesRecovery
@@ -92,10 +98,12 @@ journey_seconds=(
   17 TestFilelessSelectedReviewFindingRequiresCompleteVerification
   17 TestGateIdentityJourney_TUIRespondUsesDisplayedSnapshot
   17 TestPlannedStopKeepsAnUnownedRowUntouched
+  17 TestSetupStorageOutageReleasesCapacityOnRealDaemon
   16 TestCIScopeActionsLinkedThirdPartyCheckStillBlocksReadiness
   16 TestDocumentJourneyHiddenIndexPrecedesCachedCompletion
   16 TestGateIdentityJourney
   16 TestTestAgentNewTestFilesArePreservedAndReReviewed
+  16 TestVerificationPlanInvalidInputNeverTakesCustody
   15 TestDocumentJourneyCleanFlaggedBytesAndEscapedCount
   15 TestLivePiProfileReattachAndRerunSemantics
   15 TestPushCorrectionIndependentForgeHeadLiveJourney
@@ -103,15 +111,18 @@ journey_seconds=(
   14 TestAxiRecoveredRewriteRetiresMirrorJourney
   14 TestClosingIssueRefsOwnedTemplateJourney
   14 TestReviewPathInstructionsJourney
+  14 TestVerificationPlanLaunchAndReattach
   13 TestCIScopeFirstAttemptKeepsCompletedRequiredJob
   13 TestDocumentJourneyCarryStopsAndPublishesHistoricalEvidence
   13 TestFailedInvocationUsageJourney
   13 TestReviewPostMergeStaleSnapshotJourney
   13 TestSQLiteDocumentContentionOnRealDaemon
   12 TestRebaseMergeStrategyGlobalDefaultAndTrustedOverrideJourney
+  12 TestTargetAdvanceGateIdentityRecoveryJourney
   11 TestAnalyzerEvidenceFailuresFailPipelineJourney
   11 TestAxiAnswerPartialReturnsAtOnceAndTheClosingAnswerReturnsAGenuineReAsk
   11 TestAxiBranchSyncJourney
+  11 TestDefaultFixtureVerificationAllowsReviewFixCommit
   11 TestLargeConfiguredTestAndLintFailuresRemainUsableThroughAXIFix
   10 TestAxiPrePushAbortUnmovedHeadCustodyJourney
   10 TestCIScopeStrictReadinessIgnoresNonRequiredAndExternalChecks
@@ -122,6 +133,7 @@ journey_seconds=(
   10 TestLivePiProfileConcurrentRunsStayIsolated
   10 TestPushTargetAdvanceBudgetLiveJourney
   10 TestSelectedFixFollowedByDocumentEditDoesNotRestartReview
+  10 TestStorageBlockedFailureReleasesCapacityOnRealDaemon
   9 TestAxiCustodyRecoveryAfterRebaseJourney
   9 TestConfigurableFixCommitMessageJourney
   9 TestDocumentJourneyTrustedLimits
@@ -131,9 +143,11 @@ journey_seconds=(
   9 TestLivePiProfileResumeAfterDaemonRestartKeepsPin
   9 TestReviewConversationNeverReachesTheEvidenceBranch
   9 TestReviewSchemaRetryExhaustionJourney
+  9 TestSupersessionDoesNotWaitForBlockedSettlementOnRealDaemon
   8 TestAxiAnswerFollowsAQuestionParkedInsideAFixRound
   8 TestAxiAttachCommandsIgnoreInvalidConfigWhenDaemonRunning
   8 TestAxiCustodyRecoveryJourney
+  8 TestAxiTerminalStalePushRecoveryJourney
   8 TestEvalAutoCaptureJourney
   8 TestGiteaProviderJourney
   8 TestHostSearchBoundaryReachesEveryPipelinePrompt
@@ -151,6 +165,7 @@ journey_seconds=(
   8 TestReviewConversationOffRefusesAnAnswer
   8 TestRunOwnerReceiptJourney
   8 TestSQLiteMigrationContentionOnRealCLI
+  8 TestWorktreeRootJourney
   7 TestAxiAnswerWaitElapsedReattachesWithAxiRun
   7 TestAxiParkedAwaitingAgentSignal
   7 TestClosingIssueRefsNonGitHubFailsAtPR
@@ -164,6 +179,7 @@ journey_seconds=(
   7 TestRebaseMergeStrategyPushedBranchCannotSelfSelectJourney
   7 TestReviewPipelineOwnedPRCriterionDoesNotPark
   7 TestRunCleanupLeavesNoEmptyEvidenceDirectory
+  7 TestTargetAdvanceNewPRWhilePendingJourney
   7 TestTestEvidenceLivesUnderAppRootNotSharedTemp
   6 TestAxiRunReattachesAfterManagedFix
   6 TestDocumentNoOpPassOnCodexBinary
@@ -198,10 +214,13 @@ journey_seconds=(
   3 TestAxiTerminalEqualTreeRecoveryJourney
   3 TestDaemonStopLiveFailedFixtureCleanup
   3 TestFailedStatusCommandRetainsFixtureDiagnostics
+  3 TestHarnessUnresponsiveRPCReportsBeforePackageTimeout
   3 TestLivePiProfileTrustedPiOverridesGlobalAuto
   3 TestPushedBranchCannotEnableTheReviewConversation
   3 TestRebaseMergeStrategyUnparseableTrustedValueFailsRunClosedJourney
   3 TestReviewExternalPRLifecycleStillParks
+  3 TestTerminalMaintenanceProbeShutdownLiveJourney
+  3 TestTerminalStepMaintenanceLiveJourney
   2 TestAgentlessRunFailsBeforePipelineStarts
   2 TestAxiRunReportsImmediateAgentlessFailureWithoutRerun
   2 TestAxiSyncConfirmsMergedPRAfterCIMonitorInterrupted
@@ -209,11 +228,13 @@ journey_seconds=(
   2 TestDaemonRunUsesProvidedRoot
   2 TestDaemonStopLeavesNoDaemonProcessOwningTheRoot
   2 TestEnrolledReceiveHooksExecutableIsolation
+  2 TestHarnessWaitReportsConditionBeforePackageTimeout
   2 TestInitInSubmoduleRegistersSubmoduleOwnOrigin
   2 TestInitIsIdempotent
   2 TestInitSkillOptOut
   2 TestOriginAdmissionWithoutCompleteFactsOnRealBinary
   2 TestPlannedStopCancelsRealGitSetup
+  2 TestPlannedStopIgnoresAnUnownedRunOnRealDaemon
   2 TestStartupRefDiagnosticsOnRealCLI
   2 TestTerminalPRObservationDoesNotCompleteRun
   1 TestAxiRunPreflightGuards
@@ -227,6 +248,7 @@ journey_seconds=(
   1 TestInitRollsBackWhenDaemonStartFails
   1 TestLivePiProfileInvalidSelectionRefusedAtCli
   1 TestPushToAMisshapenGateIsRefusedClosed
+  1 TestTerminalDocumentRetentionLiveJourney
   0 TestCommitChangeCreatesMissingBranchFromMain
   0 TestDaemonStartTimeoutLeavesRoomForLoginShellProbe
   0 TestDaemonStopDirFallsBackWhenWorkDirMoved
