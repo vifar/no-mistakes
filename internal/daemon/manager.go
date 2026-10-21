@@ -54,6 +54,7 @@ type RunManager struct {
 	beforeAnswerRespond     func()
 	beforeTerminalStepsRead func(context.Context) // test barrier for a blocked stale-row query
 	afterRetryProof         func()
+	readRetryCleanup        func(string) (*db.RunRetry, error)
 
 	terminalProcessRunning func(context.Context, int) (bool, error)
 	maintenanceGate        chan struct{}
@@ -375,6 +376,9 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 			if !m.terminalRunSettled(runID) {
 				return
 			}
+			if err := pipeline.SettleTerminalWrite(m.db, func() error { return m.prepareRetryDiscard(runID, handle) }); err != nil {
+				return
+			}
 			m.mu.Lock()
 			if owned := m.runs[runID]; owned != nil && owned.handle == handle {
 				delete(m.runs, runID)
@@ -382,8 +386,8 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 			m.mu.Unlock()
 			handle.cancel(nil)
 			close(handle.done)
-			if handle.discardRetry {
-				m.discardRefusedRetryRun(runID, handle.discardRetryEvidenceDir)
+			if handle.discardRetry != nil {
+				m.discardRefusedRetryRun(runID, handle.discardRetryEvidenceDir, handle.discardRetry)
 			}
 			// Once consumed, the run goroutine owns the slot and frees it.
 			slot.Release()
@@ -2554,7 +2558,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		if err := retry.record(m.db, run); err != nil {
 			settlementErr := m.failUnadmittedRunSetup(ctx, run, err)
 			if settlementErr == nil {
-				m.discardRefusedRetryRun(run.ID, "")
+				m.discardRefusedRetryRun(run.ID, "", nil)
 			}
 			return "", errors.Join(err, settlementErr)
 		}
@@ -2571,7 +2575,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		// orphan is left to block the branch's active-run lookup.
 		settlementErr := m.failUnadmittedRunSetup(ctx, run, fmt.Errorf("queue run: %w", err))
 		if retry != nil && settlementErr == nil {
-			m.discardRefusedRetryRun(run.ID, "")
+			m.discardRefusedRetryRun(run.ID, "", nil)
 		}
 		trackStartFailure("queue_run")
 		return "", fmt.Errorf("queue run: %w", errors.Join(err, settlementErr))
@@ -2613,7 +2617,7 @@ type runHandle struct {
 	consumed bool
 	// A retry refused before executor start is deleted only after its failed
 	// setup settles and its ownership handle has been released.
-	discardRetry            bool
+	discardRetry            *db.RunRetry
 	discardRetryEvidenceDir string
 }
 
@@ -2666,13 +2670,17 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				if !m.terminalRunSettled(run.ID) {
 					return
 				}
+				if cleanupErr := pipeline.SettleTerminalWrite(m.db, func() error { return m.prepareRetryDiscard(run.ID, handle) }); cleanupErr != nil {
+					err = errors.Join(err, cleanupErr)
+					return
+				}
 				m.mu.Lock()
 				delete(m.runs, run.ID)
 				m.mu.Unlock()
 				handle.cancel(nil)
 				close(handle.done)
-				if handle.discardRetry {
-					m.discardRefusedRetryRun(run.ID, handle.discardRetryEvidenceDir)
+				if handle.discardRetry != nil {
+					m.discardRefusedRetryRun(run.ID, handle.discardRetryEvidenceDir, handle.discardRetry)
 				}
 			}
 		}()
@@ -2818,7 +2826,7 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		trackStartFailure("evidence_root")
 		return "", err
 	}
-	if handle.discardRetry {
+	if handle.discardRetry != nil {
 		handle.discardRetryEvidenceDir = m.paths.RunEvidenceDir(cfg.Test.Evidence.LocalRoot, run.ID)
 	}
 	retry, retryErr := m.retryForLaunch(run)

@@ -457,19 +457,37 @@ func (r *retryLaunch) proveAtLaunch(ctx context.Context, m *RunManager, globalCf
 }
 
 func (m *RunManager) prepareRetryDiscard(runID string, handle *runHandle) error {
-	link, err := m.db.GetRunRetry(runID)
+	read := m.db.GetRunRetry
+	if m.readRetryCleanup != nil {
+		read = m.readRetryCleanup
+	}
+	link, err := read(runID)
 	if err != nil {
 		return fmt.Errorf("read retry cleanup ownership: %w", err)
 	}
-	handle.discardRetry = link != nil
+	if handle.discardRetry != nil && (link == nil || *link != *handle.discardRetry) {
+		return fmt.Errorf("retry cleanup ownership changed for run %s", runID)
+	}
+	handle.discardRetry = link
 	return nil
 }
 
 // discardRefusedRetryRun deletes the continuation run row and the evidence
 // directory a refused retry created, so the failed run stays the branch's
 // latest run and can be retried again once the cause is fixed.
-func (m *RunManager) discardRefusedRetryRun(runID, evidenceDir string) {
-	if err := m.db.DeleteRun(runID); err != nil {
+func (m *RunManager) discardRefusedRetryRun(runID, evidenceDir string, expected *db.RunRetry) {
+	if err := pipeline.SettleTerminalWrite(m.db, func() error {
+		if expected != nil {
+			link, err := m.db.GetRunRetry(runID)
+			if err != nil {
+				return err
+			}
+			if link == nil || *link != *expected {
+				return fmt.Errorf("retry cleanup ownership changed for run %s", runID)
+			}
+		}
+		return m.db.DeleteRun(runID)
+	}); err != nil {
 		m.db.UpdateRunError(runID, fmt.Sprintf("discard refused retry: %s", err))
 		return
 	}

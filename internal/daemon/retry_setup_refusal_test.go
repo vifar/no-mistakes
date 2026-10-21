@@ -9,9 +9,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -260,5 +262,134 @@ func TestRetrySetupStorageFailureRetainsOwnershipAndEvidence(t *testing.T) {
 	m.mu.Unlock()
 	if owners != 0 || slots != 0 {
 		t.Fatalf("settled ownership retained: owners=%d slots=%d", owners, slots)
+	}
+}
+
+func TestRetryRefusalCleanupRecoversStorageFailures(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("agent stand-ins require POSIX shell")
+	}
+	for _, queued := range []bool{false, true} {
+		for _, fault := range []string{"read", "delete"} {
+			t.Run(fmt.Sprintf("queued=%v/%s", queued, fault), func(t *testing.T) {
+				f := newRetryFixture(t, retryFixtureOptions{beforeSource: func(t *testing.T, f *retryFixture) { writeFakeAgents(t, f.p, "claude", "", "claude") }})
+				m := f.manager(t, &countingStep{name: types.StepTest, count: f.executions})
+				original, err := os.ReadFile(f.p.ConfigFile())
+				if err != nil {
+					t.Fatal(err)
+				}
+				raw, err := sql.Open("sqlite", f.p.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer raw.Close()
+				var unavailable atomic.Bool
+				unavailable.Store(true)
+				var reads atomic.Int32
+				m.readRetryCleanup = func(id string) (*db.RunRetry, error) {
+					attempt := reads.Add(1)
+					if fault == "read" && unavailable.Load() {
+						return nil, fmt.Errorf("injected cleanup read failure: %w", sql.ErrConnDone)
+					}
+					if !queued && attempt == 1 {
+						return nil, errors.New("injected initial cleanup read refusal")
+					}
+					return f.d.GetRunRetry(id)
+				}
+				if fault == "delete" {
+					if _, err := raw.Exec(`CREATE TRIGGER reject_retry_delete BEFORE DELETE ON runs WHEN OLD.id != '` + f.source.ID + `' BEGIN SELECT RAISE(FAIL,'injected cleanup delete failure'); END`); err != nil {
+						t.Fatal(err)
+					}
+				}
+				restore := func() {
+					unavailable.Store(false)
+					if _, err := raw.Exec(`DROP TRIGGER IF EXISTS reject_retry_delete`); err != nil {
+						t.Error(err)
+					}
+				}
+				defer restore()
+				breakSetup := func() {
+					if err := os.WriteFile(f.p.ConfigFile(), []byte("review: [broken\n"), 0600); err != nil {
+						panic(err)
+					}
+				}
+				var holder *runSlot
+				if queued {
+					m.sched.limits = func() (int, bool) { return 1, false }
+					var ok bool
+					holder, ok = m.sched.tryAdmit("capacity-holder")
+					if !ok {
+						t.Fatal("cannot hold capacity")
+					}
+					defer holder.Release()
+				}
+				result := make(chan error, 1)
+				go func() {
+					_, err := m.HandleRetry(context.Background(), f.repo.ID, "main", f.source.ID, f.callerHead)
+					result <- err
+				}()
+				var link *db.RunRetry
+				waitForSchedCondition(t, func() bool {
+					var err error
+					link, err = f.d.GetRunRetryBySource(f.source.ID)
+					return err == nil && link != nil
+				})
+				if queued {
+					if err := <-result; err != nil {
+						t.Fatal(err)
+					}
+					breakSetup()
+					holder.Release()
+				}
+				waitForSchedCondition(t, func() bool {
+					ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+					defer cancel()
+					err := pipeline.AcquireCommitStatusLock(ctx)
+					if err == nil {
+						pipeline.ReleaseCommitStatusLock()
+					}
+					return err != nil && strings.Contains(err.Error(), "injected cleanup "+fault+" failure")
+				})
+				run, err := f.d.GetRun(link.RunID)
+				if err != nil || run == nil || !run.Status.Terminal() {
+					t.Fatalf("unsettled refusal: %+v %v", run, err)
+				}
+				if fault == "read" {
+					m.mu.Lock()
+					owner := m.runs[link.RunID]
+					m.mu.Unlock()
+					if owner == nil || owner.handle == nil {
+						t.Fatal("cleanup read failure lost ownership")
+					}
+				}
+				if f.executions.Load() != 0 {
+					t.Fatal("refused setup executed a step")
+				}
+				restore()
+				if !queued {
+					if err := <-result; err == nil {
+						t.Fatal("invalid setup accepted")
+					}
+				}
+				m.wg.Wait()
+				f.requireNothingLaunched(t)
+				m.mu.Lock()
+				owners, slots := len(m.runs), m.sched.active
+				m.mu.Unlock()
+				if owners != 0 || slots != 0 {
+					t.Fatalf("cleanup retained owners=%d slots=%d", owners, slots)
+				}
+				if err := os.WriteFile(f.p.ConfigFile(), original, 0600); err != nil {
+					t.Fatal(err)
+				}
+				accepted, err := m.HandleRetry(context.Background(), f.repo.ID, "main", f.source.ID, f.callerHead)
+				if err != nil {
+					t.Fatalf("source retry unavailable after storage recovery: %v", err)
+				}
+				if got := waitForRunTerminalState(t, f.d, accepted.RunID); got.Status != types.RunCompleted {
+					t.Fatalf("successful continuation: %s %v", got.Status, got.Error)
+				}
+			})
+		}
 	}
 }
