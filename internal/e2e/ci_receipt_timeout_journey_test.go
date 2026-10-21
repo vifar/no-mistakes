@@ -52,4 +52,5 @@ func TestCIReceiptTimeoutStatusJourney(t *testing.T) {
 	if info.CIReady {
 		t.Fatal("failed receipt was reported ready")
 	}
+	t.Logf("Real CLI status after owned receipt fault injection:\n%s", out)
 }
