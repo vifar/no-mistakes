@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -96,6 +97,7 @@ func TestLeftoverTargetAdvanceLiveJourney(t *testing.T) {
 				if run.Status != types.RunFailed || run.Error == nil || !strings.Contains(*run.Error, "test step left uncommitted edits") || !strings.Contains(*run.Error, "feature.txt") || strings.Contains(*run.Error, ".journal-live") {
 					t.Fatalf("second real edit was not refused with attribution: %s %s", run.Status, deref(run.Error))
 				}
+				assertLeftoverSnapshotSurvivesCleanup(t, h, run, "+second edit retained")
 				return
 			}
 			run := h.WaitForRun(branch, 90*time.Second)
@@ -120,6 +122,9 @@ func TestLeftoverTargetAdvanceLiveJourney(t *testing.T) {
 				if got, err := os.ReadFile(filepath.Join(worktree, ".journal-live/postgres.log")); err != nil || string(got) != "scratch retained\n" {
 					t.Fatalf("completion lost retained scratch: %q %v", got, err)
 				}
+			}
+			if kind == "post Test" {
+				assertLeftoverSnapshotSurvivesCleanup(t, h, run, "+preserved validation edit")
 			}
 			published := h.UpstreamBranchSHA(branch)
 			if published != run.HeadSHA || !isAncestorIn(t, h, h.UpstreamDir, target, published) {
@@ -181,5 +186,37 @@ func TestDocumentInheritedScratchRollbackLiveJourney(t *testing.T) {
 			}
 			t.Logf("real Document rejected both proposal commits, restored head %s, removed guide.md, retained inherited scratch bytes outside the committed tree:\n%s", head, out)
 		})
+	}
+}
+
+// Issue #113 lost its worktree before anyone could list the edits. Exercise
+// the real executor's private record on both success and bounded refusal.
+func assertLeftoverSnapshotSurvivesCleanup(t *testing.T, h *Harness, run *db.Run, wantPatch string) {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(h.NMHome, "logs", run.ID, "leftover-validation-*.json"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("missing durable leftover evidence: %v %v", files, err)
+	}
+	var snapshot struct {
+		Producer      string `json:"producer"`
+		Status        []byte `json:"status"`
+		UnstagedPatch []byte `json:"unstaged_patch"`
+	}
+	data, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Producer != "test" || !strings.Contains(string(snapshot.Status), "feature.txt") || !strings.Contains(string(snapshot.UnstagedPatch), wantPatch) {
+		t.Fatalf("snapshot lost producer, paths or edit bytes: %+v", snapshot)
+	}
+	worktree := paths.WithRoot(h.NMHome).WorktreeDir(run.RepoID, run.ID)
+	if err := os.RemoveAll(worktree); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(files[0]); err != nil || string(got) != string(data) {
+		t.Fatalf("worktree cleanup lost the snapshot: %v", err)
 	}
 }

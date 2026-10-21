@@ -1103,6 +1103,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		// reads the review conversation needs its stable directory as well as
 		// the active evidence directory, or it would decline on every tick
 		// of a RECOVERED park, which is the daemon-restart window it exists for.
+		RunLogDir:             logDir,
 		EvidenceDir:           e.runEvidenceDir(run.ID),
 		ReviewConversationDir: reviewqa.Dir(e.runEvidenceRoot(run.ID)),
 		PRTarget:              e.prTarget,
@@ -1811,6 +1812,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		IntentSource:          userIntentSource,
 		Sessions:              e.sessions,
 		Shared:                e.shared,
+		RunLogDir:             logDir,
 		EvidenceDir:           e.runEvidenceDir(run.ID),
 		ReviewConversationDir: reviewqa.Dir(e.runEvidenceRoot(run.ID)),
 		Fixing:                state.fixing,

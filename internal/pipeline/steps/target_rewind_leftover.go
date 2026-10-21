@@ -55,6 +55,19 @@ func commitLeftoverValidationEdits(c *pipeline.StepContext) (bool, error) {
 	if head != pending.LocalHeadSHA {
 		return false, nil
 	}
+	producer, err := rewindProducerStep(c)
+	if err != nil {
+		return false, err
+	}
+	if producer == "" {
+		producer = string(types.StepTest)
+	}
+	// Keep execution evidence BEFORE staging, unstaging scratch, or spending
+	// the correction budget. A refusal must retain the same evidence as a
+	// successful correction, independently of disposable-worktree cleanup.
+	if err := snapshotLeftoverValidationEdits(c, producer, head); err != nil {
+		return false, fmt.Errorf("save leftover validation evidence: %w", err)
+	}
 	if err := unstageIndexedScratch(c); err != nil {
 		return false, err
 	}
@@ -71,13 +84,6 @@ func commitLeftoverValidationEdits(c *pipeline.StepContext) (bool, error) {
 			return false, fmt.Errorf("leftover validation correction budget already spent")
 		}
 		return false, nil
-	}
-	producer, err := rewindProducerStep(c)
-	if err != nil {
-		return false, err
-	}
-	if producer == "" {
-		producer = string(types.StepTest)
 	}
 	committed, newHead, err := commitWorktreeEdits(c, producer, "before the target-advance rewind")
 	if err != nil {
