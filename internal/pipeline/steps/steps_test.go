@@ -6,11 +6,18 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 func TestMain(m *testing.M) {
+	if handled, err := git.HandleAttributionHook(os.Args[1:]); handled {
+		if err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	if handled, exitCode, err := shellenv.RunWindowsCooperativeCommandHelper(os.Args[1:]); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)

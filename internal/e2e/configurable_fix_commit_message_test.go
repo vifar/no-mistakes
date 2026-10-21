@@ -147,13 +147,13 @@ func TestFixCommitTrailersJourney(t *testing.T) {
 	h.PushToGate(branch)
 
 	gated := waitForStepStatus(t, h, branch, types.StepReview, types.StepStatusFixReview, 60*time.Second)
-	const human = "Co-Authored-By: Claude Smith <claude@example.com>\nCo-Authored-By: Claude <claude@example.com>\nSigned-off-by: Some Person <person@example.com>\nDisclosure: fixtures were generated with the repository recorder.\nContext: Discuss Claude-Session: abc and Assisted-by: pi:local handling"
+
 	worktree := paths.WithRoot(h.NMHome).WorktreeDir(gated.RepoID, gated.ID)
 	beforePush, err := h.runGit(context.Background(), worktree, "log", "-1", "--format=%B")
 	if err != nil {
 		t.Fatalf("read correction before publication: %v\n%s", err, beforePush)
 	}
-	if got, want := strings.TrimSpace(string(beforePush)), "no-mistakes(review): guard unsafe value\n\n"+human; got != want {
+	if got, want := strings.TrimSpace(string(beforePush)), "no-mistakes(review): guard unsafe value"; got != want {
 		t.Fatalf("correction before publication = %q, want %q", got, want)
 	}
 	if out, err := h.runGit(context.Background(), h.UpstreamDir, "show-ref", "--verify", "refs/heads/"+branch); err == nil {
@@ -184,8 +184,8 @@ func TestFixCommitTrailersJourney(t *testing.T) {
 			userTrailers = append(userTrailers, trailers)
 		}
 	}
-	if len(fixTrailers) != 1 || fixTrailers[0] != human {
-		t.Fatalf("review fix commit trailers = %q, want only %q", fixTrailers, human)
+	if len(fixTrailers) != 1 || fixTrailers[0] != "" {
+		t.Fatalf("review fix commit trailers = %q, want none", fixTrailers)
 	}
 	if len(userTrailers) != 1 || userTrailers[0] != "Co-Authored-By: Claude <noreply@anthropic.com>\nCodex-Session: submitted" {
 		t.Fatalf("user commit trailers = %q, want the user's commit left untouched", userTrailers)

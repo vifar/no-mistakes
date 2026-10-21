@@ -362,12 +362,9 @@ func commitPipelineCorrectionWithCleanup(
 	return commitErr
 }
 
-// withCommitTrailers renders configured trailers, then removes AI attribution
-// before any commit is written. Human trailers survive. Changes without a
-// single producer get no configured trailers rather than a guessed agent.
 func withCommitTrailers(sctx *pipeline.StepContext, message string, producer *agent.Result) (string, error) {
 	if producer == nil || len(sctx.Config.Commit.Trailers) == 0 {
-		return git.StripAIAttributionTrailers(message), nil
+		return git.StripAIAttributionTrailers(message, sctx.Config.Commit.Trailers...), nil
 	}
 	// A fallback chain reports the agent that actually ran in Provider; a bare
 	// adapter leaves it empty, and then the step agent is the one that ran.
@@ -375,11 +372,11 @@ func withCommitTrailers(sctx *pipeline.StepContext, message string, producer *ag
 	if agentName == "" && sctx.Agent != nil {
 		agentName = sctx.Agent.Name()
 	}
-	trailers, err := sctx.Config.Commit.RenderTrailers(config.TrailerData{Agent: agentName, Model: producer.Model})
+	_, err := sctx.Config.Commit.RenderTrailers(config.TrailerData{Agent: agentName, Model: producer.Model})
 	if err != nil {
 		return "", err
 	}
-	return git.StripAIAttributionTrailers(message + "\n\n" + strings.Join(trailers, "\n")), nil
+	return git.StripAIAttributionTrailers(message, sctx.Config.Commit.Trailers...), nil
 }
 
 // stagedChangesPresent is the handoff between catch-all staging and commit.
@@ -420,7 +417,7 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 		}
 		return false, recordAgentFixHead(sctx, stepName, headSHA)
 	}
-	summary = git.StripAIAttributionTrailers(summary)
+	summary = git.StripAIAttributionTrailers(summary, sctx.Config.Commit.Trailers...)
 	if summary == "" {
 		summary = fallbackSummary
 	}
@@ -491,6 +488,9 @@ func runPipelineCorrectionAgent(sctx *pipeline.StepContext, invoke func() (*agen
 }
 
 func recordPipelineHeadRange(sctx *pipeline.StepContext, before, after string) error {
+	if err := git.ValidateCommitAttribution(before, after, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }, sctx.Config.Commit.Trailers...); err != nil {
+		return err
+	}
 	if sctx.DB == nil || before == after {
 		return nil
 	}
@@ -520,6 +520,9 @@ func recordPipelineHeadRange(sctx *pipeline.StepContext, before, after string) e
 }
 
 func recordAgentFixHead(sctx *pipeline.StepContext, stepName types.StepName, headSHA string) error {
+	if err := git.ValidateCommitAttribution(sctx.Run.HeadSHA, headSHA, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }, sctx.Config.Commit.Trailers...); err != nil {
+		return err
+	}
 	if headSHA == sctx.Run.HeadSHA {
 		return nil
 	}

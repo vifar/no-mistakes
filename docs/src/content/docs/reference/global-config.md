@@ -1243,7 +1243,7 @@ A `commit.branch_pattern` in `.no-mistakes.yaml` takes precedence and clears any
 
 ### commit.trailers
 
-Git trailers configured for commits made from a single agent invocation's changes. The fork removes recognized AI attribution at commit time; human attribution and other trailers remain.
+Git trailers configured for commits made from a single agent invocation's changes. The fork omits every configured attribution trailer at commit time, regardless of its identifier. Human attribution and other trailers supplied in commit messages remain.
 
 | | |
 | --- | --- |
@@ -1257,15 +1257,7 @@ Each entry renders to one trailer line. It supports literal text and two Go-styl
 | `{{.Agent}}` | The agent that actually ran the invocation; with an `agent` fallback list, the one that answered, not the first configured |
 | `{{.Model}}` | The model the agent reported serving the invocation, or `unknown` when it reports none |
 
-For example, a human co-author can be retained:
-
-```yaml
-commit:
-  trailers:
-    - "Co-Authored-By: Some Person <person@example.com>"
-```
-
-AI co-author and assistant identities (including `no-mistakes` and `pi:local`), `Claude-Session` and `Codex-Session`, and standalone generated-with AI footers are removed before a pipeline commit is written, even when configured here. Matching uses complete attribution lines and identities, not words inside a disclosure or a human name such as Claude Smith. Subject and body prose, human co-authors, and other trailers survive. User commits already present on a submitted branch are not rewritten.
+Every entry in this setting defines AI attribution and is omitted, including entries that name a human. AI co-author and assistant identities, session attribution, and standalone generated-with AI footers are also removed from pipeline-created commit messages. Matching uses complete attribution lines and identities, not words inside a disclosure or a human name such as Claude Smith. Subject and body prose, human co-authors supplied in messages, and other trailers survive. User commits already present on a submitted branch are not rewritten. Agent-created commits are filtered before Git writes them; commits that bypass filtering are refused when recorded.
 
 `{{.Agent}}` and `{{.Model}}` come from agent output, so each is cut to its first whitespace-separated token, reduced to letters, digits, and `-_.:/`, and limited to 64 bytes; a value with nothing left renders as `unknown`.
 Claude, Codex, Grok, and Pi report the model they served; other agents render `unknown`.
@@ -1275,7 +1267,7 @@ Entries are limited to 1,024 bytes and 16 placeholders, the list to 16 entries, 
 The 1,024-byte limit also applies to the rendered line, checked when configuration loads with every placeholder at its 64-byte maximum, so an entry that loads cannot overflow at commit time.
 An invalid entry fails configuration loading, and a render failure at commit time leaves the changes unstaged.
 
-Trailers are added to Review, Test, Document, and Lint fix commits, repository gate repairs, and CI repair commits. Commits that no single invocation produced get none rather than a guessed agent: the Push step's catch-all commit, a CI repair retried after a protected-path refusal, and rebase or merge commits that an agent writes itself.
+Configured attribution is omitted from Review, Test, Document, and Lint fix commits, repository gate repairs, and CI repair commits. Commits that no single invocation produced get none rather than a guessed agent: the Push step's catch-all commit, a CI repair retried after a protected-path refusal, and rebase or merge commits that an agent writes itself.
 A per-repo [`commit.trailers`](/no-mistakes/reference/repo-config/#committrailers) list or a matching [`repository_overrides`](#repository_overrides) entry replaces this list rather than extending it; an empty list clears it.
 
 ### repository_overrides

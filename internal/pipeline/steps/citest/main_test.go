@@ -6,10 +6,17 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
 )
 
 func TestMain(m *testing.M) {
+	if handled, err := git.HandleAttributionHook(os.Args[1:]); handled {
+		if err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
 	os.Unsetenv("GIT_CONFIG_COUNT")
 	// Fixtures must not depend on the machine's system git config: some
 	// distributions ship safe.bareRepository=explicit there, which refuses

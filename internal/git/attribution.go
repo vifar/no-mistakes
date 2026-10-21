@@ -4,6 +4,8 @@ import (
 	"net/mail"
 	"regexp"
 	"strings"
+	"text/template"
+	"text/template/parse"
 )
 
 var attributionTrailerKey = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*[ \t]*:`)
@@ -31,7 +33,7 @@ func IsAIAttributionTrailer(line string) bool {
 	case "claude-session", "codex-session":
 		return true
 	case "co-authored-by":
-		address, err := mail.ParseAddress(strings.TrimSpace(value))
+		address, err := attributionAddress(value)
 		if err != nil {
 			return false
 		}
@@ -42,13 +44,18 @@ func IsAIAttributionTrailer(line string) bool {
 		}
 		return aiAttributionIdentity(address.Name)
 	case "assisted-by":
-		// Configured assistants use agent:model or no-mistakes:agent:model.
-		identity, _, _ := strings.Cut(strings.TrimSpace(value), ":")
-		if aiAttributionIdentity(identity) {
+		address, err := attributionAddress(value)
+		if err == nil && address.Name != "" {
+			if strings.EqualFold(address.Name, "Claude") {
+				return strings.EqualFold(address.Address, "noreply@anthropic.com")
+			}
+			return aiAttributionIdentity(address.Name)
+		}
+		if aiAttributionIdentity(value) {
 			return true
 		}
-		address, err := mail.ParseAddress(strings.TrimSpace(value))
-		return err == nil && aiAttributionIdentity(address.Name)
+		fields := strings.Fields(value)
+		return len(fields) > 0 && strings.Contains(fields[0], ":") && !strings.ContainsAny(value, "<>") && aiAttributionIdentity(fields[0])
 	}
 	return false
 }
@@ -57,19 +64,39 @@ func aiAttributionIdentity(name string) bool {
 	name = strings.ToLower(strings.Join(strings.Fields(name), " "))
 	switch name {
 	case "claude", "claude code", "codex", "chatgpt", "openai", "anthropic",
-		"copilot", "github copilot", "gemini", "grok", "pi", "omp", "opencode", "no-mistakes":
+		"copilot", "github copilot", "gemini", "grok", "pi", "omp", "opencode", "no-mistakes",
+		"antigravity", "rovodev", "cursor", "devin":
 		return true
 	}
-	// The configured co-author template prefixes the actual provider with
-	// no-mistakes. A person's name containing a provider name never matches.
-	return strings.HasPrefix(name, "no-mistakes ") && aiAttributionIdentity(strings.TrimPrefix(name, "no-mistakes "))
+	if strings.HasPrefix(name, "no-mistakes ") {
+		return aiAttributionIdentity(strings.TrimPrefix(name, "no-mistakes "))
+	}
+	if strings.HasPrefix(name, "acp:") {
+		parts := strings.Split(name, ":")
+		return len(parts) >= 2 && parts[1] != "" && !strings.ContainsAny(name, " \t<>")
+	}
+	if identity, _, ok := strings.Cut(name, ":"); ok && !strings.ContainsAny(name, " \t<>") {
+		return aiAttributionIdentity(identity)
+	}
+	return false
+}
+
+func attributionAddress(value string) (*mail.Address, error) {
+	value = strings.TrimSpace(value)
+	if i := strings.LastIndex(value, " <"); i >= 0 && strings.HasSuffix(value, ">") {
+		name := value[:i]
+		if !strings.HasPrefix(name, "\"") {
+			value = "\"" + strings.ReplaceAll(strings.ReplaceAll(name, "\\", "\\\\"), "\"", "\\\"") + "\"" + value[i:]
+		}
+	}
+	return mail.ParseAddress(value)
 }
 
 // StripAIAttributionTrailers removes AI attribution only from trailing trailer
 // paragraphs. The subject, prose, human trailers and their order survive.
 // Generated-with footers are recognized alongside Git's key:value trailers.
 // Continuations belong to their trailer, so deleting one cannot orphan its value.
-func StripAIAttributionTrailers(message string) string {
+func StripAIAttributionTrailers(message string, configured ...string) string {
 	lines := strings.Split(message, "\n")
 	drop := make([]bool, len(lines))
 	changed := false
@@ -109,7 +136,7 @@ func StripAIAttributionTrailers(message string) string {
 		}
 		allRemoved := true
 		for _, entry := range entries {
-			if !IsAIAttributionTrailer(entry.text) {
+			if !IsAIAttributionTrailer(entry.text) && !configuredAttribution(entry.text, configured) {
 				allRemoved = false
 				continue
 			}
@@ -135,4 +162,36 @@ func StripAIAttributionTrailers(message string) string {
 		}
 	}
 	return strings.TrimRight(strings.Join(kept, "\n"), "\r\n")
+}
+
+func configuredAttribution(line string, sources []string) bool {
+	for _, source := range sources {
+		tmpl, err := template.New("attribution").Parse(strings.TrimSpace(source))
+		if err != nil || tmpl.Tree == nil || tmpl.Tree.Root == nil {
+			continue
+		}
+		pattern := "^"
+		valid := true
+		for _, node := range tmpl.Tree.Root.Nodes {
+			switch node := node.(type) {
+			case *parse.TextNode:
+				pattern += regexp.QuoteMeta(string(node.Text))
+			case *parse.ActionNode:
+				if node.String() != "{{.Agent}}" && node.String() != "{{.Model}}" {
+					valid = false
+					break
+				}
+				pattern += `[A-Za-z0-9_.:/-]{1,64}`
+			default:
+				valid = false
+			}
+		}
+		if valid {
+			match, err := regexp.MatchString(pattern+"$", line)
+			if err == nil && match {
+				return true
+			}
+		}
+	}
+	return false
 }

@@ -206,6 +206,15 @@ func stepGitRunInput(sctx *pipeline.StepContext, input string, args ...string) (
 		cmd.Stdin = strings.NewReader(input)
 	}
 	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
+	if len(args) > 0 && args[0] == "commit" {
+		var cleanup func()
+		var err error
+		cmd.Env, cleanup, err = git.AttributionHookEnv(sctx.WorkDir, cmd.Env, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }, sctx.Config.Commit.Trailers...)
+		if err != nil {
+			return "", err
+		}
+		defer cleanup()
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		stderr := ""
@@ -218,7 +227,16 @@ func stepGitRunInput(sctx *pipeline.StepContext, input string, args ...string) (
 }
 
 func stepGitHeadSHA(sctx *pipeline.StepContext) (string, error) {
-	return stepGitRun(sctx, "rev-parse", "HEAD")
+	head, err := stepGitRun(sctx, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	if sctx.Run != nil && sctx.Config != nil {
+		if err := git.ValidateCommitAttribution(sctx.Run.HeadSHA, head, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }, sctx.Config.Commit.Trailers...); err != nil {
+			return "", err
+		}
+	}
+	return head, nil
 }
 
 func stepGitPush(sctx *pipeline.StepContext, remote, ref, expectedSHA string, forceWithLease bool) error {

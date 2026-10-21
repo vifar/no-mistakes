@@ -71,7 +71,7 @@ func TestCommitAttributionConfiguredTrailersAtCommitTime(t *testing.T) {
 			if _, err := commitAgentFixesWithResult(sctx, step, "repair widget", "fallback", &agent.Result{Provider: "pi", Model: "local"}); err != nil {
 				t.Fatal(err)
 			}
-			if got := gitTrailers(t, dir); got != "Co-Authored-By: Claude Smith <claude@example.com>" {
+			if got := gitTrailers(t, dir); got != "" {
 				t.Fatalf("trailers = %q", got)
 			}
 			if got := lastCommitMessage(t, dir); !strings.Contains(got, "repair widget") {
