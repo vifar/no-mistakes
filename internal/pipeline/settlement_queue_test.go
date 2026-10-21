@@ -185,9 +185,12 @@ func TestUnhealthySettlementStaysQueuedForTheRecoveryLoop(t *testing.T) {
 		unavailable: d.Closed,
 	}})
 	t.Cleanup(func() { setTerminalSettlements(t, nil) })
+	// The drain does not report an unhealthy TERMINAL settlement's failure:
+	// that failure is the settlement's own and is reported to its own
+	// caller. It fences nobody, so the acquirer is not failed by it.
 	withSettlementLock(t, func() {
-		if err := drainPublicationSettlements(); err == nil {
-			t.Fatal("unhealthy settlement reported success")
+		if err := drainPublicationSettlements(); err != nil {
+			t.Fatalf("an unhealthy terminal settlement fenced the acquirer: %v", err)
 		}
 	})
 	if queued := queuedTerminalSettlements(t); queued != 1 {
@@ -222,8 +225,8 @@ func TestRecoveryLoopRetriesAQueuedSettlement(t *testing.T) {
 	}})
 	t.Cleanup(func() { setTerminalSettlements(t, nil) })
 	withSettlementLock(t, func() {
-		if err := drainPublicationSettlements(); err == nil {
-			t.Fatal("unhealthy settlement reported success")
+		if err := drainPublicationSettlements(); err != nil {
+			t.Fatalf("an unhealthy terminal settlement fenced the acquirer: %v", err)
 		}
 	})
 	healthy.Store(true)

@@ -61,7 +61,22 @@ func startPublicationRecoveryLocked() {
 	}()
 }
 
+// rawSettlementFence reports that a raw publication settlement could not
+// land, so a candidate for the same preservation must not cross it. It is
+// distinct from an ordinary failure because it fences the RAW path alone: a
+// different run's terminal write can still succeed, and that run's own
+// terminal outcome must not become this one's.
+type rawSettlementFence struct{ err error }
+
+func (e *rawSettlementFence) Error() string { return e.err.Error() }
+func (e *rawSettlementFence) Unwrap() error { return e.err }
+
 func drainPublicationSettlements() error {
+	// A settlement that could not land is retried by the recovery loop, not
+	// by this drain: a drain attempts each settlement at most once, so a
+	// settlement whose storage is broken cannot spin the loop or block the
+	// settlements behind it.
+	attempted := map[*publicationSettlement]bool{}
 	for {
 		terminalSettlementMu.Lock()
 		for i := 0; i < len(terminalSettlements); {
@@ -107,7 +122,10 @@ func drainPublicationSettlements() error {
 					}
 				}
 				terminalSettlementMu.Unlock()
-				return err
+				// The RAW path is fenced by this failure: the raw write could
+				// not land, so a candidate for the same preservation must not
+				// cross it. The fence belongs to the raw path alone.
+				return &rawSettlementFence{err: err}
 			}
 			rawPublicationSettlements = rawPublicationSettlements[1:]
 			select {
@@ -122,6 +140,14 @@ func drainPublicationSettlements() error {
 			return nil
 		}
 		pending := terminalSettlements[0]
+		if attempted[pending] {
+			// This settlement already had its turn in this pass and its
+			// storage could not take the write. Leave it queued for the
+			// recovery loop and end the pass.
+			terminalSettlementMu.Unlock()
+			return nil
+		}
+		attempted[pending] = true
 		terminalSettlementMu.Unlock()
 		err := pending.write()
 		terminalSettlementMu.Lock()
@@ -131,9 +157,18 @@ func drainPublicationSettlements() error {
 			// so the run keeps custody until the outcome is durable. Storage
 			// that is gone for good was already released by the unavailable
 			// check above.
+			//
+			// The failure is THIS run's own, and it is reported to this
+			// settlement's own caller. It fences nobody: a different run's
+			// terminal write can still succeed, because the storage may reject
+			// exactly one run's write.
+			// The settlement moves to the BACK of the queue so the
+			// settlements behind it are still attempted in this pass, and the
+			// recovery loop keeps retrying it.
 			startPublicationRecoveryLocked()
+			terminalSettlements = append(terminalSettlements[1:], pending)
 			terminalSettlementMu.Unlock()
-			return err
+			continue
 		}
 		terminalSettlements = terminalSettlements[1:]
 		pending.done <- err
@@ -142,21 +177,15 @@ func drainPublicationSettlements() error {
 }
 
 func ReleaseCommitStatusLock() {
-	for {
-		if err := drainPublicationSettlements(); err != nil {
-			terminalSettlementMu.Lock()
-			<-CommitStatusLock
-			terminalSettlementMu.Unlock()
-			return
-		}
-		terminalSettlementMu.Lock()
-		if len(terminalSettlements) == 0 && len(rawPublicationSettlements) == 0 {
-			<-CommitStatusLock
-			terminalSettlementMu.Unlock()
-			return
-		}
-		terminalSettlementMu.Unlock()
-	}
+	// The lock orders the PUBLICATION writes; it is not a lease on the
+	// storage. A settlement whose write cannot land stays queued, and the
+	// recovery loop retries it, so the lock is released after this pass
+	// rather than held until the settlement lands. Holding it would let one
+	// run's broken storage block every other run's write.
+	_ = drainPublicationSettlements()
+	terminalSettlementMu.Lock()
+	<-CommitStatusLock
+	terminalSettlementMu.Unlock()
 }
 
 func SettleTerminalWrite(d *db.DB, write func() error) error {
