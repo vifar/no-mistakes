@@ -23,7 +23,7 @@ import (
 func runOpencode(args []string, scenario *Scenario) int {
 	if len(args) == 1 && args[0] == "--version" {
 		if os.Getenv("FAKEAGENT_OPENCODE_V2") == "1" {
-			fmt.Println("opencode v2.0.26")
+			fmt.Println("development fixture (API detection required)")
 		} else {
 			fmt.Println("1.0.0")
 		}

@@ -104,6 +104,7 @@ func TestOpencodeV2_RealHarnessExecutesToolAndReturnsValidatedOutput(t *testing.
 	}
 	encoded, _ := json.Marshal(config)
 	env := []string{
+		"OPENCODE_PASSWORD=", "OPENCODE_SERVER_PASSWORD=",
 		"HOME=" + root, "XDG_CONFIG_HOME=" + filepath.Join(root, "config"), "XDG_DATA_HOME=" + filepath.Join(root, "data"),
 		"XDG_STATE_HOME=" + filepath.Join(root, "state"), "XDG_CACHE_HOME=" + filepath.Join(root, "cache"),
 		"OPENCODE_CONFIG_DIR=" + filepath.Join(root, "config", "opencode"), "OPENCODE_CONFIG_CONTENT=" + string(encoded),
@@ -144,6 +145,9 @@ func TestOpencodeV2_RealHarnessExecutesToolAndReturnsValidatedOutput(t *testing.
 			return true
 		})
 		t.Fatalf("real V2 progress did not stream: %q; observed event types: %v", progress.String(), types)
+	}
+	if a.version() != opencodeAPIVersion2 || a.auth().password == "" {
+		t.Fatal("real V2 startup did not detect the API and capture its generated credential")
 	}
 	server := a.server
 	if err := a.Close(); err != nil {

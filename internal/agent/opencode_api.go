@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -68,8 +70,8 @@ func (v opencodeAPIVersion) String() string {
 //
 // The adapter and server must share a credential: an independent client
 // password would only produce a misleading 401. ensureServer resolves the
-// effective child environment or supplies the same private credential to its
-// managed V2 child, and captures legacy generated startup passwords. Only an
+// effective child environment and captures a generated startup password
+// when the server chooses its own credential. Only an
 // unsecured 1.x server needs no credential. Operator-facing environment semantics are
 // owned by docs/src/content/docs/reference/environment.md.
 type opencodeAuth struct {
@@ -315,7 +317,7 @@ func (a *opencodeAgent) sessionIDFromCreate(resp []byte) (string, error) {
 // messageBody builds the 1.x prompt payload.
 //
 // 1.x carries the model, reasoning effort, and optional native output format
-// in the message body. The 2.x payload is built separately in sendMessage;
+// in the message body. The 2.x payload is built separately in runOnceV2;
 // runOnceV2 owns its prompt-only structured-output path.
 func (a *opencodeAgent) messageBody(prompt string, schema json.RawMessage) map[string]any {
 	body := map[string]any{
@@ -340,22 +342,8 @@ func (a *opencodeAgent) messageBody(prompt string, schema json.RawMessage) map[s
 	return body
 }
 
-// sendMessage submits the prompt using the detected API generation.
-//
-// 1.x's endpoint blocks until the turn is over and answers with the message
-// itself. 2.x's endpoint does not block: it admits the prompt and returns
-// the queued inbox item, so the assistant message is read back from the
-// message list once the event stream reports the turn finished.
+// sendMessage submits a 1.x prompt and waits for its synchronous response.
 func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, prompt string, schema json.RawMessage) (*opencodeMessageResponse, error) {
-	if a.version() == opencodeAPIVersion2 {
-		// 2.x admits the prompt and returns immediately; the turn runs in
-		// the background. The message is read back after the stream
-		// reports the turn finished (see readAssistantMessage).
-		if _, err := a.doJSON(ctx, http.MethodPost, baseURL+fmt.Sprintf(a.routes().sessionPrompt, sessionID), map[string]any{"text": prompt}); err != nil {
-			return nil, err
-		}
-		return nil, nil
-	}
 	respBytes, err := a.doJSON(ctx, http.MethodPost, baseURL+fmt.Sprintf(a.routes().sessionPrompt, sessionID), a.messageBody(prompt, schema))
 	if err != nil {
 		return nil, err
@@ -366,11 +354,6 @@ func (a *opencodeAgent) sendMessage(ctx context.Context, baseURL, sessionID, pro
 		return nil, fmt.Errorf("opencode message parse: %w", err)
 	}
 	return &resp, nil
-}
-
-// opencodeMessagesResponse is the 2.x message list answer.
-type opencodeMessagesResponse struct {
-	Data []opencodeV2Message `json:"data"`
 }
 
 // opencodeV2Message is one projected message of a 2.x session. The
@@ -398,50 +381,6 @@ type opencodeV2Error struct {
 	Type    string `json:"type"`
 	Message string `json:"message"`
 	Status  int    `json:"status"`
-}
-
-// readAssistantMessage reads the newest assistant message of a 2.x session.
-func (a *opencodeAgent) readAssistantMessage(ctx context.Context, baseURL, sessionID string) (*opencodeMessageResponse, error) {
-	respBytes, err := a.doJSON(ctx, http.MethodGet, baseURL+"/api/session/"+sessionID+"/message?order=desc", nil)
-	if err != nil {
-		return nil, err
-	}
-	var list opencodeMessagesResponse
-	if err := json.Unmarshal(respBytes, &list); err != nil {
-		return nil, fmt.Errorf("opencode message parse: %w", err)
-	}
-	for _, msg := range list.Data {
-		if msg.Type != "assistant" {
-			continue
-		}
-		return v2MessageToResponse(msg), nil
-	}
-	return nil, nil
-}
-
-// v2MessageToResponse converts a 2.x assistant message into the adapter's
-// own message shape, so the rest of the adapter reads one structure.
-func v2MessageToResponse(msg opencodeV2Message) *opencodeMessageResponse {
-	resp := &opencodeMessageResponse{
-		Info: &opencodeMessageInfo{
-			ID:     msg.ID,
-			Role:   "assistant",
-			Tokens: msg.Tokens,
-		},
-	}
-	for _, part := range msg.Content {
-		if part.Type != "text" {
-			continue
-		}
-		resp.Parts = append(resp.Parts, opencodeMessagePart{Type: "text", Text: part.Text})
-	}
-	if msg.Error != nil {
-		resp.Info.Error = &opencodeMessageError{
-			Name:    msg.Error.Type,
-			Message: msg.Error.Message,
-		}
-	}
-	return resp
 }
 
 // connectEventStream opens the server-sent event stream.
@@ -527,4 +466,110 @@ func (a *opencodeAgent) setAPI(version opencodeAPIVersion, auth opencodeAuth) {
 	defer a.mu.Unlock()
 	a.apiVersion = version
 	a.apiAuth = auth
+}
+
+// The private server credential is sent only to the selected loopback server,
+// never followed through a redirect or interpolated into an error URL.
+var opencodeV2HTTP = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+
+type opencodeV2Client struct{ authorization string }
+
+func (c opencodeV2Client) authenticate(request *http.Request) {
+	if c.authorization != "" {
+		request.Header.Set("Authorization", c.authorization)
+	}
+}
+
+func (c opencodeV2Client) json(ctx context.Context, method, endpoint string, body, target any) error {
+	raw, err := c.raw(ctx, method, endpoint, body)
+	if err != nil {
+		return err
+	}
+	if target != nil {
+		if err := json.Unmarshal(raw, target); err != nil {
+			return fmt.Errorf("decode OpenCode v2 response: %w", err)
+		}
+	}
+	return nil
+}
+
+func (c opencodeV2Client) raw(ctx context.Context, method, endpoint string, body any) ([]byte, error) {
+	var input io.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		input = bytes.NewReader(encoded)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, input)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	c.authenticate(req)
+	response, err := opencodeV2HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	raw, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("%s %s failed with HTTP %d", method, req.URL.Path, response.StatusCode)
+	}
+	return raw, nil
+}
+
+type opencodeV2Model struct {
+	ID         string `json:"id"`
+	ProviderID string `json:"providerID"`
+	Variant    string `json:"variant,omitempty"`
+}
+
+type opencodeV2Session struct {
+	ID      string `json:"id"`
+	Outcome string `json:"outcome"`
+}
+
+func (c opencodeV2Client) messages(ctx context.Context, sessionURL string) ([]opencodeV2Message, error) {
+	query := url.Values{"order": {"asc"}, "limit": {"100"}}
+	seen := make(map[string]bool)
+	var messages []opencodeV2Message
+	for {
+		var page struct {
+			Data   []opencodeV2Message `json:"data"`
+			Cursor *struct {
+				Next *string `json:"next"`
+			} `json:"cursor"`
+		}
+		if err := c.json(ctx, http.MethodGet, sessionURL+"/message?"+query.Encode(), nil, &page); err != nil {
+			return nil, fmt.Errorf("opencode projection: %w", err)
+		}
+		if page.Data == nil || page.Cursor == nil {
+			return nil, fmt.Errorf("opencode projection: incomplete message page")
+		}
+		for _, message := range page.Data {
+			if message.ID == "" || message.Type == "" {
+				return nil, fmt.Errorf("opencode projection: missing message identity or type")
+			}
+			if message.Type == "assistant" && message.Content == nil {
+				return nil, fmt.Errorf("opencode projection: missing assistant content")
+			}
+		}
+		messages = append(messages, page.Data...)
+		if page.Cursor.Next == nil {
+			return messages, nil
+		}
+		cursor := *page.Cursor.Next
+		if cursor == "" || seen[cursor] {
+			return nil, fmt.Errorf("opencode projection: invalid or repeated pagination cursor")
+		}
+		seen[cursor] = true
+		query = url.Values{"cursor": {cursor}, "limit": {"100"}}
+	}
 }

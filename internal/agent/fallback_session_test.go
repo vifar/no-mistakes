@@ -213,3 +213,21 @@ func TestFallbackAgent_ExpiredContextStillWinsOverTheNewRule(t *testing.T) {
 		t.Fatalf("calls = first %d second %d, want 1/0", first.calls, second.calls)
 	}
 }
+
+// Exercise the actual HTTP/session boundary, rather than constructing the marker.
+func TestFallbackAgent_OpencodeSessionRefusalDispatchesFallback(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusMethodNotAllowed, http.StatusInternalServerError} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			fake := newOpencodeV2Fake(t, opencodeV2FakeOptions{sessionCreateStatus: status})
+			first := opencodeV2AgentFor(fake)
+			second := &fallbackTestAgent{name: "codex", run: func() (*Result, error) { return &Result{Text: "fallback completed"}, nil }}
+			result, err := NewFallback([]Agent{first, second}).Run(context.Background(), RunOpts{Prompt: "work", CWD: t.TempDir()})
+			if err != nil || result == nil || result.Text != "fallback completed" || second.calls != 1 {
+				t.Fatalf("session refusal did not dispatch fallback exactly once: result=%+v err=%v calls=%d", result, err, second.calls)
+			}
+			if fake.prompts.Load() != 0 {
+				t.Fatal("refused session admitted a prompt")
+			}
+		})
+	}
+}

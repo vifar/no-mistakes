@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -28,6 +29,13 @@ type fakeOpencodeV2Session struct {
 
 func newFakeOpencodeV2Server(scenario *Scenario) *fakeOpencodeV2Server {
 	password := os.Getenv("OPENCODE_PASSWORD")
+	if password == "" {
+		password = os.Getenv("OPENCODE_SERVER_PASSWORD")
+	}
+	if password == "" {
+		password = rand.Text()
+	}
+	fmt.Printf("server password %s\n", password)
 	_ = os.Unsetenv("OPENCODE_PASSWORD")
 	_ = os.Unsetenv("OPENCODE_SERVER_PASSWORD")
 	return &fakeOpencodeV2Server{base: &fakeOpencodeServer{scenario: scenario, sessionDirs: make(map[string]string)}, password: password, sessions: make(map[string]*fakeOpencodeV2Session)}
@@ -74,6 +82,12 @@ func (s *fakeOpencodeV2Server) routes() http.Handler {
 		}
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The released 2.x server serves the legacy health path as its SPA.
+		if r.Method == http.MethodGet && r.URL.Path == "/global/health" {
+			w.Header().Set("Content-Type", "text/html")
+			fmt.Fprint(w, "<!doctype html><html></html>")
+			return
+		}
 		user, password, ok := r.BasicAuth()
 		if !ok || user != "opencode" || password != s.password || s.password == "" {
 			http.Error(w, "unauthorized", 401)

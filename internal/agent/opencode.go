@@ -203,7 +203,7 @@ func (a *opencodeAgent) runOnceWithFormat(ctx context.Context, opts RunOpts, nat
 		return nil, err
 	}
 	if a.version() == opencodeAPIVersion2 {
-		return a.runV2(ctx, opts, baseURL)
+		return a.runOnceV2(ctx, opts, baseURL)
 	}
 
 	// Create session with blanket permissions

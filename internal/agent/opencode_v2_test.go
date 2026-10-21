@@ -368,7 +368,7 @@ func TestOpencodeAgent_V2PromptUsesTheV2Endpoint(t *testing.T) {
 	fake := newOpencodeV2Fake(t, opencodeV2FakeOptions{answer: "ok"})
 	a := opencodeV2AgentFor(fake)
 
-	if _, err := a.sendMessage(context.Background(), fake.server.URL, "v2s1", "hello", nil); err != nil {
+	if _, err := a.Run(context.Background(), RunOpts{Prompt: "hello", CWD: t.TempDir()}); err != nil {
 		t.Fatalf("sendMessage: %v", err)
 	}
 	body, _ := fake.lastPromptBody.Load().(string)
@@ -512,22 +512,13 @@ func TestOpencodeAgent_V2ToolActivityIsRecorded(t *testing.T) {
 		"data: {\"type\":\"session.tool.called\",\"data\":{\"sessionID\":\"v2s1\",\"assistantMessageID\":\"m1\",\"id\":\"call1\",\"name\":\"shell\"}}\n\n" +
 			"data: {\"type\":\"session.text.delta\",\"data\":{\"sessionID\":\"v2s1\",\"assistantMessageID\":\"m1\",\"ordinal\":0,\"delta\":\"done\"}}\n\n" +
 			"data: {\"type\":\"session.execution.succeeded\",\"data\":{\"sessionID\":\"v2s1\"}}\n\n")
-	state := &opencodeStreamState{
-		sessionID:  "v2s1",
-		textParts:  make(map[string]*opencodeTextPart),
-		usageByMsg: make(map[string]TokenUsage),
-	}
-	if err := parseOpencodeV2SSE(stream, state); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
+	state := &opencodeV2Stream{sessionID: "v2s1", parts: make(map[string]string), emitted: make(map[string]string), usage: make(map[string]TokenUsage)}
+	state.read(stream, RunOpts{})
 	if !state.toolInvoked {
 		t.Fatal("toolInvoked = false, want the tool part to be recorded")
 	}
-	if evidence := state.v2ToolEvidence(); evidence != opencodeToolsRan {
-		t.Fatalf("evidence = %v, want ran tools", evidence)
-	}
-	if state.lastText != "done" {
-		t.Fatalf("lastText = %q, want done", state.lastText)
+	if state.parts["m1:0"] != "done" {
+		t.Fatalf("lastText = %q, want done", state.parts["m1:0"])
 	}
 }
 
@@ -538,16 +529,10 @@ func TestOpencodeAgent_V2OtherSessionsAreIgnored(t *testing.T) {
 		"data: {\"type\":\"session.text.delta\",\"data\":{\"sessionID\":\"other\",\"assistantMessageID\":\"m1\",\"ordinal\":0,\"delta\":\"not mine\"}}\n\n" +
 			"data: {\"type\":\"session.text.delta\",\"data\":{\"sessionID\":\"v2s1\",\"assistantMessageID\":\"m1\",\"ordinal\":0,\"delta\":\"mine\"}}\n\n" +
 			"data: {\"type\":\"session.execution.succeeded\",\"data\":{\"sessionID\":\"v2s1\"}}\n\n")
-	state := &opencodeStreamState{
-		sessionID:  "v2s1",
-		textParts:  make(map[string]*opencodeTextPart),
-		usageByMsg: make(map[string]TokenUsage),
-	}
-	if err := parseOpencodeV2SSE(stream, state); err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if state.lastText != "mine" {
-		t.Fatalf("lastText = %q, want mine", state.lastText)
+	state := &opencodeV2Stream{sessionID: "v2s1", parts: make(map[string]string), emitted: make(map[string]string), usage: make(map[string]TokenUsage)}
+	state.read(stream, RunOpts{})
+	if state.parts["m1:0"] != "mine" {
+		t.Fatalf("lastText = %q, want mine", state.parts["m1:0"])
 	}
 }
 
