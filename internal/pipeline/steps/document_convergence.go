@@ -83,6 +83,11 @@ func documentCapFinding(findings Findings, discarded bool) Findings {
 // behind by an earlier step is not this pass's proposal, so it must not count
 // as a prospective commit and must never be deleted by the rollback.
 func documentCandidatePaths(sctx *pipeline.StepContext, from string, retained []string) ([]string, []string, error) {
+	// Entry admission precedes the agent. Recheck before trusting status or
+	// accepting a pass: flags introduced during it can hide the entire proposal.
+	if err := assertDocumentIndexVisible(sctx); err != nil {
+		return nil, nil, err
+	}
 	head, err := stepGitRun(sctx, "rev-parse", "HEAD")
 	if err != nil {
 		return nil, nil, err
@@ -205,7 +210,7 @@ func assertDocumentIndexVisible(sctx *pipeline.StepContext) error {
 		}
 	}
 	if count > 0 {
-		return fmt.Errorf("%d entries are hidden from status by index flags; Document cannot verify a clean entry (first %d paths: %s)", count, len(hidden), strings.Join(hidden, ", "))
+		return fmt.Errorf("worktree has %d entries hidden from status by index flags; Document cannot verify a clean entry (first %d paths: %s)", count, len(hidden), strings.Join(hidden, ", "))
 	}
 	return nil
 }
@@ -214,6 +219,10 @@ func assertDocumentIndexVisible(sctx *pipeline.StepContext) error {
 // require a different repair to that same file. Bind suppression to the exact
 // accepted input tree, using the entry head captured before the agent runs.
 func documentRepeatsUnchangedInputs(sctx *pipeline.StepContext, previous *db.DocumentPass, entryHead string, paths []string) (bool, error) {
+	// A matching committed tree says nothing about bytes hidden by index flags.
+	if err := assertDocumentIndexVisible(sctx); err != nil {
+		return false, err
+	}
 	if previous == nil || len(paths) == 0 {
 		return false, nil
 	}
