@@ -265,7 +265,7 @@ Updates matching documentation for code changes and reports unresolved gaps or o
 - Preserves predecessor edits under the [leftover-edit rules](#target-advances-before-publication) before starting its own pass
 - The placement policy gives each fact one authoritative owner, prefers removing stale duplicates or replacing them with pointers, avoids new documentation surfaces for perceived gaps, and keeps durable incident lessons near their owner instead of in `AGENTS.md`
 - `document.instructions` can add trusted default-branch ownership rules for the repository, and a matching machine-local [`repository_overrides`](/no-mistakes/reference/global-config/#machine-local-review-and-documentation-guidance) entry can add the operator's own, in a separate labeled section
-- When `commands.lint` is empty, performs documentation and agent-driven lint in one combined housekeeping invocation, categorizing findings for the document or lint gate; if that pass is skipped, its structured output is unusable, or a daemon restart loses the in-memory result, lint runs its own agent pass instead
+- When `commands.lint` is empty, repair passes perform documentation and agent-driven lint in one combined housekeeping invocation, categorizing findings for the document or lint gate; if that pass is skipped, its structured output is unusable, or a daemon restart loses the in-memory result, lint runs its own agent pass instead
 - Includes user intent when available
 - Returns findings for unresolved documentation gaps or owner decisions, including convergence stops under the rules linked above
 - Requires a structured `summary` field; it may be empty only when there are no findings and the pass made no changes, including agent-created commits
