@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -69,11 +68,7 @@ func TestCustomGateWatcherProofProductionJourneys(t *testing.T) {
 				h.Respond(run.ID, gate, types.ActionApprove)
 			}
 			run := waitForStepStatus(t, h, branch, types.StepCI, types.StepStatusRunning, 45*time.Second)
-			control, err := sql.Open("sqlite", paths.WithRoot(h.NMHome).DB())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer control.Close()
+			control := openControlDB(t, paths.WithRoot(h.NMHome).DB())
 			database, err := db.OpenReadOnly(paths.WithRoot(h.NMHome).DB())
 			if err != nil {
 				t.Fatal(err)

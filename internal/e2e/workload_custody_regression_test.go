@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"context"
-	"database/sql"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,11 +73,7 @@ func TestStorageBlockedFailureReleasesCapacityOnRealDaemon(t *testing.T) {
 	if out, err := h.Run("init"); err != nil {
 		t.Fatalf("init: %v\n%s", err, out)
 	}
-	control, err := sql.Open("sqlite", paths.WithRoot(h.NMHome).DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer control.Close()
+	control := openControlDB(t, paths.WithRoot(h.NMHome).DB())
 	if _, err := control.Exec(`CREATE TRIGGER block_one BEFORE UPDATE OF status ON runs WHEN NEW.branch='feature/storage-blocked' AND NEW.status IN ('failed','cancelled') BEGIN SELECT RAISE(ABORT,'owned storage outage'); END`); err != nil {
 		t.Fatal(err)
 	}
@@ -182,11 +177,7 @@ func TestSupersessionDoesNotWaitForBlockedSettlementOnRealDaemon(t *testing.T) {
 		_, err := os.Stat(command + ".started")
 		return err == nil
 	})
-	control, err := sql.Open("sqlite", paths.WithRoot(h.NMHome).DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer control.Close()
+	control := openControlDB(t, paths.WithRoot(h.NMHome).DB())
 	if _, err := control.Exec(`CREATE TRIGGER supersession_outage BEFORE UPDATE OF status ON runs WHEN OLD.id='` + first.ID + `' AND NEW.status IN ('failed','cancelled') BEGIN SELECT RAISE(ABORT,'predecessor storage outage'); END`); err != nil {
 		t.Fatal(err)
 	}
@@ -240,11 +231,7 @@ func TestSetupStorageOutageReleasesCapacityOnRealDaemon(t *testing.T) {
 				h.PushToGate("feature/setup-slot-holder")
 				holder = waitForStepStatus(t, h, "feature/setup-slot-holder", types.StepTest, types.StepStatusRunning, 30*time.Second)
 			}
-			control, err := sql.Open("sqlite", paths.WithRoot(h.NMHome).DB())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer control.Close()
+			control := openControlDB(t, paths.WithRoot(h.NMHome).DB())
 			if _, err := control.Exec(`CREATE TABLE setup_attempts (message TEXT); CREATE TRIGGER setup_outage BEFORE UPDATE OF status ON runs WHEN NEW.branch='feature/broken-setup' AND NEW.status='failed' BEGIN INSERT INTO setup_attempts VALUES(NEW.error); SELECT RAISE(FAIL,'setup storage outage'); END`); err != nil {
 				t.Fatal(err)
 			}

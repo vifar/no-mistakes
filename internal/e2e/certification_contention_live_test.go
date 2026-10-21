@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -100,11 +99,7 @@ os.execv(%q, [%q]+sys.argv[1:])
 				}
 				time.Sleep(20 * time.Millisecond)
 			}
-			control, err := sql.Open("sqlite", filepath.Join(h.NMHome, "state.sqlite"))
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer control.Close()
+			control := openControlDB(t, filepath.Join(h.NMHome, "state.sqlite"))
 			control.SetMaxOpenConns(1)
 			if _, err := control.Exec("BEGIN IMMEDIATE"); err != nil {
 				t.Fatal(err)

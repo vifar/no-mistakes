@@ -4,7 +4,6 @@ package e2e
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -84,11 +83,7 @@ func TestPlannedStopRefusesOwnedAdmissionFailureOnRealDaemon(t *testing.T) {
 	h.PushToGate("feature/slot-holder")
 	waitForStepStatus(t, h, "feature/slot-holder", types.StepReview, types.StepStatusRunning, 30*time.Second)
 	p := paths.WithRoot(h.NMHome)
-	control, err := sql.Open("sqlite", p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer control.Close()
+	control := openControlDB(t, p.DB())
 	if _, err := control.Exec(`CREATE TABLE admission_attempts (status TEXT)`); err != nil {
 		t.Fatal(err)
 	}

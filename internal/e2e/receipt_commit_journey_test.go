@@ -27,11 +27,7 @@ func TestRunOwnerReceiptFailureBeforeCommitJourney(t *testing.T) {
 	h.CommitChange("feature/holder", "holder.txt", "hold slot\n", "holder")
 	h.PushToGate("feature/holder")
 	holder := waitForStepStatus(t, h, "feature/holder", types.StepReview, types.StepStatusAwaitingApproval, 90*time.Second)
-	writer, err := sql.Open("sqlite", paths.WithRoot(h.NMHome).DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer writer.Close()
+	writer := openControlDB(t, paths.WithRoot(h.NMHome).DB())
 	for _, path := range []string{"observer", "existing-fresh", "new-fresh"} {
 		t.Run(path, func(t *testing.T) {
 			branch := "feature/" + path

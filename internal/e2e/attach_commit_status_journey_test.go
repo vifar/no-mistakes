@@ -3,7 +3,6 @@
 package e2e
 
 import (
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -243,11 +242,7 @@ func TestAttachCommitStatusJourney(t *testing.T) {
 		statusCommand(t, h, h.WorkDir, "daemon", "stop", "--force")
 		// Crash window: the forge received failure, but its durable acknowledgement
 		// was lost. Recovery would repost it unless the replacement retires it.
-		database, err := sql.Open("sqlite", paths.WithRoot(h.NMHome).DB())
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer database.Close()
+		database := openControlDB(t, paths.WithRoot(h.NMHome).DB())
 		loseAcknowledgement := func() {
 			t.Helper()
 			// Seed a lost POST acknowledgement, bypassing the live writer's
