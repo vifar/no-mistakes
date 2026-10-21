@@ -396,8 +396,9 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	return err
 }
 
-// commitAgentFixesWithResult commits the worktree changes left by producer, the
-// agent invocation that made them. A nil producer commits without trailers.
+// commitAgentFixesWithResult preserves direct agent commits as applied repairs
+// even when there are no remaining worktree edits. The result records whether
+// the head advanced, independently of the producer's descriptive summary.
 func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string, producer *agent.Result) (bool, error) {
 	ctx := sctx.Ctx
 	recordedHead := sctx.Run.HeadSHA

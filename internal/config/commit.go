@@ -29,9 +29,9 @@ const (
 	maxTrailerValueBytes       = 64
 )
 
-// unknownTrailerValue stands in for an agent or model the invocation did not
-// report, so a trailer still says which commits lack that evidence instead of
-// silently disappearing.
+// unknownTrailerValue keeps attribution-template validation deterministic when
+// an invocation does not report an agent or model. Rendered trailers are not
+// appended to pipeline commits; the filtering policy lives in internal/git.
 const unknownTrailerValue = "unknown"
 
 // MaxFixMessageSummaryBytes bounds agent-provided fix summaries before rendering.
