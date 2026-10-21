@@ -46,7 +46,7 @@ func TestDocumentCapCleanCheckLeavesLintToItsOwnPass(t *testing.T) {
 		"match": "Detect the linting and formatting tools for this project",
 		"structured": map[string]any{
 			"findings": []map[string]any{{"id": "remaining-lint", "severity": "warning", "file": "feature.txt", "action": "ask-user", "description": "formatting still needs attention"}},
-			"summary": "unresolved lint duty",
+			"summary":  "unresolved lint duty",
 		},
 	}
 	scenario := documentJourneyScenarioWith(t, "", nil, capJourneyCheck(documentJourneyAction("", "")), lint)

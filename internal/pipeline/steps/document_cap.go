@@ -215,14 +215,12 @@ func (s *DocumentStep) discardGapCheckProposal(sctx *pipeline.StepContext, headB
 	defer cancel()
 	cleanup := *sctx
 	cleanup.Ctx = cleanupCtx
-	// The index-visibility check comes FIRST. Git status - and therefore the
-	// candidate discovery below - cannot see an entry marked
-	// --assume-unchanged or --skip-worktree, so a check that hid a file and
-	// then edited it would look like it proposed nothing, and its verdict
-	// would be accepted while the committed documentation stayed stale.
-	if err := assertDocumentIndexVisible(&cleanup); err != nil {
-		return false, err
-	}
+	// documentCandidatePaths admits the index visibility FIRST, so a check
+	// that hid a file behind --assume-unchanged or --skip-worktree cannot
+	// make its edit invisible: Git status cannot see such an entry, and the
+	// verdict would otherwise be accepted while the committed documentation
+	// stayed stale. The check runs on the cleanup context, so it still
+	// works when the run was cancelled.
 	paths, untracked, err := documentCandidatePaths(&cleanup, headBefore, retainedScratch)
 	if err != nil {
 		return false, err
