@@ -77,7 +77,7 @@ if [[ "$#" -eq 0 ]]; then
   # the shards finish in the time of the slowest one instead of their sum.
   #
   # The shard count is deliberately small: each shard is a whole go test
-  # process with its own daemon slots, and the daemon cap is shared, so more
+  # process with its own test environment, and the daemon cap is shared, so more
   # shards than the cap supports only adds contention. It is a measured
   # count, not a knob: an unsupported value could skip shards or break the
   # arithmetic that places the long poles.
@@ -199,8 +199,8 @@ if [[ "$#" -eq 0 ]]; then
   #
   # The split balances by MEASURED TIME, not by test count. The journeys
   # below are the measured long pole of the bucket - each one costs more than
-  # the rest of a shard together - so they are handed out one per shard
-  # explicitly. Everything else is spread by a checksum of the test's own
+  # the rest of a shard together - so they are assigned round robin across
+  # shards explicitly. Everything else is spread by a checksum of the test's own
   # name, which is stable across runs, so a test always lands in the same
   # shard and a failure reproduces in the same place.
   slow_journeys=(
