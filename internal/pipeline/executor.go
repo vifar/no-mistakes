@@ -122,8 +122,7 @@ type Executor struct {
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
 	onPRMerged            func(context.Context, string)
-	// onWorkloadDone reports that the run's pipeline work is decided. It runs
-	// at most once, before the terminal outcome is written to storage.
+	// See SetOnWorkloadDone for the workload boundary contract.
 	onWorkloadDone func()
 	// workloadDone records that the hook already ran, so a run that settles
 	// through more than one path reports the workload boundary only once.
@@ -218,10 +217,10 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 }
 
 // SetOnWorkloadDone registers a hook invoked once the run's pipeline work is
-// decided, before the terminal outcome is written to storage.
+// decided, before failure persistence or completion readback.
 //
 // The two are different moments. The work is over as soon as the run has
-// decided its outcome; recording that outcome can still be waiting on storage
+// decided its outcome; recording or confirming it can still wait on storage
 // that is slow or unhealthy, and a caller that must not be held hostage by
 // the recording waits for this hook rather than for the run to be fully
 // settled. The hook runs at most once per executor.
@@ -232,9 +231,7 @@ func (e *Executor) SetOnWorkloadDone(fn func()) {
 	e.onWorkloadDone = fn
 }
 
-// reportWorkloadDone invokes the workload boundary hook at most once. It is
-// the moment the run's pipeline work is decided, which is earlier than the
-// moment its outcome is durable.
+// reportWorkloadDone invokes the hook described by SetOnWorkloadDone at most once.
 func (e *Executor) reportWorkloadDone() {
 	if e.onWorkloadDone == nil {
 		return
