@@ -365,7 +365,7 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 	goScript := "#!/bin/sh\n"
 	goScript += "case \" $* \" in *' run ./internal/e2edaemon/reapmain.go '*) printf 'cleanup\\n' >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0 ;; esac\n"
 	goScript += wrapperDiscoveryScript
-	goScript += "case \"$*\" in *' -skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ ./internal/e2e/...'*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=remaining ;; *'./internal/pipeline/steps/...'*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=step-tests ;; *' -run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=terminal ;; *' -run ^TestUserJourney$/(claude|codex)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=claude-codex ;; *' -run ^TestUserJourney$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=complement ;; *) exit 0 ;; esac\n"
+	goScript += "case \"$*\" in *' -skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ ./internal/e2e/...'*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=remaining ;; *'./internal/pipeline/steps/...'*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; printf 'step-tests-done\\n' >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0 ;; *' -run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=terminal ;; *' -run ^TestUserJourney$/(claude|codex)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=claude-codex ;; *' -run ^TestUserJourney$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=complement ;; *) exit 0 ;; esac\n"
 	goScript += "export NM_E2E_FAKE_PARENT_PID=$$\n"
 	goScript += "\"$NM_E2E_FAKE_CHILD\" \"$selector\" &\nchild_pid=$!\n"
 	goScript += "trap 'wait \"$child_pid\" 2>/dev/null || true; printf \"parent-end:%s\\n\" \"$selector\" >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0' TERM INT\n"
@@ -421,11 +421,12 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 		reader := bufio.NewReader(ready)
 		wantLines := 4
 		if stage == "remaining" {
-			// The terminal worker, the step-test worker, and the shards
-			// that run beside it. The fixture's daemon cap is 2, and the
-			// terminal worker takes one slot, so exactly one shard runs
-			// beside it. The step-test worker takes no daemon slot.
-			wantLines = 6
+			// The terminal worker and the shard that runs beside it. The
+			// fixture's daemon cap is 2, and the terminal worker takes one
+			// slot, so exactly one shard runs beside it. The step-test
+			// worker takes no daemon slot and is awaited BEFORE the
+			// shards start, so it has already finished by then.
+			wantLines = 4
 		}
 		lines := make([]string, 0, wantLines)
 		for len(lines) < wantLines {
@@ -445,7 +446,7 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 	}
 	wantJobs := 2
 	if stage == "remaining" {
-		wantJobs = 3
+		wantJobs = 2
 	}
 	if len(readyLines) != wantJobs*2 {
 		t.Fatalf("ready lines = %q, want %d parent and child readiness reports", readyLines, wantJobs)
