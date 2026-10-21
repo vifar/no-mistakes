@@ -762,7 +762,12 @@ func (i daemonInstance) exited() (bool, error) {
 	}
 	running, err := daemonProcessRunning(i.pid)
 	if err != nil {
-		return false, err
+		// A process may exit during a platform probe. Retry once, accepting
+		// only a confirmed absence; uncertainty must still fail the stop.
+		if stillRunning, recheckErr := daemonProcessRunning(i.pid); recheckErr == nil && !stillRunning {
+			return true, nil
+		}
+		return false, fmt.Errorf("inspect daemon pid %d: %w", i.pid, err)
 	}
 	if !running {
 		return true, nil
@@ -961,10 +966,16 @@ func waitForDaemonStop(p *paths.Paths, instance daemonInstance) error {
 		cleanupCapturedDaemonArtifacts(p, instance)
 		return nil
 	}
-	// Validate the captured process itself; a successor PID file is never a target.
-	matches, err := daemonPIDRecordMatchesProcess(p, daemonPIDFile{PID: instance.pid, StartedAt: instance.startedAt}, instance.startedAt)
-	if err != nil || !matches {
-		return fmt.Errorf("captured daemon identity could not be verified: %v", err)
+	// Re-read OS identity immediately before the destructive fallback. Comparing
+	// the captured start time to itself cannot detect a PID recycled since the
+	// deadline probe. A successor PID file is never a target.
+	exited, err := instance.exited()
+	if err != nil {
+		return fmt.Errorf("verify captured daemon before kill: %w", err)
+	}
+	if exited {
+		cleanupCapturedDaemonArtifacts(p, instance)
+		return nil
 	}
 	pid := instance.pid
 
@@ -977,7 +988,7 @@ func waitForDaemonStop(p *paths.Paths, instance daemonInstance) error {
 	for time.Now().Before(killDeadline) {
 		exited, err := instance.exited()
 		if err != nil {
-			return err
+			return fmt.Errorf("wait for daemon pid %d after kill: %w", pid, err)
 		}
 		if exited {
 			cleanupCapturedDaemonArtifacts(p, instance)

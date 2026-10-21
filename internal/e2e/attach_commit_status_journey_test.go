@@ -149,6 +149,7 @@ func statusCommand(t *testing.T, h *Harness, dir string, args ...string) string 
 	t.Helper()
 	out, err := h.RunInDir(dir, args...)
 	if err != nil {
+		h.dumpDebugState()
 		t.Fatalf("%v: %v\n%s", args, err, out)
 	}
 	return out

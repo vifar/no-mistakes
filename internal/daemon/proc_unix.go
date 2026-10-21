@@ -51,13 +51,16 @@ func splitUnixProcessLine(line string) (int, string, bool) {
 }
 
 func processRunning(pid int) (bool, error) {
+	if pid <= 0 {
+		return false, nil
+	}
 	err := syscall.Kill(pid, 0)
 	if err == nil {
 		state, err := processState(pid)
 		if err != nil {
 			return false, err
 		}
-		if strings.HasPrefix(state, "Z") {
+		if state == "" || strings.HasPrefix(state, "Z") {
 			return false, nil
 		}
 		return true, nil
@@ -75,9 +78,23 @@ func processState(pid int) (string, error) {
 	cmd := processStateCommand(pid)
 	out, err := cmd.Output()
 	if err != nil {
-		return "", err
+		var exitErr *exec.ExitError
+		// ps uses exit 1 with no output for no matching PID. Confirm absence
+		// independently: exit 1 alone is not evidence that the daemon stopped.
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(out) == 0 && len(exitErr.Stderr) == 0 && errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			return "", nil
+		}
+		stderr := ""
+		if errors.As(err, &exitErr) {
+			stderr = strings.TrimSpace(string(exitErr.Stderr))
+		}
+		return "", fmt.Errorf("probe process state pid %d (ps -o stat=, stderr=%q): %w", pid, stderr, err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	state := strings.TrimSpace(string(out))
+	if state == "" && !errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+		return "", fmt.Errorf("probe process state pid %d: ps returned an empty state for an existing or unverifiable process", pid)
+	}
+	return state, nil
 }
 
 func processStateCommand(pid int) *exec.Cmd {

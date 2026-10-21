@@ -3,6 +3,9 @@
 package daemon
 
 import (
+	"errors"
+	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -120,4 +123,56 @@ func countEnvEntries(env []string, key string) int {
 		}
 	}
 	return count
+}
+
+// The fake ps runs only after kill(pid, 0) succeeded, then kills and waits
+// for the real child to be reaped before returning ps's documented no-match.
+func TestProcessRunningAcceptsExitBetweenProbes(t *testing.T) {
+	// Only the probe should terminate the child. A short wall-clock lifetime
+	// can expire before ps is scheduled and exercises the wrong interleaving.
+	child := exec.CommandContext(t.Context(), "/bin/sleep", "300")
+	if err := child.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- child.Wait() }()
+	defer func() { _ = child.Process.Kill(); <-done }()
+	dir := t.TempDir()
+	script := fmt.Sprintf("#!/bin/sh\n/bin/kill -KILL %d\nwhile /bin/kill -0 %d 2>/dev/null; do /bin/sleep 0.01; done\nexit 1\n", child.Process.Pid, child.Process.Pid)
+	if err := os.WriteFile(filepath.Join(dir, "ps"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	running, err := processRunning(child.Process.Pid)
+	if err != nil || running {
+		t.Fatalf("exited child reported running=%v err=%v", running, err)
+	}
+}
+
+func TestProcessRunningRetainsRealProbeFailure(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ps"), []byte("#!/bin/sh\necho 'probe access denied' >&2\nexit 2\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	_, err := processRunning(os.Getpid())
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 || !strings.Contains(err.Error(), "probe access denied") || !strings.Contains(err.Error(), fmt.Sprint(os.Getpid())) {
+		t.Fatalf("lost probe cause, stderr or pid: %v", err)
+	}
+}
+
+func TestProcessRunningDoesNotHideAmbiguousPSFailures(t *testing.T) {
+	for _, script := range []string{"exit 1", "exit 0", "echo 'ps unavailable' >&2; exit 1", "echo R; exit 1"} {
+		t.Run(script, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, "ps"), []byte("#!/bin/sh\n"+script+"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", dir)
+			if running, err := processRunning(os.Getpid()); err == nil {
+				t.Fatalf("existing pid probe accepted: running=%v", running)
+			}
+		})
+	}
 }
