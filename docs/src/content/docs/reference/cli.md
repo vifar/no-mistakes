@@ -648,7 +648,7 @@ The new run inherits the failed run's intent byte for byte with its provenance, 
 
 `--run` names the failed run, as `axi status` shows it.
 It does not select a run: the retried run is always the current branch's latest run, and a `--run` that names any other run is refused.
-The retry refuses, changing nothing, unless every proof holds:
+The retry proceeds only when every proof holds:
 
 | Proof | Holds when |
 | ----- | ---------- |
@@ -668,6 +668,7 @@ The retry refuses, changing nothing, unless every proof holds:
 | `review conversation` | a carried Review that recorded a question still has its question records on disk. They are copied into the new run, so open and withdrawn questions reach the PR body; if they are gone, the retry is refused |
 
 Each refusal names the failed proof and points to `no-mistakes rerun`.
+If setup refuses a continuation before execution, cleanup settles the setup failure, releases its ownership handle, and deletes the continuation and retry link so the source can be retried again. Transient storage failures delay cleanup; missing or changed ownership evidence preserves the records and evidence rather than deleting unrelated work.
 The new run records which run, step, and round it continues, the failed step's error, and the preserved head it started from.
 Its run object shows that link as `retry_of`, and the failed run's run object names its continuation as `retried_by`; the new run's own outcome completes the trail.
 A failed run is continued at most once.

@@ -439,7 +439,8 @@ func cfgForInvocation(cfg *config.Config, inv db.AgentInvocation) *config.Config
 // proveAtLaunch repeats the configuration proof against the configuration the
 // continuation run loaded, then carries the failed run's Review conversation
 // into the run's own evidence directory. It refuses, naming the proof, before
-// the audit link or any carried step exists.
+// any carried step exists. The audit link is already durable so setup cleanup
+// can identify the refused continuation.
 func (r *retryLaunch) proveAtLaunch(ctx context.Context, m *RunManager, globalCfg *config.GlobalConfig, cfg *config.Config, repoCfg *config.RepoConfig, runID, headSHA string) error {
 	if hasRebaseCoreStep(m.steps()) {
 		if _, err := pipeline.RetryComparisonReceipt(m.db, r.source, headSHA); err != nil {
