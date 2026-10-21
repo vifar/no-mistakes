@@ -195,12 +195,14 @@ func TestAcceptedTestGapCommitStatusJourney(t *testing.T) {
 				if out, err := j.h.Run("axi", "abort"); err != nil {
 					t.Fatalf("cancel uncertified watcher: %v\n%s", err, out)
 				}
+				// Abort observes terminal run state; stopping also drains the
+				// manager's final status publication before we inspect it.
+				if out, err := j.h.Run("daemon", "stop"); err != nil {
+					t.Fatalf("stop disposable daemon: %v\n%s", err, out)
+				}
 				publications, err := database.GetCommitStatusPublications(t.Context(), runID)
 				if err != nil || len(publications) != 1 || publications[0].LastState != "failure" || publications[0].StrictCertificate != nil {
 					t.Fatalf("uncertified cancellation preserved success: %+v %v", publications, err)
-				}
-				if out, err := j.h.Run("daemon", "stop"); err != nil {
-					t.Fatalf("stop disposable daemon: %v\n%s", err, out)
 				}
 				assertNoDaemonProcessesForRoot(t, j.h, "after recovered gap journey")
 				mu.Lock()
