@@ -376,12 +376,12 @@ Optional dependency-preparation command for isolated run worktrees. Run via the 
 
 When set, no-mistakes runs this command before the first Review fix round, Document agent turn (including combined lint), standalone agent-driven Lint, or configured Test, Lint, or Format command that the pipeline reaches, including machine-local additional Test or Lint checks.
 It is a lazy hook rather than an additional pipeline step: a read-only Review pass does not trigger preparation, and a successful setup is reused by later fix rounds and steps in the same worktree. Repositories without a preparation command keep their existing behavior.
-Trusted `test.prepare: true` instead triggers it eagerly before agent-only Test while leaving `commands.test` unset.
+Trusted `test.prepare: true` also triggers it eagerly before agent-only Test while leaving `commands.test` unset.
 A successful result is shared by all later preparation callers in that isolated worktree, including after daemon recovery.
 The dependent step log records the preparation command, output, and elapsed preparation time.
 A non-zero exit or launch failure reports a dependency-preparation failure and stops that step before its agent or command runs.
 
-Use this for deterministic dependency materialization such as `npm ci --prefer-offline`. The run worktree starts with tracked files only, so ignored dependency directories such as `node_modules` are otherwise absent. no-mistakes keeps ignored files produced by preparation, and keeps any submodule it checks out at the commit the superproject records, while removing its tracked, ordinary untracked, and nested-repository mutations before continuing; a submodule commit the command moved to is reset to the recorded commit. Earlier pending tracked and ordinary untracked pipeline changes are restored exactly, so preparation can run before a later configured command without admitting setup artifacts into a fix commit.
+Use this for deterministic dependency materialization such as `npm ci --prefer-offline`. The run worktree starts with tracked files only, so ignored dependency directories such as `node_modules` are otherwise absent. no-mistakes keeps ignored files produced by preparation, and keeps any submodule it checks out at the commit the superproject records, while removing its tracked, ordinary untracked, and nested-repository mutations before continuing; a submodule commit the command moved to is reset to the recorded commit. Earlier pending tracked and ordinary untracked pipeline changes are restored exactly, so preparation can first run partway through the pipeline without admitting setup artifacts into a fix commit.
 
 Like every `commands.*` value, `commands.prepare` comes from the trusted default-branch configuration unless that trusted copy explicitly enables `allow_repo_commands: true`. no-mistakes never auto-detects an install command from the pushed branch.
 
