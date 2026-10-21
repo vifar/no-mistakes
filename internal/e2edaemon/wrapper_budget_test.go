@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -48,8 +49,8 @@ func TestE2EWrapperDefaultPartitionsJourneyAndRunsRemainder(t *testing.T) {
 		t.Fatalf("wrapper status = %d, output: %s", result.status, result.output)
 	}
 	calls := result.calls
-	if len(calls) != 5 { // two matrix processes, terminal journey, remainder, cleanup
-		t.Fatalf("go calls = %q, want two matrix processes, terminal journey, remainder, and cleanup", calls)
+	if len(calls) != 9 { // two matrix processes, two discovery calls, terminal, three shards, cleanup
+		t.Fatalf("go calls = %q, want matrix, discovery, terminal journey, three shards, and cleanup", calls)
 	}
 	assertBothMatrixCallsFinishedBeforeCleanup(t, result.events)
 	first := callContaining(t, calls, "-run ^TestUserJourney$/(claude|codex)$")
@@ -66,6 +67,37 @@ func TestE2EWrapperDefaultPartitionsJourneyAndRunsRemainder(t *testing.T) {
 	remaining := callContaining(t, calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ ./internal/e2e/... ./internal/pipeline/steps/...")
 	if !strings.Contains(remaining, "-timeout ") {
 		t.Errorf("remaining-suite timeout missing: %q", remaining)
+	}
+	// The suite contract is that every discovered test runs exactly once,
+	// including tests that exist only in a steps package. Evaluate the actual
+	// child selectors against the discovery inventory, independently of the
+	// wrapper's placement algorithm.
+	for _, name := range strings.Fields(wrapperDiscoveredTests) {
+		selected := 0
+		for _, call := range calls {
+			fields := strings.Fields(call)
+			if len(fields) == 0 || fields[0] != "test" || strings.Contains(call, " -list ") {
+				continue
+			}
+			run, skip := ".*", "a^"
+			for i := 0; i+1 < len(fields); i++ {
+				if fields[i] == "-run" {
+					run = fields[i+1]
+				}
+				if fields[i] == "-skip" {
+					skip = fields[i+1]
+				}
+			}
+			// Matrix selectors address subtests; the parent is their owner.
+			run = strings.SplitN(run, "/", 2)[0]
+			skip = strings.SplitN(skip, "/", 2)[0]
+			if regexp.MustCompile(run).MatchString(name) && !regexp.MustCompile(skip).MatchString(name) {
+				selected++
+			}
+		}
+		if name != "TestUserJourney" && selected != 1 {
+			t.Errorf("discovered test %s selected %d times, want exactly once", name, selected)
+		}
 	}
 }
 
@@ -88,8 +120,28 @@ func TestE2EWrapperPropagatesTerminalJourneyFailure(t *testing.T) {
 	if result.status != 19 {
 		t.Fatalf("wrapper status = %d, want terminal failure 19; output: %s", result.status, result.output)
 	}
-	if len(result.calls) != 5 || result.events[len(result.events)-1] != "cleanup" {
+	if len(result.calls) != 9 || result.events[len(result.events)-1] != "cleanup" {
 		t.Fatalf("both remaining workers must finish before cleanup: calls=%q events=%q", result.calls, result.events)
+	}
+}
+
+func TestE2EWrapperDiscoveryFailureStartsNoWorkers(t *testing.T) {
+	result := runE2EWrapper(t, "discovery", "")
+	if result.status != 1 {
+		t.Fatalf("wrapper status = %d, want failed discovery to reject the suite: %s", result.status, result.output)
+	}
+	if len(result.calls) != 4 || result.events[len(result.events)-1] != "cleanup" {
+		t.Fatalf("discovery failure launched workers or skipped cleanup: calls=%q events=%q", result.calls, result.events)
+	}
+}
+
+func TestE2EWrapperShardFailureWaitsForWorkersAndFailsTheSuite(t *testing.T) {
+	result := runE2EWrapper(t, "shard", "")
+	if result.status != 29 {
+		t.Fatalf("wrapper status = %d, want shard failure 29: %s", result.status, result.output)
+	}
+	if len(result.calls) != 9 || result.events[len(result.events)-1] != "cleanup" {
+		t.Fatalf("shard failure lost workers or cleanup: calls=%q events=%q", result.calls, result.events)
 	}
 }
 
@@ -195,6 +247,7 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 	fakeGo := filepath.Join(binDir, "go")
 	goScript := "#!/bin/sh\n"
 	goScript += "case \" $* \" in *' run ./internal/e2edaemon/reapmain.go '*) printf 'cleanup\\n' >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0 ;; esac\n"
+	goScript += wrapperDiscoveryScript
 	goScript += "case \"$*\" in *' -skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ ./internal/e2e/... '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=remaining ;; *' -run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=terminal ;; *' -run ^TestUserJourney$/(claude|codex)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=claude-codex ;; *' -run ^TestUserJourney$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=complement ;; *) exit 0 ;; esac\n"
 	goScript += "export NM_E2E_FAKE_PARENT_PID=$$\n"
 	goScript += "\"$NM_E2E_FAKE_CHILD\" \"$selector\" &\nchild_pid=$!\n"
@@ -250,6 +303,9 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 	go func() {
 		reader := bufio.NewReader(ready)
 		wantLines := 4
+		if stage == "remaining" {
+			wantLines = 8 // terminal worker plus three shards, each with a child
+		}
 		lines := make([]string, 0, wantLines)
 		for len(lines) < wantLines {
 			line, readErr := reader.ReadString('\n')
@@ -267,6 +323,9 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 		t.Fatalf("timed out waiting for both fake jobs and children to report readiness: %v", readyCtx.Err())
 	}
 	wantJobs := 2
+	if stage == "remaining" {
+		wantJobs = 4
+	}
 	if len(readyLines) != wantJobs*2 {
 		t.Fatalf("ready lines = %q, want %d parent and child readiness reports", readyLines, wantJobs)
 	}
@@ -363,6 +422,12 @@ type e2eWrapperResult struct {
 	events []string
 }
 
+const wrapperDiscoveredTests = "TestUserJourney TestTargetAdvanceTerminalMergeLiveJourney TestRetainedTargetContinuityLiveJourney TestAttachCommitStatusJourney TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary TestEvalJourney TestStepOnly"
+
+// These are external go-list responses, not substitutes for the wrapper.
+// Listing a steps-only name catches silently excluding an entire package.
+const wrapperDiscoveryScript = "case \" $* \" in *' -list '*) if [ \"${NM_E2E_FAKE_GO_FAIL_MATRIX:-}\" = discovery ]; then exit 23; fi; case \"$*\" in *'./internal/pipeline/steps/...'*) printf 'TestStepOnly\\n' ;; *) printf '%s\\n' 'TestUserJourney' 'TestTargetAdvanceTerminalMergeLiveJourney' 'TestRetainedTargetContinuityLiveJourney' 'TestAttachCommitStatusJourney' 'TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney' 'TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary' 'TestEvalJourney' ;; esac; exit 0 ;; esac\n"
+
 func runE2EWrapper(t *testing.T, failOnMatrix, explicit string) e2eWrapperResult {
 	t.Helper()
 	return runE2EWrapperWithCap(t, failOnMatrix, explicit, "2")
@@ -380,8 +445,9 @@ func runE2EWrapperWithCap(t *testing.T, failOnMatrix, explicit, cap string) e2eW
 	fakeGo := filepath.Join(binDir, "go")
 	contents := "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$NM_E2E_FAKE_GO_LOG\"\n"
 	contents += "case \" $* \" in *' run ./internal/e2edaemon/reapmain.go '*) printf 'cleanup\\n' >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0 ;; esac\n"
+	contents += wrapperDiscoveryScript
 	contents += "printf 'begin:%s\\n' \"$*\" >>\"$NM_E2E_FAKE_GO_EVENTS\"\nstatus=0\n"
-	contents += "case \"$NM_E2E_FAKE_GO_FAIL_MATRIX:$*\" in first:*\"-run ^TestUserJourney$/(claude|codex)$\"*) status=17 ;; terminal:*\"-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$\"*) status=19 ;; esac\n"
+	contents += "case \"$NM_E2E_FAKE_GO_FAIL_MATRIX:$*\" in first:*\"-run ^TestUserJourney$/(claude|codex)$\"*) status=17 ;; terminal:*\"-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$\"*) status=19 ;; shard:*\"-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$\"*) status=29 ;; esac\n"
 	contents += "printf 'end:%s:%s\\n' \"$*\" \"$status\" >>\"$NM_E2E_FAKE_GO_EVENTS\"\nexit \"$status\"\n"
 	if err := os.WriteFile(fakeGo, []byte(contents), 0o755); err != nil {
 		t.Fatal(err)
