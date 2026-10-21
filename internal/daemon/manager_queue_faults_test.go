@@ -794,6 +794,13 @@ func TestClaimedCancelRPCStopsWorkWhenDatabaseReadsFail(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
+	// The daemon can still be finishing a bounded terminal write while the
+	// fixture restores its schema. Wait for that ordinary contention; a busy
+	// restore has not made storage healthy and must never be marked restored.
+	raw.SetMaxOpenConns(1)
+	if _, err := raw.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		t.Fatal(err)
+	}
 	// Change only this disposable database. Both the handler and its guard
 	// now receive a real SQLite read error, rather than a mocked DB result.
 	if _, err := raw.Exec("ALTER TABLE runs RENAME TO unreadable_runs"); err != nil {
@@ -806,6 +813,7 @@ func TestClaimedCancelRPCStopsWorkWhenDatabaseReadsFail(t *testing.T) {
 		}
 		if _, err := raw.Exec("ALTER TABLE unreadable_runs RENAME TO runs"); err != nil {
 			t.Errorf("restore disposable database: %v", err)
+			return
 		}
 		restored = true
 	}
