@@ -531,6 +531,12 @@ func (s *Service) gateContextRefusal(ctx context.Context) (State, bool) {
 // use a strict fast-forward. Equivalent-diverged branches first anchor the
 // pre-sync head, then move to the verified equivalent pipeline head.
 func (s *Service) Apply(ctx context.Context) State {
+	return s.apply(ctx, false)
+}
+
+// strictFastForward keeps published-head custody recovery from adopting even
+// equivalent divergence. Ordinary sync retains its anchored equivalent mode.
+func (s *Service) apply(ctx context.Context, strictFastForward bool) State {
 	if refusal, blocked := s.gateContextRefusal(ctx); blocked {
 		return refusal
 	}
@@ -538,6 +544,11 @@ func (s *Service) Apply(ctx context.Context) State {
 	if plan.State == StateSynchronized || plan.State == StateMergedRemoteRemoved {
 		plan.Changed = false
 		return plan
+	}
+	if strictFastForward && plan.State == StateDiverged {
+		blocked := blockedPlan(plan, StateDiverged, "blocked_recover_diverged", fmt.Sprintf("the local branch has diverged from pipeline-pushed head %s; recovery requires a strict fast-forward; inspect both histories before reconciling manually; no files or branch refs were changed", plan.Pipeline.PushedHead))
+		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right HEAD..." + plan.Pipeline.PushedHead}
+		return blocked
 	}
 	if !CanApply(plan) {
 		return plan
@@ -689,7 +700,12 @@ func (s *Service) BindRecoveryArchive(ctx context.Context, archiveRef string) St
 // head never changed from the submitted head needs no recovery at all, so
 // Recover treats that user_owned state as an idempotent no-op success.
 //
-// The decision matrix, by worktree relation to the preserved pipeline head P
+// An already-returned terminal run whose current head equals its pushed head
+// instead uses apply(ctx, true) for plain recovery: ownership alone does not
+// prove the local branch contains the published fix. See Custody recovery in
+// docs/src/content/docs/reference/cli.md for the user-facing contract.
+//
+// The unpublished-head decision matrix, by worktree relation to preserved head P
 // (the terminally verified run head, pinned by its private recovery ref):
 //
 //	relation   worktree  default                        --keep-local
@@ -812,6 +828,20 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		return rebound
 	}
 	if run != nil && run.CustodyReturnedAt != nil {
+		// A custody stamp proves ownership, not that this worktree contains
+		// the final published fix. Repeating recovery must finish that move
+		// rather than silently reporting success on the old base (#89).
+		if !keepLocal && terminalRunStatus(run.Status) && run.LastPushedSHA != nil && run.HeadSHA == *run.LastPushedSHA {
+			published := s.apply(ctx, true)
+			published.Recovered = published.State == StateSynchronized
+			// Retired PRs still admit the existing exact-head no-op, but
+			// must never move a stale local branch after retirement.
+			if published.Local.Head == published.Pipeline.PushedHead &&
+				(published.State == StateMergedRemoteRetained || published.State == StateClosed) {
+				published.Recovered = true
+			}
+			return published
+		}
 		state.Recovered = true
 		state.Changed = false
 		return state
@@ -1520,8 +1550,9 @@ func (s *Service) recoverAdoptPreserved(ctx context.Context, run *db.Run, state 
 // Its success decision is an allowlist. Recovered is true only when (a) the
 // explicit recover_remote_rewritten rebind committed, or (b) a fresh live
 // check proved the binding already equals the live head, in which case the
-// caller's ordinary idempotent path decides (handled=false). Every other fresh
-// outcome refuses with Recovered=false and never reaches a cached no-op.
+// caller's custody or strict published-head path decides (handled=false).
+// Every other fresh outcome refuses with Recovered=false and never reaches
+// a cached no-op.
 // Runs whose head moved past an unpublished binding keep the ordinary custody
 // recovery (handled=false without a live check).
 //
