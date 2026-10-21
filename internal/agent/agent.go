@@ -87,7 +87,20 @@ func IsStructuredOutputRejected(err error) bool {
 	var rejection interface {
 		StructuredOutputRejected() bool
 	}
-	return errors.As(err, &rejection) && rejection.StructuredOutputRejected()
+	if errors.As(err, &rejection) && rejection.StructuredOutputRejected() {
+		return true
+	}
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, child := range wrapped.Unwrap() {
+			if IsStructuredOutputRejected(child) {
+				return true
+			}
+		}
+	case interface{ Unwrap() error }:
+		return IsStructuredOutputRejected(wrapped.Unwrap())
+	}
+	return false
 }
 
 // IsUsageLimitReached reports the adapter's terminal usage-limit signal. The

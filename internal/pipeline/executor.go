@@ -2197,7 +2197,7 @@ rounds:
 			fmt.Fprintf(logFile, "\nerror: %s\n", redactedErr)
 			touchLogActivity("error: "+redactedErr, true)
 			cause := ""
-			if errors.Is(err, ErrAgentInvocationFailed) && (outcome == nil || outcome.ExitCode == 0) {
+			if errors.Is(err, ErrAgentInvocationFailed) && !agent.IsStructuredOutputRejected(err) && (outcome == nil || outcome.ExitCode == 0) {
 				cause = db.StepFailureCauseAgentInvocation
 			}
 			if dbErr := e.db.FailStepWithCause(sr.ID, redactedErr, durationMS, cause); dbErr != nil {
