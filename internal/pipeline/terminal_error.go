@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -80,11 +81,14 @@ func shutdownCancellationOnly(err error, ctxs ...context.Context) bool {
 //
 // The rule is deliberately narrow. A step that was cut off mid-flight
 // reports the failure it was in the middle of - a terminated git command, a
-// closed pipe - and that failure is the step's own: the operation it was
-// doing did not succeed. A shutdown that arrives while a read is in flight
-// does not make the read succeed, so the read keeps its own outcome.
+// closed pipe - and that failure is the step's own UNLESS the cancellation
+// is what stopped the work. A shutdown that arrives while a read is in
+// flight does not make the read succeed, so the read keeps its own
+// outcome; a read whose subprocess this command's own context stopped IS the
+// cancellation, and the git package records that provenance at the
+// execution boundary, where it is known.
 //
-// What IS decoration is a wrapper that adds a MESSAGE around the
+// What is otherwise decoration is a wrapper that adds a MESSAGE around the
 // cancellation. A step that reports "step document failed: daemon shutting
 // down" says the same thing the cancellation says, with a prefix. So the
 // question is asked of the error's own cause: a wrapper is asked of what it
@@ -105,7 +109,8 @@ func cancellationAttributable(err, cause error) bool {
 	if joined, ok := err.(interface{ Unwrap() []error }); ok {
 		// A joined error is attributable only when EVERY part of it is. One
 		// independent part among the cancellations makes the whole thing an
-		// independent failure.
+		// independent failure, so the join is inspected BEFORE anything is
+		// looked for through it.
 		children := joined.Unwrap()
 		if len(children) == 0 {
 			return false
@@ -117,15 +122,35 @@ func cancellationAttributable(err, cause error) bool {
 		}
 		return true
 	}
-	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
-		// A wrapper adds a message around the real cause. What matters is
-		// whether the cause it wraps is the cancellation, so the question
-		// is asked of the inner error.
-		inner := wrapped.Unwrap()
+	// The pipeline's own report of a step that failed is a MESSAGE around the
+	// step's error, so the question is asked of what it wraps. Every OTHER
+	// wrapper is a MEANING: the shipping layer's "the remote observation
+	// failed" says the read did not produce a result, which is a failure in
+	// its own right even when the cancellation stopped the process. A wrapper
+	// that adds meaning is never transparent.
+	var stepErr *stepExecutionError
+	if errors.As(err, &stepErr) {
+		inner := stepErr.Unwrap()
 		if inner == nil {
 			return false
 		}
 		return cancellationAttributable(inner, cause)
+	}
+	// A subprocess this command's own context stopped is the cancellation,
+	// whatever it reported on the way out. The git package records that
+	// provenance at the execution boundary, where it is known, so the marker
+	// is read rather than guessed from the shape of the error.
+	//
+	// The marker is read where it IS, not wherever it is found: a meaning
+	// adding wrapper in between means the failure is that wrapper's, so the
+	// marker underneath it does not speak for the whole error.
+	if _, ok := err.(*git.CancelledExitError); ok {
+		return true
+	}
+	if _, ok := err.(interface{ Unwrap() error }); ok {
+		// Any other wrapper adds MEANING around the real cause. So the
+		// wrapper is the answer, not a message to look through.
+		return false
 	}
 	// A leaf: it is the cancellation only if it IS the cancellation.
 	return err == cause || err == context.Canceled

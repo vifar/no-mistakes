@@ -6,14 +6,20 @@ import (
 	"fmt"
 	"os/exec"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/git"
 )
 
-// A run's failure is the cancellation only when the cancellation IS the whole
+// A run's failure is the cancellation only when the cancellation is the whole
 // story. A step that was cut off mid-flight reports the failure it was in the
-// middle of, and that failure is its own.
+// middle of, and that failure is its own UNLESS the cancellation is what
+// stopped the work.
 func TestCancellationAttributable(t *testing.T) {
 	cause := errors.New("daemon shutting down")
 	independent := errors.New("the ref was already deleted")
+	// A wrapper that adds MEANING rather than a message: the read did not
+	// produce a result, which is a failure in its own right.
+	meaningful := fmt.Errorf("observe shipping ref: remote observation failed: %w", independent)
 
 	cases := []struct {
 		name string
@@ -31,7 +37,7 @@ func TestCancellationAttributable(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "a step that wraps the cancellation",
+			name: "the pipeline's own report of a step that failed",
 			// The step's message says the same thing the cancellation says,
 			// with a prefix. That is decoration, not an independent failure.
 			err:  &stepExecutionError{step: "document", message: "daemon shutting down", cause: cause},
@@ -50,27 +56,15 @@ func TestCancellationAttributable(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "a subprocess that was killed",
-			// The command was doing real work when it was stopped, and that
-			// work did not succeed. The read failed; the cancellation only
-			// arrived alongside it.
-			err:  errors.Join(killedProcessExit(t), context.Canceled),
+			name: "a wrapper that adds meaning",
+			// The observation failed to produce a result. That is the
+			// failure, whatever stopped the process.
+			err:  meaningful,
 			want: false,
 		},
 		{
-			name: "a killed subprocess wrapped by a step",
-			err: &stepExecutionError{step: "document", message: "git rev-parse: signal: terminated",
-				cause: errors.Join(killedProcessExit(t), context.Canceled)},
-			want: false,
-		},
-		{
-			name: "a subprocess that failed on its own",
-			err:  errors.Join(failedProcessExit(t), context.Canceled),
-			want: false,
-		},
-		{
-			name: "an independent failure",
-			err:  independent,
+			name: "a step whose meaning wrapped the cancellation",
+			err:  &stepExecutionError{step: "ci", message: "observe shipping ref: remote observation failed", cause: meaningful},
 			want: false,
 		},
 		{
@@ -78,6 +72,17 @@ func TestCancellationAttributable(t *testing.T) {
 			// The failure would have happened anyway; the cancellation only
 			// arrived alongside it.
 			err:  errors.Join(independent, context.Canceled),
+			want: false,
+		},
+		{
+			name: "a step's report joined to an independent failure",
+			err: errors.Join(&stepExecutionError{step: "ci", message: "remote observation failed", cause: independent},
+				errors.New("independent failure")),
+			want: false,
+		},
+		{
+			name: "an independent failure",
+			err:  independent,
 			want: false,
 		},
 		{
@@ -111,28 +116,28 @@ func TestCancellationAttributableIgnoresAWrapperAroundAnIndependentCause(t *test
 	}
 }
 
+// A subprocess this command's own context stopped is the cancellation: the
+// git package records that provenance at the execution boundary, where it is
+// known, and the classifier reads the marker rather than guessing from the
+// shape of the error.
+func TestCancellationAttributableAcceptsAStoppedSubprocess(t *testing.T) {
+	cause := errors.New("daemon shutting down")
+	stopped := &git.CancelledExitError{ExitError: killedProcessExit(t)}
+	err := &stepExecutionError{step: "document", message: "git rev-parse: signal: terminated", cause: stopped}
+	if !cancellationAttributable(err, cause) {
+		t.Fatalf("a subprocess the context stopped was not attributed to the cancellation: %v", err)
+	}
+}
+
 // killedProcessExit runs a process that is killed by a signal and returns its
 // exit error, which is what a subprocess stopped mid-flight reports.
-func killedProcessExit(t *testing.T) error {
+func killedProcessExit(t *testing.T) *exec.ExitError {
 	t.Helper()
 	cmd := exec.Command("/bin/sh", "-c", "kill -TERM $$")
 	err := cmd.Run()
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) {
 		t.Fatalf("killed process did not report an exit: %v", err)
-	}
-	return exit
-}
-
-// failedProcessExit runs a process that exits with a failure code of its own
-// and returns its exit error.
-func failedProcessExit(t *testing.T) error {
-	t.Helper()
-	cmd := exec.Command("/bin/sh", "-c", "exit 128")
-	err := cmd.Run()
-	var exit *exec.ExitError
-	if !errors.As(err, &exit) {
-		t.Fatalf("failed process did not report an exit: %v", err)
 	}
 	return exit
 }

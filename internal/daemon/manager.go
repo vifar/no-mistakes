@@ -376,12 +376,14 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		// workload signal, and reporting it here too would close the channel a
 		// second time.
 		if !handle.consumed {
-			// Report the boundary FIRST, before the settlement below, which
-			// can still be waiting on storage to record the terminal outcome.
+			// Report the boundary BEFORE the settlement below, which can
+			// still be waiting on storage to record the terminal outcome. A
+			// caller waiting for the run to stop must not be held by that
+			// wait.
 			//
-			// The SLOT is not released here: an unsettled setup failure keeps
-			// its capacity, because the run keeps its custody until its
-			// outcome is durable.
+			// The SLOT is the custody here, and it is held until the run
+			// settles: an unresolved setup failure keeps its capacity, so a
+			// later run does not start while this one is still unresolved.
 			handle.reportWorkloadStopped()
 		}
 		if r := recover(); r != nil {
@@ -2706,10 +2708,11 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 			// waiting on storage to record the terminal outcome. A caller
 			// waiting for the run to stop must not be held by that wait.
 			//
-			// The SLOT is not released here: an unsettled setup failure keeps
-			// its capacity, because the run keeps its custody until its
-			// outcome is durable. Releasing it would let a later run start
-			// while this one is still unresolved.
+			// The SLOT is the custody here, and it is held until the run
+			// settles: an unresolved setup failure keeps its capacity, so a
+			// later run does not start while this one is still unresolved.
+			// The settlement is retried by the publication recovery loop, and
+			// the slot is freed when it lands.
 			handle.reportWorkloadStopped()
 			if err != nil {
 				err = errors.Join(err, m.failRunSetup(setupCtx, run.ID, started, err))
