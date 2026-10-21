@@ -58,15 +58,7 @@ type managedServer struct {
 	exited        chan struct{} // closed exactly once when cmd.Wait returns
 	waitErr       error         // result of cmd.Wait; only read after exited is closed
 	healthTimeout time.Duration // health-check deadline; defaults to defaultHealthTimeout when zero
-	healthHeaders map[string]string
-	stdin         io.WriteCloser // optional parent-owned lease for stdio servers
 	stopping      atomic.Bool
-}
-
-type managedServerOptions struct {
-	output        io.Writer
-	healthHeaders map[string]string
-	holdStdin     bool
 }
 
 // getAvailablePort finds an ephemeral port by binding to :0 and releasing.
@@ -85,27 +77,19 @@ func getAvailablePort() (int, error) {
 // ctx is only used for the health check timeout.
 // agentName tags the PID tracking file so crash-recovery can identify orphans.
 func startServerWithPort(ctx context.Context, agentName, bin string, args []string, cwd string, healthPath string, port int, environment runenv.Overlay, extraEnv ...[]string) (*managedServer, error) {
-	return startServerWithOptions(ctx, agentName, bin, args, cwd, healthPath, port, environment, managedServerOptions{}, extraEnv...)
+	return startServerWithPortOutput(ctx, agentName, bin, args, cwd, healthPath, port, environment, nil, extraEnv...)
 }
 
+// startServerWithPortOutput is startServerWithPort with an explicit output
+// writer. A non-nil writer receives stdout and stderr instead of the global
+// sink, allowing callers to capture startup data such as OpenCode's generated
+// password.
 func startServerWithPortOutput(ctx context.Context, agentName, bin string, args []string, cwd string, healthPath string, port int, environment runenv.Overlay, output io.Writer, extraEnv ...[]string) (*managedServer, error) {
-	return startServerWithOptions(ctx, agentName, bin, args, cwd, healthPath, port, environment, managedServerOptions{output: output}, extraEnv...)
-}
-
-func startServerWithOptions(ctx context.Context, agentName, bin string, args []string, cwd string, healthPath string, port int, environment runenv.Overlay, options managedServerOptions, extraEnv ...[]string) (*managedServer, error) {
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
 	cmd.Stdin = nil
-	var stdin io.WriteCloser
-	if options.holdStdin {
-		var err error
-		stdin, err = cmd.StdinPipe()
-		if err != nil {
-			return nil, fmt.Errorf("create server stdin lease: %w", err)
-		}
-	}
 	cmd.Env = gitSafeEnvWithOverlay(cwd, environment, extraEnv...)
-	out := options.output
+	out := output
 	if out == nil {
 		out = currentManagedServerOutput()
 	}
@@ -114,9 +98,6 @@ func startServerWithOptions(ctx context.Context, agentName, bin string, args []s
 	configureManagedServerCmd(cmd)
 
 	if err := cmd.Start(); err != nil {
-		if stdin != nil {
-			_ = stdin.Close()
-		}
 		slog.Warn("managed agent server failed to start", "agent", agentName, "error", err)
 		return nil, fmt.Errorf("start server %s: %w", bin, err)
 	}
@@ -134,12 +115,9 @@ func startServerWithOptions(ctx context.Context, agentName, bin string, args []s
 		StartedAt:      time.Now().UTC(),
 	})
 
-	srv := &managedServer{cmd: cmd, port: port, pidFile: pidFile, exited: make(chan struct{}), healthTimeout: defaultHealthTimeout, healthHeaders: options.healthHeaders, stdin: stdin}
+	srv := &managedServer{cmd: cmd, port: port, pidFile: pidFile, exited: make(chan struct{}), healthTimeout: defaultHealthTimeout}
 	go func() {
 		srv.waitErr = cmd.Wait()
-		if stdin != nil {
-			_ = stdin.Close()
-		}
 		if srv.stopping.Load() {
 			slog.Info("managed agent server stopped", "agent", agentName, "pid", cmd.Process.Pid)
 		} else if srv.waitErr != nil {
@@ -181,9 +159,6 @@ func formatHealthTimeout(d time.Duration) string {
 func (s *managedServer) waitForHealth(ctx context.Context, path string) error {
 	url := s.baseURL() + path
 	client := &http.Client{Timeout: 2 * time.Second}
-	if len(s.healthHeaders) > 0 {
-		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	}
 	timeout := s.healthTimeout
 	if timeout <= 0 {
 		timeout = defaultHealthTimeout
@@ -204,9 +179,6 @@ func (s *managedServer) waitForHealth(ctx context.Context, path string) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 		if err != nil {
 			return err
-		}
-		for key, value := range s.healthHeaders {
-			req.Header.Set(key, value)
 		}
 		resp, err := client.Do(req)
 		if err == nil {
@@ -239,9 +211,6 @@ func serverExitedBeforeHealthyError(waitErr error) error {
 // future daemon can finish the job.
 func (s *managedServer) shutdown() {
 	s.stopping.Store(true)
-	if s.stdin != nil {
-		_ = s.stdin.Close()
-	}
 	if s.cmd == nil || s.cmd.Process == nil {
 		removeServerPIDFile(s.pidFile)
 		return
