@@ -291,3 +291,33 @@ func TestEndingShutdownLeavesCIMonitorInterruptedWithoutCancelEvent(t *testing.T
 		t.Fatalf("shutdown changed run status or invented cancel caller: %s", raw)
 	}
 }
+
+func TestEndingCancelWithoutInMemoryRecordStillSignals(t *testing.T) {
+	f := newFaultFixture(t, "1")
+	run, err := f.d.InsertRun("fault-repo", "legacy-handle", f.head, f.head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewRunManager(f.d, f.p, nil)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	registerTestRunCancel(m, run.ID, cancel)
+	// A legacy/recovery owner may have only a cancellation handle. Do not fetch
+	// a row before signalling merely to fill in audit metadata.
+	if err := m.HandleCancel(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	cause := context.Cause(ctx)
+	if cause == nil || cause.Error() != types.RunCancelReasonAbortedByUser {
+		t.Fatalf("cancel did not signal: %v", cause)
+	}
+	raw, _ := json.Marshal(cause)
+	var doc struct{ Event map[string]any }
+	_ = json.Unmarshal(raw, &doc)
+	if doc.Event["attribution_source"] != "unavailable" || doc.Event["caller"] != nil {
+		t.Fatalf("unknown metadata invented an owner: %s", raw)
+	}
+	m.mu.Lock()
+	delete(m.runs, run.ID)
+	m.mu.Unlock()
+}

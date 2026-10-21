@@ -651,9 +651,13 @@ func (m *RunManager) cancelManagedRun(runID, reason string, events ...*types.Run
 		event.AttributionSource = "push"
 	} else {
 		event.Event = "run_cancel_requested"
+		owner := ""
+		if owned.run != nil {
+			owner = owned.run.Owner()
+		}
 		if event.Caller != "" {
 			event.AttributionSource = "caller"
-		} else if owner := owned.run.Owner(); owner != "" {
+		} else if owner != "" {
 			event.Caller = owner
 			event.AttributionSource = "launch_owner"
 		} else {

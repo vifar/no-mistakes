@@ -7,8 +7,11 @@ import (
 	"testing"
 )
 
+// Version 6 is also allocated by open PR #132, without ending_event.
+// Its database must receive this independent feature rather than silently
+// treating a same-number schema stamp as proof the audit column exists.
 func TestEndingRecordMigratesOldSchema(t *testing.T) {
-	for _, version := range []int{0, 5} {
+	for _, version := range []int{0, 5, 6} {
 		t.Run(fmt.Sprint(version), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "old.sqlite")
 			d, err := Open(path)
