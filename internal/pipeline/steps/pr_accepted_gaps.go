@@ -41,11 +41,12 @@ func attestedAcceptedGaps(sr *db.StepResult) *pipelineAttestationAcceptedGaps {
 	return &pipelineAttestationAcceptedGaps{FindingIDs: gaps.FindingIDs, ReasonDigest: acceptedGapTextDigest(gaps.Reason), CoveredByDigest: acceptedGapTextDigest(gaps.CoveredBy)}
 }
 
-// canonicalAcceptedGapText redacts the reason and covering tests before both
-// digesting and rendering them, so the digest never binds text publication
-// would redact. Redaction is idempotent, so later whole-body redaction cannot
-// change it. Rendering also escapes text and neutralizes reserved markers and
-// closing references; those presentation rewrites are not part of the digest.
+// canonicalAcceptedGapText cleans controls and redacts the reason and covering
+// tests before both digesting and rendering them, so the digest never binds
+// text publication would rewrite. Both operations are idempotent, so later
+// whole-body cleanup cannot change it. Rendering also escapes text and
+// neutralizes reserved markers and closing references; those presentation
+// rewrites are not part of the digest.
 func canonicalAcceptedGapText(text string) string {
 	return safepath.RedactText(neutralizePRControls(text))
 }

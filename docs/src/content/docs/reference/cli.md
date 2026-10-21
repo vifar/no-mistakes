@@ -661,6 +661,7 @@ The retry refuses, changing nothing, unless every proof holds:
 | `eligible failure` | the failed step's recorded cause is an agent invocation failure |
 | `reusable evidence` | the failed step is Test or an earlier step |
 | `preserved head` | the run verified its final head when it failed, and the gate still keeps exactly that commit: its recovery ref when the pipeline moved the head, the submitted commit otherwise |
+| `exact comparison` | the failed run's comparison receipt names exactly its preserved head; continuing retains that receipt rather than granting its approval to a changed target |
 | `clean branch` | the working tree has no uncommitted changes |
 | `matching head` | the local `HEAD` is exactly the preserved head; adopt it first with `no-mistakes axi sync --recover` |
 | `compatible configuration` | the run has no verification plan, its Pi profile still resolves to the same model and effort, and the repository's gates, read from the freshly fetched trusted default branch, are the gates the run pinned. A carried Review also needs the same effective repository configuration as the trusted commit its rounds recorded, the same global configuration when its rounds recorded one, and the same agent and model that served each carried step (an `auto` agent is resolved first). The configuration is checked twice: once before the launch, and again against the configuration the new run actually loads, so a change between the two refuses the retry. The refusal names the changed setting |
@@ -900,7 +901,7 @@ no-mistakes update -y
 no-mistakes update --force
 ```
 
-Downloads the latest release, verifies the SHA-256 checksum, atomically replaces the running binary, and resets the daemon when it is running or stale daemon artifacts exist so the new executable is picked up, preferring the managed service path (on macOS and Linux the newly installed binary's `daemon start` rewrites the service definition) and falling back to a detached daemon if service startup is unavailable or fails.
+Downloads the latest release, verifies the SHA-256 checksum, atomically replaces the running binary, and [restarts the daemon](/no-mistakes/concepts/daemon/#starting-and-stopping) when it is running or stale daemon artifacts exist so the new executable is picked up.
 By default this installs the latest stable release.
 Pass `--beta` to include prereleases and install the latest beta when one is newer than the current stable release.
 Version discovery reads the configured fork's `channels.json` release asset to avoid the unauthenticated REST API rate limit. Stable, beta, and background checks use the same manifest. If the manifest is unavailable or invalid, update fails without falling back to upstream or the REST API. [Fork release prerequisites](/no-mistakes/guides/fork-updates/) explains publication and version ordering. Channel-manifest publication is a prerequisite; channel fallback is not implemented.

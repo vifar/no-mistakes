@@ -219,7 +219,7 @@ Password for the managed OpenCode server's HTTP basic authentication, using the 
 
 The adapter reads credentials from the effective environment used to launch the server, including invocation overrides. The last assignment to each variable wins; a nonempty `OPENCODE_PASSWORD` takes precedence over `OPENCODE_SERVER_PASSWORD`.
 
-OpenCode 2.x requires authentication on its `/api` requests. When neither variable supplies a password, the server generates one at startup and no-mistakes captures it from the server's output. OpenCode 1.x can run without authentication unless `OPENCODE_SERVER_PASSWORD` is set.
+OpenCode 2.x requires authentication on its `/api` requests. When neither variable supplies a password, no-mistakes generates a private password and passes it to its managed V2 child through both variables, using the same credential for its HTTP requests and health check. Authenticated setup and API requests refuse redirects. Legacy server-generated startup passwords are still captured from server output. OpenCode 1.x can run without authentication unless `OPENCODE_SERVER_PASSWORD` is set.
 
 ## `XDG_DATA_HOME`
 

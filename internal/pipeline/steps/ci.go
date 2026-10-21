@@ -58,8 +58,9 @@ const (
 // run at the checks verdict.
 //
 // By default the green observation only clears the failure signal: the monitor
-// keeps watching the PR, so the run stays open and a later base-branch advance
-// is still repaired on its own. That is also why the recorded step duration
+// keeps watching the PR, so the run stays open. Target movement still follows
+// the comparison rules in reference/pipeline-steps.md; it is not automatically
+// repaired merely because monitoring continues. The recorded step duration
 // includes merge-waiting time. The opt-in release finishes the step there
 // instead, recording readiness and completing the run with the terminal
 // checks_passed status, which releases its worktree and lane and leaves the

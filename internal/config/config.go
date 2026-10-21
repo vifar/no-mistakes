@@ -860,10 +860,10 @@ type CI struct {
 	// verdict instead of monitoring the pull request until it is merged or
 	// closed.
 	//
-	// false (default): the step records readiness and keeps polling, which is
-	// the behavior every run has had until now - a later base-branch advance or
-	// conflict is repaired and the merge itself is observed, bounded by
-	// ci_timeout.
+	// false (default): the step records readiness and keeps polling, bounded
+	// by ci_timeout. Target movement and conflict repair follow the comparison
+	// rules in docs/src/content/docs/reference/pipeline-steps.md; monitoring
+	// alone does not authorize refreshing a changed comparison.
 	//
 	// true: the green observation ends the step, and the run completes with the
 	// checks_passed status, releasing its worktree and its lane while the merge

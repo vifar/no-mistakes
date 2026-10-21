@@ -177,7 +177,7 @@ After resolving `auto`, entries that resolve to the same ACP target are deduplic
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback. OpenCode and Rovo Dev server-startup and session-creation failures also count as unavailable agents. For OpenCode, a failed API-generation probe or event-stream connection before submitting the prompt counts the same way.
 Fallback candidates share the invocation's existing bounded context and use only its remaining time; once that context expires or is cancelled, no further candidate is announced or started.
-Structured findings and schema/output validation problems do not trigger fallback. An OpenCode failure from a turn that ran tools, or whose tool activity cannot be established, does not trigger agent fallback.
+Structured findings and schema/output validation problems do not trigger fallback. An OpenCode failure from a turn that ran tools, or whose tool activity cannot be established, does not trigger agent fallback, quota switching, or automatic crash retry, even when the worktree and evidence are unchanged. A completed OpenCode provider verdict is not an unavailable-agent error, even when it quotes setup-failure wording and no tools ran.
 
 ### acpx_path
 
@@ -619,11 +619,7 @@ Queued or running checks never spend this budget. A poll that cannot establish t
 
 ### `ci.release_after_checks_pass`
 
-Defaults to `false`. The global setting or trusted repository configuration may opt into finishing a run once its checks pass. The run then records `checks_passed`, releases its worktree and stops monitoring the PR. The human merge decision remains separate. When disabled, the existing monitor stays active until merge, closure or its idle timeout. Readiness and final comparison checks still apply.
-
-Strict shipping runs in both `full` and `immutable-source` modes ignore this setting and keep monitoring, retaining the worktree and live `ci-ready` receipt lifecycle.
-
-If the daemon stops after recording CI completion but before the verified terminal write, recovery fails the unfinished run and requires revalidation. A CI completion marker never replaces the fork’s terminal-head proof.
+The operator-level fallback for [`ci.release_after_checks_pass`](/no-mistakes/reference/repo-config/#cirelease_after_checks_pass), whose repository reference owns the completion semantics and strict-shipping exception. Defaults to `false`; a trusted repository value overrides this global setting.
 
 ### step_quiet_warning
 
@@ -644,7 +640,7 @@ For older active runs that do not yet have activity rows, AXI falls back to the 
 
 ### agent_crash_retries
 
-Opt-in automatic retries of an agent-crashed Review, Test, Document or Lint step in the **same live run**. Completed steps stay completed. Set `agent_crash_retries: 1` to allow one additional attempt; the default `0` preserves the existing failure behavior.
+Opt-in automatic retries of an agent-crashed Review, Test, Document or Lint step in the **same live run**. Completed steps stay completed. Set `agent_crash_retries: 1` to allow one additional attempt per eligible step; the default `0` preserves the existing failure behavior.
 
 |         |                  |
 | ------- | ---------------- |
@@ -652,7 +648,7 @@ Opt-in automatic retries of an agent-crashed Review, Test, Document or Lint step
 | Range   | `0`–`3`          |
 | Default | `0` (disabled)   |
 
-Agent process exits and agent invocation timeout cuts qualify, never a real finding, test verdict, configured-command failure, Git error, or cancellation. Typed terminal provider signals, including authentication/access-denial errors and quota exhaustion, stay terminal. Adapters that give no typed terminal signal (Pi, Grok) can have an auth or quota failure retried up to `agent_crash_retries` times before failing with the original diagnostic. Existing adapter and analyzer formatting retries run first; exhausted adapter-transient failures and Claude's native structured-output retry exhaustion stay terminal. Each additional attempt must still produce a valid result; a crash is never a pass.
+Agent process exits and agent invocation timeout cuts can qualify, never a real finding, test verdict, configured-command failure, Git error, or cancellation. The [OpenCode replay-safety refusal](#agent) applies before either exit or timeout eligibility. Typed terminal provider signals, including authentication/access-denial errors and quota exhaustion, stay terminal. Adapters that give no typed terminal signal (Pi, Grok) can have an auth or quota failure retried up to `agent_crash_retries` times before failing with the original diagnostic. Existing adapter and analyzer formatting retries run first; exhausted adapter-transient failures and Claude's native structured-output retry exhaustion stay terminal. Each additional attempt must still produce a valid result; a crash is never a pass.
 
 Eligible validation steps also pin their freshly resolved diff base across the live run: a later fetch that changes that base fails before invoking another agent, even if the run's recorded previous-push SHA did not change. A full restart at Review establishes a new base pin.
 
@@ -660,7 +656,7 @@ Before retrying, the executor proves that the run and worktree head SHA, recorde
 
 A hang cut by the default invocation budget can qualify. A non-default agent timeout or `agent_stall_timeout`, or any still-working cap, disables timeout-based crash retries; the shipped timeout values count as unconfigured even when the generated config writes them explicitly. Process exits can still qualify. Test budget cuts that already park for an operator decision remain parked, not automatically retried.
 
-Fix rounds, review-answer/coverage continuations, conflict resolution, custom gates, Intent and Push/PR/CI delivery are not replayed or retried. This budget is separate from `auto_fix`, is not replenished by approval rounds, and is disabled for the remainder of a run resumed after daemon recovery; a later agent crash fails that step normally. It does not continue a terminal run: [`axi retry`](/reference/cli/#axi-retry) is the separate manual continuation, using the shared `agent_invocation` cause and its own checkpoint proofs. Timeout cuts do not acquire that cause, and parser rejections remain terminal. It is global-only: repository config and environment variables cannot enable it.
+Fix rounds, review-answer/coverage continuations, conflict resolution, custom gates, Intent and Push/PR/CI delivery are not replayed or retried. This budget is separate from `auto_fix`, is not replenished by approval rounds, and is disabled for the remainder of a run resumed after daemon recovery; a later agent crash fails that step normally. It does not continue a terminal run: [`axi retry`](/no-mistakes/reference/cli/#no-mistakes-axi-retry) is the separate manual continuation, using the shared `agent_invocation` cause and its own checkpoint proofs. Timeout cuts do not acquire that cause, and parser rejections remain terminal. It is global-only: repository config and environment variables cannot enable it.
 
 ### agent_timeout
 
@@ -931,7 +927,7 @@ Native `claude` and `codex` retain account, profile, and model-scope matching. A
 
 Each agent keeps its own [`agent_config`](#agent_config) model and effort: only the order changes. A missing, slow, or unreadable `quota-axi` keeps your configured order, logs the reason, and never blocks a run. The mid-run quota switch remains enabled in this case. Inspect the recorded outcome with `no-mistakes axi status` or [`no-mistakes stats`](/no-mistakes/reference/cli/#no-mistakes-stats). See [local telemetry](/no-mistakes/reference/environment/#what-stays-local-and-what-leaves-the-machine) for storage and privacy.
 
-Mid-run, a recognised quota-exhaustion error advances to the next agent in the chosen order with a fresh session, dropping any resumed session. This can happen once per agent, and later invocations do not return to earlier agents. If no successor remains, the error is returned. The existing agent-unavailable fallback is unchanged. Daemon recovery reuses the recorded order and last recorded switch without reading another snapshot, even if the global opt-in setting has since changed.
+Mid-run, a recognised quota-exhaustion error advances to the next agent in the chosen order with a fresh session, dropping any resumed session, subject to the [OpenCode replay-safety refusal](#agent). This can happen once per agent, and later invocations do not return to earlier agents. If no successor remains, the error is returned. The existing agent-unavailable fallback is unchanged. Daemon recovery reuses the recorded order and last recorded switch without reading another snapshot, even if the global opt-in setting has since changed.
 
 Subkeys:
 
@@ -1012,7 +1008,7 @@ Without a limit, many sessions launching at once ran every pipeline concurrently
 
 **Queueing.** A launch that cannot acquire a slot is recorded durably with status `queued` and returns immediately. Queued runs start first in, first out as slots free and count as their branch's active run. See [`axi run`](/no-mistakes/reference/cli/#no-mistakes-axi-run) for reattachment, queue output, explicit waiting, and cancellation, and [concurrent push handling](/no-mistakes/concepts/daemon/#concurrent-push-handling) for supersession.
 
-**What holds a slot.** A run holds a slot only while it executes pipeline work. A run parked at a gate (`awaiting_approval` or `fix_review`) releases its slot. Accepting a response or automatic reconciliation claim reserves the run's place ahead of every queued new run before acknowledgement, without waiting for capacity; resumed runs wait in reservation order. The CI step's PR monitoring poll also releases the slot: monitoring a PR for days no longer occupies a slot. The step takes one back only to run an agent turn (a CI fix or conflict repair), and the run takes one back before any later step runs. A run frees its slot on completion, failure, cancellation, abort, and panic. Set `hold_slot_while_parked: true` to keep the slot through parks and CI monitoring instead; it then behaves as a plain cap on live runs.
+**What holds a slot.** A run holds a slot only while it executes pipeline work. A run parked at a gate (`awaiting_approval` or `fix_review`) releases its slot. Accepting a response or automatic reconciliation claim reserves the run's place ahead of every queued new run before acknowledgement, without waiting for capacity; resumed runs wait in reservation order. The CI step's PR monitoring poll also releases the slot: monitoring a PR for days no longer occupies a slot. The step takes one back only to run an agent turn (a CI fix or conflict repair), and the run takes one back before any later step runs. A run frees its slot on completion, failure, cancellation, abort, and panic. On the executor's failure path, capacity is released after execution and head reconciliation stop, even while terminal persistence waits for recovery; releasing capacity does not establish terminal status or return branch custody. Set `hold_slot_while_parked: true` to keep the slot through parks and CI monitoring instead; it then behaves as a plain cap on live runs.
 
 **Restart.** The [daemon crash-recovery model](/no-mistakes/concepts/daemon/#crash-recovery) owns queue restoration and admission of recovered runs.
 
