@@ -1087,7 +1087,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				errMsg := fmt.Sprintf("internal panic: %v", recovered)
-				if err := pipeline.RecordRunFailure(context.Background(), m.db, plan.run.ID, errMsg, nil); err != nil {
+				if err := pipeline.RecordRunFailure(context.Background(), m.db, plan.run.ID, errMsg, nil, runCtx); err != nil {
 					slog.Error("failed to update recovered run after panic", "run_id", plan.run.ID, "error", err)
 				} else {
 					plan.run.Status = types.RunFailed
@@ -2858,9 +2858,9 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				verifiedHead, verified := preserveRunHead(m.db, wtDir, run)
 				var dbErr error
 				if verified {
-					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, &verifiedHead)
+					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, &verifiedHead, runCtx)
 				} else {
-					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, nil)
+					dbErr = pipeline.RecordRunFailure(context.Background(), m.db, run.ID, errMsg, nil, runCtx)
 				}
 				if dbErr != nil {
 					slog.Error("failed to update run after panic", "run_id", run.ID, "error", dbErr)
