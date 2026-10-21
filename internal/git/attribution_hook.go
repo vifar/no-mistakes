@@ -287,7 +287,7 @@ func AttributionHookEnv(dir string, env []string, run func(...string) (string, e
 	if previous.Submitted != "" && previous.Submitted != submitted {
 		return nil, fmt.Errorf("attribution boundary belongs to a different submitted head")
 	}
-	original, err := run("rev-parse", "--git-path", "hooks")
+	original, err := RunWithEnv(context.Background(), dir, env, "rev-parse", "--git-path", "hooks")
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +365,7 @@ func ValidateCommitAttribution(before, after string, run func(...string) (string
 		return err
 	}
 	root := filepath.Join(metadata, "no-mistakes-attribution")
-	args := []string{"rev-list", "--first-parent", after, "^" + before}
+	args := []string{"rev-list", after, "^" + before}
 	data, err := os.ReadFile(filepath.Join(root, "policy.json"))
 	if err != nil && !os.IsNotExist(err) {
 		return err

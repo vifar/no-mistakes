@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func TestMain(m *testing.M) {
@@ -15,6 +17,7 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(0)
 	}
+	testgit.ClearConfigEnv()
 	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	globalConfigDir, err := os.MkdirTemp("", "no-mistakes-pipeline-tests-")
 	if err != nil {

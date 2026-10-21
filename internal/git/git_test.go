@@ -11,6 +11,8 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/testgit/gitfault"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func TestMain(m *testing.M) {
@@ -33,9 +35,7 @@ func TestMain(m *testing.M) {
 	// Agent harnesses inject git config (e.g. safe.bareRepository=explicit)
 	// via GIT_CONFIG_COUNT/KEY_n/VALUE_n; tests that need it re-set it with
 	// t.Setenv (issue #362).
-	if err := os.Unsetenv("GIT_CONFIG_COUNT"); err != nil {
-		panic(err)
-	}
+	testgit.ClearConfigEnv()
 	code := m.Run()
 	gitfault.Cleanup()
 	_ = os.RemoveAll(dir)

@@ -7,12 +7,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 // Ambient GIT_CONFIG_* injection from agent harnesses would leak into every
 // git call these tests make, so drop it for the package.
 func TestMain(m *testing.M) {
-	os.Unsetenv("GIT_CONFIG_COUNT")
+	testgit.ClearConfigEnv()
 	// Fixtures must not depend on the machine's system git config: some
 	// distributions ship safe.bareRepository=explicit there, which refuses
 	// the in-directory use of the bare fixture repositories these tests

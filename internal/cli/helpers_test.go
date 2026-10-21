@@ -19,6 +19,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func init() {
@@ -75,6 +77,7 @@ func init() {
 }
 
 func TestMain(m *testing.M) {
+	testgit.ClearConfigEnv()
 	base := os.TempDir()
 	if runtime.GOOS != "windows" {
 		base = "/tmp"

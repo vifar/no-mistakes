@@ -9,9 +9,12 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/daemon"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func TestMain(m *testing.M) {
+	testgit.ClearConfigEnv()
 	root, err := os.MkdirTemp("", "nm-main-test-")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create test NM_HOME: %v\n", err)

@@ -103,6 +103,32 @@ func attributionAddress(value string) (*mail.Address, error) {
 // Continuations belong to their trailer, so deleting one cannot orphan its value.
 func StripAIAttributionTrailers(message string, configured ...string) string {
 	lines := strings.Split(message, "\n")
+	fenced := make([]bool, len(lines))
+	var fence byte
+	width := 0
+	body := false
+	for i, line := range lines {
+		if !body {
+			body = strings.TrimSpace(line) == ""
+			continue
+		}
+		fenced[i] = width > 0
+		text := strings.TrimLeft(line, " ")
+		if len(line)-len(text) > 3 || len(text) < 3 || (text[0] != '`' && text[0] != '~') {
+			continue
+		}
+		n := 1
+		for n < len(text) && text[n] == text[0] {
+			n++
+		}
+		if width == 0 {
+			if n >= 3 && (text[0] != '`' || !strings.Contains(text[n:], "`")) {
+				fence, width, fenced[i] = text[0], n, true
+			}
+		} else if text[0] == fence && n >= width && strings.TrimSpace(text[n:]) == "" {
+			width = 0
+		}
+	}
 	drop := make([]bool, len(lines))
 	changed := false
 	end := len(lines)
@@ -124,22 +150,16 @@ func StripAIAttributionTrailers(message string, configured ...string) string {
 			text       string
 		}
 		var entries []trailer
-		valid := true
 		nonTrailers := 0
 		recognized := false
 		for i := start; i < end; i++ {
 			line := lines[i]
 			gitGenerated := strings.HasPrefix(line, "Signed-off-by: ") || strings.HasPrefix(line, "(cherry picked from commit ")
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
-				valid = false // A fenced body example is never attribution.
-				break
-			}
 			if strings.HasPrefix(line, "#") {
 				preserveParagraph = true
 				continue
 			}
-			if (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) && len(entries) > 0 && entries[len(entries)-1].end == i {
+			if (strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t")) && len(entries) > 0 && entries[len(entries)-1].end == i && fenced[i] == fenced[i-1] {
 				entry := &entries[len(entries)-1]
 				entry.text += " " + strings.TrimSpace(line)
 				entry.end = i + 1
@@ -153,12 +173,12 @@ func StripAIAttributionTrailers(message string, configured ...string) string {
 		}
 		// Like Git, accept a mixed paragraph only with a recognized footer
 		// and at least 25% trailer entries. Unknown keys in prose stay prose.
-		if !valid || len(entries) == 0 || (nonTrailers > 0 && (!recognized || len(entries)*3 < nonTrailers)) {
+		if len(entries) == 0 || (nonTrailers > 0 && (!recognized || len(entries)*3 < nonTrailers)) {
 			break
 		}
 		allRemoved := !preserveParagraph
 		for _, entry := range entries {
-			if !IsAIAttributionTrailer(entry.text) && !configuredAttribution(entry.text, configured) {
+			if fenced[entry.start] || (!IsAIAttributionTrailer(entry.text) && !configuredAttribution(entry.text, configured)) {
 				allRemoved = false
 				continue
 			}
