@@ -22,7 +22,7 @@ LDFLAGS := -X github.com/kunchenguid/no-mistakes/internal/buildinfo.Version=$(VE
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryHost=$(UMAMI_HOST) \
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryWebsiteID=$(UMAMI_WEBSITE_ID)
 
-.PHONY: build dist install test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check
+.PHONY: build dist install test e2e e2e-record lint fmt fmt-check clean docs docs-build docs-preview demo skill skill-check
 
 DIST_DIR ?= dist
 INSTALL_BIN := $(shell go env GOPATH)/bin/no-mistakes
@@ -94,7 +94,15 @@ skill:
 skill-check:
 	go run ./cmd/genskill --check
 
-lint: skill-check
+# Check exactly the tree the Push formatter visits, without changing files.
+fmt-check:
+	@files=$$(gofmt -l .) || exit $$?; \
+	if [ -n "$$files" ]; then \
+		printf 'Go files need gofmt (run make fmt):\n%s\n' "$$files"; \
+		exit 1; \
+	fi
+
+lint: skill-check fmt-check
 	go vet ./...
 
 fmt:
