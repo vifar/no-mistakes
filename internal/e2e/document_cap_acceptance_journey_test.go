@@ -223,4 +223,3 @@ func TestDocumentCapAcceptanceRollback(t *testing.T) {
 		})
 	}
 }
-
