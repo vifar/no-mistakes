@@ -3,7 +3,6 @@
 package daemon
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -129,9 +128,9 @@ func countEnvEntries(env []string, key string) int {
 // The fake ps runs only after kill(pid, 0) succeeded, then kills and waits
 // for the real child to be reaped before returning ps's documented no-match.
 func TestProcessRunningAcceptsExitBetweenProbes(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	child := exec.CommandContext(ctx, "/bin/sleep", "30")
+	// Only the probe should terminate the child. A short wall-clock lifetime
+	// can expire before ps is scheduled and exercises the wrong interleaving.
+	child := exec.CommandContext(t.Context(), "/bin/sleep", "300")
 	if err := child.Start(); err != nil {
 		t.Fatal(err)
 	}
