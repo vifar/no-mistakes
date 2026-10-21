@@ -37,37 +37,57 @@ func snapshotLeftoverValidationEdits(c *pipeline.StepContext, producer, head str
 	if err != nil || len(paths) == 0 {
 		return err
 	}
+	// Git can report a staged deletion and an untracked survivor for one path.
+	// Keep every status record, but capture each path's patches only once.
+	wanted := make(map[string]bool, len(paths))
+	unique := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if !wanted[path] {
+			wanted[path] = true
+			unique = append(unique, path)
+		}
+	}
+	paths = unique
 	snapshot := leftoverValidationSnapshot{RunID: c.Run.ID, Producer: producer, Head: head, Paths: paths,
 		Untracked: map[string][]byte{}, Symlinks: map[string]string{}, Modes: map[string]uint32{}}
 	status, err := git.RunRaw(c.Ctx, c.WorkDir, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=none")
 	if err != nil {
 		return err
 	}
-	entries := map[string]string{}
+	entries := map[string][]string{}
 	for _, entry := range strings.Split(string(status), "\x00") {
-		if len(entry) >= 4 && entry[2] == ' ' {
-			entries[entry[3:]] = entry
+		if len(entry) >= 4 && entry[2] == ' ' && wanted[entry[3:]] {
+			entries[entry[3:]] = append(entries[entry[3:]], entry)
+			snapshot.Status = append(snapshot.Status, []byte(entry+"\x00")...)
 		}
 	}
 	for _, path := range paths {
-		entry, ok := entries[path]
-		if !ok {
+		records := entries[path]
+		if len(records) == 0 {
 			return fmt.Errorf("dirty path changed while recording evidence: %q", path)
 		}
-		snapshot.Status = append(snapshot.Status, []byte(entry+"\x00")...)
+		untracked := false
+		for _, entry := range records {
+			untracked = untracked || strings.HasPrefix(entry, "?? ")
+		}
 		// Literal pathspecs and disabled external diff/textconv prevent source
 		// filenames or repository diff drivers from changing the captured scope.
-		staged, err := git.RunRaw(c.Ctx, c.WorkDir, "--literal-pathspecs", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--cached", head, "--", path)
+		// Recovery consumes a standard patch, regardless of display preferences.
+		patchArgs := []string{"--literal-pathspecs", "diff", "--no-color", "--binary",
+			"--no-ext-diff", "--no-textconv", "--no-renames", "--no-relative",
+			"--src-prefix=a/", "--dst-prefix=b/", "--unified=3",
+			"--output-indicator-new=+", "--output-indicator-old=-", "--output-indicator-context= "}
+		staged, err := git.RunRaw(c.Ctx, c.WorkDir, append(patchArgs, "--cached", head, "--", path)...)
 		if err != nil {
 			return err
 		}
 		snapshot.StagedPatch = append(snapshot.StagedPatch, staged...)
-		unstaged, err := git.RunRaw(c.Ctx, c.WorkDir, "--literal-pathspecs", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", "--", path)
+		unstaged, err := git.RunRaw(c.Ctx, c.WorkDir, append(patchArgs, "--", path)...)
 		if err != nil {
 			return err
 		}
 		snapshot.UnstagedPatch = append(snapshot.UnstagedPatch, unstaged...)
-		if !strings.HasPrefix(entry, "?? ") {
+		if !untracked {
 			continue
 		}
 		full := filepath.Join(c.WorkDir, filepath.FromSlash(path))

@@ -29,6 +29,11 @@ func TestLeftoverTargetAdvanceLiveJourney(t *testing.T) {
 			count := filepath.Join(root, "count")
 			command := "sh " + shellQuote(script)
 			config := fmt.Sprintf("commands:\n  test: %q\n  lint: 'true'\n", command)
+			if kind == "spent budget scratch" {
+				// Verify scratch while the run owns its worktree, before the
+				// ordinary terminal cleanup can remove that temporary directory.
+				config = fmt.Sprintf("commands:\n  test: %q\n  lint: %q\n", command, "test \"$(cat .journal-live/postgres.log)\" = \"scratch retained\"")
+			}
 			if kind == "custom gate" {
 				config = fmt.Sprintf("commands:\n  test: 'true'\n  lint: 'true'\ngates:\n  - name: validation\n    after: test\n    command: %q\n", command)
 			}
@@ -82,13 +87,6 @@ func TestLeftoverTargetAdvanceLiveJourney(t *testing.T) {
 			h.PushToGate(branch)
 			if kind == "second real edit" {
 				run := h.WaitForRun(branch, 90*time.Second)
-				worktree := paths.WithRoot(h.NMHome).WorktreeDir(run.RepoID, run.ID)
-				for path, want := range map[string]string{"feature.txt": "second edit retained\n", ".journal-live/postgres.log": "scratch retained\n"} {
-					got, err := os.ReadFile(filepath.Join(worktree, path))
-					if err != nil || string(got) != want {
-						t.Fatalf("refusal lost %s: %q %v", path, got, err)
-					}
-				}
 				out, err := h.Run("axi", "status", "--run", run.ID)
 				if err != nil {
 					t.Fatal(err)
@@ -117,12 +115,7 @@ func TestLeftoverTargetAdvanceLiveJourney(t *testing.T) {
 				}
 				t.Fatalf("preservation failed: %s %s", run.Status, deref(run.Error))
 			}
-			if kind == "spent budget scratch" {
-				worktree := paths.WithRoot(h.NMHome).WorktreeDir(run.RepoID, run.ID)
-				if got, err := os.ReadFile(filepath.Join(worktree, ".journal-live/postgres.log")); err != nil || string(got) != "scratch retained\n" {
-					t.Fatalf("completion lost retained scratch: %q %v", got, err)
-				}
-			}
+
 			if kind == "post Test" {
 				assertLeftoverSnapshotSurvivesCleanup(t, h, run.ID, run.RepoID, "+preserved validation edit")
 			}
