@@ -595,7 +595,7 @@ func ReviewBotCommentChecks(checks []Check, excluded ...Check) []Check {
 // provider-supported bots. Pending checkless reviews hold readiness, but never
 // hide a different, settled bot's unresolved findings.
 func ReadReadinessReviewBotComments(ctx context.Context, host Host, pr *PR, policy CheckScopePolicy, checks []Check, excluded ...Check) ([]ReviewComment, error) {
-	if policy.ReviewBotComments != "always" {
+	if policy.ReviewBotComments != "always" || !host.Capabilities().ReviewComments {
 		return nil, nil
 	}
 	var candidates []Check
@@ -605,7 +605,7 @@ func ReadReadinessReviewBotComments(ctx context.Context, host Host, pr *PR, poli
 			candidates = append(candidates, check)
 		}
 	}
-	if len(candidates) == 0 || !host.Capabilities().ReviewComments {
+	if len(candidates) == 0 {
 		return nil, nil
 	}
 	reader, ok := host.(ReviewCommentsHost)

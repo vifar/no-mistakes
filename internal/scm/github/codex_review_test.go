@@ -134,3 +134,29 @@ func TestCodexAcknowledgedReviewRequestCompletion(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexCompletionHeadBinding(t *testing.T) {
+	const head = "0123456789abcdef0123456789abcdef01234567"
+	const request = `{"id":7,"user":{"login":"owner"},"body":"@codex review","created_at":"2026-10-21T12:00:00Z"}`
+	for _, tc := range []struct {
+		name, reviews, summary string
+		wantPending            bool
+	}{
+		{"old review", `[[{"user":{"login":"chatgpt-codex-connector[bot]"},"commit_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","state":"COMMENTED","submitted_at":"2026-10-21T12:01:00Z"}]]`, "", true},
+		{"old summary", `[[]]`, ",{\"user\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"body\":\"**Reviewed commit:** `bbbbbbbbbb`\",\"created_at\":\"2026-10-21T12:01:00Z\"}", true},
+		{"current summary", `[[]]`, ",{\"user\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"body\":\"**Reviewed commit:** `0123456789`\",\"created_at\":\"2026-10-21T12:01:00Z\"}", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh api --method GET repos/test/repo/pulls/42/reviews --paginate --slurp":            {stdout: tc.reviews},
+				"gh api --method GET repos/test/repo/issues/42/comments --paginate --slurp":          {stdout: "[[" + request + tc.summary + "]]"},
+				"gh api --method GET repos/test/repo/issues/comments/7/reactions --paginate --slurp": {stdout: `[[{"user":{"login":"chatgpt-codex-connector[bot]"},"content":"eyes"}]]`},
+			}), nil, "", "test/repo")
+			bot, _ := scm.ReviewBotForApp("chatgpt-codex-connector")
+			pending, err := host.ReviewBotPending(context.Background(), &scm.PR{Number: "42", HeadSHA: head}, bot)
+			if err != nil || pending != tc.wantPending {
+				t.Fatalf("pending=%v err=%v; want %v: only current-head completion can settle this request", pending, err, tc.wantPending)
+			}
+		})
+	}
+}

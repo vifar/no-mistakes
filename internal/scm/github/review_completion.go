@@ -102,11 +102,11 @@ func (h *Host) reviewBotState(ctx context.Context, pr *scm.PR, bot scm.ReviewBot
 		if !ok || author.AppSlug != bot.AppSlug {
 			continue
 		}
-		if review.State != "PENDING" && review.SubmittedAt.After(lastCompletion) {
-			lastCompletion = review.SubmittedAt
-		}
 		if review.CommitID != pr.HeadSHA {
 			continue
+		}
+		if review.State != "PENDING" && review.SubmittedAt.After(lastCompletion) {
+			lastCompletion = review.SubmittedAt
 		}
 		switch review.State {
 		case "PENDING":
@@ -123,17 +123,17 @@ func (h *Host) reviewBotState(ctx context.Context, pr *scm.PR, bot scm.ReviewBot
 			continue
 		}
 		match := reviewedCommit.FindStringSubmatch(summary.Body)
-		if len(match) == 2 && summary.CreatedAt.After(lastCompletion) {
-			lastCompletion = summary.CreatedAt
-		}
 		if len(match) == 2 && strings.HasPrefix(strings.ToLower(pr.HeadSHA), strings.ToLower(match[1])) {
+			if summary.CreatedAt.After(lastCompletion) {
+				lastCompletion = summary.CreatedAt
+			}
 			state = "settled"
 		}
 	}
 	// The documented start signal is a bot-authored eyes reaction on an
 	// explicit review request. Counts on the comment do not prove authorship.
-	// A later submitted review/summary retires historical requests, including
-	// requests from an older head. A +1 reaction is the clean-review completion.
+	// Only a completion of the current head may retire pending requests; a
+	// late completion of an older head cannot speak for the current review. A +1 reaction is the clean-review completion.
 	for _, request := range summaries {
 		if request.ID <= 0 || request.CreatedAt.IsZero() || !request.CreatedAt.After(lastCompletion) || !codexReviewRequest.MatchString(request.Body) {
 			continue
