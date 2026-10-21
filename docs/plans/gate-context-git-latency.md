@@ -44,7 +44,7 @@ The [gate-model handbook](../src/content/docs/concepts/gate-model.md#recursive-r
 - Isolated daemon `gate_context` ingress and CLI preflight propagate identity failure and create no run or enrollment mutation. Test roots and processes never touch an installed daemon.
 - Existing managed-worktree, symlinked-root, ordinary linked-worktree, independent/fork clone, forged-marker, authenticated-ancestry, concurrent-classification and no-mutation refusals pass.
 
-Run the package owners first, then `make lint`, `go test -race ./...`, the applicable E2E suite through `scripts/e2e.sh` with its 2400-second package deadline, and a pinned build. Cross-platform compile/vet must cover the structured-error and classifier changes. Any broad baseline failure must be reproduced on the unchanged pin and reported; it does not permit weakening or deleting the failed assertion. Do not call a focused pass full-suite validation.
+Run the package owners first, then `make lint`, `go test -race ./...`, the applicable E2E suite through `scripts/e2e.sh` within the [fork CI guide's suite budget](../src/content/docs/guides/fork-ci.md), and a pinned build. Cross-platform compile/vet must cover the structured-error and classifier changes. Any broad baseline failure must be reproduced on the unchanged pin and reported; it does not permit weakening or deleting the failed assertion. Do not call a focused pass full-suite validation.
 
 ## Validation limits
 
