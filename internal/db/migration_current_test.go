@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,12 +41,30 @@ func TestCurrentOpenWithHeldWriter(t *testing.T) {
 }
 
 func TestUpstream199UpgradeFromForkSchemas(t *testing.T) {
-	for _, version := range []int{0, 4, 5} {
+	for _, version := range []int{0, 4, 5, 7} {
 		t.Run(fmt.Sprint(version), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "state.sqlite")
-			d, err := Open(path)
-			if err != nil {
-				t.Fatal(err)
+			var d *DB
+			if version == 7 {
+				schema, err := os.ReadFile("testdata/migrations/base-7b2fb05b.sql")
+				if err != nil {
+					t.Fatal(err)
+				}
+				sqlDB, err := openMigrationSQLite(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				d = &DB{sql: sqlDB}
+				if _, err := d.sql.Exec(string(schema)); err != nil {
+					d.Close()
+					t.Fatal(err)
+				}
+			} else {
+				var err error
+				d, err = Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			repo, err := d.InsertRepo("fixture", "https://example.com/repo", "main")
 			if err != nil {
@@ -55,7 +74,8 @@ func TestUpstream199UpgradeFromForkSchemas(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := d.sql.Exec(fmt.Sprintf(`
+			if version != 7 {
+				if _, err := d.sql.Exec(fmt.Sprintf(`
 DROP TABLE run_retries;
 ALTER TABLE runs DROP COLUMN quota_routing;
 ALTER TABLE runs DROP COLUMN ci_released_at;
@@ -64,7 +84,27 @@ ALTER TABLE step_rounds DROP COLUMN response_origin;
 ALTER TABLE step_results DROP COLUMN failure_cause;
 ALTER TABLE step_results DROP COLUMN carried_from;
 PRAGMA user_version=%d`, version)); err != nil {
-				t.Fatal(err)
+					t.Fatal(err)
+				}
+			}
+			for table, columns := range map[string][]string{
+				"runs":         {"quota_routing", "ci_released_at"},
+				"step_results": {"response_origin", "failure_cause", "carried_from"},
+				"step_rounds":  {"response_origin"},
+			} {
+				for _, column := range columns {
+					if hasColumn(t, d, table, column) {
+						t.Fatalf("historical fixture contains %s.%s", table, column)
+					}
+				}
+			}
+			var retryTables int
+			if err := d.sql.QueryRow("SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='run_retries'").Scan(&retryTables); err != nil || retryTables != 0 {
+				t.Fatalf("historical retry table count = %d, %v", retryTables, err)
+			}
+			var historicalVersion int
+			if err := d.sql.QueryRow("PRAGMA user_version").Scan(&historicalVersion); err != nil || historicalVersion != version {
+				t.Fatalf("historical schema = %d, %v; want %d", historicalVersion, err, version)
 			}
 			d.Close()
 			if reader, err := OpenReader(path); err == nil {
@@ -75,6 +115,10 @@ PRAGMA user_version=%d`, version)); err != nil {
 				d, err = Open(path)
 				if err != nil {
 					t.Fatal(err)
+				}
+				var upgradedVersion int
+				if err := d.sql.QueryRow("PRAGMA user_version").Scan(&upgradedVersion); err != nil || upgradedVersion != 8 {
+					t.Fatalf("upgraded schema = %d, %v; want 8", upgradedVersion, err)
 				}
 				got, err := d.GetRun(run.ID)
 				if err != nil || got == nil || got.HeadSHA != "head" {
