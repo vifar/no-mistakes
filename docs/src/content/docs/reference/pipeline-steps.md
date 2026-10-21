@@ -259,7 +259,7 @@ Updates matching documentation for code changes and reports unresolved gaps or o
 **Behavior:**
 
 - Diffs the base commit against head and skips the step if there are no non-ignored changed files to document
-- Asks the agent to find documentation gaps caused by this change, update their owner documents or doc comments, and verify its edits; the pipeline checks convergence before committing
+- During repair passes, asks the agent to find documentation gaps caused by this change, update their owner documents or doc comments, and verify its edits; the pipeline checks convergence before committing
 - Carries validation credit under the trusted [`document.doc_only_paths`](/no-mistakes/reference/repo-config/#documentdoc_only_paths) rules
 - Stops repeated edits and bounds commits under [`document.max_commits_per_run`](/no-mistakes/reference/repo-config/#documentmax_commits_per_run), which defines the read-only check at the cap, rollback rules, clean-entry requirements, and interrupted-pass handling
 - Preserves predecessor edits under the [leftover-edit rules](#target-advances-before-publication) before starting its own pass
@@ -272,7 +272,7 @@ Updates matching documentation for code changes and reports unresolved gaps or o
 - Requires approval whenever any unresolved documentation finding is returned, including `info` findings
 - Bounds the documentation (and combined housekeeping) agent with [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout): a silent turn is cancelled at that stall budget, a still-working one continues past that budget only when its still-working cap is set, and cancellation fails the step with a timeout diagnostic rather than leaving the run active indefinitely
 
-**Auto-fix:** documentation fixes happen during the initial document pass. Unresolved findings pause for approval instead of starting another automatic document/fix loop. If you manually trigger a fix from the TUI or AXI interface, the agent receives the selected previous findings plus any per-finding user notes, any selected user-authored findings, and the shared [finding decision history](#finding-decision-history).
+**Auto-fix:** documentation repairs are bounded by the [commit budget](/no-mistakes/reference/repo-config/#documentmax_commits_per_run). Unresolved findings pause for approval instead of starting another automatic document/fix loop. If you manually trigger a fix from the TUI or AXI interface, the agent receives the selected previous findings plus any per-finding user notes, any selected user-authored findings, and the shared [finding decision history](#finding-decision-history).
 
 **Default auto-fix limit:** not used for automatic document follow-up loops.
 

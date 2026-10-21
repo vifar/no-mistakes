@@ -963,8 +963,7 @@ Global-only: a repository's `.no-mistakes.yaml` cannot set it, because it descri
 ### auto_fix
 
 Maximum follow-up auto-fix attempts per step. Set a step to `0` to disable the follow-up auto-fix loop, so findings require manual approval.
-The document step attempts documentation fixes during its initial pass, so unresolved documentation findings pause for approval instead of using an automatic follow-up loop.
-For empty `commands.lint`, the document step's combined housekeeping pass also attempts safe lint fixes, and the lint step consumes its result; unresolved blocking lint findings then pause for approval instead of starting another automatic fix loop.
+The step reference owns the [Document](/no-mistakes/reference/pipeline-steps/#document) and [Lint](/no-mistakes/reference/pipeline-steps/#lint) rules for repairs, combined housekeeping, and approval instead of automatic follow-up loops.
 
 |      |          |
 | ---- | -------- |
