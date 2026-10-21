@@ -88,7 +88,7 @@ When the pipeline pauses for approval, you can manually trigger a fix from the T
 4. Press `f` to fix the selected findings
 
 The agent receives the merged fix payload for that round: the selected agent findings, any per-finding user notes, any selected user-authored findings added from the TUI or AXI interface, and the shared [finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history).
-The current step's part of that history also includes one-line summaries from earlier fix commits.
+The current step's part of that history also includes summaries from earlier fix commits.
 
 After a user-triggered fix, the step re-runs. It completes if the check passes and no step-specific outstanding condition remains, or pauses again with the new results in `fix_review` status. For Review, see the [Review step reference](/no-mistakes/reference/pipeline-steps/#review) for its carry-forward condition; an operator can also explicitly approve, fix again, skip, or abort, subject to the [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths).
 
@@ -96,7 +96,7 @@ After a user-triggered fix, the step re-runs. It completes if the check passes a
 
 When the Review, Test, Document, Lint, CI, or a repository gate repair commits agent changes, its subject comes from `commit.fix_message`.
 The [global config reference](/no-mistakes/reference/global-config/#commitfix_message) owns the template syntax, default, validation rules, size limits, and supported placeholders; the [repo config reference](/no-mistakes/reference/repo-config/#commitfix_message) owns the repository override and trust behavior.
-The [`commit.trailers` reference](/no-mistakes/reference/global-config/#committrailers) owns attribution filtering and message-preservation rules.
+The [`commit.trailers` reference](/no-mistakes/reference/global-config/#committrailers) owns attribution filtering and message-preservation rules. The [Review step reference](/no-mistakes/reference/pipeline-steps/#review) owns Review fix bodies and summary attribution filtering.
 The pipeline validates the template, agent summary, predicted output size, final rendered subject, and trailers before automatic staging, so a rejected value does not leave changes staged.
 The combined document-and-lint housekeeping pass runs in the Document step, so its documentation and safe lint fixes use the Document value for `{{.Step}}`; configured-command lint fixes use the Lint value.
 
@@ -110,7 +110,7 @@ The repository-config reference owns the [`protected_paths` refusal rules](/no-m
 ## Step rounds
 
 Each execution of a step (initial run or follow-up auto-fix run) is recorded as a "round" in the database.
-A round stores its findings, duration, any selected finding IDs and whether that selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and any one-line fix summary from that execution.
+A round stores its findings, duration, any selected finding IDs and whether that selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and any fix summary from that execution.
 That merged payload can include per-finding user notes and user-authored findings added from the TUI or AXI interface.
 AXI status uses the same round history and the persisted auto-fix limit to show the active fix attempt, for example `auto-fix 1/3` or `fix 2`.
 The step log records a marker when each automatic or user-triggered fix round starts.

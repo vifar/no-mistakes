@@ -1277,6 +1277,7 @@ Entries are limited to 1,024 bytes and 16 placeholders, the list to 16 entries, 
 The 1,024-byte limit also applies to the rendered line, checked when configuration loads with every placeholder at its 64-byte maximum, so an entry that loads cannot overflow at commit time.
 An invalid entry fails configuration loading, and a render failure at commit time leaves the changes unstaged.
 
+Review fix commits also remove exact rendered configured lines, including quoted forms, from incoming Review summaries and finding filenames and descriptions, including their PR display copies, regardless of whether the configured identity is recognizable as AI. Matching uses rendered values, including the actual agent and model; PR rendering also uses recorded round configuration and invocation metadata. See [Review](/no-mistakes/reference/pipeline-steps/#review) for the rest of its summary attribution filtering contract.
 A per-repo [`commit.trailers`](/no-mistakes/reference/repo-config/#committrailers) list or a matching [`repository_overrides`](#repository_overrides) entry replaces this list rather than extending it; an empty list clears it.
 
 ### repository_overrides
