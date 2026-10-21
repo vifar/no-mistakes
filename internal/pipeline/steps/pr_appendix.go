@@ -115,6 +115,10 @@ func narrativeWithIntent(sctx *pipeline.StepContext, whatChanged string) string 
 }
 
 func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) (body string) {
+	whatChanged = presentPRCoauthors(whatChanged)
+	riskLine = presentPRCoauthors(riskLine)
+	testingMD = presentPRCoauthors(testingMD)
+	pipelineMD = presentPRCoauthors(pipelineMD)
 	defer func() {
 		body = preserveAcceptedGapAudit(body, narrativeWithIntent(sctx, whatChanged), pipelineMD, bodyLimit, scm.PRBodyLen, scm.ClampPRBody)
 	}()
@@ -165,6 +169,10 @@ func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.St
 // buildPRBodyWithin is buildPRBody under a byte budget below the default,
 // which the Issues section uses to reserve its own room.
 func buildPRBodyWithin(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, provider scm.Provider, maxBytes int) (assembled string) {
+	body = presentPRCoauthors(body)
+	riskLine = presentPRCoauthors(riskLine)
+	testingMD = presentPRCoauthors(testingMD)
+	pipelineMD = presentPRCoauthors(pipelineMD)
 	defer func() {
 		assembled = preserveAcceptedGapAudit(assembled, narrativeWithIntent(sctx, body), pipelineMD, maxBytes, func(s string) int { return len(s) }, clampPRBytes)
 	}()

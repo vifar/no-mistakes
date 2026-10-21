@@ -98,6 +98,7 @@ func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit 
 	before := redactPRContent(prContent{Body: parts.before}).Body
 	after := redactPRContent(prContent{Body: parts.after}).Body
 	appendix = escapePRAppendixMarkers(appendix)
+	appendix = presentPRCoauthors(appendix)
 	appendix = redactPRContent(prContent{Body: appendix}).Body
 	if !parts.managed && before != "" {
 		before += "\n\n"
@@ -195,6 +196,12 @@ func rebindOwnedPRAttestation(body, head string, steps []*db.StepResult, policy 
 			}
 			rebound = true
 		}
+		if rebound {
+			updated = presentPRCoauthors(updated)
+			if len(updated) > maxPullRequestBodyBytes {
+				return "", false, fmt.Errorf("restamped PR body exceeds the publication budget")
+			}
+		}
 		return updated, rebound, nil
 	}
 	parts, err := parsePROwnedBody(body)
@@ -214,7 +221,7 @@ func rebindOwnedPRAttestation(body, head string, steps []*db.StepResult, policy 
 	// Restamps reach UpdatePR without the draft path's redaction. The generated
 	// appendix is ours, so route it through the same publication redaction before
 	// the integrity guard is recomputed; author text outside it is untouched.
-	appendix = safepath.RedactText(appendix)
+	appendix = safepath.RedactText(presentPRCoauthors(appendix))
 	updated := parts.before + wrapPRAppendix(appendix) + parts.after
 	if len(updated) > maxPullRequestBodyBytes {
 		return "", false, fmt.Errorf("restamped PR body exceeds the publication budget")
