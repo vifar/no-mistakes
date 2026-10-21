@@ -161,7 +161,7 @@ func (s *DocumentStep) runCapGapCheckAttempt(sctx *pipeline.StepContext, baseSHA
 	if combinedLint {
 		// The combined pass's lint half has its own gate; the Document gap
 		// check only speaks for the documentation half. The lint step falls
-		// back to its own pass, so neither duty is never silently dropped.
+		// back to its own pass, so neither duty is silently dropped.
 		gaps, _ = splitHousekeepingFindings(reported)
 	}
 
@@ -200,7 +200,7 @@ func (s *DocumentStep) runCapGapCheckAttempt(sctx *pipeline.StepContext, baseSHA
 // still holds. The rollback is the same one the convergence path uses, so
 // only this check's own proposal is touched.
 //
-// The second return value is the load-bearing one: a verdict produced
+// The boolean return value is the load-bearing one: a verdict produced
 // against bytes the rollback just removed describes a state that no longer
 // exists, so the caller must not accept it. A check that repaired the
 // documentation and then reported no gap would otherwise complete the step
