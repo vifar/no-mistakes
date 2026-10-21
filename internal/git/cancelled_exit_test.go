@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -20,26 +21,50 @@ func TestCancelledExitRecordsOnlyTheContextsOwnStop(t *testing.T) {
 	if err := exec.Command("git", "init", repo).Run(); err != nil {
 		t.Fatal(err)
 	}
+	// The sleeper announces that it is up, so the test can cancel the context
+	// only once the child is running. A fixed sleep would race the child's
+	// start on a loaded runner, and a cancellation that arrives before the
+	// child is up is a different case: the command never ran.
+	started := filepath.Join(dir, "started")
 	for _, args := range [][]string{
 		{"-C", repo, "config", "user.email", "t@t.com"},
 		{"-C", repo, "config", "user.name", "T"},
-		{"-C", repo, "config", "alias.sleeper", "!sleep 30"},
+		{"-C", repo, "config", "alias.sleeper", "!touch " + started + "; sleep 30"},
 		{"-C", repo, "commit", "--allow-empty", "-m", "init"},
 	} {
 		if err := exec.Command("git", args...).Run(); err != nil {
 			t.Fatal(err)
 		}
 	}
+	waitForStart := func(t *testing.T) {
+		t.Helper()
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			if _, err := os.Stat(started); err == nil {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("the child never started")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	resetStart := func(t *testing.T) {
+		t.Helper()
+		if err := os.Remove(started); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
 
 	t.Run("a command this context stopped is marked", func(t *testing.T) {
+		resetStart(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		go func() {
 			_, err := Run(ctx, repo, "sleeper")
 			done <- err
 		}()
-		// Give the command a moment to start, then cancel it.
-		time.Sleep(200 * time.Millisecond)
+		waitForStart(t)
 		cancel()
 		err := <-done
 		if err == nil {
@@ -63,6 +88,7 @@ func TestCancelledExitRecordsOnlyTheContextsOwnStop(t *testing.T) {
 	})
 
 	t.Run("a command killed by something else is not marked", func(t *testing.T) {
+		resetStart(t)
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		done := make(chan error, 1)
@@ -70,10 +96,10 @@ func TestCancelledExitRecordsOnlyTheContextsOwnStop(t *testing.T) {
 			_, err := Run(ctx, repo, "sleeper")
 			done <- err
 		}()
-		time.Sleep(200 * time.Millisecond)
-		// Kill the process group from outside the command's context, then
-		// cancel the context. The context never stopped this child, so the
-		// exit is not the cancellation's doing.
+		waitForStart(t)
+		// Kill the child from outside the command's context, then cancel the
+		// context. The context never stopped this child, so the exit is not
+		// the cancellation's doing.
 		_ = exec.Command("pkill", "-TERM", "-f", "sleep 30").Run()
 		err := <-done
 		if err == nil {

@@ -144,13 +144,6 @@ if [[ "$#" -eq 0 ]]; then
     exit "$second_status"
   fi
 
-  elapsed_seconds=$((SECONDS - start_seconds))
-  remaining_seconds=$((budget_seconds - elapsed_seconds))
-  if (( remaining_seconds <= 0 )); then
-    echo "e2e suite budget exhausted during the user-journey matrix" >&2
-    exit 1
-  fi
-
   # Discover the test names of EVERY package the shards run, not just the e2e
   # package. A shard's -run pattern selects the tests that run in it, so a
   # package whose names are missing from the pattern would silently run
@@ -181,6 +174,16 @@ if [[ "$#" -eq 0 ]]; then
     all_tests="${all_tests}${listed}
 "
   done
+
+  # The budget is recomputed AFTER the discovery, because the discovery is
+  # part of the suite's own time: measuring it before would hand the workers
+  # an allowance that already includes the time the discovery took.
+  elapsed_seconds=$((SECONDS - start_seconds))
+  remaining_seconds=$((budget_seconds - elapsed_seconds))
+  if (( remaining_seconds <= 0 )); then
+    echo "e2e suite budget exhausted before the workers started" >&2
+    exit 1
+  fi
 
   # The terminal-merge and retained-target journeys keep their own worker: they
   # are the two slowest live journeys, and sharing a worker with the rest of
