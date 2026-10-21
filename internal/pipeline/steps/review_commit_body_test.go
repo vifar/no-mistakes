@@ -111,6 +111,69 @@ func TestReviewFixCommitBodySanitizesFindingsAndTrailers(t *testing.T) {
 	}
 }
 
+func TestReviewFixCommitAttributionBoundary(t *testing.T) {
+	t.Parallel()
+	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
+	const human = "Co-Authored-By: Claude Smith <claude@example.com>"
+	const humanWithAIEmail = "Co-Authored-By: Alex Example <codex@example.com>"
+	attribution := []string{
+		"Generated with Codex",
+		"> Generated with Claude",
+		"Claude-Session: abc",
+		"Codex-Session: abc",
+		"Assisted-by: pi:local",
+		"Co-Authored-By: Claude <noreply@anthropic.com>",
+		"> Co-Authored-By: Codex <ai@example.com>",
+		`"Co-Authored-By: ChatGPT <ai@example.com>"`,
+		"`Assisted-by: GitHub Copilot`",
+		"Co-Authored-By: Gemini <ai@example.com>",
+		"Assisted-by: Grok",
+		"Co-Authored-By: no-mistakes codex <noreply@example.com>",
+		"Assisted-by: no-mistakes:claude:local",
+	}
+	noise := strings.Join(attribution, "\n")
+	cleanSummary := "Guard receipts\n\n" + disclosure + "\n\n" + human
+	summary := cleanSummary + "\n" + noise
+	dir, base, head := setupGitRepo(t)
+	output, err := json.Marshal(map[string]string{"summary": summary, "verification": "passed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := &mockAgent{name: "pi", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		writeAgentChange(t, dir)
+		return &agent.Result{Output: output}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	sctx.Fixing = true
+	sctx.Config.Commit.Trailers = []string{human, humanWithAIEmail, "Assisted-by: {{.Agent}}:local", "Codex-Session: configured"}
+	findings, err := json.Marshal(Findings{Items: []Finding{
+		{File: "receipt.go\n" + noise, Description: disclosure + "\n" + noise},
+		{Description: human},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.PreviousFindings = string(findings)
+	gotSummary, err := executeFixMode(sctx, types.StepReview, fixExecutionOptions{FallbackSummary: "address review findings", RequireVerification: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotSummary != cleanSummary {
+		t.Errorf("persisted summary = %q, want %q", gotSummary, cleanSummary)
+	}
+	wantBody := cleanSummary + "\n\nRound findings:\n- receipt.go: " + disclosure + "\n- " + human + "\n\n" + human + "\n" + humanWithAIEmail
+	if body := gitCmd(t, dir, "show", "-s", "--format=%b"); body != wantBody {
+		t.Errorf("body = %q, want %q", body, wantBody)
+	}
+	wantSubject := "no-mistakes(review): Guard receipts " + disclosure + " " + human
+	if subject := lastCommitMessage(t, dir); subject != wantSubject {
+		t.Errorf("subject = %q, want %q", subject, wantSubject)
+	}
+	if trailers := gitTrailers(t, dir); trailers != human+"\n"+humanWithAIEmail {
+		t.Errorf("trailers = %q, want only human co-authors", trailers)
+	}
+}
+
 func TestOtherFixCommitBodiesUnchanged(t *testing.T) {
 	t.Parallel()
 	for _, step := range []types.StepName{types.StepDocument, types.StepLint} {
