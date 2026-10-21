@@ -25,6 +25,16 @@ import (
 // Document helper as a substitute for executing the product.
 func documentJourneyScenario(t *testing.T, path string, action map[string]any) string {
 	t.Helper()
+	return documentJourneyScenarioWith(t, path, action, nil)
+}
+
+// documentJourneyScenarioWith is documentJourneyScenario with extra actions.
+//
+// The extras are prepended BEFORE the general Document action, because the
+// fake agent takes the FIRST action whose match substring appears in the
+// prompt. A more specific match therefore wins over the general one.
+func documentJourneyScenarioWith(t *testing.T, path string, action map[string]any, extra ...map[string]any) string {
+	t.Helper()
 	base, err := os.ReadFile(cleanReviewScenario(t))
 	if err != nil {
 		t.Fatal(err)
@@ -35,9 +45,23 @@ func documentJourneyScenario(t *testing.T, path string, action map[string]any) s
 	if err := yaml.Unmarshal(base, &scenario); err != nil {
 		t.Fatal(err)
 	}
+	// A nil extra is SKIPPED, not appended. A nil entry serializes as a null
+	// action, and the fake agent decodes it as an empty Action whose empty
+	// match catches EVERY prompt before the intended responses - so the run
+	// would never produce a structured finding.
+	var prepended []map[string]any
+	for _, item := range extra {
+		if item == nil {
+			continue
+		}
+		prepended = append(prepended, item)
+	}
 	if action != nil {
 		action["match"] = "Find what this change made stale"
-		scenario.Actions = append([]map[string]any{action}, scenario.Actions...)
+		prepended = append(prepended, action)
+	}
+	if len(prepended) > 0 {
+		scenario.Actions = append(prepended, scenario.Actions...)
 	}
 	if path == "" {
 		path = filepath.Join(t.TempDir(), "document-journey.json")
@@ -64,6 +88,19 @@ func documentJourneyAction(path, content string, gaps ...string) map[string]any 
 	if path != "" {
 		action["edits"] = []map[string]string{{"path": path, "new": content}}
 	}
+	return action
+}
+
+// documentJourneyCapGapAction is the READ-ONLY gap check's canned response.
+//
+// The check must not edit: a check that edits has its proposal rolled back
+// and its verdict about the discarded bytes rejected, so a fixture that
+// rewrote a file on every call would fail the step closed instead of
+// parking on the gap these journeys await. It reports a REAL gap, so the
+// gate still parks and the owner still has something to decide.
+func documentJourneyCapGapAction() map[string]any {
+	action := documentJourneyAction("", "", "a documentation gap the cap cannot repair")
+	action["match"] = "Commit budget exhausted (read-only gap check)"
 	return action
 }
 
@@ -295,7 +332,7 @@ func documentJourneyCalls(h *Harness) int {
 func TestDocumentJourneyAdmissionAndInterruptedHistory(t *testing.T) {
 	for _, kind := range []string{"dirty", "interrupted", "assume-unchanged", "skip-worktree", "flag-without-edit"} {
 		t.Run(kind, func(t *testing.T) {
-			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenario(t, "", documentJourneyAction("README.md", "must not apply\n"))})
+			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenarioWith(t, "", documentJourneyAction("README.md", "must not apply\n"), documentJourneyCapGapAction())})
 			branch, submitted := documentJourneyStart(t, h, documentJourneyBoundary+"commands:\n  lint: 'true'\ndocument:\n  max_commits_per_run: 0\n")
 			boundary := types.CustomGateStepName(types.StepTest, "boundary")
 			parked := waitForStepStatus(t, h, branch, boundary, types.StepStatusAwaitingApproval, 90*time.Second)
@@ -346,8 +383,8 @@ func TestDocumentJourneyAdmissionAndInterruptedHistory(t *testing.T) {
 				limited := documentJourneyNextGate(t, h, parked.ID, types.StepDocument, "")
 				after, err := os.ReadFile(filepath.Join(worktree, "feature.txt"))
 				if err != nil || string(after) != string(before) || limited.HeadSHA != revalidated.HeadSHA ||
-					gitIn(t, h, worktree, "ls-files", "-v") != flags || len(documentJourneyPasses(t, h, parked.ID)) != 0 || documentJourneyCalls(h) != 0 {
-					t.Fatalf("zero Document budget changed the preserved edit or launched an agent: %+v error=%v", limited, err)
+					gitIn(t, h, worktree, "ls-files", "-v") != flags || len(documentJourneyPasses(t, h, parked.ID)) != 0 {
+					t.Fatalf("zero Document budget changed the preserved edit or recorded a pass: %+v error=%v", limited, err)
 				}
 				return
 			}
@@ -432,7 +469,7 @@ func TestDocumentJourneyHiddenIndexPrecedesCachedCompletion(t *testing.T) {
 func TestDocumentJourneyTrustedLimits(t *testing.T) {
 	for _, limit := range []int{-1, 0} {
 		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
-			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenario(t, "", documentJourneyAction("README.md", "must not apply\n"))})
+			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenarioWith(t, "", documentJourneyAction("README.md", "must not apply\n"), documentJourneyCapGapAction())})
 			commitTrustedRepoConfig(t, h, fmt.Sprintf("document:\n  max_commits_per_run: %d\ncommands:\n  lint: 'true'\n", limit))
 			initFromOwnWorktree(t, h, "init-document-limit")
 			const branch = "feature/document-limit"
@@ -453,19 +490,29 @@ func TestDocumentJourneyTrustedLimits(t *testing.T) {
 				return
 			}
 			parked := waitForStepStatus(t, h, branch, types.StepDocument, types.StepStatusAwaitingApproval, 90*time.Second)
-			if parked.HeadSHA != submitted || documentJourneyCalls(h) != 0 || len(documentJourneyPasses(t, h, parked.ID)) != 0 {
+			if parked.HeadSHA != submitted || len(documentJourneyPasses(t, h, parked.ID)) != 0 {
 				t.Fatal("branch widened trusted zero budget")
 			}
 			step, _ := findStep(parked.Steps, types.StepDocument)
 			if step.FindingsJSON == nil || !strings.Contains(*step.FindingsJSON, "commit limit reached") || strings.Contains(*step.FindingsJSON, "discard") {
 				t.Fatalf("zero-budget admission falsely reported a discard: %+v", step)
 			}
+			// The zero budget still runs the READ-ONLY gap check: the cap
+			// bounds commits, and only a real gap may park the run.
+			if documentJourneyCalls(h) == 0 {
+				t.Fatal("the zero budget did not run the read-only gap check")
+			}
+			// The gap check never commits, so the budget stays spent and no
+			// Document pass is recorded.
+			if len(documentJourneyPasses(t, h, parked.ID)) != 0 {
+				t.Fatal("the gap check recorded a Document pass")
+			}
 			gateJourneyDaemon(t, h, "stop")
 			gateJourneyDaemon(t, h, "start")
 			parked = documentJourneyNextGate(t, h, parked.ID, types.StepDocument, "")
 			previous := documentJourneyFix(t, h, parked)
 			parked = documentJourneyNextGate(t, h, parked.ID, types.StepDocument, previous)
-			if documentJourneyCalls(h) != 0 || len(documentJourneyPasses(t, h, parked.ID)) != 0 {
+			if len(documentJourneyPasses(t, h, parked.ID)) != 0 {
 				t.Fatal("recovery lost trusted budget")
 			}
 			documentJourneyStatus(t, h, parked.ID)
@@ -637,7 +684,11 @@ func TestDocumentJourneyUnsafeAndStrictRestart(t *testing.T) {
 				path = "guides/feature.md"
 			}
 			action := documentJourneyAction(path, "updated\n")
-			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenario(t, "", action)})
+			// The READ-ONLY gap check gets its own response: it must report a
+			// gap without editing, because a check that edits has its
+			// proposal rolled back and its verdict rejected, and a check that
+			// edits twice fails the step closed.
+			h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: documentJourneyScenarioWith(t, "", action, documentJourneyCapGapAction())})
 			// A trusted broad path selection still cannot admit executable or
 			// instruction changes. Strict runs use the real shipping CLI.
 			trustedPaths := "['**']"
@@ -648,11 +699,11 @@ func TestDocumentJourneyUnsafeAndStrictRestart(t *testing.T) {
 			if kind == "intermediate-code-revert" {
 				action["edits"] = []map[string]string{{"path": "README.md", "new": "updated\n"}, {"path": "feature.txt", "new": "temporary code change\n"}}
 				action["git"] = [][]string{{"add", "feature.txt"}, {"commit", "-m", "intermediate executable change"}, {"restore", "--source=HEAD^", "--staged", "--worktree", "--", "feature.txt"}, {"add", "README.md"}, {"commit", "-m", "restore feature and document"}}
-				documentJourneyScenario(t, h.Scenario, action)
+				documentJourneyScenarioWith(t, h.Scenario, action, documentJourneyCapGapAction())
 			}
 			if kind == "executable-document" {
 				action["git"] = [][]string{{"config", "core.filemode", "false"}, {"add", "README.md"}, {"update-index", "--chmod=+x", "README.md"}, {"commit", "-m", "executable documentation"}}
-				documentJourneyScenario(t, h.Scenario, action)
+				documentJourneyScenarioWith(t, h.Scenario, action, documentJourneyCapGapAction())
 			}
 			if kind == "hidden-gitlink" {
 				// A gitlink need not have .gitmodules or a checked-out directory.
@@ -665,7 +716,7 @@ func TestDocumentJourneyUnsafeAndStrictRestart(t *testing.T) {
 				gitIn(t, h, h.WorkDir, "update-index", "--add", "--cacheinfo", "160000,"+old+",module")
 				gitIn(t, h, h.WorkDir, "commit", "-m", "seed hidden gitlink")
 				gitIn(t, h, h.WorkDir, "push", "origin", "main")
-				documentJourneyScenario(t, h.Scenario, action)
+				documentJourneyScenarioWith(t, h.Scenario, action, documentJourneyCapGapAction())
 			}
 			state := setupStatefulGitHub(t, h)
 			initFromOwnWorktree(t, h, "init-document-restart")
@@ -677,9 +728,12 @@ func TestDocumentJourneyUnsafeAndStrictRestart(t *testing.T) {
 			if kind == "strict" {
 				wt := h.AddWorktree(branch)
 				out, err := h.RunInDir(wt, "axi", "run", "--shipping-mode", "full", "--intent", "verify strict documentation restart", "--wait", "2s")
-				// A bounded CLI hold reports elapsed as exit 1 while its daemon
-				// continues. Independently await and assert publication below.
-				if err != nil && !strings.Contains(out, "wait of 2s elapsed") {
+				// A bounded CLI hold may expire during subscription setup after
+				// the launch receipt has already confirmed admission. Independently
+				// await and assert publication below in either timeout case.
+				admittedTimeout := strings.Contains(out, "launch_receipt:") &&
+					(strings.Contains(out, "wait of 2s elapsed") || strings.Contains(out, "context deadline exceeded"))
+				if err != nil && !admittedTimeout {
 					t.Fatalf("strict run: %v\n%s", err, out)
 				}
 				t.Logf("strict CLI output:\n%s", out)

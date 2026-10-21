@@ -53,8 +53,8 @@ func (s *RunShared) EnsurePrepared(prepare func() error) error {
 }
 
 // SetHousekeepingLint records the combined pass's lint assessment for the
-// lint step. It replaces any previous assessment (a document fix round
-// re-runs the combined pass and re-stashes a fresh result).
+// lint step. It replaces any previous assessment when a Document repair
+// pass produces a fresh combined result.
 func (s *RunShared) SetHousekeepingLint(result HousekeepingLintResult) {
 	if s == nil {
 		return

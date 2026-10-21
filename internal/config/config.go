@@ -1747,7 +1747,8 @@ log_level: info
 #   max_runs: 20
 
 # Maximum follow-up auto-fix attempts per step (0 = disabled after the initial pass)
-# Document fixes are attempted during the initial document pass.
+# Document repair and approval rules:
+# https://kunchenguid.github.io/no-mistakes/reference/pipeline-steps/#document
 auto_fix:
   rebase: 3
   lint: 3

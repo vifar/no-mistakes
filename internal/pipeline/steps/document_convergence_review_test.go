@@ -116,16 +116,23 @@ func TestDocumentOverBudgetDiscardPersistsAlongsideGaps(t *testing.T) {
 	}
 }
 
+// The exhausted budget runs the READ-ONLY gap check: the cap bounds
+// COMMITS, so the step still has to find out whether the documentation is
+// accurate. A check that reports no gap completes the step without
+// manufacturing a finding, and a check that DID propose work never claims a
+// discard it never made.
 func TestDocumentExhaustedBudgetDoesNotClaimDiscard(t *testing.T) {
 	dir, base, head := setupGitRepo(t)
-	ag := &mockAgent{name: "test"}
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"no gap"}`)}, nil
+	}}
 	sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
 	sc.Config.Document.MaxCommitsPerRun = 0
 	out, err := (&DocumentStep{}).Execute(sc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !out.NeedsApproval || strings.Contains(strings.ToLower(out.Findings), "discard") || len(ag.calls) != 0 {
+	if out.NeedsApproval || strings.Contains(strings.ToLower(out.Findings), "discard") || len(ag.calls) != 1 {
 		t.Fatalf("exhausted admission misreported a discarded proposal: %+v", out)
 	}
 	passes, err := sc.DB.GetDocumentPasses(sc.Run.ID)

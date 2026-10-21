@@ -32,9 +32,8 @@ flowchart TD
 
 Review has an additional step-specific outstanding condition during carry-forward verification; missing coverage or silence can keep its gate parked even when no blocking-severity finding is reported. A clean review that omits its coverage record parks for approval the same way rather than certifying the head. See the [Review step reference](/no-mistakes/reference/pipeline-steps/#review) for the authoritative carry-forward contract.
 
-The document step applies fixes during its initial pass instead of relying on a follow-up automatic fix loop.
-When `commands.lint` is empty, that same invocation is a combined documentation-and-lint housekeeping pass: it updates documentation, detects relevant linters and formatters, applies safe fixes, verifies both duties, and categorizes any unresolved findings for the document or lint gate.
-The lint step consumes a usable lint result from that pass instead of starting a second cold agent invocation; when the combined pass is skipped, cannot produce trustworthy structured output, or loses its in-memory result across a daemon restart, lint falls back to its own agent pass.
+The document step applies fixes during repair passes instead of relying on a follow-up automatic fix loop; the [Document commit cap](/no-mistakes/reference/repo-config/#documentmax_commits_per_run) governs when it can make repairs.
+The [Document and Lint step reference](/no-mistakes/reference/pipeline-steps/#document) owns combined housekeeping and standalone lint fallback behavior.
 Unresolved documentation findings and unresolved blocking lint findings pause for approval instead of entering another automatic fix loop.
 
 ## Before the agent: deterministic CI reruns
@@ -75,11 +74,9 @@ An unclassified finding is never eligible for automatic fixing.
 Classification also follows the remedy, not only the topic: when the smallest honest remedy would add new durable state, a schema change, new background, retry, or persistence machinery, a new subsystem, or otherwise extend the change beyond its stated intent rather than correct what it already does, the review agent classifies the finding `ask-user` and says in the description that the remedy, not the defect, is what needs authorization. The review step's dedicated Simplification pass uses the same action for a component the stated intent does not strictly require: it is reported as an `ask-user` warning whose recommended remedy is removal. The [pipeline-step reference](/no-mistakes/reference/pipeline-steps/) owns which repair agents apply the shared removal-first rule. Agents driving the AXI skill should relay `ask-user` findings to the user unless they have explicit `--yes` consent to resolve gates unattended.
 See [AXI `--yes`](/no-mistakes/reference/cli/#no-mistakes-axi-run) and [TUI yolo mode](/no-mistakes/guides/tui/#action-bar) for automatic gate handling and its exceptions.
 
-The `review`, `test`, `ci`, and configured-command `lint` steps use this shared model directly; the CI step derives its findings from the pull request's settled checks rather than from an agent, as the [pipeline-step reference](/no-mistakes/reference/pipeline-steps/#ci) describes. The `document` step also uses the same `action` field, but unresolved documentation findings pause for approval because the initial document pass already attempted the documentation updates it could make safely.
+The `review`, `test`, `ci`, and configured-command `lint` steps use this shared model directly; the CI step derives its findings from the pull request's settled checks rather than from an agent, as the [pipeline-step reference](/no-mistakes/reference/pipeline-steps/#ci) describes. The [Document step reference](/no-mistakes/reference/pipeline-steps/#document) owns documentation findings and approval behavior.
 The [`gates` reference](/no-mistakes/reference/repo-config/#gates) owns repository-gate findings, automatic fix budgets, and operator-authorized repair behavior.
 When `commands.lint` is empty, the combined housekeeping pass routes documentation and lint findings to their owning gates. Its unresolved lint findings describe issues left after safe fixes, so blocking findings pause for approval instead of remaining eligible for another automatic fix loop.
-
-Documentation findings use the same approval UI, but the `document` step treats any finding as an unresolved documentation gap or judgment call that should pause for approval.
 
 ## User-triggered fixes
 
