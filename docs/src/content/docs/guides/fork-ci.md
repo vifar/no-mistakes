@@ -117,6 +117,25 @@ are administrative changes; editing the JSON file alone does not apply them.
 
 See [GitHub's workflow execution controls](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution).
 
+### The trunk is verified; a superseded pull request is not
+
+The `ci` and `nix` workflows cancel an in-flight run only for a PULL REQUEST,
+whose newer commit supersedes its older one and makes the older run's result
+worthless. A push to the trunk is a distinct commit that has to be verified, so
+a later push to the trunk does NOT cancel the run in flight.
+
+Every trunk run remains eligible for execution, including runs waiting for an
+available runner. This costs runner time but lets each commit finish verification
+even when later pushes arrive before its jobs complete.
+
+The concurrency group includes the event type and uses the PR number for pull
+requests or the unique run ID for pushes and manual dispatches. This keeps PRs
+apart from each other and gives every non-PR run its own group. Disabling
+`cancel-in-progress` alone would still let a newer pending run replace an older
+one in the same group. `workflow_trunk_concurrency_test.go` evaluates the groups
+and cancellation policy against representative events, including successive
+trunk pushes.
+
 ## Runner ownership and recovery
 
 The runner runs as a dedicated unprivileged account with a private home

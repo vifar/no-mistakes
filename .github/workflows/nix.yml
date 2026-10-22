@@ -24,8 +24,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: nix-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: nix-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  # Concurrency policy: docs/src/content/docs/guides/fork-ci.md.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   nix:

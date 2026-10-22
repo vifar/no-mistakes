@@ -6,6 +6,8 @@ import (
 )
 
 type workflowConditionContext struct {
+	PRNumber   string
+	RunID      string
 	EventName  string
 	Ref        string
 	Repository string
@@ -98,6 +100,10 @@ func workflowConditionValue(expression string, context workflowConditionContext)
 	switch expression {
 	case "github.event_name":
 		return context.EventName, nil
+	case "github.event.pull_request.number":
+		return context.PRNumber, nil
+	case "github.run_id":
+		return context.RunID, nil
 	case "github.ref":
 		return context.Ref, nil
 	case "github.repository":

@@ -17,8 +17,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  # Keep non-PR groups unique: cancel-in-progress: false alone still allows
+  # pending-run replacement. Policy: docs/src/content/docs/guides/fork-ci.md.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # The ci-pilot runner host exposes 8 vCPU. Size the Go runtime to the
