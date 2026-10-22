@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -78,6 +79,86 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 					t.Fatalf("published text = %q, want %q", got, want)
 				}
 			}
+		})
+	}
+}
+
+// The oracle is issue #182's complete generated-body contract, including the
+// approved wrapper forms and preservation of literal human mailbox bytes.
+// Unlike the per-component checks, this crosses the final body assembly
+// boundary: a filter that protects only summaries would leave the narrative
+// and intent attribution intact and fail here.
+func TestPRBodyNeutralizesAttributionAcrossGeneratedSections(t *testing.T) {
+	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+		t.Run(string(provider), func(t *testing.T) {
+			root := t.TempDir()
+			humans := []string{
+				"Co-Authored-By: Claude <no_reply@anthropic.com>",
+				"Co-Authored-By: Claude <no`reply@anthropic.com>",
+				"Co-Authored-By: Claude Smith <code@example.com>",
+				"Co-Authored-By: Claude <summary@example.com>",
+				"Co-Authored-By: Claude <tested@example.com>",
+				"Co-Authored-By: Claude <label@example.com>",
+				"Co-Authored-By: Claude <artifact@example.com>",
+				"Co-Authored-By: Claude <file@example.com>",
+				"Co-Authored-By: Claude <scenario@example.com>",
+			}
+			file := filepath.Join(root, "captured.txt")
+			if err := os.WriteFile(file, []byte("Assisted-by: OpenCode\n"+humans[7]), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			reviewJSON, err := json.Marshal(types.Findings{
+				RiskLevel:     "low",
+				RiskRationale: "Recorded risk\nCo-Authored-By: gpt-5.5 <model@example.com>\n" + humans[2],
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			testJSON, err := json.Marshal(types.Findings{
+				Verdict:        types.TestVerdictGo,
+				TestingSummary: "Recorded validation\n**Generated with Codex**\n" + humans[3],
+				Tested:         []string{"Recorded command\nCo-Authored-By: `Codex` <code@example.com>\n" + humans[4]},
+				Artifacts: []types.TestArtifact{
+					{Kind: "log", Label: "Evidence\nGenerated with **Codex**\n" + humans[5], Content: "<code>Generated with Codex</code>\n" + humans[6]},
+					{Kind: "log", Label: "Captured file", Path: file},
+				},
+				Scenarios: []types.TestScenario{{Name: "Recorded scenario", Result: types.ScenarioResultPass, Live: true, Evidence: "Recorded result\nCodex-Session: disposable\n" + humans[8]}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			reviewRaw, testRaw := string(reviewJSON), string(testJSON)
+			results := []*db.StepResult{
+				{ID: "review", StepName: types.StepReview, Status: types.StepStatusCompleted, FindingsJSON: &reviewRaw},
+				{ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &testRaw},
+			}
+			rounds := map[string][]*db.StepRound{"test": {{Round: 1, Trigger: "initial", FindingsJSON: &testRaw}}}
+			pipelineMD, risk := BuildPipelineSummaryFor(results, rounds, testPipelineHeadSHA, provider)
+			testingMD := BuildTestingSummaryForPRWithProvider(results, rounds, "https://github.com/example/repo", testPipelineHeadSHA, root, root, nil, provider)
+			sctx := &pipeline.StepContext{UserIntent: "Keep the output readable.\nGenerated with `Codex`\n" + humans[0]}
+			narrative := "## What Changed\n\nPreserve the selected command environment.\n> Generated with Codex\n" + humans[1]
+			body := assembleDraftPRBody(sctx, narrative, risk, testingMD, pipelineMD, 0, provider)
+			decoded := html.UnescapeString(body)
+			for _, forbidden := range []string{"Codex", "OpenCode", "gpt-5.5"} {
+				if strings.Contains(decoded, forbidden) {
+					t.Fatalf("complete generated body retained AI attribution %q:\n%s", forbidden, body)
+				}
+			}
+			for _, human := range humans {
+				if !strings.Contains(decoded, human) {
+					t.Fatalf("complete generated body lost human attribution %q:\n%s", human, body)
+				}
+			}
+			for _, section := range []string{"## Intent", "## What Changed", "## Risk Assessment", "## Testing", "## Pipeline"} {
+				if !strings.Contains(body, section) {
+					t.Fatalf("complete generated body omitted %q:\n%s", section, body)
+				}
+			}
+			record, err := json.Marshal(map[string]string{"provider": string(provider), "body": body})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Logf("FULL_BODY_JSON %s", record)
 		})
 	}
 }
