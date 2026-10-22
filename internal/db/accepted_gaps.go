@@ -66,10 +66,9 @@ type AcceptedGaps struct {
 // gaps may be accepted for this step, otherwise the reason it may not.
 //
 // A gap is admitted on every run, strict or not. It is the owner-approved,
-// audited way past a Test step parked on an inconclusive verdict, and a
-// repository that declares no_ci has no external check to fall back on: there,
-// the local Test verdict is the only validation there is, so refusing the
-// mechanism leaves such a run with no way to finish. Only an inconclusive
+// audited way past a Test step parked on an inconclusive verdict, including
+// when a repository declares no_ci and has no observed external checks.
+// Local gap acceptance never waives an external check. Only an inconclusive
 // verdict's test-verdict finding is acceptable, and every actionable finding
 // on the step must be named, so a gap can never hide a failed scenario, a
 // failing configured command, or a Test-agent budget cut.
