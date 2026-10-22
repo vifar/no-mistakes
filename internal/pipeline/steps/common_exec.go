@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/execpath"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
@@ -74,63 +75,34 @@ func mergeEnv(extra []string) []string {
 	return merged
 }
 
+// executableCandidates returns the file names to look for, in the order the
+// platform would try them. It is the SHARED resolver's, so the step's lookup
+// and the git package's lookup select the same program.
 func executableCandidates(name string, env []string) []string {
-	return executableCandidatesForOS(runtime.GOOS, name, env)
+	return execpath.Candidates(env, name)
 }
 
 func executableCandidatesForOS(goos, name string, env []string) []string {
-	candidates := []string{name}
-	if goos != "windows" || filepath.Ext(name) != "" {
-		return candidates
-	}
-	pathExt := ".COM;.EXE;.BAT;.CMD"
-	if customPathExt, ok := envValueForOS(env, "PATHEXT", goos); ok {
-		pathExt = customPathExt
-	}
-	for _, ext := range strings.Split(pathExt, ";") {
-		ext = strings.TrimSpace(ext)
-		if ext == "" {
-			continue
-		}
-		candidates = append(candidates, name+ext)
-	}
-	return candidates
+	return execpath.CandidatesForOS(goos, name, env)
 }
 
+// findInCustomPath resolves the program in the environment's PATH, with the
+// SHARED resolver, so this lookup and the git package's lookup cannot pick
+// different programs.
 func findInCustomPath(workDir string, env []string, name string) string {
-	customPath, ok := envValue(env, "PATH")
-	if !ok {
+	path, _, found := execpath.Resolve(env, name, workDir)
+	if !found {
 		return ""
 	}
-	for _, dir := range filepath.SplitList(customPath) {
-		if dir == "" {
-			continue
-		}
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(workDir, dir)
-		}
-		for _, candidateName := range executableCandidates(name, env) {
-			candidate := filepath.Join(dir, candidateName)
-			if fi, err := os.Stat(candidate); err == nil && pathCandidateUsable(runtime.GOOS, candidate, fi) {
-				return candidate
-			}
-		}
-	}
-	return ""
+	return path
 }
 
 func pathCandidateUsable(goos, path string, fi os.FileInfo) bool {
-	if fi.IsDir() {
-		return false
-	}
-	if goos == "windows" {
-		return filepath.Ext(path) != ""
-	}
-	return fi.Mode().Perm()&0o111 != 0
+	return execpath.UsableForOS(goos, path, fi)
 }
 
 func missingFromCustomPath(env []string, name string) string {
-	customPath, ok := envValue(env, "PATH")
+	customPath, ok := execpath.Value(env, "PATH")
 	if !ok {
 		return ""
 	}
@@ -152,22 +124,25 @@ func stepCmd(sctx *pipeline.StepContext, name string, args ...string) *exec.Cmd 
 }
 
 func stepCmdContext(sctx *pipeline.StepContext, ctx context.Context, name string, args ...string) *exec.Cmd {
+	env := stepEnvironment(sctx)
+	lookupEnv := env
+	if lookupEnv == nil {
+		lookupEnv = os.Environ()
+	}
 	resolved := name
 	missingFromPath := false
-	if len(sctx.Env) > 0 && !hasExecutablePathSeparator(name) {
-		if candidate := findInCustomPath(sctx.WorkDir, sctx.Env, name); candidate != "" {
+	if !hasExecutablePathSeparator(name) {
+		if candidate := findInCustomPath(sctx.WorkDir, lookupEnv, name); candidate != "" {
 			resolved = candidate
-		} else if _, ok := envValue(sctx.Env, "PATH"); ok {
-			resolved = missingFromCustomPath(sctx.Env, name)
+		} else if _, ok := execpath.Value(lookupEnv, "PATH"); ok {
+			resolved = missingFromCustomPath(lookupEnv, name)
 			missingFromPath = true
 		}
 	}
 	cmd := exec.CommandContext(ctx, resolved, args...)
 	cmd.Dir = sctx.WorkDir
 	winproc.Harden(cmd)
-	if env := stepEnvironment(sctx); env != nil {
-		cmd.Env = env
-	}
+	cmd.Env = env
 	if missingFromPath {
 		cmd.Err = &exec.Error{Name: name, Err: exec.ErrNotFound}
 	}
@@ -287,16 +262,13 @@ func stepExecutableAvailable(sctx *pipeline.StepContext, name string) bool {
 		fi, err := os.Stat(candidate)
 		return err == nil && pathCandidateUsable(runtime.GOOS, candidate, fi)
 	}
-	if len(sctx.Env) == 0 {
-		_, err := exec.LookPath(name)
-		return err == nil
+	env := stepEnvironment(sctx)
+	if env == nil {
+		env = os.Environ()
 	}
-	if candidate := findInCustomPath(sctx.WorkDir, sctx.Env, name); candidate != "" {
-		return true
-	}
-	_, ok := envValue(sctx.Env, "PATH")
-	if ok {
-		return false
+	_, hasPath, found := execpath.Resolve(env, name, sctx.WorkDir)
+	if hasPath {
+		return found
 	}
 	_, err := exec.LookPath(name)
 	return err == nil

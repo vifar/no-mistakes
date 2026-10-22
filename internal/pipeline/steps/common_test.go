@@ -2040,3 +2040,42 @@ func TestCorrectionInvocationRejectsInvalidRange(t *testing.T) {
 		})
 	}
 }
+
+func TestStepCommandsUseInheritedCommandDirectoryPATH(t *testing.T) {
+	workDir := t.TempDir()
+	bin := filepath.Join(workDir, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkTestBinary(t, bin, "git")
+	linkTestBinary(t, bin, "workdir-only")
+	t.Chdir(t.TempDir())
+	t.Setenv("FAKE_CLI_MODE", "gh")
+	t.Setenv("PATH", "bin"+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, mode := range []string{"inherited", "unrelated override", "PATH override"} {
+		t.Run(mode, func(t *testing.T) {
+			log := filepath.Join(t.TempDir(), "calls")
+			t.Setenv("FAKE_CLI_LOG", log)
+			sctx := &pipeline.StepContext{Ctx: context.Background(), WorkDir: workDir}
+			switch mode {
+			case "unrelated override":
+				sctx.Env = []string{"STEP_TEST_VAR=custom"}
+			case "PATH override":
+				sctx.Env = []string{"PATH=" + os.Getenv("PATH")}
+			}
+			if !stepExecutableAvailable(sctx, "workdir-only") {
+				t.Fatal("availability ignored the command directory's PATH entry")
+			}
+			if err := stepCmd(sctx, "workdir-only", "auth", "status").Run(); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := stepGitRun(sctx, "auth", "status"); err != nil {
+				t.Fatal(err)
+			}
+			calls, err := os.ReadFile(log)
+			if err != nil || string(calls) != "auth status\nauth status\n" {
+				t.Fatalf("command-directory executables were not run: %q, %v", calls, err)
+			}
+		})
+	}
+}

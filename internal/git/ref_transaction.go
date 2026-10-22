@@ -6,10 +6,8 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os/exec"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
-	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
 func WithPreparedRefTransaction(ctx context.Context, dir, commands string, prepared func() error) error {
@@ -17,10 +15,7 @@ func WithPreparedRefTransaction(ctx context.Context, dir, commands string, prepa
 	if isBareGitDir(dir) {
 		args = append([]string{"--git-dir=" + dir}, args...)
 	}
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = dir
-	cmd.Env = nonInteractiveEnvForContext(ctx, dir)
-	winproc.Harden(cmd)
+	cmd := gitCommand(ctx, dir, nil, args...)
 	shellenv.ConfigureShellCommand(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

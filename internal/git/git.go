@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/execpath"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
@@ -45,6 +46,11 @@ var refuseStops atomic.Bool
 
 // errRefusedStop is the refusal a stopped command reports.
 var errRefusedStop = errors.New("operation not permitted")
+
+// cancelRefusalPrefix is the standard library's report of a REFUSED stop. It
+// wraps the refusal the cancel hook returned, so the text is the only way to
+// recognise it: the wrapper type is unexported.
+const cancelRefusalPrefix = "exec: canceling Cmd"
 
 // CancelledExitError is the exit of a subprocess that THIS command's context
 // stopped.
@@ -204,21 +210,30 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	return out, nil
 }
 
-// runInDirWithEnvAndInputRawCaptured runs a git command and keeps its stdout
-// even when the command fails, so a caller can read a result git reports on
-// stdout and signals through the exit code. The plain raw runner drops stdout
-// on failure, because most callers treat a failed command as no output at all.
-func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEnv []string, input string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+func gitCommand(ctx context.Context, dir string, extraEnv []string, args ...string) *exec.Cmd {
+	env := append(nonInteractiveEnvForContext(ctx, dir), extraEnv...)
+	binary, hasPath, found := execpath.Resolve(env, "git", dir)
+	if !hasPath {
+		binary = "git"
+	}
+	cmd := exec.CommandContext(ctx, binary, args...)
+	if hasPath && !found {
+		cmd.Err = &exec.Error{Name: "git", Err: exec.ErrNotFound}
+	}
 	cmd.Dir = dir
-	cmd.Env = append(nonInteractiveEnvForContext(ctx, dir), extraEnv...)
+	cmd.Env = env
 	if len(args) > 0 && strings.HasPrefix(args[0], "--git-dir=") {
 		cmd.Env = bareRepositoryEnv(cmd.Env)
 	}
+	winproc.Harden(cmd)
+	return cmd
+}
+
+func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEnv []string, input string, args ...string) ([]byte, error) {
+	cmd := gitCommand(ctx, dir, extraEnv, args...)
 	if input != "" {
 		cmd.Stdin = strings.NewReader(input)
 	}
-	winproc.Harden(cmd)
 	// OutputShellCommand captures stdout only, so unlike cmd.Output it never
 	// fills ExitError.Stderr. Capture stderr explicitly or the git error text
 	// below silently becomes empty.
@@ -480,9 +495,8 @@ func InitBare(ctx context.Context, path string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "git", "init", "--bare", path)
-	cmd.Env = bareRepositoryEnv(nonInteractiveEnvForContext(ctx, ""))
-	winproc.Harden(cmd)
+	cmd := gitCommand(ctx, "", nil, "init", "--bare", path)
+	cmd.Env = bareRepositoryEnv(cmd.Env)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git init --bare: %w: %s", err, strings.TrimSpace(string(out)))
@@ -557,9 +571,7 @@ func FindGitRoot(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	cmd.Dir = abs
-	winproc.Harden(cmd)
+	cmd := gitCommand(context.Background(), abs, nil, "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s", abs)
@@ -599,9 +611,7 @@ func FindMainRepoRoot(path string) (string, error) {
 	}
 
 	// Resolve the git common dir.
-	commonDirCmd := exec.Command("git", "rev-parse", "--git-common-dir")
-	commonDirCmd.Dir = abs
-	winproc.Harden(commonDirCmd)
+	commonDirCmd := gitCommand(context.Background(), abs, nil, "rev-parse", "--git-common-dir")
 	commonDirOut, err := commonDirCmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s", abs)
@@ -622,8 +632,7 @@ func FindMainRepoRoot(path string) (string, error) {
 	// itself for its core.worktree, which git writes when it absorbs a
 	// submodule's git dir. The value is typically relative (e.g.
 	// "../../../sub"); resolve it against the common dir.
-	worktreeCmd := exec.Command("git", "--git-dir", commonDir, "config", "--get", "core.worktree")
-	winproc.Harden(worktreeCmd)
+	worktreeCmd := gitCommand(context.Background(), abs, nil, "--git-dir", commonDir, "config", "--get", "core.worktree")
 	if worktreeOut, err := worktreeCmd.Output(); err == nil {
 		worktree := strings.TrimSpace(string(worktreeOut))
 		if worktree != "" {
@@ -636,9 +645,7 @@ func FindMainRepoRoot(path string) (string, error) {
 
 	// Branch 3: exotic GIT_DIR without a usable core.worktree. Defer to
 	// `git rev-parse --show-toplevel` from the original path.
-	topCmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	topCmd.Dir = abs
-	winproc.Harden(topCmd)
+	topCmd := gitCommand(context.Background(), abs, nil, "rev-parse", "--show-toplevel")
 	topOut, err := topCmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s", abs)
@@ -747,9 +754,7 @@ func CurrentBranch(ctx context.Context, dir string) (string, error) {
 // (HEAD points at a commit rather than a branch ref). Uses `git symbolic-ref`
 // which fails cleanly when HEAD is not a symbolic ref.
 func IsDetachedHEAD(ctx context.Context, dir string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD")
-	cmd.Dir = dir
-	winproc.Harden(cmd)
+	cmd := gitCommand(ctx, dir, nil, "symbolic-ref", "-q", "HEAD")
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			// Exit 1 means HEAD is not a symbolic ref — detached.
@@ -1118,9 +1123,7 @@ func ExactRefTarget(ctx context.Context, dir, ref string) (string, bool, error) 
 // `git rev-parse --verify --quiet` so a missing ref is a clean (nil, false)
 // result rather than a loud error.
 func RefExists(ctx context.Context, dir, ref string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
-	cmd.Env = nonInteractiveEnvForContext(ctx, dir)
-	winproc.Harden(cmd)
+	cmd := gitCommand(ctx, dir, nil, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ee.ExitCode() == 1 {

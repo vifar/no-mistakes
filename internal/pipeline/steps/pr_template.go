@@ -205,7 +205,10 @@ func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provid
 		parts = append(parts, "## Intent\n\n"+neutralizeAttestationMarkers(provider, intent))
 	}
 	if evidence := appendixEvidence(appendixMode(sctx), prBodyFlavorFor(provider), risk, testing, pipelineMD, provider); evidence != "" {
-		parts = append(parts, evidence)
+		// The appendix's evidence is published text like any other: a
+		// co-author it quotes is rendered as a labelled field, and it is
+		// rendered before the body it becomes is budgeted.
+		parts = append(parts, renderCoAuthorAsLabelledField(evidence))
 	}
 	return strings.Join(parts, "\n\n"), nil
 }

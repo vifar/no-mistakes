@@ -5,16 +5,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net/mail"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -128,7 +131,20 @@ type pipelineAttestationPolicy struct {
 	AllowTestCommandOverride string
 }
 
+// buildPipelineSummaryFor renders the Pipeline section and the risk line.
+//
+// The co-author key is rendered here, at the section's source, so every
+// publication path that carries the section carries the rendered form: the
+// ordinary body, the minimal and collapsed appendices, and a generated
+// template appendix. It is rendered before any body is budgeted, so a body
+// that fits the budget before the rendering is truncated to it rather than
+// refused afterwards.
 func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy) (string, string) {
+	pipelineMD, riskLine := buildPipelineSummaryForRaw(steps, rounds, headSHA, provider, policy)
+	return renderCoAuthorAsLabelledField(pipelineMD), renderCoAuthorAsLabelledField(riskLine)
+}
+
+func buildPipelineSummaryForRaw(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy) (string, string) {
 	if len(steps) == 0 {
 		return "", ""
 	}
@@ -397,7 +413,17 @@ func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepR
 	return buildTestingSummary(steps, rounds, opts)
 }
 
+// buildTestingSummary renders the Testing section.
+//
+// The co-author key is rendered here, at the section's source, for the same
+// reason the Pipeline section's is: every publication path that carries the
+// section carries the rendered form, and the rendering happens before the
+// body is budgeted.
 func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, opts testingSummaryOptions) string {
+	return renderCoAuthorAsLabelledField(buildTestingSummaryRaw(steps, rounds, opts))
+}
+
+func buildTestingSummaryRaw(steps []*db.StepResult, rounds map[string][]*db.StepRound, opts testingSummaryOptions) string {
 	for _, sr := range steps {
 		if sr.StepName != types.StepTest {
 			continue
@@ -639,7 +665,7 @@ func appendTestingArtifacts(artifacts []types.TestArtifact, seen map[string]bool
 		return artifacts
 	}
 	for _, artifact := range findings.Artifacts {
-		artifact.Label = sanitizePromptText(artifact.Label)
+		artifact.Label = sanitizePromptText(neutralizeAIAttribution(artifact.Label))
 		artifact.Kind = strings.ToLower(sanitizePromptText(artifact.Kind))
 		artifact.Path = sanitizeArtifactPath(artifact.Path, opts)
 		artifact.URL = sanitizeArtifactURL(artifact.URL)
@@ -666,7 +692,7 @@ func appendTestingDetails(details []string, seen map[string]bool, raw *string) [
 		return details
 	}
 	for _, detail := range findings.Tested {
-		clean := sanitizePromptText(detail)
+		clean := sanitizePromptText(neutralizeAIAttribution(detail))
 		if clean == "" || seen[clean] {
 			continue
 		}
@@ -677,7 +703,7 @@ func appendTestingDetails(details []string, seen map[string]bool, raw *string) [
 }
 
 func renderTestedDetailFor(detail string, flavor prBodyFlavor) string {
-	clean := sanitizePromptMultilineText(detail)
+	clean := neutralizeAIAttribution(sanitizePromptMultilineText(detail))
 	if clean == "" {
 		return ""
 	}
@@ -696,7 +722,7 @@ func renderTestedDetailFor(detail string, flavor prBodyFlavor) string {
 }
 
 func renderTestingSummaryFor(summary string, flavor prBodyFlavor) string {
-	clean := sanitizePromptMultilineText(summary)
+	clean := neutralizeAIAttribution(sanitizePromptMultilineText(summary))
 	if clean == "" {
 		return ""
 	}
@@ -715,7 +741,7 @@ func renderTestingSummaryFor(summary string, flavor prBodyFlavor) string {
 }
 
 func renderTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptions, state *testingArtifactRenderState) string {
-	label := sanitizePromptText(artifact.Label)
+	label := sanitizePromptText(neutralizeAIAttribution(artifact.Label))
 	if label == "" {
 		return ""
 	}
@@ -761,7 +787,7 @@ func renderTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptio
 		if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n\n") {
 			b.WriteString("\n")
 		}
-		b.WriteString(fmt.Sprintf("**%s**\n\n```text\n%s\n```\n", html.EscapeString(label), escapeMarkdownFence(escapePipelineFoldMarkers(fenceBody))))
+		b.WriteString(fmt.Sprintf("**%s**\n\n```text\n%s\n```\n", html.EscapeString(label), escapeMarkdownFence(escapePipelineFoldMarkers(neutralizeAIAttribution(fenceBody)))))
 	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
@@ -813,7 +839,7 @@ func renderCompactTestingArtifact(artifact types.TestArtifact, opts testingSumma
 		inner.WriteString(renderTestedDetailFor(descriptionLine, opts.flavor))
 		inner.WriteString("\n\n")
 	}
-	inner.WriteString(fmt.Sprintf("```text\n%s\n```\n", escapeMarkdownFence(escapePipelineFoldMarkers(fenceBody))))
+	inner.WriteString(fmt.Sprintf("```text\n%s\n```\n", escapeMarkdownFence(escapePipelineFoldMarkers(neutralizeAIAttribution(fenceBody)))))
 	folded := foldPRBlock("Evidence: "+html.EscapeString(label), inner.String(), opts.flavor)
 	if attachment == "" {
 		return folded
@@ -1341,7 +1367,7 @@ func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound) 
 		emoji := riskEmoji(src.RiskLevel)
 		label := capitalizeRisk(src.RiskLevel)
 		if src.RiskRationale != "" {
-			return fmt.Sprintf("%s %s: %s", emoji, label, src.RiskRationale)
+			return fmt.Sprintf("%s %s: %s", emoji, label, neutralizeAIAttribution(src.RiskRationale))
 		}
 		return fmt.Sprintf("%s %s", emoji, label)
 	}
@@ -1637,6 +1663,7 @@ func writeTestedDetails(b *strings.Builder, sr *db.StepResult, findings *types.F
 }
 
 func escapePRText(s string, flavor prBodyFlavor) string {
+	s = neutralizeAIAttribution(s)
 	if flavor == prBodyMarkdown {
 		return escapePipelineFoldMarkers(s)
 	}
@@ -1678,6 +1705,42 @@ func escapePipelineFoldMarkers(s string) string {
 	return out
 }
 
+// publishedCoAuthorKey matches the commit trailer key that PUBLISHED text must
+// not carry raw.
+//
+// The key is rendered as a labelled field that says what it is: a co-author
+// the body QUOTED. A fixture, an example, a review finding quoted whole - none
+// of them is this work's attribution, and the label says so.
+//
+// The key can also sit inside a line - a backtick-wrapped quote, or a quoted
+// string in embedded evidence - and a consumer scans the raw text wherever it
+// is, so the key is rewritten wherever it is.
+var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)`)
+
+// renderCoAuthorAsLabelledField renders a co-author as a labelled field
+// rather than as a raw trailer line.
+//
+// This is the PUBLISHED text's rule, and it is deliberately not the
+// classifier's rule. The classifier decides whether a line IS an AI
+// attribution, and it is precise: a person whose name happens to contain a
+// tool's name is a person, and that attribution stays whole, name and address
+// and all.
+//
+// The published text is read by consumers that cannot make that distinction.
+// One that scans the pull request body for attribution reads a raw
+// "Co-Authored-By:" line as a claim of AI attribution, and it reads it that
+// way even inside a code fence, because it scans the raw text. So a co-author
+// the body carries is rendered in a form no such consumer reads as a claim,
+// with the name and the address still there, because they are the evidence.
+//
+// The rule is the merge bar's owner's: the bar's rule does not change, and a
+// published body never carries a raw co-author trailer line. It is a
+// publication policy, and it is deliberately narrow - it renders the KEY and
+// nothing else, so the attribution itself survives the rendering.
+func renderCoAuthorAsLabelledField(s string) string {
+	return publishedCoAuthorKey.ReplaceAllString(s, "co-author (quoted)${1}")
+}
+
 // neutralizeAttestationMarkers breaks every attestation comment prefix in
 // agent-authored PR-body prose so only the pipeline-authored marker in the
 // Pipeline section stays parseable by the compliance check, which binds the
@@ -1685,13 +1748,140 @@ func escapePipelineFoldMarkers(s string) string {
 // ownership markers (e.g. Testing evidence quoting a templated body): a raw
 // pair in an ordinary body makes every later restamp refuse it as ambiguous.
 // And it neutralizes closing references in the provider's own grammar
-// (closingGrammarFor), since every PR-body site that generates text passes
-// through here - the grammar has to travel with the text, because GitLab
+// (closingGrammarFor). The grammar has to travel with the text, because GitLab
 // resolves a reference inside a code block where GitHub does not.
+//
+// Within this helper, AI attribution must be neutralized before retained
+// co-author keys are rendered. Rendering a key first would hide the trailer
+// from the AI classifier. Pipeline and Testing sections also render their
+// retained keys at their sources, before callers budget the body.
 func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 	s = strings.NewReplacer(acceptedGapsStart, "<!-- no-mistakes:accepted\\-gaps:start -->", acceptedGapsEnd, "<!-- no-mistakes:accepted\\-gaps:end -->").Replace(s)
 	escaped := escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
-	return closingGrammarFor(provider).neutralize(escaped)
+	return closingGrammarFor(provider).neutralize(renderCoAuthorAsLabelledField(neutralizeAIAttribution(escaped)))
+}
+
+// neutralizeAIAttribution replaces recognized AI attribution lines with a notice.
+//
+// Quoted test output can contain trailers that readers mistake for attribution
+// of this PR, so fenced evidence follows the same rule as generated prose.
+func neutralizeAIAttribution(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if lineCarriesAIAttribution(line) {
+			lines[i] = "<no-mistakes: AI attribution line neutralized>"
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// lineCarriesAIAttribution reports whether a rendered line carries an
+// attribution a reader would take for THIS work.
+func lineCarriesAIAttribution(line string) bool {
+	return git.IsAIAttributionTrailer(normalizeRenderedText(html.UnescapeString(line)))
+}
+
+// listItemMarker splits a list item's marker from its text.
+func listItemMarker(text string) (string, string, bool) {
+	for _, marker := range []string{"- ", "* ", "+ "} {
+		if strings.HasPrefix(text, marker) {
+			return marker, text[len(marker):], true
+		}
+	}
+	if dot := strings.Index(text, ". "); dot > 0 {
+		for _, r := range text[:dot] {
+			if r < '0' || r > '9' {
+				return "", "", false
+			}
+		}
+		return text[:dot+2], text[dot+2:], true
+	}
+	return "", "", false
+}
+
+var renderedGeneratedAttribution = regexp.MustCompile(`(?i)^((?:🤖[ \t]*)?generated[ \t]+with[ \t]+)(.+)$`)
+
+func unwrapAttributionMarkup(text string) (string, bool) {
+	text = strings.TrimSpace(text)
+	for {
+		if strings.HasPrefix(text, "`") {
+			width := len(text) - len(strings.TrimLeft(text, "`"))
+			endWidth := len(text) - len(strings.TrimRight(text, "`"))
+			if width == endWidth && len(text) > 2*width {
+				return strings.TrimSpace(text[width : len(text)-width]), true
+			}
+		}
+		unwrapped := false
+		for _, marker := range []string{"**", "__", "~~", "*", "_"} {
+			if len(text) > 2*len(marker) && strings.HasPrefix(text, marker) && strings.HasSuffix(text, marker) {
+				text = strings.TrimSpace(text[len(marker) : len(text)-len(marker)])
+				unwrapped = true
+				break
+			}
+		}
+		if !unwrapped {
+			return text, false
+		}
+	}
+}
+
+func normalizeRenderedText(text string) string {
+	mailbox := ""
+	for offset := 0; offset < len(text); {
+		start := strings.IndexByte(text[offset:], '<')
+		if start < 0 {
+			break
+		}
+		start += offset
+		end := strings.IndexByte(text[start:], '>')
+		if end < 0 {
+			break
+		}
+		end += start + 1
+		candidate := text[start:end]
+		if _, err := mail.ParseAddress(candidate); err == nil {
+			mailbox = candidate
+			text = text[:start] + text[end:]
+			break
+		}
+		offset = end
+	}
+	literalCode := false
+	for {
+		before := text
+		text = strings.TrimSpace(text)
+		for strings.HasPrefix(text, ">") {
+			text = strings.TrimSpace(strings.TrimPrefix(text, ">"))
+		}
+		if strings.HasPrefix(text, "<code>") && strings.HasSuffix(text, "</code>") {
+			text = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(text, "<code>"), "</code>"))
+			literalCode = true
+			break
+		}
+		if _, rest, ok := listItemMarker(text); ok {
+			text = strings.TrimSpace(rest)
+		}
+		text, literalCode = unwrapAttributionMarkup(text)
+		if literalCode {
+			break
+		}
+		if text == before {
+			break
+		}
+	}
+	if !literalCode {
+		if match := renderedGeneratedAttribution.FindStringSubmatch(text); match != nil {
+			value, _ := unwrapAttributionMarkup(match[2])
+			text = match[1] + value
+		} else if key, value, ok := strings.Cut(text, ":"); ok {
+			value, _ = unwrapAttributionMarkup(value)
+			text = key + ": " + value
+		}
+	}
+	if mailbox != "" {
+		text = strings.TrimSpace(text) + " " + mailbox
+	}
+	return text
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {

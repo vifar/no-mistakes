@@ -722,7 +722,14 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 		pipelineMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, rounds, sctx.Run.HeadSHA, policy) + "\n```"
 	}
 	testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds))
-	return pipelineMD, riskLine, testingMD
+	// The sections render a co-author's trailer key as a labelled field.
+	//
+	// This is their single source, so every publication path gets it: the
+	// ordinary body, the minimal and collapsed appendices, and a generated
+	// template appendix. It happens here, before any body is budgeted, so a
+	// body that fits the budget before the rendering is not over it after
+	// it.
+	return renderCoAuthorAsLabelledField(pipelineMD), renderCoAuthorAsLabelledField(riskLine), renderCoAuthorAsLabelledField(testingMD)
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a
@@ -863,8 +870,8 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 	return appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, maxPullRequestBodyBytes, provider)
 }
 
-// appendGeneratedSectionsToCleanBodyWithinLimit is the single choke point that
-// decides which attestation comment a body consumer sees.
+// appendGeneratedSectionsToCleanBodyWithinLimit applies the attestation boundary
+// when assembling an ordinary body with a full appendix.
 //
 // pipelineMD carries the run's real attestation. Every other component -
 // what-changed, intent, risk, and above all the Testing section, which embeds
@@ -881,7 +888,19 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 // still shipped three live foreign markers ahead of the real one. Fencing is no
 // defense either - verify.py reads raw text, so a marker inside a ```text block
 // counts exactly the same.
+//
+// Co-author keys must be rendered before budgeting because the replacement
+// grows the text. Compact and template bodies apply the same policy at their
+// own assembly boundaries.
 func appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
+	body = renderCoAuthorAsLabelledField(body)
+	riskLine = renderCoAuthorAsLabelledField(riskLine)
+	testingMD = renderCoAuthorAsLabelledField(testingMD)
+	pipelineMD = renderCoAuthorAsLabelledField(pipelineMD)
+	return appendGeneratedSectionsToCleanBodyWithinLimitRaw(body, riskLine, testingMD, pipelineMD, maxBytes, provider)
+}
+
+func appendGeneratedSectionsToCleanBodyWithinLimitRaw(body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
 	body = neutralizeAttestationMarkers(provider, body)
 	riskLine = neutralizeAttestationMarkers(provider, riskLine)
 	testingMD = neutralizeAttestationMarkers(provider, testingMD)

@@ -34,11 +34,6 @@ func processWasCancelled(err *exec.ExitError) bool {
 	return ok && status.Signaled() && (status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
 }
 
-// cancelRefusalPrefix is the standard library's report of a REFUSED stop. It
-// wraps the refusal the cancel hook returned, so the text is the only way to
-// recognise it: the wrapper type is unexported.
-const cancelRefusalPrefix = "exec: canceling Cmd"
-
 // isCancelRefusal reports whether an error is the standard library's report
 // that a command's stop was REFUSED.
 //

@@ -353,6 +353,10 @@ Disable telemetry collection.
 
 When set to a disabling value, telemetry stays off even if a runtime or embedded website ID is available.
 
+## Git executable selection
+
+Git commands use the `PATH` in their effective subprocess environment to select the Git executable, including any step-scoped override. The last `PATH` assignment wins, and relative entries resolve against the command's working directory. An explicitly empty `PATH`, or one containing no usable Git executable, fails the command instead of falling back to the daemon's `PATH`. Without an override, Git uses the inherited environment described in [Environment the daemon sees](#environment-the-daemon-sees).
+
 ## Git repository selection
 
 Explicit bare-repository operations, including bare initialization, remove
