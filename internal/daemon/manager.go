@@ -476,7 +476,8 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 		// A setup failure is the SETUP's own outcome. The cancellation is
 		// the reason only when the setup error IS the cancellation: a
 		// worktree operation that was interrupted reports the operation's
-		// own failure, and that failure keeps its own outcome.
+		// own failure - the signal it died of - and that failure keeps
+		// its own outcome.
 		cancelled := pipeline.CancellationOnly(setupErr, cause)
 		if cancelled {
 			status, message = types.RunCancelled, cause.Error()
@@ -2981,6 +2982,38 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				}
 				addRunPerformanceSummary(m.db, run.ID, fields)
 				telemetry.Track("run", fields)
+				// A panic is the run's work ending, so the workload boundary
+				// is reported BEFORE the outcome is recorded. The record
+				// below is a SETTLED write, and a store that refuses it
+				// makes the record wait indefinitely - so a caller that
+				// waits for the run to stop, and the run's capacity slot,
+				// must not be held by that wait.
+				//
+				// The CUSTODY is separate: the run keeps its worktree and
+				// its place in the ownership table until the outcome is
+				// durable.
+				//
+				// The cancellation's attribution is recorded FIRST, with a
+				// direct write. It is part of the outcome the run decided,
+				// and a caller that reads the run the moment the boundary
+				// fires must find it. The direct write does not wait on
+				// the store's health: the SETTLED write below does, and a
+				// store that refuses it must not hold the boundary.
+				if err := pipeline.RecordCancellationAttribution(m.db, run.ID, runCtx); err != nil {
+					slog.Error("failed to record cancellation attribution after panic", "run_id", run.ID, "error", err)
+				}
+				workloadOnce.Do(func() {
+					// The SLOT is released and the waiter is signalled
+					// here: the panic ended the run's work, and the
+					// record below can wait on storage.
+					//
+					// The state transition waits for the record: a
+					// cancellation that arrives while the run is
+					// still deciding is still the run's own, and
+					// its attribution must be recorded.
+					slot.Release()
+					close(handle.workloadDone)
+				})
 				verifiedHead, verified := preserveRunHead(m.db, wtDir, run)
 				var dbErr error
 				if verified {
@@ -2993,19 +3026,7 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				} else if err := executor.ReportSettledRunFailure(context.Background(), run, repo); err != nil {
 					slog.Error("terminal notification failed", "run_id", run.ID, "error", err)
 				}
-				// A panic is the run's work ending, so the workload boundary
-				// is reported here too. A waiter must not be left on the
-				// signal because the pipeline panicked instead of deciding.
-				//
-				// The boundary is reported AFTER the failure is recorded:
-				// the attribution of WHO cancelled the run is part of the
-				// outcome the run decided, and a caller that reads the run
-				// the moment the boundary fires must find that attribution.
-				workloadOnce.Do(func() {
-					m.markFinishing(run.ID)
-					slot.Release()
-					close(handle.workloadDone)
-				})
+				m.markFinishing(run.ID)
 			} else if run.Status == types.RunFailed || run.Status == types.RunCancelled {
 				executor.ReportPublishedHeadFailure(context.Background(), run, repo)
 			}

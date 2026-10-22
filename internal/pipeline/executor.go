@@ -3248,27 +3248,30 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if dbErr != nil {
 		slog.Warn("retrying terminal outcome settlement", "run", run.ID, "error", dbErr)
 		err = errors.Join(err, dbErr)
-		// The write is awaited here because the run's custody depends on it:
-		// the outcome is either durable or the run keeps its custody for the
-		// next start's recovery. A caller that must not be held hostage by
-		// the recording waits for the workload boundary, which is reported
-		// once the outcome is durable.
+		// The run's work is over: it has decided its outcome. The write
+		// above recorded the cancellation's attribution with it, and the
+		// RETRY below is the part that can still wait on storage - the
+		// store may refuse the terminal write indefinitely.
+		//
+		// The boundary is reported HERE, before the retry: a caller that
+		// waits for the run to stop must not be held by a store that
+		// cannot record the outcome, and the run's capacity slot must be
+		// released then too. The CUSTODY is separate: the run keeps its
+		// worktree and its place in the ownership table until the outcome
+		// is durable.
+		e.reportWorkloadDone()
+		// The write is awaited here because the run's custody depends on
+		// it: the outcome is either durable or the run keeps its custody
+		// for the next start's recovery.
 		dbErr = SettleTerminalWrite(e.db, writeTerminal)
 	}
 	if dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
 		return errors.Join(err, dbErr)
 	}
-	// The run's work is over: it has decided its outcome, and that outcome -
-	// including the cancellation's attribution - is durable. The RETRY above
-	// is the part that can still wait on storage, so a caller that must not
-	// be held hostage by an unhealthy store waits for this boundary rather
-	// than for the whole settlement.
-	//
-	// The boundary is reported AFTER the write, not before it: the
-	// attribution of WHO cancelled the run is part of the outcome the run
-	// decided, and a caller that reads the run the moment the boundary
-	// fires must find that attribution.
+	// The write succeeded, so the outcome - including the cancellation's
+	// attribution - is durable. The boundary is reported here for the
+	// path that never needed a retry.
 	e.reportWorkloadDone()
 	durable, readErr := ReadSettledRun(e.db, run.ID)
 	if readErr != nil {
