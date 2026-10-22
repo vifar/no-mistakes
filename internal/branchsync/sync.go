@@ -104,6 +104,10 @@ type PipelineState struct {
 	PushedHead     string
 	PushedAt       int64
 	PushGeneration int64
+	// PRBaseBranch reports db.LineagePRBaseBranch's selection so a recovery
+	// handoff agrees with ordinary launch inheritance. Empty means no lineage
+	// value was recorded; it does not resolve configuration or a live PR target.
+	PRBaseBranch string
 }
 
 type TargetState struct {
@@ -2098,6 +2102,7 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 	state.Pipeline = PipelineState{
 		RunID: run.ID, Status: string(run.Status), SubmittedHead: ptr(run.SubmittedHeadSHA), CurrentHead: run.HeadSHA,
 		PushedHead: ptr(run.LastPushedSHA), PushedAt: value(run.LastPushedAt), PushGeneration: value(run.PushGeneration),
+		PRBaseBranch: db.LineagePRBaseBranch(runs, branch),
 	}
 	state.PRState = normalizePRState(run.PRState)
 	if run.Shipping != nil && run.Shipping.Mode == types.ShippingImmutableSource {

@@ -548,3 +548,65 @@ func TestRebaseStep_UsesPerRunPRBaseBranch(t *testing.T) {
 		t.Fatalf("merge-base with per-run base = %s, want epic %s", got, epicSHA)
 	}
 }
+
+// A recorded base branch that no longer exists on the remote is the run's
+// comparison target when no open PR supplies a live target, and the
+// comparison boundary fails closed on it: the run refuses instead of
+// completing against the repository default.
+//
+// This is the guarantee that an inherited base branch relies on. The launch
+// path does NOT check an inherited base branch's existence, because an open
+// PR's live target takes precedence over the inherited prospective target, so
+// a stale inherited branch must not block a valid continuation. When the
+// inherited value IS the target, this boundary is what refuses the run.
+func TestRebaseStep_FailsClosedWhenTheRecordedBaseBranchIsGone(t *testing.T) {
+	t.Parallel()
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir := t.TempDir()
+	gitCmd(t, dir, "init")
+	gitCmd(t, dir, "config", "user.name", "test")
+	gitCmd(t, dir, "config", "user.email", "test@test.com")
+	gitCmd(t, dir, "checkout", "-b", "main")
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "base")
+	gitCmd(t, dir, "push", "origin", "main")
+
+	gitCmd(t, dir, "checkout", "-b", "epic/feature")
+	if err := os.WriteFile(filepath.Join(dir, "epic.txt"), []byte("epic\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "epic integration")
+	epicSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", "origin", "epic/feature")
+
+	gitCmd(t, dir, "checkout", "-b", "task")
+	if err := os.WriteFile(filepath.Join(dir, "task.txt"), []byte("task\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "task")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, epicSHA, headSHA, config.Commands{})
+	sctx.Run.Branch = "refs/heads/task"
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Config.PR.BaseBranch = "main"
+	// The recorded base branch was deleted upstream after it was recorded.
+	goneBase := "gone/base"
+	sctx.Run.PRBaseBranch = &goneBase
+
+	outcome, err := (&RebaseStep{}).Execute(sctx)
+	if err == nil {
+		t.Fatalf("the rebase step completed against a missing recorded base branch: %+v", outcome)
+	}
+	if !strings.Contains(err.Error(), "gone/base") {
+		t.Fatalf("rebase error = %v, want it to name the missing base branch", err)
+	}
+}

@@ -572,8 +572,8 @@ type RunInfo struct {
 	Error            *string         `json:"error,omitempty"`
 	CIReady          bool            `json:"ci_ready,omitempty"`
 	CIReadyNoCI      bool            `json:"ci_ready_no_ci,omitempty"`
-	// PRBaseBranch is the per-run PR target override, if the operator set
-	// --base-branch when starting this run.
+	// PRBaseBranch exposes the run's recorded integration/PR target override.
+	// See db.Run.PRBaseBranch for the sources of this value.
 	PRBaseBranch *string `json:"pr_base_branch,omitempty"`
 	// OmitIntent is true when this run was started with the caller-side,
 	// tighten-only request to keep the generated Intent section out of the

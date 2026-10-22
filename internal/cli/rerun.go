@@ -107,7 +107,7 @@ func newRerunCmd() *cobra.Command {
 	}
 	bindOwnerFlag(cmd)
 	cmd.Flags().StringVar(&intent, "intent", "", "explicit intent for this rerun (overrides inherited intent or fresh inference)")
-	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch for the PR for this rerun only (overrides inherited per-run base branch)")
+	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against (overrides the inherited per-run base branch; a run continuing that branch's lineage inherits the recorded base branch)")
 	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this rerun (adds to the inherited decision; tighten-only)")
 	cmd.Flags().StringArrayVar(&closesIssues, "closes", nil, "GitHub issue this PR closes when merged; repeat for multiple issues (42 or owner/repo#42); adds to inherited references")
 	bindPiProfileFlags(cmd, &model, &effort)

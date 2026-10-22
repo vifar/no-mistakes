@@ -2534,6 +2534,34 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("invalid_pr_base_branch")
 		return "", err
 	}
+	// A run that continues an existing lineage inherits the lineage's base
+	// branch. The caller's own --base-branch always wins for that run; without
+	// one, the branch's established base branch is carried forward onto the
+	// successor's own record instead of being dropped and resolved from the
+	// repository default.
+	//
+	// The inherited value carries no retarget authority: the one-time request
+	// belongs to the run that asked for it. A strict shipping run is excluded
+	// because it persists its own pinned target at launch and resolves its
+	// base from that pin; it neither inherits nor records a lineage base
+	// branch, so its comparison identity is exactly what it always was.
+	if storedPRBaseBranch == "" && !prBaseBranchRequested && shippingPin == nil {
+		lineageBase, err := m.lineagePRBaseBranch(repo.ID, branch)
+		if err != nil {
+			trackStartFailure("read_lineage_pr_base_branch")
+			return "", fmt.Errorf("read lineage PR base branch: %w", err)
+		}
+		if lineageBase != "" {
+			// A recorded base branch that cannot be carried is refused
+			// visibly instead of being replaced by the repository default.
+			normalized, err := normalizeRunPRBaseBranch(lineageBase)
+			if err != nil {
+				trackStartFailure("invalid_lineage_pr_base_branch")
+				return "", fmt.Errorf("lineage PR base branch %q cannot be inherited: %w", lineageBase, err)
+			}
+			storedPRBaseBranch = normalized
+		}
+	}
 	// The caller-side omit decision is the OR of the explicit per-run request
 	// and the operator's global tighten-only default. It is stamped here, at
 	// creation, and can only reduce publication: the repository's trusted
@@ -2792,7 +2820,17 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		trackStartFailure("configure_worktree_identity")
 		return "", fmt.Errorf("configure worktree git identity: %w", err)
 	}
-	if storedPRBaseBranch != "" {
+	// A base branch the operator REQUESTED for this run, and a strict shipping
+	// run's own pinned target, must exist on the remote before the run starts.
+	//
+	// An INHERITED base branch is only the PROSPECTIVE target. When an open PR
+	// exists, its live target takes precedence and the inherited value is
+	// never fetched, so a stale inherited branch must not refuse a valid
+	// continuation here. When no open PR exists the inherited value IS the
+	// target, and the comparison boundary fails closed on it instead: the
+	// Rebase step fetches the recorded base and refuses the run when that
+	// fetch fails, rather than falling back to the repository default.
+	if storedPRBaseBranch != "" && (run.PRBaseBranchRequested || run.Shipping != nil) {
 		if err := steps.VerifyRemoteBranchExists(ctx, wtDir, storedPRBaseBranch); err != nil {
 			trackStartFailure("pr_base_branch_missing")
 			return "", err
