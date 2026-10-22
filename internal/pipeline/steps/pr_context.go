@@ -40,7 +40,7 @@ func GuardPRContext(sctx *pipeline.StepContext, step types.StepName) (pipeline.P
 	if host == nil {
 		return pipeline.PRContextDecision{}, fmt.Errorf("read pull request target: %s", reason)
 	}
-	if err := host.Available(sctx.Ctx); err != nil {
+	if _, err := pipeline.ReadPRContext(sctx.Ctx, sctx.Log, func() (struct{}, error) { return struct{}{}, host.Available(sctx.Ctx) }); err != nil {
 		return pipeline.PRContextDecision{}, fmt.Errorf("read pull request target: %w", err)
 	}
 	reader, ok := host.(scm.PRFactsReader)
@@ -602,7 +602,7 @@ func verifyPRMutationComparison(sctx *pipeline.StepContext, host scm.Host, pr *s
 	if !ok {
 		return fmt.Errorf("provider cannot read complete pull request facts before update")
 	}
-	facts, err := reader.ReadPRFacts(sctx.Ctx, pr)
+	facts, err := pipeline.ReadPRContext(sctx.Ctx, sctx.Log, func() (scm.PRFacts, error) { return reader.ReadPRFacts(sctx.Ctx, pr) })
 	if err != nil {
 		return fmt.Errorf("read pull request before update: %w", err)
 	}
@@ -686,7 +686,7 @@ func verifyCurrentPRComparison(sctx *pipeline.StepContext, host scm.Host, select
 		if !ok {
 			return fmt.Errorf("provider cannot read merged PR facts")
 		}
-		observed, err := reader.ReadPRFacts(sctx.Ctx, prFromOwnedURL(receipt.PRURL))
+		observed, err := pipeline.ReadPRContext(sctx.Ctx, sctx.Log, func() (scm.PRFacts, error) { return reader.ReadPRFacts(sctx.Ctx, prFromOwnedURL(receipt.PRURL)) })
 		if err != nil {
 			return fmt.Errorf("read merged PR evidence: %w", err)
 		}

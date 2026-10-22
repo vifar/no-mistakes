@@ -43,7 +43,9 @@ func retainPublishedComparison(c *pipeline.StepContext, host scm.Host, previous 
 	if !host.Capabilities().MergeableState {
 		return false, nil
 	}
-	state, err := host.GetMergeableState(c.Ctx, prFromOwnedURL(previous.PRURL))
+	state, err := pipeline.ReadPRContext(c.Ctx, c.Log, func() (scm.MergeableState, error) {
+		return host.GetMergeableState(c.Ctx, prFromOwnedURL(previous.PRURL))
+	})
 	if err != nil {
 		return false, err
 	}
@@ -85,7 +87,9 @@ func publishedTargetAllowsBehind(c *pipeline.StepContext, host scm.Host, previou
 	if !ok {
 		return false, nil
 	}
-	strict, err := policy.RequiresUpToDate(c.Ctx, prFromOwnedURL(previous.PRURL), previous.TargetBranch)
+	strict, err := pipeline.ReadPRContext(c.Ctx, c.Log, func() (bool, error) {
+		return policy.RequiresUpToDate(c.Ctx, prFromOwnedURL(previous.PRURL), previous.TargetBranch)
+	})
 	if err != nil {
 		return false, fmt.Errorf("verify qualified head protection: %w", err)
 	}
