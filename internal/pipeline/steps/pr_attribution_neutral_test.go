@@ -194,13 +194,32 @@ func TestNeutralizeAIAttributionKeepsAHumanTrailer(t *testing.T) {
 		"We tested fixtures generated with Codex.",
 	} {
 		for _, text := range []string{line, html.EscapeString(line), "`" + line + "`", "`` " + html.EscapeString(line) + " ``", "<code>" + line + "</code>"} {
-			// The classifier and the section builders keep a human
-			// attribution WHOLE: the name and the address are the
-			// evidence, and a person whose name happens to contain a
-			// tool's name is a person. The published BODY renders a
-			// quoted co-author as a labelled field, which is the
-			// assembly's rule; see pr_published_coauthor_test.go.
-			if got := neutralizeAttestationMarkers(scm.ProviderGitHub, text); got != text {
+			got := neutralizeAttestationMarkers(scm.ProviderGitHub, text)
+			// The classifier keeps a human attribution WHOLE: it is not
+			// an AI attribution, so it is not replaced by the
+			// neutralization notice. The name and the address are the
+			// evidence, and they stay.
+			if strings.Contains(got, "no-mistakes: AI attribution line neutralized") {
+				t.Fatalf("a human attribution was neutralized: %q", got)
+			}
+			if !strings.Contains(got, coAuthorIdentity(line)) &&
+				!strings.Contains(got, html.EscapeString(coAuthorIdentity(line))) {
+				t.Fatalf("a human attribution lost its name or address: %q", got)
+			}
+			// The published text renders the trailer KEY as a labelled
+			// field, so no consumer that scans the body for attribution
+			// reads a quoted trailer as a claim. Prose that is not a
+			// trailer is untouched.
+			if strings.HasPrefix(strings.TrimSpace(line), "Co-Authored-By:") {
+				if strings.Contains(got, "Co-Authored-By:") {
+					t.Fatalf("the published text still carries a raw co-author trailer: %q", got)
+				}
+				if !strings.Contains(got, "co-author (quoted):") {
+					t.Fatalf("the co-author was dropped instead of rendered as a labelled field: %q", got)
+				}
+				continue
+			}
+			if got != text {
 				t.Fatalf("human attribution or prose was changed: %q", got)
 			}
 		}
@@ -295,12 +314,17 @@ func TestPRSummaryFiltersAttributionBeforeRendering(t *testing.T) {
 						}
 						for _, output := range outputs {
 							if human {
-								// The section keeps a human attribution
-								// WHOLE. The published BODY renders a
-								// quoted co-author as a labelled field;
-								// see pr_published_coauthor_test.go.
-								if !strings.Contains(html.UnescapeString(output), "Co-Authored-By: Claude <no_reply@anthropic.com>") {
+								// The section keeps a human attribution's
+								// NAME and ADDRESS, and it renders the
+								// trailer key as a labelled field, so no
+								// consumer that scans the body for
+								// attribution reads the quote as a claim.
+								published := html.UnescapeString(output)
+								if !strings.Contains(published, "Claude <no_reply@anthropic.com>") {
 									t.Fatalf("human attribution lost from published summary:\n%s", output)
+								}
+								if strings.Contains(published, "Co-Authored-By:") {
+									t.Fatalf("the published summary carries a raw co-author trailer:\n%s", output)
 								}
 							} else if strings.Contains(output, "Codex") || !strings.Contains(output, "AI attribution line neutralized") {
 								t.Fatalf("AI attribution was not neutralized in published summary:\n%s", output)
@@ -311,4 +335,14 @@ func TestPRSummaryFiltersAttributionBeforeRendering(t *testing.T) {
 			}
 		}
 	}
+}
+
+// coAuthorIdentity returns the part of a trailer line that is the evidence:
+// the name and the address.
+func coAuthorIdentity(line string) string {
+	trimmed := strings.TrimSpace(line)
+	if at := strings.Index(trimmed, ":"); at >= 0 {
+		return strings.TrimSpace(trimmed[at+1:])
+	}
+	return trimmed
 }

@@ -46,7 +46,7 @@ func joinAppendixSections(risk, testing, pipeline string, provider scm.Provider)
 		parts = append(parts, neutralizeAttestationMarkers(provider, testing))
 	}
 	if pipeline != "" {
-		parts = append(parts, pipeline)
+		parts = append(parts, renderCoAuthorAsLabelledField(pipeline))
 	}
 	return strings.Join(parts, "\n\n")
 }
@@ -131,6 +131,11 @@ func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD
 
 func assembleMinimalPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, pipelineMD string, bodyLimit int, provider scm.Provider) string {
 	prefix := narrativeWithIntent(sctx, whatChanged)
+	// The components are rendered before the body is budgeted: the
+	// rendering grows the text, and a body that fits the budget before
+	// it would exceed it after it.
+	riskLine = renderCoAuthorAsLabelledField(riskLine)
+	pipelineMD = renderCoAuthorAsLabelledField(pipelineMD)
 	tail := minimalTail(riskLine, pipelineMD, provider)
 	full := joinBlocks(prefix, tail)
 	if bodyLimit <= 0 || scm.PRBodyLen(full) <= bodyLimit {
@@ -141,6 +146,12 @@ func assembleMinimalPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, pi
 
 func assembleCollapsedPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) string {
 	prefix := narrativeWithIntent(sctx, whatChanged)
+	// The components are rendered before the body is budgeted: the
+	// rendering grows the text, and a body that fits the budget before
+	// it would exceed it after it.
+	riskLine = renderCoAuthorAsLabelledField(riskLine)
+	testingMD = renderCoAuthorAsLabelledField(testingMD)
+	pipelineMD = renderCoAuthorAsLabelledField(pipelineMD)
 	if bodyLimit <= 0 {
 		return joinBlocks(prefix, wrapValidation(joinAppendixSections(riskLine, testingMD, pipelineMD, provider)))
 	}

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
@@ -50,6 +52,75 @@ func TestPublishedBodyRendersItsOwnAttributionAsALabelledField(t *testing.T) {
 	}
 	if !strings.Contains(got, "co-author (quoted): Claude Smith <code@example.com>") {
 		t.Fatalf("the body's own attribution lost its name or address: %q", got)
+	}
+}
+
+// Every publication path renders the co-author key.
+//
+// The rule is one rule, so it has to hold on the paths that build a body
+// differently: the full body, the minimal appendix, the collapsed appendix,
+// and the appendix's own evidence. A body that reaches publication with a raw
+// trailer line is a body a consumer reads as a claim.
+func TestPublishedBodyRendersACoAuthorOnEveryAssemblyPath(t *testing.T) {
+	for _, mode := range []string{config.PRAppendixFull, config.PRAppendixMinimal, config.PRAppendixCollapsed} {
+		t.Run(mode, func(t *testing.T) {
+			ctx := &pipeline.StepContext{Config: &config.Config{}}
+			ctx.Config.PR.Appendix = mode
+			narrative := "## What Changed\n\nCo-Authored-By: Claude Smith <code@example.com>\n"
+			risk := "Low: Recorded risk Co-Authored-By: Claude <risk@example.com>\n"
+			testing := "## Testing\n\nCo-Authored-By: Claude <artifact@example.com>\n"
+			pipelineMD := "## Pipeline\n\nCo-Authored-By: Claude <pipeline@example.com>\n"
+			for _, body := range []string{
+				assemblePRBody(ctx, narrative, risk, testing, pipelineMD, 0, scm.ProviderGitHub),
+				buildPRBodyWithin(narrative, risk, testing, pipelineMD, ctx, scm.ProviderGitHub, 0),
+				appendixEvidence(mode, prBodyHTML, risk, testing, pipelineMD, scm.ProviderGitHub),
+			} {
+				if strings.TrimSpace(body) == "" {
+					// This appendix mode publishes no evidence at
+					// all, so there is nothing to check.
+					continue
+				}
+				if strings.Contains(body, "Co-Authored-By:") {
+					t.Fatalf("the published body carries a raw co-author trailer: %q", body)
+				}
+				// Every co-author the body carries is rendered as a
+				// labelled field, and it keeps its name and its
+				// address: they are the evidence. An appendix mode
+				// may drop a section entirely, so the check is on
+				// the co-authors the body actually carries.
+				for _, rest := range strings.Split(body, "co-author (quoted):")[1:] {
+					identity := strings.TrimSpace(strings.FieldsFunc(rest, func(r rune) bool {
+						return r == '\n' || r == '|' || r == '<' || r == '>'
+					})[0])
+					if identity == "" {
+						t.Fatalf("a co-author was rendered without its name: %q", body)
+					}
+					if !strings.Contains(body, identity) {
+						t.Fatalf("the co-author %q lost its name or address: %q", identity, body)
+					}
+				}
+			}
+		})
+	}
+}
+
+// The rendering happens BEFORE the body is budgeted.
+//
+// Each replacement grows the text. A body that fits the budget before the
+// rendering must be truncated to it afterwards, not refused by the later
+// budget validation.
+func TestPublishedBodyRendersACoAuthorBeforeTheBudget(t *testing.T) {
+	ctx := &pipeline.StepContext{Config: &config.Config{}}
+	ctx.Config.PR.Appendix = config.PRAppendixFull
+	const limit = 2000
+	narrative := "## What Changed\n\n" + strings.Repeat("change ", 200) + "\nCo-Authored-By: Claude Smith <code@example.com>\n"
+	for _, body := range []string{
+		assemblePRBody(ctx, narrative, "low risk", "evidence", "## Pipeline\n\n- ok", limit, scm.ProviderGitHub),
+		buildPRBodyWithin(narrative, "low risk", "evidence", "## Pipeline\n\n- ok", ctx, scm.ProviderGitHub, limit),
+	} {
+		if scm.PRBodyLen(body) > limit {
+			t.Fatalf("the published body is over the budget: %d > %d\n%s", scm.PRBodyLen(body), limit, body)
+		}
 	}
 }
 

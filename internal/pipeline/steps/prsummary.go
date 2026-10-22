@@ -131,7 +131,20 @@ type pipelineAttestationPolicy struct {
 	AllowTestCommandOverride string
 }
 
+// buildPipelineSummaryFor renders the Pipeline section and the risk line.
+//
+// The co-author key is rendered here, at the section's source, so every
+// publication path that carries the section carries the rendered form: the
+// ordinary body, the minimal and collapsed appendices, and a generated
+// template appendix. It is rendered before any body is budgeted, so a body
+// that fits the budget before the rendering is truncated to it rather than
+// refused afterwards.
 func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy) (string, string) {
+	pipelineMD, riskLine := buildPipelineSummaryForRaw(steps, rounds, headSHA, provider, policy)
+	return renderCoAuthorAsLabelledField(pipelineMD), renderCoAuthorAsLabelledField(riskLine)
+}
+
+func buildPipelineSummaryForRaw(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy) (string, string) {
 	if len(steps) == 0 {
 		return "", ""
 	}
@@ -400,7 +413,17 @@ func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepR
 	return buildTestingSummary(steps, rounds, opts)
 }
 
+// buildTestingSummary renders the Testing section.
+//
+// The co-author key is rendered here, at the section's source, for the same
+// reason the Pipeline section's is: every publication path that carries the
+// section carries the rendered form, and the rendering happens before the
+// body is budgeted.
 func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, opts testingSummaryOptions) string {
+	return renderCoAuthorAsLabelledField(buildTestingSummaryRaw(steps, rounds, opts))
+}
+
+func buildTestingSummaryRaw(steps []*db.StepResult, rounds map[string][]*db.StepRound, opts testingSummaryOptions) string {
 	for _, sr := range steps {
 		if sr.StepName != types.StepTest {
 			continue
@@ -1728,10 +1751,28 @@ func renderCoAuthorAsLabelledField(s string) string {
 // (closingGrammarFor), since every PR-body site that generates text passes
 // through here - the grammar has to travel with the text, because GitLab
 // resolves a reference inside a code block where GitHub does not.
+// neutralizeAttestationMarkers is the chokepoint for the PUBLISHED text's
+// rules.
+//
+// It breaks every attestation comment prefix in agent-authored PR-body prose,
+// so only the pipeline-authored marker in the Pipeline section stays
+// parseable by the compliance check, which binds the first marker in the body
+// to the PR head. It also breaks copied PR-appendix ownership markers (e.g.
+// Testing evidence quoting a templated body): a raw pair in an ordinary body
+// makes every later restamp refuse it as ambiguous. And it neutralizes closing
+// references in the provider's own grammar (closingGrammarFor), since every
+// PR-body site that generates text passes through here.
+//
+// It also renders a co-author's trailer key as a labelled field. That is a
+// published-text rule, and it belongs here because this is the one place every
+// published text passes through: the narrative, the intent, a template
+// narrative, a generated appendix. The rendering happens AFTER the AI
+// attribution is broken, so a line that IS an AI attribution is replaced by
+// the notice and never reaches the key rendering.
 func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 	s = strings.NewReplacer(acceptedGapsStart, "<!-- no-mistakes:accepted\\-gaps:start -->", acceptedGapsEnd, "<!-- no-mistakes:accepted\\-gaps:end -->").Replace(s)
 	escaped := escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
-	return closingGrammarFor(provider).neutralize(neutralizeAIAttribution(escaped))
+	return closingGrammarFor(provider).neutralize(renderCoAuthorAsLabelledField(neutralizeAIAttribution(escaped)))
 }
 
 // neutralizeAIAttribution replaces recognized AI attribution lines with a notice.

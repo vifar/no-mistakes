@@ -722,7 +722,14 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 		pipelineMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, rounds, sctx.Run.HeadSHA, policy) + "\n```"
 	}
 	testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds))
-	return pipelineMD, riskLine, testingMD
+	// The sections render a co-author's trailer key as a labelled field.
+	//
+	// This is their single source, so every publication path gets it: the
+	// ordinary body, the minimal and collapsed appendices, and a generated
+	// template appendix. It happens here, before any body is budgeted, so a
+	// body that fits the budget before the rendering is not over it after
+	// it.
+	return renderCoAuthorAsLabelledField(pipelineMD), renderCoAuthorAsLabelledField(riskLine), renderCoAuthorAsLabelledField(testingMD)
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a
@@ -836,7 +843,6 @@ func buildPRBodyFull(body, riskLine, testingMD, pipelineMD string, sctx *pipelin
 	// Neutralized for the same reason as in prependIntentSection: intent is
 	// agent-extracted text placed ahead of the pipeline section.
 	cleaned := neutralizeAttestationMarkers(provider, publicPRIntent(sctx))
-	cleaned = renderCoAuthorAsLabelledField(cleaned)
 	if cleaned == "" {
 		return sections
 	}
@@ -890,11 +896,20 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 // section and the Pipeline section all reach the reader through it, and a
 // consumer that scans the body for attribution scans all of them.
 func appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
-	// The published body renders a co-author as a labelled field, so no
-	// consumer that scans the body for attribution reads a quoted
+	// The sections render a co-author's trailer key as a labelled field, so
+	// no consumer that scans the body for attribution reads a quoted
 	// fixture's trailer as a claim. The name and the address survive the
 	// rendering; only the key is rendered.
-	return renderCoAuthorAsLabelledField(appendGeneratedSectionsToCleanBodyWithinLimitRaw(body, riskLine, testingMD, pipelineMD, maxBytes, provider))
+	//
+	// The components are rendered BEFORE the body is budgeted. The
+	// rendering grows the text, and a body that fits the budget before it
+	// would exceed it after it, which the later budget validation refuses
+	// instead of truncating normally.
+	body = renderCoAuthorAsLabelledField(body)
+	riskLine = renderCoAuthorAsLabelledField(riskLine)
+	testingMD = renderCoAuthorAsLabelledField(testingMD)
+	pipelineMD = renderCoAuthorAsLabelledField(pipelineMD)
+	return appendGeneratedSectionsToCleanBodyWithinLimitRaw(body, riskLine, testingMD, pipelineMD, maxBytes, provider)
 }
 
 func appendGeneratedSectionsToCleanBodyWithinLimitRaw(body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
@@ -1635,7 +1650,7 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 	// Intent is agent-extracted text that lands ahead of the pipeline section,
 	// so it can shadow the real attestation the same way the Testing section
 	// can. See appendGeneratedSectionsToCleanBodyWithinLimit.
-	cleaned := renderCoAuthorAsLabelledField(neutralizeAttestationMarkers(resolvedProviderForBody(sctx), publicPRIntent(sctx)))
+	cleaned := neutralizeAttestationMarkers(resolvedProviderForBody(sctx), publicPRIntent(sctx))
 	if cleaned == "" {
 		return body
 	}
