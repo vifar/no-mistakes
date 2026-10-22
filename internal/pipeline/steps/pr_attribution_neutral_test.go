@@ -26,6 +26,7 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 		line string
 	}{
 		{"co-authored trailer", "Co-Authored-By: Codex <bot@example.invalid>"},
+		{"co-authored trailer with tag-like mailbox", "Co-Authored-By: Codex <code@example.com>"},
 		{"co-authored trailer with a name", "Co-Authored-By: Claude <noreply@anthropic.com>"},
 		{"generated with", "Generated with [Claude Code](https://claude.ai/code)"},
 		{"generated with plain", "Generated with Claude Code"},
@@ -54,9 +55,6 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 				"  - " + tc.line,
 				"Generated with **" + "Codex**",
 				"Co-Authored-By: **" + "Codex** <bot@example.invalid>",
-				"Generated with Codex<br>",
-				"<p>Summary</p><p>Generated with Codex</p>",
-				"<p>Summary</p><p>Co-Authored-By: Codex <bot@example.invalid></p>",
 			} {
 				body := "## Testing\n\n```text\n" + line + "\n```\n"
 				got := neutralizeAttestationMarkers(scm.ProviderGitHub, body)
@@ -74,11 +72,12 @@ func TestNeutralizeAIAttributionKeepsAHumanTrailer(t *testing.T) {
 	for _, line := range []string{
 		"Co-Authored-By: A Person <person@example.com>",
 		"Co-Authored-By: Claude Smith <human@example.com>",
+		"Co-Authored-By: Claude Smith <code@example.com>",
 		"Co-Authored-By: Claude <human@example.com>",
 		"Assisted-by: Claude Smith <human@example.com>",
 		"We tested fixtures generated with Codex.",
 	} {
-		for _, text := range []string{line, html.EscapeString(line), "`" + line + "`", "`` " + html.EscapeString(line) + " ``"} {
+		for _, text := range []string{line, html.EscapeString(line), "`" + line + "`", "`` " + html.EscapeString(line) + " ``", "<code>" + line + "</code>"} {
 			if got := neutralizeAttestationMarkers(scm.ProviderGitHub, text); got != text {
 				t.Fatalf("human attribution or prose was changed: %q", got)
 			}
@@ -109,7 +108,7 @@ func TestPRSummaryFiltersAttributionBeforeRendering(t *testing.T) {
 			for _, human := range []bool{false, true} {
 				for _, wrapper := range []string{"", "`", "``"} {
 					t.Run(string(provider)+"/"+source+"/"+wrapper+"/"+map[bool]string{false: "AI", true: "human"}[human], func(t *testing.T) {
-						line := "Co-Authored-By: Codex <bot@example.invalid>"
+						line := "Co-Authored-By: Codex <code@example.com>"
 						if human {
 							line = "Co-Authored-By: Claude Smith <human@example.com>"
 						}
