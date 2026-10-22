@@ -1709,7 +1709,7 @@ func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 func neutralizeAIAttribution(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		if git.IsAIAttributionTrailer(unwrapRenderedText(html.UnescapeString(line))) {
+		if git.IsAIAttributionTrailer(normalizeRenderedText(html.UnescapeString(line))) {
 			lines[i] = "<no-mistakes: AI attribution line neutralized>"
 		}
 	}
@@ -1734,8 +1734,8 @@ func listItemMarker(text string) (string, string, bool) {
 	return "", "", false
 }
 
-// unwrapRenderedText removes the wrappers a rendered detail carries around its
-// text, so the classifier sees the text a reader sees.
+// normalizeRenderedText normalizes a rendered line so the complete-line
+// classifier sees the text a reader sees.
 //
 // A detail is rendered as a backtick-wrapped bullet, as Markdown emphasis, or
 // inside an HTML <code> element, and the wrappers combine. The classifier is
@@ -1746,7 +1746,7 @@ func listItemMarker(text string) (string, string, bool) {
 // Only the wrappers are removed, and only from the outside: the text under
 // them is what the classifier has to judge, and a trailer that names a PERSON
 // is still a trailer that names a person.
-func unwrapRenderedText(text string) string {
+func normalizeRenderedText(text string) string {
 	for {
 		before := text
 		text = strings.TrimSpace(text)
@@ -1773,9 +1773,13 @@ func unwrapRenderedText(text string) string {
 			text = strings.TrimSpace(text[1 : len(text)-1])
 		}
 		if text == before {
-			return text
+			break
 		}
 	}
+	// The emphasis can be INSIDE the text, as in "Generated with **Codex**".
+	// The markers are the wrapper's, so they go; the words under them are
+	// the text, and they stay.
+	return strings.NewReplacer("**", "", "*", "", "_", "", "~", "").Replace(text)
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {

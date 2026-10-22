@@ -52,6 +52,8 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 				"> > " + tc.line,
 				"<code>" + tc.line + "</code>",
 				"  - " + tc.line,
+				"Generated with **" + "Codex**",
+				"Co-Authored-By: **" + "Codex** <bot@example.invalid>",
 			} {
 				body := "## Testing\n\n```text\n" + line + "\n```\n"
 				got := neutralizeAttestationMarkers(scm.ProviderGitHub, body)
