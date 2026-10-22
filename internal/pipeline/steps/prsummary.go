@@ -683,7 +683,7 @@ func renderTestedDetailFor(detail string, flavor prBodyFlavor) string {
 		return ""
 	}
 	if strings.HasPrefix(clean, "`") && strings.HasSuffix(clean, "`") && strings.Count(clean, "`") == 2 && !strings.Contains(clean[1:len(clean)-1], "\n") {
-		return "`" + neutralizeAIAttribution(clean[1:len(clean)-1]) + "`"
+		return clean
 	}
 	if !strings.Contains(clean, "`") && !strings.Contains(clean, "\n") {
 		return fmt.Sprintf("`%s`", clean)
@@ -1709,7 +1709,8 @@ func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 func neutralizeAIAttribution(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		if git.IsAIAttributionTrailer(html.UnescapeString(line)) {
+		text := strings.Trim(strings.TrimSpace(html.UnescapeString(line)), "`")
+		if git.IsAIAttributionTrailer(text) {
 			lines[i] = "<no-mistakes: AI attribution line neutralized>"
 		}
 	}
