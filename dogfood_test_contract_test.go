@@ -2,7 +2,9 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -68,15 +70,90 @@ func TestRepoConfigDocs_CommandsTestIsTargetedContract(t *testing.T) {
 	}
 }
 
-// Remote CI must keep the complete race-enabled Go suite as the broad
-// regression owner after local Test stops duplicating it.
 func TestCIWorkflow_RetainsFullRaceSuiteAsBroadRegressionOwner(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
-	if err != nil {
-		t.Fatalf("read ci.yml: %v", err)
+	job := loadCIWorkflowDoc(t).Jobs["test"]
+	if job == nil {
+		t.Fatal("missing test job")
 	}
-	content := string(data)
-	if !strings.Contains(content, "run: go test -race ./...") {
-		t.Fatal("CI workflow must still run go test -race ./... as the broad regression owner")
+	var suite []workflowCommand
+	for _, command := range workflowCommandsMatching(job.Steps, func(step wfStep) bool { return step.If == "" }) {
+		if command.name == "bash" && slices.Equal(command.args, []string{"scripts/race.sh"}) {
+			suite = append(suite, command)
+		}
+	}
+	if len(suite) != 1 {
+		t.Fatalf("unconditional race wrapper invocations = %d, want 1", len(suite))
+	}
+	dir := t.TempDir()
+	inventory := []string{
+		"github.com/kunchenguid/no-mistakes/internal/daemon",
+		"github.com/kunchenguid/no-mistakes/internal/pipeline/steps",
+		"github.com/kunchenguid/no-mistakes/internal/pipeline",
+		"example.org/suite/alpha",
+		"example.org/suite/beta",
+		"example.org/suite/gamma",
+		"example.org/suite/" + filepath.Base(dir),
+	}
+	if err := os.WriteFile(filepath.Join(dir, "inventory"), []byte(strings.Join(inventory, "\n")+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stub := `#!/bin/sh
+case "$1" in
+ list)
+  [ "$#" -eq 2 ] && [ "$2" = './...' ] || exit 81
+  cat "$RACE_CONTRACT_DIR/inventory"
+  ;;
+ test)
+  shift
+  printf '%s\n' "$@" > "$RACE_CONTRACT_DIR/args-$$"
+  ;;
+ *) exit 82 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(dir, "go"), []byte(stub), 0700); err != nil {
+		t.Fatal(err)
+	}
+	command := suite[0]
+	cmd := exec.Command(command.name, command.args...)
+	cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"), "RACE_CONTRACT_DIR="+dir)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("race wrapper: %v\n%s", err, output)
+	}
+	logs, err := filepath.Glob(filepath.Join(dir, "args-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := make(map[string]int)
+	for _, log := range logs {
+		raw, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := strings.Fields(string(raw))
+		race := false
+		for i := 0; i < len(args); i++ {
+			arg := args[i]
+			switch {
+			case arg == "-race":
+				race = true
+			case arg == "-p" || arg == "-timeout" || arg == "-count":
+				i++
+			case strings.HasPrefix(arg, "-"):
+			default:
+				counts[arg]++
+			}
+		}
+		if !race {
+			t.Fatalf("test invocation lacks race detector: %v", args)
+		}
+	}
+	for _, pkg := range inventory {
+		if counts[pkg] != 1 {
+			t.Errorf("%s executed %d times, want exactly once", pkg, counts[pkg])
+		}
+		delete(counts, pkg)
+	}
+	if len(counts) != 0 {
+		t.Fatalf("unexpected packages executed: %v", counts)
 	}
 }

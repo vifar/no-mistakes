@@ -12,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -531,6 +532,96 @@ func TestTestStep_NoLiveSurfaceCIWorkflowAsksUser(t *testing.T) {
 	}
 }
 
+const noSurfaceWithDuplicateAcknowledgementFindingsJSON = `{
+  "findings": [
+    {
+      "id": "test-1",
+      "severity": "warning",
+      "action": "ask-user",
+      "file": ".github/workflows/ci.yml",
+      "description": "Workflow checks passed, but this CI-only change has no locally live-validatable product surface. Human acknowledgement is needed to proceed without live validation; the outer CI phase must establish completion on the self-hosted runner."
+    }
+  ],
+  "summary": "",
+  "tested": ["inspected .github/workflows/ci.yml"],
+  "testing_summary": "CI workflow split has no running product to drive",
+  "artifacts": [],
+  "scenarios": [{"name":"Windows git-heavy shard runs the git-backed packages","result":"untested","live":false,"evidence":"","reason":"CI workflow YAML has no running product no-mistakes can drive"}],
+  "verdict": "no-surface"
+}`
+
+func TestTestStep_NoSurfaceAcknowledgementIsReleasable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		description string
+		canonical   bool
+		want        bool
+	}{
+		{name: "canonical duplicate", canonical: true, want: true},
+		{name: "independent warning", description: "workflow validation found an unresolved runner-policy decision"},
+		{name: "unproven paraphrase", description: "Human acknowledgement is needed to proceed without live validation"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, _ := setupGitRepo(t)
+			headSHA := commitCIWorkflowOnlyChange(t, dir, baseSHA)
+			payload, err := types.ParseFindingsJSON(noSurfaceWithDuplicateAcknowledgementFindingsJSON)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.canonical {
+				payload.Items = []types.Finding{types.NoSurfaceTestFinding(payload.Scenarios)}
+			} else {
+				payload.Items[0].Description = tc.description
+			}
+			var wire map[string]any
+			if err := json.Unmarshal([]byte(noSurfaceWithDuplicateAcknowledgementFindingsJSON), &wire); err != nil {
+				t.Fatal(err)
+			}
+			wire["findings"] = payload.Items
+			raw, err := json.Marshal(wire)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: raw}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.UserIntent = "Split the Windows CI job into a git-heavy shard and a core remainder"
+			outcome, err := (&TestStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := types.IsNoSurfaceTestAcknowledgment(findings); got != tc.want {
+				t.Fatalf("acknowledgeable = %v, want %v: %s", got, tc.want, outcome.Findings)
+			}
+			exitCode := 0
+			row := db.StepResult{StepName: types.StepTest, ExitCode: &exitCode, FindingsJSON: &outcome.Findings}
+			if got := row.StrictApprovalRefusal("") == ""; got != tc.want {
+				t.Fatalf("strict approval permitted = %v, want %v", got, tc.want)
+			}
+			if !tc.canonical {
+				found := false
+				for _, item := range findings.Items {
+					if item.Description == tc.description {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("independent finding lost: %s", outcome.Findings)
+				}
+			}
+		})
+	}
+}
+
+// const mixedLivePassAndUntestedFindingsJSON is the mixed live/untested
+// payload.
 const mixedLivePassAndUntestedFindingsJSON = `{
   "findings": [],
   "summary": "",

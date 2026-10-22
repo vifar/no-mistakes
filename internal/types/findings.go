@@ -750,6 +750,8 @@ func NoSurfaceTestFinding(scenarios []TestScenario) Finding {
 	}
 }
 
+// IsNoSurfaceTestAcknowledgment reports whether a no-surface Test step can be
+// released by the human's acknowledgement.
 func IsNoSurfaceTestAcknowledgment(findings Findings) bool {
 	if findings.Verdict != TestVerdictNoSurface || !NoLiveExercisableScenarios(findings.Scenarios) || findings.UnvalidatedSinceSHA != "" {
 		return false
@@ -760,7 +762,7 @@ func IsNoSurfaceTestAcknowledgment(findings Findings) bool {
 		}
 	}
 	want := NoSurfaceTestFinding(findings.Scenarios)
-	count := 0
+	canonical := 0
 	for _, item := range findings.Items {
 		if item.ID == FindingIDTestAgentTimeout || item.ID == FindingIDTestAgentUnvalidatedWork || item.Category == FindingCategoryTestCommand {
 			return false
@@ -768,11 +770,13 @@ func IsNoSurfaceTestAcknowledgment(findings Findings) bool {
 		if item.ActionOrDefault() == ActionNoOp {
 			continue
 		}
-		item.ID = ""
-		if item != want {
-			return false
+		probe := item
+		probe.ID = ""
+		if probe == want {
+			canonical++
+			continue
 		}
-		count++
+		return false
 	}
-	return count == 1
+	return canonical > 0
 }

@@ -41,8 +41,10 @@ with whole packages assigned exactly once. The measured long poles
 their own shard; remaining packages are assigned by a checksum of their full
 import path. That assignment stays stable when unrelated packages are added.
 Package discovery must succeed before any shard starts. Each shard uses
-`-race -count=1` and a 25-minute timeout per package; the CI job has a
-60-minute wall-clock bound, including builds. The wrapper contracts are
+`-race -count=1 -p 2` and a 25-minute timeout per package, allowing at most
+six package test binaries across the three shards. CI sets `GOMAXPROCS=8`
+for the runner's eight vCPUs. The race job has a 90-minute wall-clock bound,
+including builds. The wrapper contracts are
 covered by `internal/e2edaemon/race_wrapper_test.go`.
 
 Every CI job checks out the exact PR head (or event SHA outside a PR) without
@@ -54,7 +56,7 @@ multi-user Nix with an active `nix-daemon` usable by the runner account. The `Ni
 workflow adds `/nix/var/nix/profiles/default/bin` to `GITHUB_PATH` by default.
 Administrators install these dependencies; the runner account does not gain
 sudo access. The default end-to-end suite shares a 40-minute budget inside
-the 45-minute job bound. With at least two daemon slots, the user-journey
+the 90-minute job bound. With at least two daemon slots, the user-journey
 matrix runs in two isolated Go test processes: Claude and Codex in one, all
 other agents in the other. The terminal-merge and retained-target continuity
 journey tables then share one Go test process alongside a separate
