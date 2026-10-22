@@ -240,3 +240,30 @@ func TestPRHumanCoauthorPresentation_EncodedKeyIsNotAReplacementTarget(t *testin
 		}
 	}
 }
+
+func TestPRConfiguredAttributionHTMLForms(t *testing.T) {
+	t.Parallel()
+	for _, configured := range []string{"Build-Agent: private&#45;identifier", "Build-Agent: private-identifier", "Build&#45;Agent: private-identifier"} {
+		decoded := html.UnescapeString(configured)
+		for _, input := range []string{configured, decoded, html.EscapeString(configured), html.EscapeString(decoded), "**" + configured + "**", "> " + configured} {
+			if got := prDisplayText(input, configured); got != "" {
+				t.Errorf("display retained exact configured form %q: %q", input, got)
+			}
+		}
+		for _, input := range []string{configured, decoded} {
+			if got := stripReviewAIAttribution(input, []string{configured}); got != "" {
+				t.Errorf("Review retained exact configured form %q: %q", input, got)
+			}
+		}
+		for _, input := range []string{configured + "-", decoded + ".", html.EscapeString(configured) + "-"} {
+			if got := prDisplayText(input, configured); got != input {
+				t.Errorf("lookalike changed: %q, want %q", got, input)
+			}
+		}
+	}
+	for _, attribution := range []string{"&#67;o-Authored-By: &#67;odex &lt;ai@example.com&gt;", "Generated with &#67;odex"} {
+		if got := prDisplayText(attribution); got != "" {
+			t.Errorf("encoded native attribution survived: %q", got)
+		}
+	}
+}

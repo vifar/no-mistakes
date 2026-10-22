@@ -3,6 +3,7 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/mail"
 	"regexp"
 	"strings"
@@ -53,6 +54,9 @@ func reviewAttributionLine(line string) (string, bool) {
 }
 
 func reviewAttributionStart(line string, configuredTrailers []string) bool {
+	if reviewConfiguredAttributionMatches(line, configuredTrailers) {
+		return true
+	}
 	if !reviewTrailerKey.MatchString(line) {
 		return reviewGeneratedWith.MatchString(line)
 	}
@@ -61,17 +65,7 @@ func reviewAttributionStart(line string, configuredTrailers []string) bool {
 	case "co-authored-by", "assisted-by", "signed-off-by", "reviewed-by", "co-committed-by":
 		return true
 	}
-	if git.IsAIAttributionTrailer(line) {
-		return true
-	}
-	for _, trailer := range configuredTrailers {
-		configured, _ := reviewAttributionLine(trailer)
-		configuredKey, _, ok := strings.Cut(configured, ":")
-		if ok && strings.EqualFold(strings.TrimSpace(key), strings.TrimSpace(configuredKey)) {
-			return true
-		}
-	}
-	return false
+	return git.IsAIAttributionTrailer(line)
 }
 
 func reviewAttributionAddressComplete(line string) bool {
@@ -87,9 +81,12 @@ func reviewAttributionAddressComplete(line string) bool {
 }
 
 func reviewConfiguredAttributionMatches(line string, configuredTrailers []string) bool {
+	raw, _ := reviewAttributionLine(line)
+	decoded, _ := reviewAttributionLine(html.UnescapeString(line))
 	for _, trailer := range configuredTrailers {
 		configured, _ := reviewAttributionLine(trailer)
-		if strings.EqualFold(line, configured) {
+		decodedConfigured, _ := reviewAttributionLine(html.UnescapeString(trailer))
+		if strings.EqualFold(raw, configured) || strings.EqualFold(decoded, decodedConfigured) {
 			return true
 		}
 	}
