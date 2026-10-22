@@ -245,7 +245,9 @@ func TestReviewStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.ReviewAgentTimeout = 20 * time.Millisecond
 
-	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
+	app := paths.WithRoot(t.TempDir())
+	enrollExecutorGate(t, app, sctx.Repo.ID)
+	exec := pipeline.NewExecutor(sctx.DB, app, sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
 	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err == nil {
 		t.Fatal("expected hanging review agent to fail the run")
 	}
@@ -305,7 +307,9 @@ func TestReviewStep_ByteLiveProgresslessTurnFailsOnStallNotWallClock(t *testing.
 	sctx.Config.ReviewAgentTimeout = 30 * time.Second
 	sctx.Config.AgentStallTimeout = 80 * time.Millisecond
 
-	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
+	app := paths.WithRoot(t.TempDir())
+	enrollExecutorGate(t, app, sctx.Repo.ID)
+	exec := pipeline.NewExecutor(sctx.DB, app, sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
 	start := time.Now()
 	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err == nil {
 		t.Fatal("expected a progressless review turn to fail the run")
@@ -614,7 +618,9 @@ func TestReviewStep_WallClockTimeoutPreservesTheAgentReport(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.ReviewAgentTimeout = 20 * time.Millisecond
 
-	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
+	app := paths.WithRoot(t.TempDir())
+	enrollExecutorGate(t, app, sctx.Repo.ID)
+	exec := pipeline.NewExecutor(sctx.DB, app, sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
 	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err == nil {
 		t.Fatal("expected the review invocation limit to fail the run")
 	}
@@ -683,7 +689,9 @@ func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 	sctx.Config.ReviewAgentTimeout = timeout
 	sctx.Config.AutoFix.Review = 2
 
-	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
+	app := paths.WithRoot(t.TempDir())
+	enrollExecutorGate(t, app, sctx.Repo.ID)
+	exec := pipeline.NewExecutor(sctx.DB, app, sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
 	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
@@ -847,7 +855,9 @@ func TestReviewStep_ProgressWithoutTerminalCompletionCannotPublish(t *testing.T)
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.ReviewAgentTimeout = 40 * time.Millisecond
 
-	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
+	app := paths.WithRoot(t.TempDir())
+	enrollExecutorGate(t, app, sctx.Repo.ID)
+	exec := pipeline.NewExecutor(sctx.DB, app, sctx.Config, ag, []pipeline.Step{&ReviewStep{}}, nil)
 	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err == nil {
 		t.Fatal("expected progress-only review to hit its invocation budget")
 	}

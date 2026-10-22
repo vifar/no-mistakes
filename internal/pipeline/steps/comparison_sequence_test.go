@@ -63,6 +63,7 @@ func TestTestRepairCommitRestartsThroughReview(t *testing.T) {
 	var ex *pipeline.Executor
 	fixes := 0
 	responseDone := make(chan error, 1)
+	enrollExecutorGate(t, p, c.Repo.ID)
 	ex = pipeline.NewExecutor(c.DB, p, c.Config, c.Agent, []pipeline.Step{review, &TestStep{}}, func(e ipc.Event) {
 		if e.StepName != nil && *e.StepName == types.StepTest && e.Status != nil && (*e.Status == string(types.StepStatusAwaitingApproval) || *e.Status == string(types.StepStatusFixReview)) {
 			fixes++
@@ -130,6 +131,7 @@ func TestSecondAutomaticReviewFixUsesAdvancedReceipt(t *testing.T) {
 		raw, _ := json.Marshal(f)
 		return &agent.Result{Output: raw}, nil
 	}}
+	enrollExecutorGate(t, p, c.Repo.ID)
 	ex := pipeline.NewExecutor(c.DB, p, c.Config, c.Agent, []pipeline.Step{&ReviewStep{}}, nil)
 	ex.SetPRContextGuard(GuardPRContext)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

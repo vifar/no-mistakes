@@ -167,6 +167,7 @@ func setupCIGateReconcileTest(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.
 		"FAKE_CLI_CREATED_PATH": filepath.Join(t.TempDir(), "pr-created"),
 		"FAKE_CLI_PR_HEAD_SHA":  headSHA,
 	})
+	enrollExecutorGate(t, p, repo.ID)
 	return database, p, run, repo, dir, statePath, env
 }
 

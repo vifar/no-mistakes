@@ -103,6 +103,7 @@ func TestPipeline_CIRepairRefreshesPublishedAttestationBeforeReadiness(t *testin
 			if err := appPaths.EnsureDirs(); err != nil {
 				t.Fatal(err)
 			}
+			enrollExecutorGate(t, appPaths, sctx.Repo.ID)
 			exec := pipeline.NewExecutor(sctx.DB, appPaths, sctx.Config, ag, steps, nil)
 			exec.SetForgeContext(&forgecontext.Context{
 				Provider: scm.ProviderGitHub,

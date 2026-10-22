@@ -584,7 +584,9 @@ func TestDocumentStep_HangingAgentFailsRunAfterTimeout(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.AgentTimeout = 20 * time.Millisecond
 
-	exec := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&DocumentStep{}}, nil)
+	app := paths.WithRoot(t.TempDir())
+	enrollExecutorGate(t, app, sctx.Repo.ID)
+	exec := pipeline.NewExecutor(sctx.DB, app, sctx.Config, ag, []pipeline.Step{&DocumentStep{}}, nil)
 	if err := exec.Execute(context.Background(), sctx.Run, sctx.Repo, dir); err == nil {
 		t.Fatal("expected hanging document agent to fail the run")
 	}
