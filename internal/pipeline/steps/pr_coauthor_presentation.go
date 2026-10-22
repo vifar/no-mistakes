@@ -2,7 +2,6 @@ package steps
 
 import (
 	"html"
-	"net/mail"
 	"strings"
 )
 
@@ -16,17 +15,13 @@ func presentPRCoauthors(text string, configuredTrailers ...string) string {
 	for start := 0; start < len(lines); {
 		end, unfolded, entry, ai := reviewAttributionEntry(decoded, start, configuredTrailers)
 		if !ai {
-			key, value, _ := strings.Cut(unfolded, ":")
-			if entry && strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") {
-				if i := strings.LastIndex(value, "<"); i >= 0 {
-					if _, err := mail.ParseAddress(strings.TrimSpace(value[i:])); err == nil {
-						line := lines[start]
-						label := strings.Index(strings.ToLower(line), "co-authored-by")
-						if label >= 0 {
-							if literalKey := reviewTrailerKey.FindString(line[label:]); literalKey != "" {
-								lines[start] = line[:label] + "preserved human co-author:" + line[label+len(literalKey):]
-							}
-						}
+			key, _, _ := strings.Cut(unfolded, ":")
+			if entry && strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && reviewAttributionAddressComplete(unfolded) {
+				line := lines[start]
+				label := strings.Index(strings.ToLower(line), "co-authored-by")
+				if label >= 0 {
+					if literalKey := reviewTrailerKey.FindString(line[label:]); literalKey != "" {
+						lines[start] = line[:label] + "preserved human co-author:" + line[label+len(literalKey):]
 					}
 				}
 			}

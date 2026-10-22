@@ -20,9 +20,15 @@ func TestAttributionEntryContract(t *testing.T) {
 		name, input, kept, presented, forbidden string
 		configured                              []string
 	}{
+		{name: "complete AI followed by quoted prose", input: "> Co-Authored-By: Codex <ai@example.com>\n> Focused checks passed", kept: "> Focused checks passed", presented: "\n> Focused checks passed", forbidden: "ai@example.com"},
+		{name: "complete AI followed by another trailer key", input: "> Co-Authored-By: Codex <ai@example.com>\n> Verification: focused checks passed", kept: "> Verification: focused checks passed", presented: "\n> Verification: focused checks passed", forbidden: "ai@example.com"},
+		{name: "folded AI followed by quoted prose", input: "> Co-Authored-By: Claude\n> <noreply@anthropic.com>\n> Focused checks passed", kept: "> Focused checks passed", presented: "\n> Focused checks passed", forbidden: "noreply@anthropic.com"},
+		{name: "incomplete human followed by another trailer key", input: "> Co-Authored-By: Claude\n> Verification: focused checks passed", kept: "> Co-Authored-By: Claude\n> Verification: focused checks passed", presented: "> Co-Authored-By: Claude\n> Verification: focused checks passed"},
+		{name: "folded human followed by quoted prose", input: "> Co-Authored-By: Claude\n> <claude@example.com>\n> Focused checks passed", kept: "> Co-Authored-By: Claude\n> <claude@example.com>\n> Focused checks passed", presented: "> preserved human co-author: Claude\n> <claude@example.com>\n> Focused checks passed"},
 		{name: "AI plain", input: "Co-Authored-By: Codex <ai@example.com>", forbidden: "ai@example.com"},
 		{name: "AI quoted", input: "> Co-Authored-By: Codex <ai@example.com>", forbidden: "ai@example.com"},
 		{name: "AI bold", input: "**Co-Authored-By: Codex <ai@example.com>**", forbidden: "ai@example.com"},
+		{name: "assisted-by folded address", input: "Assisted-by: Codex\n <ai@example.com>", forbidden: "ai@example.com"},
 		{name: "AI folded", input: "Co-Authored-By: Claude\n <noreply@anthropic.com>", forbidden: "noreply@anthropic.com"},
 		{name: "AI folded quoted", input: "> Co-Authored-By: Claude\n> <noreply@anthropic.com>", forbidden: "noreply@anthropic.com"},
 		{name: "model", input: "Co-Authored-By: gpt-5.5 <ai@example.com>", forbidden: "ai@example.com"},

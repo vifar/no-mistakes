@@ -476,3 +476,98 @@ func TestAcceptedGapDigestsBindPresentedHumanEvidence(t *testing.T) {
 		t.Fatal("publication changed the raw accepted-gap record")
 	}
 }
+
+func TestAcceptedGapConfiguredHomePathsFilteredBeforeRedaction(t *testing.T) {
+	t.Parallel()
+	const configuredReason = "Build-Agent: /Users/alex/private-identifier"
+	const configuredCovered = "Cover-Agent: /home/bob/private-cover"
+	trailers := []string{configuredReason, configuredCovered}
+	for _, kept := range []bool{false, true} {
+		steps := acceptedGapStepsForTest(t)
+		gaps := db.AcceptedGaps{FindingIDs: []string{"test-verdict"}, Findings: []db.AcceptedGapFinding{{ID: "test-verdict", Category: types.FindingCategoryTestVerdict, Description: configuredReason}}, Reason: configuredReason, CoveredBy: configuredCovered, Verdict: types.TestVerdictInconclusive}
+		wantReason, wantCovered, wantDescription := "", "", ""
+		if kept {
+			gaps.Reason = "Owner approved in /Users/alex/approval.md"
+			gaps.CoveredBy = "/home/bob/tests/run.go"
+			gaps.Findings[0].Description = "Disclosure: fixtures were generated with the repository recorder. /Users/alex/notes"
+			wantReason = "Owner approved in ~/approval.md"
+			wantCovered = "~/tests/run.go"
+			wantDescription = "Disclosure: fixtures were generated with the repository recorder. ~/notes"
+		}
+		payload, err := json.Marshal(gaps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw := string(payload)
+		steps[1].AcceptedGapsJSON = &raw
+		policy := pipelineAttestationPolicy{ConfiguredTrailers: trailers, acceptedGapSteps: steps}
+		for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+			md, _ := buildPipelineSummaryFor(steps, nil, testPipelineHeadSHA, provider, policy, trailers...)
+			sctx := &pipeline.StepContext{Config: &config.Config{}}
+			bodies := []string{md, assembleDraftPRBody(sctx, "Details", "Low risk", "", md, 0, provider, trailers...)}
+			ownedMD := md
+			if provider == scm.ProviderBitbucket {
+				ownedMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, nil, testPipelineHeadSHA, policy) + "\n```"
+			}
+			owned, err := composeOwnedPRContent(prOwnedBody{before: "Author text"}, "repair", ownedMD, 0, trailers...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			bodies = append(bodies, owned.Body)
+			legacy, _ := buildPipelineSummaryFor(steps, nil, testPipelineHeadSHA, scm.ProviderGitHub, pipelineAttestationPolicy{})
+			for _, ownedBody := range []bool{false, true} {
+				for _, retained := range []bool{false, true} {
+					body := legacy
+					if ownedBody {
+						body = "Author prefix\n\n" + wrapPRAppendix(body) + "\nAuthor suffix"
+					}
+					current := steps
+					if retained {
+						current = nil
+					}
+					updated, rebound, err := rebindOwnedPRAttestation(body, strings.Repeat("b", 40), current, policy, provider)
+					if err != nil || !rebound {
+						t.Fatalf("restamp: %t, %v", rebound, err)
+					}
+					bodies = append(bodies, updated)
+				}
+			}
+			for _, body := range bodies {
+				decoded := html.UnescapeString(body)
+				for _, forbidden := range []string{"private-identifier", "private-cover", "/Users/alex", "/home/bob"} {
+					if strings.Contains(decoded, forbidden) {
+						t.Errorf("publication retained %q", forbidden)
+					}
+				}
+				audit := acceptedGapAuditBlock(decoded)
+				if !strings.Contains(audit, "- Approved: "+wantReason+"\n") || !strings.Contains(audit, "- Covered by: "+wantCovered+"\n") {
+					t.Errorf("canonical audit mismatch: %q", audit)
+				}
+				finding := "- `test-verdict`"
+				if wantDescription != "" {
+					finding += ": " + wantDescription
+				}
+				if !strings.Contains(audit, finding+"\n") {
+					t.Errorf("canonical finding mismatch: %q", audit)
+				}
+				if strings.Contains(body, pipelineAttestationCommentPrefix) {
+					found := false
+					for _, step := range parsePipelineAttestationForTest(t, body).Steps {
+						if step.Step == types.StepTest {
+							found = true
+							if g := step.AcceptedGaps; g == nil || g.ReasonDigest != fmt.Sprintf("%x", sha256.Sum256([]byte(wantReason))) || g.CoveredByDigest != fmt.Sprintf("%x", sha256.Sum256([]byte(wantCovered))) {
+								t.Errorf("digest does not bind canonical published text: %+v", g)
+							}
+						}
+					}
+					if !found {
+						t.Fatal("Test attestation missing")
+					}
+				}
+			}
+		}
+		if *steps[1].AcceptedGapsJSON != string(payload) {
+			t.Fatal("raw accepted-gap record changed")
+		}
+	}
+}

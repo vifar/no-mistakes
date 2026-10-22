@@ -3,6 +3,7 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
+	"net/mail"
 	"regexp"
 	"strings"
 
@@ -51,25 +52,44 @@ func reviewAttributionStart(line string, configuredTrailers []string) bool {
 	return false
 }
 
+func reviewAttributionAddressComplete(line string) bool {
+	_, value, ok := strings.Cut(line, ":")
+	if !ok {
+		return false
+	}
+	i := strings.LastIndex(value, "<")
+	if i < 0 {
+		return false
+	}
+	_, err := mail.ParseAddress(strings.TrimSpace(value[i:]))
+	return err == nil
+}
+
+func reviewConfiguredAttributionMatches(line string, configuredTrailers []string) bool {
+	for _, trailer := range configuredTrailers {
+		configured, _ := reviewAttributionLine(trailer)
+		if strings.EqualFold(line, configured) {
+			return true
+		}
+	}
+	return false
+}
+
 func reviewAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
 	end = start + 1
 	unfolded, _ = reviewAttributionLine(lines[start])
 	if !reviewAttributionStart(unfolded, configuredTrailers) {
 		return end, unfolded, false, false
 	}
-	for end < len(lines) {
+	for end < len(lines) && !reviewAttributionAddressComplete(unfolded) && !reviewConfiguredAttributionMatches(unfolded, configuredTrailers) {
 		next, continuation := reviewAttributionLine(lines[end])
-		if next == "" || !continuation || reviewAttributionStart(next, configuredTrailers) {
+		if next == "" || !continuation || reviewTrailerKey.MatchString(next) || reviewGeneratedWith.MatchString(next) {
 			break
 		}
 		unfolded += " " + next
 		end++
 	}
-	ai = git.IsAIAttributionTrailer(unfolded)
-	for _, trailer := range configuredTrailers {
-		configured, _ := reviewAttributionLine(trailer)
-		ai = ai || strings.EqualFold(unfolded, configured)
-	}
+	ai = git.IsAIAttributionTrailer(unfolded) || reviewConfiguredAttributionMatches(unfolded, configuredTrailers)
 	_, value, hasKey := strings.Cut(unfolded, ":")
 	entry = ai || (hasKey && strings.TrimSpace(value) != "" && !reviewGeneratedWith.MatchString(unfolded))
 	return end, unfolded, entry, ai

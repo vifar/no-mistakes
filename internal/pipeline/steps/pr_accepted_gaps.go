@@ -47,7 +47,7 @@ func attestedAcceptedGaps(sr *db.StepResult, configuredTrailers ...string) *pipe
 // change it. Rendering also escapes text and neutralizes reserved markers and
 // closing references; those presentation rewrites are not part of the digest.
 func canonicalAcceptedGapText(text string, configuredTrailers ...string) string {
-	return presentPRCoauthors(safepath.RedactText(text), configuredTrailers...)
+	return safepath.RedactText(presentPRCoauthors(text, configuredTrailers...))
 }
 
 func acceptedGapTextDigest(text string, configuredTrailers ...string) string {
