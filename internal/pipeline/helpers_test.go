@@ -137,6 +137,17 @@ func setupTest(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.Repo) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Executors always require an enrolled gate, including in unit fixtures.
+	gate := p.RepoDir(repo.ID)
+	if err := git.InitBare(context.Background(), gate); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.IsolateHooksPath(context.Background(), gate); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.RecordSharedConfigBaseline(context.Background(), gate); err != nil {
+		t.Fatal(err)
+	}
 	run, err := database.InsertRun(repo.ID, "feature", "abc123", "def456")
 	if err != nil {
 		t.Fatal(err)

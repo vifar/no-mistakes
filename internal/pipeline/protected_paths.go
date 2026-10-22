@@ -129,6 +129,9 @@ func (e *ProtectedPathError) Error() string {
 }
 
 func ProtectedPathOutcome(err error) *StepOutcome {
+	if errors.Is(err, errSharedConfigBoundary) {
+		return nil
+	}
 	var refusal *ProtectedPathError
 	if !errors.As(err, &refusal) {
 		return nil

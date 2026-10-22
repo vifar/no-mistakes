@@ -192,7 +192,7 @@ func validateForkRouting(ctx context.Context, upstreamURL, forkURL string) error
 // the working repo to the gate and the gate to its upstream. Every step is
 // idempotent so this doubles as the repair path for re-running init.
 func provisionGate(ctx context.Context, bareDir, absRoot, upstreamURL, reposDir string, refresh bool) error {
-	// Create the bare repo. git init --bare is a no-op on an existing one.
+	// Validate an existing gate without reinitializing its configuration.
 	if err := git.InitBare(ctx, bareDir); err != nil {
 		return fmt.Errorf("create bare repo: %w", err)
 	}
@@ -211,11 +211,6 @@ func provisionGate(ctx context.Context, bareDir, absRoot, upstreamURL, reposDir 
 	if err != nil {
 		return fmt.Errorf("isolate hooks path: %w", err)
 	}
-	if isolated {
-		if err := git.MarkGateConfigCurrent(bareDir); err != nil {
-			return fmt.Errorf("stamp gate config: %w", err)
-		}
-	}
 
 	// Record upstream as origin on the gate repo so gh can resolve repository
 	// context from detached worktrees created from the gate.
@@ -227,6 +222,11 @@ func provisionGate(ctx context.Context, bareDir, absRoot, upstreamURL, reposDir 
 		return fmt.Errorf("add remote: %w", err)
 	}
 
+	if isolated {
+		if err := git.MarkGateConfigCurrent(bareDir); err != nil {
+			return fmt.Errorf("stamp gate config: %w", err)
+		}
+	}
 	return nil
 }
 

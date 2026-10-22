@@ -264,7 +264,9 @@ A daemon refuses a gate that does not sit under [its own root](/no-mistakes/refe
 Both receive hooks talk to the daemon over `~/.no-mistakes/socket`. If the daemon is not running, pre-receive admission fails closed and the push is rejected before any gate ref changes. Start the daemon and push again.
 
 If the gate is older, re-running `no-mistakes init` or restarting the daemon also reapplies hook-path isolation when Git supports `config --worktree`.
-That protects the gate hook if a tool such as Husky wrote `core.hookspath` into shared git config from inside a linked worktree. [Crash recovery](/no-mistakes/concepts/daemon/#crash-recovery) owns the gate validation and migration rules used during restart.
+[Crash recovery](/no-mistakes/concepts/daemon/#crash-recovery) owns the gate validation and migration rules used during restart.
+
+If a dependency script such as Husky fails with `could not lock config file` during a pipeline step, it may be attempting a shared gate config write that the executor blocks. Configure the script to use worktree scope for worktree settings; see the [gate configuration boundary](/no-mistakes/concepts/gate-model/#what-no-mistakes-init-does) for scope requirements, baseline diagnostics, and stale-lock recovery. An active step's lock must remain in place.
 
 ## PR step is skipped
 

@@ -33,6 +33,10 @@ func TestImmutableShippingRerunUsesPublishedSourceWithoutUpdatingGateBranch(t *t
 			gitCmd(t, "", "init", "--bare", published)
 			gitCmd(t, repo.WorkingPath, "remote", "set-url", "gate", published)
 			gitCmd(t, p.RepoDir(repo.ID), "remote", "set-url", "origin", published)
+			// Finalize the intended fixture gate configuration before admitting runs.
+			if err := git.RecordSharedConfigBaseline(context.Background(), p.RepoDir(repo.ID)); err != nil {
+				t.Fatal(err)
+			}
 			gitCmd(t, repo.WorkingPath, "push", "gate", "main:refs/heads/main")
 			repo, err := d.ReplaceRepoURLs(repo.ID, published, "")
 			if err != nil {

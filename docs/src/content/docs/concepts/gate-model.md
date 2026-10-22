@@ -46,6 +46,42 @@ If the working repo was renamed or moved and the old path no longer exists, `ini
 If the working repo was copied and the original path still exists, `init` treats the copy as a new repo and repoints the copied `no-mistakes` remote to a fresh gate.
 If daemon startup fails during a refresh, `init` reports the error but does not eject the pre-existing gate.
 
+Enrollment keeps the working checkout non-bare. Re-initializing a
+registered gate validates the existing bare repository instead of running
+`git init --bare` again. Explicit bare operations use an
+[isolated Git environment](/no-mistakes/reference/environment/#git-repository-selection)
+so inherited repository selection cannot redirect configuration writes into the
+caller's checkout. A checkout previously marked bare can be restored with
+`git config core.bare false` from that checkout; its files and commits are retained.
+
+Each executing step and final Test evidence refresh reserves the gate's shared
+`config.lock`, disabling shared configuration writes from dependency scripts
+and agent children. Commands that need a worktree-specific setting must use
+`git config --worktree`, for example
+`git config --worktree core.hooksPath .husky/_`. The gate's shared
+`extensions.worktreeConfig` opt-in is established during enrollment; steps do
+not enable it by writing to shared config.
+
+Enrollment records shared configuration in `no-mistakes-shared-config.json`
+after the intended gate remotes are installed. Values are stored only as
+SHA-256 hashes. Keys containing a subsection name, including remote names and
+URL scopes, are also stored only as `sha256:<digest>` identities, so credentials
+in a key never enter the baseline. Ordinary keys remain readable. With worktree
+config enabled, shared `core.bare` and `core.hooksPath` must be absent: the bare
+gate keeps those settings in its own per-worktree file. Before and after each
+step, fix round, or final Test evidence refresh, the executor checks the shared
+file against that baseline, including remote changes. A missing gate or a
+missing, unreadable, invalid, or empty baseline fails preflight before execution.
+A violation detected after execution fails that step and names the config file
+and key. It remains fatal even when
+the same execution also encounters a protected-path refusal. A violation during
+a final Test evidence refresh marks the existing Test result failed and emits
+its failed status. Subsection-bearing keys are identified only by their redacted
+hash, including when read from an older baseline. Config values are not included
+in the failure. A foreign config lock
+is never removed. An abrupt daemon kill can leave its reservation behind; verify
+that no writer is alive before removing a stale lock and retrying.
+
 After init, your original `origin` still points at the real upstream remote.
 With `--fork-url`, that `origin` should be the parent repository, and the fork URL is stored separately for branch pushes.
 That is a core design choice, not an implementation detail.

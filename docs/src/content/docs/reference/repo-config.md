@@ -383,6 +383,8 @@ A non-zero exit or launch failure reports a dependency-preparation failure and s
 
 Use this for deterministic dependency materialization such as `npm ci --prefer-offline`. The run worktree starts with tracked files only, so ignored dependency directories such as `node_modules` are otherwise absent. no-mistakes keeps ignored files produced by preparation, and keeps any submodule it checks out at the commit the superproject records, while removing its tracked, ordinary untracked, and nested-repository mutations before continuing; a submodule commit the command moved to is reset to the recorded commit. Earlier pending tracked and ordinary untracked pipeline changes are restored exactly, so preparation can first run partway through the pipeline without admitting setup artifacts into a fix commit.
 
+Before running preparation, after integration, no-mistakes registers missing submodule URL and update settings from the current `.gitmodules` in per-worktree Git config, preserving existing settings. Relative URLs are resolved against the branch's configured remote, otherwise `origin`, falling back to the worktree path when that remote has no URL. Custom `!` update commands from `.gitmodules` become `none`. This lets preparation initialize submodules without writing the [shared gate configuration](/no-mistakes/concepts/gate-model/#what-no-mistakes-init-does).
+
 Like every `commands.*` value, `commands.prepare` comes from the trusted default-branch configuration unless that trusted copy explicitly enables `allow_repo_commands: true`. no-mistakes never auto-detects an install command from the pushed branch.
 
 ### commands.test

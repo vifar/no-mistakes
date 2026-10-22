@@ -16,6 +16,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -1333,6 +1334,14 @@ func setupAxiQueryRepo(t *testing.T) (string, *paths.Paths, *db.DB, *db.Repo) {
 	if err != nil {
 		t.Fatalf("insert repo: %v", err)
 	}
+	run(t, rawRoot, "git", "clone", "--bare", rawRoot, p.RepoDir(repo.ID))
+	if err := git.IsolateHooksPath(context.Background(), p.RepoDir(repo.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.RecordSharedConfigBaseline(context.Background(), p.RepoDir(repo.ID)); err != nil {
+		t.Fatal(err)
+	}
+
 	return rawRoot, p, database, repo
 }
 

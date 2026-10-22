@@ -17,14 +17,20 @@ import (
 )
 
 type refreshingTestOwner struct {
-	calls int
-	claim types.Finding
+	calls         int
+	claim         types.Finding
+	beforeRefresh func(*StepContext) error
 }
 
 func (s *refreshingTestOwner) Name() types.StepName                         { return types.StepTest }
 func (s *refreshingTestOwner) Execute(c *StepContext) (*StepOutcome, error) { return s.proof(c) }
 func (s *refreshingTestOwner) RefreshReviewSupport(c *StepContext) (*StepOutcome, error) {
 	s.calls++
+	if s.beforeRefresh != nil {
+		if err := s.beforeRefresh(c); err != nil {
+			return nil, err
+		}
+	}
 	c.LogFile(strings.Repeat("x", 1100000))
 	c.Log("bounded configured-command output")
 	return s.proof(c)
@@ -47,9 +53,44 @@ func (s *refreshingTestOwner) proof(c *StepContext) (*StepOutcome, error) {
 }
 
 func TestExecutorRefreshesPendingTestProofAfterForwardDocumentCommit(t *testing.T) {
+	testFinalTestSupportRefresh(t, "ordinary", true)
+}
+
+func TestIssue131ProtectsEvidenceRefresh(t *testing.T) {
+	for _, mode := range []string{"git-write", "direct-write", "direct-write-error"} {
+		for _, atCI := range []bool{true, false} {
+			location := "final-completion"
+			if atCI {
+				location = "ci-completion"
+			}
+			t.Run(mode+"/"+location, func(t *testing.T) { testFinalTestSupportRefresh(t, mode, atCI) })
+		}
+	}
+}
+
+func testFinalTestSupportRefresh(t *testing.T, mode string, atCI bool) {
 	database, p, run, repo := setupTest(t)
-	dir := t.TempDir()
-	initGitRepo(t, dir)
+	ctx := context.Background()
+	seed := t.TempDir()
+	initGitRepo(t, seed)
+	gate := p.RepoDir(repo.ID)
+	if _, err := git.Run(ctx, seed, "push", gate, "HEAD:refs/heads/main"); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "run")
+	if err := git.WorktreeAdd(ctx, gate, dir, "main"); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range map[string]string{"user.name": "Test", "user.email": "test@test.com"} {
+		if err := git.SetWorktreeConfig(ctx, dir, key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configPath := filepath.Join(gate, "config")
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	head, err := git.HeadSHA(context.Background(), dir)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +109,28 @@ func TestExecutorRefreshesPendingTestProofAfterForwardDocumentCommit(t *testing.
 		t.Fatal(err)
 	}
 	owner := &refreshingTestOwner{claim: claim}
-	executor := NewExecutor(database, p, &config.Config{}, nil, []Step{
+	if mode != "ordinary" {
+		owner.beforeRefresh = func(c *StepContext) error {
+			if mode == "git-write" {
+				_, err := git.Run(c.Ctx, c.WorkDir, "config", "remote.no-mistakes.url", "https://example.test/escaped.git")
+				if err == nil {
+					t.Fatal("evidence refresh wrote shared config")
+				}
+				if !strings.Contains(err.Error(), "could not lock config file") {
+					t.Fatalf("write failed without the shared-config lock: %v", err)
+				}
+				return nil
+			}
+			if err := os.WriteFile(configPath, append(append([]byte{}, before...), []byte("\n[remote \"no-mistakes\"]\nurl = https://example.test/escaped.git\n")...), 0o600); err != nil {
+				return err
+			}
+			if mode == "direct-write-error" {
+				return fmt.Errorf("refresh command failed")
+			}
+			return nil
+		}
+	}
+	steps := []Step{
 		&adaptiveCallStep{name: types.StepReview, fn: func(c *StepContext) (*StepOutcome, error) {
 			return &StepOutcome{Findings: encoded, ReviewApprovedHeadSHA: c.Run.HeadSHA}, nil
 		}}, owner,
@@ -88,13 +150,70 @@ func TestExecutorRefreshesPendingTestProofAfterForwardDocumentCommit(t *testing.
 			receipt.DiffDigest = fmt.Sprintf("%064d", 2)
 			_, err = c.DB.AdvanceRunPRContext(c.Run.ID, receipt)
 			return &StepOutcome{}, err
-		}}, newPassStep(types.StepCI)}, func(event ipc.Event) {
+		}},
+	}
+	if atCI {
+		steps = append(steps, newPassStep(types.StepCI))
+	}
+	var failedTestEvents []ipc.Event
+	executor := NewExecutor(database, p, &config.Config{}, nil, steps, func(event ipc.Event) {
+		if event.Type == ipc.EventStepCompleted && event.StepName != nil && *event.StepName == types.StepTest && event.Status != nil && *event.Status == string(types.StepStatusFailed) {
+			failedTestEvents = append(failedTestEvents, event)
+			rows, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range rows {
+				if row.StepName == types.StepTest && row.Status != types.StepStatusFailed {
+					t.Fatalf("failure event preceded saved Test failure: %s", row.Status)
+				}
+			}
+		}
 		if event.Type == ipc.EventLogChunk && event.Content != nil && len(*event.Content) > 65536 {
 			t.Errorf("refresh emitted oversized log chunk: %d bytes", len(*event.Content))
 		}
 	})
-	if err := executor.Execute(context.Background(), run, repo, dir); err != nil {
+	err = executor.Execute(ctx, run, repo, dir)
+	if mode == "direct-write" || mode == "direct-write-error" {
+		if err == nil || !strings.Contains(err.Error(), "refresh final Test support:") || !strings.Contains(err.Error(), "test shared config boundary") || !strings.Contains(err.Error(), configPath) {
+			t.Fatalf("unreported evidence-refresh config pollution: %v", err)
+		}
+		if mode == "direct-write-error" && !strings.Contains(err.Error(), "refresh command failed") {
+			t.Fatalf("refresh error lost: %v", err)
+		}
+		if owner.calls != 1 {
+			t.Fatalf("refresh calls = %d, want 1", owner.calls)
+		}
+		rows, readErr := database.GetStepsByRun(run.ID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		var savedTest *db.StepResult
+		for _, row := range rows {
+			if row.StepName == types.StepTest {
+				savedTest = row
+			}
+		}
+		if savedTest == nil || savedTest.Status != types.StepStatusFailed || savedTest.Error == nil || !strings.Contains(*savedTest.Error, "test shared config boundary") || !strings.Contains(*savedTest.Error, configPath) {
+			t.Fatalf("Test writer failure was not saved: %+v", savedTest)
+		}
+		if len(failedTestEvents) != 1 || failedTestEvents[0].Error == nil || *failedTestEvents[0].Error != *savedTest.Error {
+			t.Fatalf("Test failure event = %+v", failedTestEvents)
+		}
+		return
+	}
+	if err != nil {
 		t.Fatalf("forward edit could not finish with fresh proof: %v", err)
+	}
+	if len(failedTestEvents) != 0 {
+		t.Fatalf("successful refresh emitted Test failure: %+v", failedTestEvents)
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("evidence refresh changed shared config")
 	}
 	if owner.calls != 1 {
 		t.Fatalf("fresh owner executions=%d, want 1", owner.calls)

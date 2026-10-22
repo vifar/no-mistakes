@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 )
@@ -81,4 +82,20 @@ func NonInteractiveEnvFrom(base []string, dir string) []string {
 		}
 	}
 	return env
+}
+
+// bareRepositoryEnv prevents inherited discovery and config-file selection from
+// redirecting an explicitly named bare operation into the caller's checkout.
+// Preserve identity, credentials and explicit scratch-index settings.
+func bareRepositoryEnv(env []string) []string {
+	result := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_CONFIG":
+			continue
+		}
+		result = append(result, entry)
+	}
+	return result
 }

@@ -411,6 +411,10 @@ func setupTestGitRepo(t *testing.T, p *paths.Paths, d *db.DB, repoID string) (*d
 	// does). Without this the trusted-config fetch fails, which now aborts the
 	// run (the disable_project_settings security boundary).
 	gitCmd(t, bareDir, "remote", "add", "origin", bareDir)
+	// Match enrollment: pin intended shared metadata before any run starts.
+	if err := git.RecordSharedConfigBaseline(ctx, bareDir); err != nil {
+		t.Fatal(err)
+	}
 
 	// Register repo in DB.
 	repo, err := d.InsertRepoWithID(repoID, workDir, "https://github.com/test/repo", "main")
