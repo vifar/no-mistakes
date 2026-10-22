@@ -15,15 +15,7 @@ func WithPreparedRefTransaction(ctx context.Context, dir, commands string, prepa
 	if isBareGitDir(dir) {
 		args = append([]string{"--git-dir=" + dir}, args...)
 	}
-<<<<<<< HEAD
 	cmd := gitCommand(ctx, dir, nil, args...)
-=======
-	env := nonInteractiveEnvForContext(ctx, dir)
-	cmd := gitCommand(ctx, dir, env, args...)
-	cmd.Dir = dir
-	cmd.Env = env
-	winproc.Harden(cmd)
->>>>>>> origin/fix/git-uses-the-environment-it-is-given
 	shellenv.ConfigureShellCommand(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
