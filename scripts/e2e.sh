@@ -4,7 +4,7 @@
 # Responsibilities:
 #   1. Exact inventory directory (mode 0700) for this suite invocation
 #   2. EXIT/INT/TERM trap that reaps only inventoried temp daemons
-#   3. Concurrency cap via NM_E2E_DAEMON_MAX (default 2)
+#   3. Concurrency cap via NM_E2E_DAEMON_MAX
 #   4. Pre-reap of any leftover inventory from a prior killed wrapper
 #
 # Honest boundary: this EXIT trap does NOT survive SIGKILL of this shell.
@@ -41,15 +41,9 @@ else
   OWNED_INVENTORY=0
 fi
 
-# The concurrency cap bounds how many TEMPORARY DAEMONS may be live at
-# once. It is not a bound on test parallelism: the step-test worker takes no
-# daemon slot at all, and the shards each take one.
-#
-# The default is five, not two, because the e2e bucket is roughly 4500
-# seconds of measured work and the budget is 2400. With a cap of two only
-# one shard could run beside the terminal worker, so the bucket was
-# serialised into a single worker that could not finish inside the budget -
-# the suite died on its own -timeout rather than on a failing test.
+# The wrapper's daemon cap and worker budgets are documented in
+# docs/src/content/docs/guides/fork-ci.md. Export the cap so all worker
+# processes share the same limit.
 export NM_E2E_DAEMON_MAX="${NM_E2E_DAEMON_MAX:-5}"
 
 reap_inventory() {
@@ -76,9 +70,8 @@ trap cleanup_inventory EXIT INT TERM
 #
 # The rule is longest-processing-time-first: the most expensive journey goes
 # to the least loaded shard, one at a time, and the rest follow in the same
-# order. The result is a function of the measurements alone, so it is
-# deterministic - a journey does not move when an unrelated one is added, and
-# a failure reproduces in the same place.
+# order. Placement is deterministic for a fixed inventory, cost table, and
+# shard count; changing any of those inputs can move other journeys too.
 #
 # The measured costs live in scripts/e2e-journey-costs.txt. A test that is
 # not listed there costs the default, which is small on purpose: an
@@ -228,19 +221,14 @@ if [[ "$#" -eq 0 ]]; then
 
   # The shard count is bounded by what the daemon cap leaves for the shards.
   # The terminal worker runs alongside them and takes one slot, and each
-  # shard is a whole go test process that needs a slot of its own. A shard
-  # that cannot get a slot does not wait - it fails, and the suite reports a
-  # failure that has nothing to do with the code under test. So the shards
-  # never outnumber the slots that are left.
+  # shard is a whole go test process whose harness needs a slot. Reserving
+  # the terminal worker's slot avoids unnecessary slot-acquisition waits.
   shard_count=$(( daemon_cap - 1 ))
   if (( shard_count < 1 )); then
     shard_count=1
   fi
   if (( shard_count > 4 )); then
-    # More shards than this only adds contention on a small runner. Four
-    # shards carry the measured e2e bucket - about 4500 seconds of work -
-    # inside the 2400 second budget with room to spare, and they are
-    # bounded by the cap.
+    # Bound CPU contention on the shared runner as well as daemon usage.
     shard_count=4
   fi
 
@@ -263,11 +251,8 @@ if [[ "$#" -eq 0 ]]; then
     exit "$second_status"
   fi
 
-  # Discover the test names of EVERY package the shards run, not just the e2e
-  # package. A shard's -run pattern selects the tests that run in it, so a
-  # package whose names are missing from the pattern would silently run
-  # nothing at all - the step tests would stop running without a single
-  # failure.
+  # Check discovery for both worker package trees. Only the e2e inventory
+  # feeds shard patterns; the step worker runs its whole package tree.
   #
   # A discovery that fails is fatal, and the failure is the EXIT STATUS of go
   # test, not whether the output happens to be empty. One package under
@@ -312,20 +297,9 @@ if [[ "$#" -eq 0 ]]; then
     exit 1
   fi
 
-  # The pipeline-step tests get their own worker. They are 1423 tests, and
-  # they are FAST, but they are also the reason the daemon-slot-constrained
-  # shards were long: a shard's -run pattern names tests, not packages, so
-  # every shard ran every package's selected tests. The step tests never
-  # take a daemon slot - only the e2e harness does - so a worker of their
-  # own competes for nothing.
-  #
-  # Giving them their own worker also keeps them out of the shards'
-  # discovery: a shard's pattern then names only journeys, and the step
-  # tests are no longer counted twice.
-  #
-  # This worker runs FIRST and is awaited before the shards start. The
-  # shards are the long pole of the suite, and every daemon slot the step
-  # worker is not using is a slot a shard can have.
+  # Keep pipeline-step tests out of shard placement. Their worker takes no
+  # daemon slot but uses CPU and build resources, so await it before shards
+  # start to reduce contention.
   go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" ./internal/pipeline/steps/... &
   steps_pid=$!
 
@@ -333,11 +307,8 @@ if [[ "$#" -eq 0 ]]; then
   # they are the two slowest live journeys, and sharing a worker with the
   # rest of the bucket is what made that worker the suite's long pole.
   #
-  # This worker runs ALONGSIDE the shards, so it takes one of the daemon
-  # cap's slots for as long as it runs. The shard count is bounded by what is
-  # left of the cap, so a shard can always get a slot: a shard that cannot
-  # get one does not wait - it fails, and the suite reports a failure that
-  # has nothing to do with the code under test.
+  # This worker can overlap the shards, so shard_count reserves one daemon
+  # slot for it.
   go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
     -run '^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$' ./internal/e2e/... &
   terminal_pid=$!
@@ -357,9 +328,7 @@ if [[ "$#" -eq 0 ]]; then
   # the least loaded shard, one at a time, and the rest follow in the same
   # order.
   #
-  # The placement is a function of the measurements alone, so it is
-  # deterministic: a journey does not move when an unrelated one is added,
-  # and a failure reproduces in the same place.
+  # place_shards owns the deterministic placement and its input contract.
   shard_tests=()
   shard_load=()
   shard_index=0
@@ -372,11 +341,8 @@ if [[ "$#" -eq 0 ]]; then
   # The measured cost of every discovered test, and the placement.
   place_shards
 
-  # The step-test worker is awaited BEFORE the shards start. It takes no
-  # daemon slot, but it does take a go test process and a CPU, and the
-  # shards are the long pole of the suite: every resource the step worker
-  # is using is a resource a shard is not. The step tests take about seven
-  # minutes, and the shards need the whole budget.
+  # Await the step worker before launching shards to reduce CPU contention.
+  # Its elapsed time must also be charged to the shards' remaining allowance.
   steps_status=0
   wait "$steps_pid" || steps_status=$?
   if (( steps_status != 0 )); then

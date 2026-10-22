@@ -35,23 +35,15 @@ tag) is not run by this fork's CI: no hosted Windows runner is used, and
 cross-compilation remains the only Windows and macOS check. It does not prove
 runtime behavior there.
 
-The race suite runs through `scripts/race.sh`, which splits it across
-parallel shards. Run as one `go test` process, the suite's cost is the SUM of
-every package's race time, which outgrew the job's bound: the job was killed
-with `internal/pipeline/steps` and fifteen more packages never started, so it
-could not report a failing test. The shards are assigned by PACKAGE, because
-a package's race time is the cost of its slowest test, so splitting a
-package's tests across shards would run the same expensive test more than
-once and save nothing. The assignment balances by MEASURED TIME rather than by
-package count: the measured long poles (`internal/daemon`,
-`internal/pipeline/steps`, `internal/pipeline`) are handed out one per shard,
-and the remaining packages are spread by a checksum of the package's own
-path, so a package always lands in the same shard and a failure reproduces in
-the same place. Every package runs in exactly one shard, and the suite's own
-contract test proves it. The job's wall-clock bound is 60 minutes, which
-leaves room for the runner's contention without hiding a hung test: a
-package that hangs is killed by the suite's own per-package timeout and
-reported as a failure.
+The race suite runs through `scripts/race.sh` in three parallel shards,
+with whole packages assigned exactly once. The measured long poles
+(`internal/daemon`, `internal/pipeline/steps`, `internal/pipeline`) each get
+their own shard; remaining packages are assigned by a checksum of their full
+import path. That assignment stays stable when unrelated packages are added.
+Package discovery must succeed before any shard starts. Each shard uses
+`-race -count=1` and a 25-minute timeout per package; the CI job has a
+60-minute wall-clock bound, including builds. The wrapper contracts are
+covered by `internal/e2edaemon/race_wrapper_test.go`.
 
 Every CI job checks out the exact PR head (or event SHA outside a PR) without
 persisting checkout credentials.
@@ -65,46 +57,36 @@ sudo access. The default end-to-end suite shares a 40-minute budget inside
 the 45-minute job bound. With at least two daemon slots, the user-journey
 matrix runs in two isolated Go test processes: Claude and Codex in one, all
 other agents in the other. The terminal-merge and retained-target continuity
-journey tables then share one Go test process alongside parallel shards for
-the remaining e2e and pipeline-step tests. The wrapper discovers test names
-from both package trees before starting these workers and fails if discovery
-fails or returns no tests.
+journey tables then share one Go test process alongside a separate
+pipeline-step worker. Before starting those workers, the wrapper checks test
+discovery in both package trees and fails if either discovery fails or returns
+no tests. It waits for the pipeline-step worker to succeed before starting
+shards containing the remaining e2e tests.
 
-The shards are balanced by the journey's MEASURED cost, not by test count.
-The measurements live in `scripts/e2e-journey-costs.txt` and the placement is
-the longest-processing-time-first rule: the most expensive journey goes to
-the least loaded shard, one at a time, and the rest follow in the same order.
-The placement is a function of the measurements alone, so it is
-deterministic: a journey does not move when an unrelated one is added, and a
-failure reproduces in the same place. A count-based split is not enough here:
-the retained-target journey alone costs more than ten minutes, so a split
-that only balances the number of tests leaves one shard as the suite's long
-pole while the rest idle, and the suite costs the sum of its shards instead
-of the time of its slowest one.
+Shard placement uses the estimated costs in `scripts/e2e-journey-costs.txt`:
+the most expensive remaining journey goes to the least loaded shard, with
+unlisted journeys using the file's default cost. Placement is deterministic
+for a fixed test inventory, cost table, and shard count. Adding a journey or
+changing a cost can move other journeys between shards. The matrix, terminal
+journeys, and pipeline-step tests are excluded from shard placement so each
+test runs in its assigned worker only.
 
-The pipeline-step tests have their own worker, and that worker is awaited
-before the shards start. They are 1423 tests and they are fast, but they are
-also the reason the daemon-slot-constrained shards were long: a shard's
-`-run` pattern names tests, not packages, so every shard ran every package's
-selected tests. The step tests never take a daemon slot - only the e2e
-harness does - so a worker of their own competes for nothing, and their own
-worker also keeps them out of the shards' discovery, so a test is never both
-placed in a shard and run by another worker. Awaiting them first costs
-about seven minutes and gives every daemon slot to a shard when the shards
-begin.
+The pipeline-step worker uses CPU and build resources but does not use a
+temporary-daemon slot. Waiting for it before starting the e2e shards reduces
+resource contention. The terminal worker retains the allowance calculated
+after the matrix and discovery; the shards receive a newly calculated
+allowance after the step worker finishes and placement completes. An
+exhausted allowance prevents launch. These allowances are passed as Go's
+per-package test timeout; compilation and wrapper cleanup remain subject to
+the CI job's wall-clock bound.
 
-The daemon cap bounds how many temporary daemons may be live at once; it is
-not a bound on test parallelism. The suite's default cap is five, which
-leaves four shards once the terminal worker takes its slot, and four shards
-carry the measured e2e bucket - about 4500 seconds of work - inside the
-2400 second budget: each shard carries about 1240 seconds, less than half
-the allowance. The shard count is bounded by what the cap leaves, so a shard
-can always get a slot: a shard that cannot get one does not wait - it fails,
-and the suite reports a failure that has nothing to do with the code under
-test. With one daemon slot, the complete suite runs in a single process with
-the same budget. All workers use the budget remaining after the matrix and
-discovery, and all workers share the same daemon cap. Each run retains the
-shared temporary-daemon inventory and cleanup trap.
+The daemon cap bounds how many temporary daemons may be live at once. The
+wrapper defaults to five slots and uses at most four e2e shards, reserving
+one slot for the terminal worker. A lower cap reduces the shard count; with
+one slot, the complete suite runs in a single Go test process. Harness slot
+acquisition waits for up to two minutes before failing. Each invocation
+retains the shared temporary-daemon inventory and cleanup trap. Wrapper
+contracts are covered by `internal/e2edaemon/wrapper_budget_test.go`.
 
 ## Required execution policy
 

@@ -13,19 +13,16 @@
 #
 # The placement is the LONGEST-PROCESSING-TIME-FIRST rule: the measured
 # journeys go to the least loaded shard, one at a time, and the rest follow
-# in the same order. The result is deterministic - the same measurements
-# always produce the same split - and it is a function of the measurements
-# alone, so a journey does not move when an unrelated one is added.
+# in the same order. See docs/src/content/docs/guides/fork-ci.md for placement
+# stability, worker exclusions, and budget semantics.
 #
 # A journey that is not measured costs default_journey_seconds. Raising a
 # number here is a measurement, not a guess: the value is what the journey
 # actually cost.
 #
-# The measured total of the journeys a shard carries is about 3350 seconds,
-# and three shards carry that inside the 2400 second budget. The journeys
-# the terminal worker owns are listed here too, so the file is a complete
-# record of what the bucket costs; the placement leaves them out of the
-# shards.
+# The terminal worker's journeys are listed here too; placement leaves them
+# out of the shards. These estimates guide balancing rather than guarantee
+# completion within the remaining allowance.
 default_journey_seconds=15
 
 # The journeys the suite measures, in the order they were measured.
