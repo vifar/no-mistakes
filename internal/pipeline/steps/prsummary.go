@@ -1801,7 +1801,7 @@ func listItemMarker(text string) (string, string, bool) {
 
 var renderedGeneratedAttribution = regexp.MustCompile(`(?i)^((?:🤖[ \t]*)?generated[ \t]+with[ \t]+)(.+)$`)
 
-func unwrapAttributionMarkup(text string, emphasis bool) (string, bool) {
+func unwrapAttributionMarkup(text string) (string, bool) {
 	text = strings.TrimSpace(text)
 	for {
 		if strings.HasPrefix(text, "`") {
@@ -1810,9 +1810,6 @@ func unwrapAttributionMarkup(text string, emphasis bool) (string, bool) {
 			if width == endWidth && len(text) > 2*width {
 				return strings.TrimSpace(text[width : len(text)-width]), true
 			}
-		}
-		if !emphasis {
-			return text, false
 		}
 		unwrapped := false
 		for _, marker := range []string{"**", "__", "~~", "*", "_"} {
@@ -1859,31 +1856,27 @@ func normalizeRenderedText(text string) string {
 		if strings.HasPrefix(text, "<code>") && strings.HasSuffix(text, "</code>") {
 			text = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(text, "<code>"), "</code>"))
 			literalCode = true
+			break
 		}
 		if _, rest, ok := listItemMarker(text); ok {
 			text = strings.TrimSpace(rest)
 		}
-		if strings.HasPrefix(text, "`") {
-			width := len(text) - len(strings.TrimLeft(text, "`"))
-			endWidth := len(text) - len(strings.TrimRight(text, "`"))
-			if endWidth >= width && len(text) > 2*width {
-				text = strings.TrimSpace(text[width : len(text)-width])
-				literalCode = true
-			}
+		text, literalCode = unwrapAttributionMarkup(text)
+		if literalCode {
+			break
 		}
-		var code bool
-		text, code = unwrapAttributionMarkup(text, !literalCode)
-		literalCode = literalCode || code
 		if text == before {
 			break
 		}
 	}
-	if match := renderedGeneratedAttribution.FindStringSubmatch(text); match != nil {
-		value, _ := unwrapAttributionMarkup(match[2], !literalCode)
-		text = match[1] + value
-	} else if key, value, ok := strings.Cut(text, ":"); ok {
-		value, _ = unwrapAttributionMarkup(value, !literalCode)
-		text = key + ": " + value
+	if !literalCode {
+		if match := renderedGeneratedAttribution.FindStringSubmatch(text); match != nil {
+			value, _ := unwrapAttributionMarkup(match[2])
+			text = match[1] + value
+		} else if key, value, ok := strings.Cut(text, ":"); ok {
+			value, _ = unwrapAttributionMarkup(value)
+			text = key + ": " + value
+		}
 	}
 	if mailbox != "" {
 		text = strings.TrimSpace(text) + " " + mailbox

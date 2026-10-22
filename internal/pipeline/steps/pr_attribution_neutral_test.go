@@ -44,28 +44,24 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 		{"robot emoji", "\U0001F916 Generated with Codex"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, line := range []string{
+			lines := []string{
 				tc.line,
 				html.EscapeString(tc.line),
-				"`" + tc.line + "`",
-				"`` " + html.EscapeString(tc.line) + " ``",
 				"**" + tc.line + "**",
-				"<code>" + tc.line + "</code>",
-				"**`" + tc.line + "`**",
 				"* " + tc.line,
 				"- " + tc.line,
 				"1. " + tc.line,
 				"> " + tc.line,
 				"> > " + tc.line,
-				"<code>" + tc.line + "</code>",
 				"  - " + tc.line,
-				"Generated with **" + "Codex**",
+				"Generated with **Codex**",
 				"Generated with `Codex`",
-				"Co-Authored-By: **" + "Codex** <bot@example.invalid>",
-				"Generated with **" + "Codex**",
-				"Generated with `Codex`",
-				"Co-Authored-By: **" + "Codex** <bot@example.invalid>",
-			} {
+				"Co-Authored-By: **Codex** <bot@example.invalid>",
+			}
+			if !strings.Contains(tc.line, "`") {
+				lines = append(lines, "`"+tc.line+"`", "`` "+html.EscapeString(tc.line)+" ``", "<code>"+tc.line+"</code>", "**`"+tc.line+"`**")
+			}
+			for _, line := range lines {
 				body := "## Testing\n\n```text\n" + line + "\n```\n"
 				got := neutralizeAttestationMarkers(scm.ProviderGitHub, body)
 				want := "## Testing\n\n```text\n<no-mistakes: AI attribution line neutralized>\n```\n"
@@ -257,9 +253,13 @@ func TestPRSummaryFiltersAttributionBeforeRendering(t *testing.T) {
 	}
 	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 		for _, source := range []string{"tested", "tested multiline", "tested code span", "summary", "artifact text", "artifact description", "artifact label", "artifact file", "scenario", "finding", "risk", "error"} {
-			for _, identity := range []string{"", "Claude <no_reply@anthropic.com>", "Open_Code <person@example.com>", "Open`Code <person@example.com>", "`_OpenCode_` <person@example.com>"} {
+			for _, identity := range []string{"", "Claude <no_reply@anthropic.com>", "Open_Code <person@example.com>", "Open`Code <person@example.com>", "`_OpenCode_` <person@example.com>", "`OpenCode` <person@example.com>"} {
 				human := identity != ""
-				for _, wrapper := range []string{"", "`", "``"} {
+				wrappers := []string{"", "`", "``"}
+				if identity == "`OpenCode` <person@example.com>" {
+					wrappers = []string{"``"}
+				}
+				for _, wrapper := range wrappers {
 					t.Run(string(provider)+"/"+source+"/"+wrapper+"/"+map[bool]string{false: "AI", true: identity}[human], func(t *testing.T) {
 						line := "Co-Authored-By: Codex <code@example.com>"
 						if human {
@@ -357,4 +357,25 @@ func coAuthorIdentity(line string) string {
 		return strings.TrimSpace(trimmed[at+1:])
 	}
 	return trimmed
+}
+
+func TestPublishedAttributionPreservesLiteralBackticksInsideCode(t *testing.T) {
+	for _, line := range []string{
+		"Co-Authored-By: `OpenCode` <person@example.com>",
+		"Assisted-by: `OpenCode` <person@example.com>",
+		"Generated with `OpenCode`",
+	} {
+		for _, text := range []string{
+			"`` " + line + " ``",
+			"**`` " + line + " ``**",
+			"<code>" + line + "</code>",
+			"`` " + html.EscapeString(line) + " ``",
+		} {
+			got := neutralizeAttestationMarkers(scm.ProviderGitHub, text)
+			want := strings.ReplaceAll(text, "Co-Authored-By:", "co-author (quoted):")
+			if got != want {
+				t.Errorf("published literal identity = %q, want %q", got, want)
+			}
+		}
+	}
 }
