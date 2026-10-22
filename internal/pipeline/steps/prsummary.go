@@ -1681,6 +1681,38 @@ func escapePipelineFoldMarkers(s string) string {
 	return out
 }
 
+// publishedCoAuthorKey matches the commit trailer key that PUBLISHED text must
+// not carry raw.
+//
+// A consumer that scans the pull request body for attribution - the merge
+// bar, a reviewer - reads a raw "Co-Authored-By:" line as a claim of AI
+// attribution, and it reads it that way even inside a code fence, because it
+// scans the raw text. So a co-author the body QUOTES - a test fixture, an
+// example - is rendered as a labelled field instead. The name and the address
+// stay: they are the evidence.
+// The key can also sit inside a line - a backtick-wrapped quote, or a
+// quoted string in embedded evidence - and the consumer scans the raw text
+// wherever it is, so the key is rewritten wherever it is.
+var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)`)
+
+// publishedGeneratedWithEmoji matches the robot emoji a "Generated with" line
+// may carry, for the same reason: the emoji is how the line reads as a claim.
+var publishedGeneratedWithEmoji = regexp.MustCompile(`(?i)(^|\n)([ \t]*)\x{1F916}([ \t]+)`)
+
+// renderQuotedAttributionAsLabelledFields renders a quoted co-author as a
+// labelled field rather than as a raw trailer line.
+//
+// This is the PUBLISHED text's rule, and it is deliberately not the
+// classifier's: the classifier decides whether a line is an AI attribution, and
+// it is precise - a person whose name happens to contain a tool's name is a
+// person. The published text is read by consumers that cannot make that
+// distinction, so a quoted trailer is rendered in a form none of them reads as
+// a claim. The quote stays a quote: the name and the address are still there.
+func renderQuotedAttributionAsLabelledFields(s string) string {
+	s = publishedCoAuthorKey.ReplaceAllString(s, "Co-author${1}")
+	return publishedGeneratedWithEmoji.ReplaceAllString(s, "$1$2$3")
+}
+
 // neutralizeAttestationMarkers breaks every attestation comment prefix in
 // agent-authored PR-body prose so only the pipeline-authored marker in the
 // Pipeline section stays parseable by the compliance check, which binds the
@@ -1694,7 +1726,7 @@ func escapePipelineFoldMarkers(s string) string {
 func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 	s = strings.NewReplacer(acceptedGapsStart, "<!-- no-mistakes:accepted\\-gaps:start -->", acceptedGapsEnd, "<!-- no-mistakes:accepted\\-gaps:end -->").Replace(s)
 	escaped := escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
-	return closingGrammarFor(provider).neutralize(neutralizeAIAttribution(escaped))
+	return closingGrammarFor(provider).neutralize(renderQuotedAttributionAsLabelledFields(neutralizeAIAttribution(escaped)))
 }
 
 // neutralizeAIAttribution replaces recognized AI attribution lines with a notice.
