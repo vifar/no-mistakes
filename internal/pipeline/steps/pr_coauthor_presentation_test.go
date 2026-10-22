@@ -267,3 +267,33 @@ func TestPRConfiguredAttributionHTMLForms(t *testing.T) {
 		}
 	}
 }
+
+func TestPRConfiguredAttributionCaseSensitive(t *testing.T) {
+	t.Parallel()
+	for _, configured := range []string{"Build-Agent: Worker-A", "Build-Agent: Worker&#45;A"} {
+		for _, input := range []string{"Build-Agent: Worker-A", "Build-Agent: Worker&#45;A", "**Build-Agent: Worker-A**"} {
+			if got := prDisplayText(input, configured); got != "" {
+				t.Errorf("exact configured attribution survived: %q", got)
+			}
+			if got := stripReviewAIAttribution(input, []string{configured}); got != "" {
+				t.Errorf("Review exact configured attribution survived: %q", got)
+			}
+		}
+		for _, input := range []string{"Build-Agent: worker-a", "Build-Agent: worker&#45;a", "build-agent: Worker-A"} {
+			if got := prDisplayText(input, configured); got != input {
+				t.Errorf("case-distinct evidence changed: %q, want %q", got, input)
+			}
+			if got := stripReviewAIAttribution(input, []string{configured}); got != input {
+				t.Errorf("Review case-distinct evidence changed: %q, want %q", got, input)
+			}
+		}
+	}
+	for _, input := range []string{"cO-aUTHORED-bY: cOdEx <ai@example.com>", "gEnErAtEd WiTh cOdEx", "gEnErAtEd WiTh &#67;oDeX"} {
+		if got := prDisplayText(input, "Build-Agent: Worker-A"); got != "" {
+			t.Errorf("native attribution survived: %q", got)
+		}
+	}
+	if got := prDisplayText(humanCoauthorFixture, "Build-Agent: Worker-A"); got != "preserved human co-author: Claude Smith <claude@example.com>" {
+		t.Errorf("human evidence changed: %q", got)
+	}
+}

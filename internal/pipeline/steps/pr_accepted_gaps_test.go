@@ -571,3 +571,41 @@ func TestAcceptedGapConfiguredHomePathsFilteredBeforeRedaction(t *testing.T) {
 		}
 	}
 }
+
+func TestAcceptedGapConfiguredCaseSensitiveDigest(t *testing.T) {
+	t.Parallel()
+	const kept = "Build-Agent: worker-a"
+	trailers := []string{"Build-Agent: Worker-A"}
+	steps := acceptedGapStepsForTest(t)
+	gaps := db.AcceptedGaps{FindingIDs: []string{"test-verdict"}, Findings: []db.AcceptedGapFinding{{ID: "test-verdict", Category: types.FindingCategoryTestVerdict, Description: kept}}, Reason: kept, CoveredBy: "Build-Agent: Worker&#45;A", Verdict: types.TestVerdictInconclusive}
+	payload, err := json.Marshal(gaps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(payload)
+	steps[1].AcceptedGapsJSON = &raw
+	policy := pipelineAttestationPolicy{ConfiguredTrailers: trailers, acceptedGapSteps: steps}
+	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+		body, _ := buildPipelineSummaryFor(steps, nil, testPipelineHeadSHA, provider, policy, trailers...)
+		audit := acceptedGapAuditBlock(html.UnescapeString(body))
+		if !strings.Contains(audit, "- Approved: "+kept+"\n") || !strings.Contains(audit, "- Covered by: \n") || !strings.Contains(audit, "- `test-verdict`: "+kept+"\n") {
+			t.Errorf("case-sensitive published audit mismatch: %q", audit)
+		}
+		attestation := buildPipelineAttestationWithPolicy(steps, nil, testPipelineHeadSHA, policy)
+		found := false
+		for _, step := range parsePipelineAttestationForTest(t, attestation).Steps {
+			if step.Step == types.StepTest {
+				found = true
+				if g := step.AcceptedGaps; g == nil || g.ReasonDigest != fmt.Sprintf("%x", sha256.Sum256([]byte(kept))) || g.CoveredByDigest != fmt.Sprintf("%x", sha256.Sum256(nil)) {
+					t.Errorf("digest does not bind case-sensitive published text: %+v", g)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("Test attestation missing")
+		}
+	}
+	if *steps[1].AcceptedGapsJSON != string(payload) {
+		t.Fatal("raw accepted-gap record changed")
+	}
+}

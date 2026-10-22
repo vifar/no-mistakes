@@ -86,7 +86,7 @@ func reviewConfiguredAttributionMatches(line string, configuredTrailers []string
 	for _, trailer := range configuredTrailers {
 		configured, _ := reviewAttributionLine(trailer)
 		decodedConfigured, _ := reviewAttributionLine(html.UnescapeString(trailer))
-		if strings.EqualFold(raw, configured) || strings.EqualFold(decoded, decodedConfigured) {
+		if raw == configured || decoded == decodedConfigured {
 			return true
 		}
 	}
