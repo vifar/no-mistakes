@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -139,7 +140,7 @@ func TestRecoverDivergedRefusalReportsAPatchMatchAsADiagnosticOnly(t *testing.T)
 	checkRecoverPatchMatchDiagnostic(t, 0)
 }
 
-func TestRecoverDivergedRefusalReportsAPatchMatchBeyondFormerCutoff(t *testing.T) {
+func TestRecoverDivergedRefusalReportsBoundedSearchBeyondLimit(t *testing.T) {
 	t.Parallel()
 	checkRecoverPatchMatchDiagnostic(t, 501)
 }
@@ -161,7 +162,18 @@ func checkRecoverPatchMatchDiagnostic(t *testing.T, padding int) {
 		}
 		mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.preserved)
 	}
-	assertRecoverPatchMatchDiagnostic(t, f)
+	if padding == 0 {
+		assertRecoverPatchMatchDiagnostic(t, f)
+		return
+	}
+	mustRun(t, f.gate, "update-ref", f.anchorRef(), f.preserved)
+	refused := f.service.Recover(f.ctx, false)
+	if refused.Safety != "blocked_recover_diverged" || refused.Recovered || refused.Changed || !strings.Contains(refused.Error, "the search was bounded") {
+		t.Fatalf("bounded search refusal = %#v", refused)
+	}
+	if f.custodyReturned() || mustRun(t, f.local, "rev-parse", "HEAD") != f.localHead {
+		t.Fatal("bounded search changed custody or the local head")
+	}
 }
 
 func TestRecoverDivergedRefusalReportsPatchMatchesWithConfiguredDiff(t *testing.T) {
@@ -190,7 +202,7 @@ func assertRecoverPatchMatchDiagnostic(t *testing.T, f *rewrittenCopyFixture) {
 		t.Fatalf("recover diverged = %#v", refused)
 	}
 	t.Logf("refusal: %s", refused.Error)
-	if !strings.Contains(refused.Error, f.rewritten) {
+	if !strings.Contains(refused.Error, shortCommit(f.ctx, f.local, f.rewritten)) {
 		t.Errorf("divergence refusal does not name the commit carrying the same patch (%s): %q", f.rewritten, refused.Error)
 	}
 	for _, want := range []string{f.localHead, f.preserved, "ancestry", "three-way merge", "patch-ID matches", "a lead for the operator, not a finding of containment", "hunk locations and whitespace", "this needs an operator decision"} {
@@ -227,7 +239,84 @@ func TestRecoverDivergedRefusalClaimsNoPatchMatchWhenNoneExists(t *testing.T) {
 	if refused.Safety != "blocked_recover_diverged" {
 		t.Fatalf("recover diverged = %#v", refused)
 	}
+	if !strings.Contains(refused.Error, "no commit in the preserved pipeline head carries the same patch identity") {
+		t.Errorf("divergence refusal omits the completed no-match result: %q", refused.Error)
+	}
 	if strings.Contains(refused.Error, "patch-ID matches") {
 		t.Errorf("divergence refusal claims a patch match that does not exist: %q", refused.Error)
+	}
+}
+
+func TestDivergenceDiagnosticFindsReplayDespitePresentationConfig(t *testing.T) {
+	for _, setting := range []struct{ key, value string }{
+		{"color.ui", "always"},
+		{"diff.submodule", "log"},
+		{"diff.ignoreSubmodules", "all"},
+	} {
+		t.Run(setting.key, func(t *testing.T) {
+			dir := t.TempDir()
+			mustRun(t, dir, "init", "-b", "main")
+			configureIdentity(t, dir)
+			mustRun(t, dir, "commit", "--allow-empty", "-m", "old module")
+			old := mustRun(t, dir, "rev-parse", "HEAD")
+			mustRun(t, dir, "commit", "--allow-empty", "-m", "new module")
+			newHead := mustRun(t, dir, "rev-parse", "HEAD")
+			mustRun(t, dir, "update-index", "--add", "--cacheinfo", "160000,"+old+",module")
+			mustRun(t, dir, "commit", "-m", "base pointer")
+			base := mustRun(t, dir, "rev-parse", "HEAD")
+			baseTree := mustRun(t, dir, "rev-parse", "HEAD^{tree}")
+			mustRun(t, dir, "update-index", "--cacheinfo", "160000,"+newHead+",module")
+			mustRun(t, dir, "commit", "-m", "local pointer change")
+			local := mustRun(t, dir, "rev-parse", "HEAD")
+			tree := mustRun(t, dir, "rev-parse", "HEAD^{tree}")
+			upstream := mustRun(t, dir, "commit-tree", baseTree, "-p", base, "-m", "upstream")
+			replay := mustRun(t, dir, "commit-tree", tree, "-p", upstream, "-m", "replay")
+			ctx := context.Background()
+			patch := fmt.Sprintf("diff --git a/module b/module\nindex %.7s..%.7s 160000\n--- a/module\n+++ b/module\n@@ -1 +1 @@\n-Subproject commit %s\n+Subproject commit %s\n", old, newHead, old, newHead)
+			oracle, err := git.RunWithInput(ctx, dir, patch, "patch-id", "--stable")
+			if err != nil || len(strings.Fields(oracle)) != 2 {
+				t.Fatalf("specified gitlink patch identity = %q, %v", oracle, err)
+			}
+			want := strings.Fields(oracle)[0]
+			mustRun(t, dir, "config", setting.key, setting.value)
+			legacyStream := mustRun(t, dir, "log", "--format=commit %H", "-p", "-M", "--no-textconv", "--no-merges", "--no-ext-diff", replay, "^"+local)
+			legacyIDs, err := git.StablePatchIdentities(ctx, dir, legacyStream)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(legacyIDs) != 0 {
+				t.Fatalf("fixture does not reproduce the lost search identity: %v", legacyIDs)
+			}
+			identity, ok := commitPatchIdentity(ctx, dir, local)
+			if !ok || identity != want {
+				t.Fatalf("local identity = %q, %v; want %s", identity, ok, want)
+			}
+			diagnostic := collectDivergenceDiagnostic(ctx, dir, local, replay, "preserved pipeline head")
+			if diagnostic.PatchIdentity.Status != patchIdentityMatch || diagnostic.PatchIdentity.Match != mustRun(t, dir, "rev-parse", "--short", replay) {
+				t.Fatalf("replay diagnostic = %#v", diagnostic.PatchIdentity)
+			}
+			if got := mustRun(t, dir, "rev-parse", "HEAD"); got != local {
+				t.Fatalf("diagnostic moved local head to %s", got)
+			}
+		})
+	}
+}
+
+func TestDivergenceDescriptionPreservesSearchOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		evidence patchIdentityEvidence
+		want     string
+	}{
+		{"completed", patchIdentityEvidence{Status: patchIdentityNoMatch}, "no commit in the preserved pipeline head carries the same patch identity"},
+		{"bounded", patchIdentityEvidence{Status: patchIdentityNoMatch, Bounded: true}, "the search was bounded"},
+		{"interrupted", patchIdentityEvidence{Status: patchIdentityIncomplete}, "did not finish"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := divergenceDiagnostic{LocalHead: "local", PreservedHead: "preserved", PatchIdentity: tc.evidence}
+			if got := d.divergenceDescription(); !strings.Contains(got, tc.want) {
+				t.Fatalf("search outcome missing %q: %s", tc.want, got)
+			}
+		})
 	}
 }

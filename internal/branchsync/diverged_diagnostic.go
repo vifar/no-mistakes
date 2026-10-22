@@ -56,7 +56,8 @@ type divergenceDiagnostic struct {
 	// MergeBase is the common ancestor the three-way merge proof used.
 	MergeBase string
 	// Ancestry reports what the Git ancestry check established.
-	Ancestry checkOutcome
+	Ancestry        checkOutcome
+	ReverseAncestry checkOutcome
 	// MergeProof reports what the executable three-way merge proof
 	// established.
 	MergeProof checkOutcome
@@ -163,7 +164,7 @@ func (d divergenceDiagnostic) divergenceDescription() string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "the refusal compared the local head %s with the %s %s", d.LocalHead, preservedLabel, d.PreservedHead)
-	if d.Ancestry == checkUndetermined || d.MergeProof == checkUndetermined {
+	if d.Ancestry == checkUndetermined || d.ReverseAncestry == checkUndetermined || d.MergeProof == checkUndetermined {
 		// One of the two checks established nothing, so this refusal may
 		// not say both of them ran.
 		b.WriteString("; the only tests it used were Git ancestry (git merge-base --is-ancestor) and the executable three-way merge proof (git merge-tree --write-tree --merge-base)")
@@ -178,6 +179,15 @@ func (d divergenceDiagnostic) divergenceDescription() string {
 	default:
 		b.WriteString("; ancestry could not be determined, so this refusal claims no result for it")
 	}
+	switch d.ReverseAncestry {
+	case checkPassed:
+		b.WriteString("; reverse ancestry holds, the other head is an ancestor of the local head")
+	case checkFailed:
+		b.WriteString("; reverse ancestry does not hold, the other head is not an ancestor of the local head")
+	default:
+		b.WriteString("; reverse ancestry could not be determined, so this refusal claims no result for it")
+	}
+
 	switch d.MergeProof {
 	case checkPassed:
 		b.WriteString("; the three-way merge proof holds, the other head carries every local change")
@@ -191,7 +201,7 @@ func (d divergenceDiagnostic) divergenceDescription() string {
 	}
 	switch {
 	case d.PatchIdentity.Status == patchIdentityMatch:
-		fmt.Fprintf(&b, "; a commit in the %s carries the same patch identity as the local head's own change (%s), the same patch under a different commit identity - that is a diagnostic for the operator and not a containment proof, so it was not one of the tests that decided this and nothing was adopted", preservedLabel, d.PatchIdentity.Match)
+		fmt.Fprintf(&b, "; the %s carries a commit whose patch-ID matches the local head's change (%s), the same patch identity; a patch-ID match is a lead for the operator, not a finding of containment and not a containment proof; patch IDs discard hunk locations and whitespace; it was not one of the tests that decided this and nothing was adopted; this needs an operator decision", preservedLabel, d.PatchIdentity.Match)
 	case d.PatchIdentity.Status == patchIdentityNoMatch && d.PatchIdentity.Bounded:
 		fmt.Fprintf(&b, "; no commit in the most recent %d commits the %s adds carries the same patch identity as the local head's own change, and the search was bounded, so a match further back was not looked for - that is a diagnostic, not a containment proof, and it was not one of the tests that decided this", divergencePatchScanLimit, preservedLabel)
 	case d.PatchIdentity.Status == patchIdentityNoMatch:
@@ -217,6 +227,7 @@ func collectDivergenceDiagnostic(ctx context.Context, dir, local, preserved, pre
 		PreservedLabel: preservedLabel,
 	}
 	diagnostic.Ancestry = ancestryOutcome(ctx, dir, local, preserved)
+	diagnostic.ReverseAncestry = ancestryOutcome(ctx, dir, preserved, local)
 	base, err := git.Run(ctx, dir, "merge-base", local, preserved)
 	if err != nil || base == "" {
 		// The merge base could not be found, so the three-way merge proof
@@ -325,7 +336,7 @@ func patchIdentityDiagnostic(ctx context.Context, dir, local, preserved string) 
 	// measurement does not, so a file with such a filter would be measured
 	// as its displayed content on one side and as its stored content on the
 	// other - two identities for one change, and another false negative.
-	stream, err := git.Run(ctx, dir, "log", "--format=commit %H", "-p", "-M", "--no-textconv", "--no-merges", "--no-ext-diff",
+	stream, err := git.Run(ctx, dir, "--no-pager", "log", "--no-color", "--submodule=short", "--ignore-submodules=none", "--format=commit %H", "-p", "-M", "--no-textconv", "--no-merges", "--no-ext-diff",
 		"--max-count="+strconv.Itoa(divergencePatchScanLimit), preserved, "^"+local)
 	if err != nil {
 		evidence.Status = patchIdentityIncomplete
@@ -391,7 +402,7 @@ func commitPatchIdentity(ctx context.Context, dir, commit string) (string, bool)
 	if strings.TrimSpace(commit) == "" {
 		return "", false
 	}
-	diff, err := git.Run(ctx, dir, "diff-tree", "-p", "-M", "--root", "--no-commit-id", "--no-ext-diff", "--no-textconv", commit)
+	diff, err := git.Run(ctx, dir, "--no-pager", "diff-tree", "--no-color", "--submodule=short", "--ignore-submodules=none", "-p", "-M", "--root", "--no-commit-id", "--no-ext-diff", "--no-textconv", commit)
 	if err != nil || strings.TrimSpace(diff) == "" {
 		return "", false
 	}

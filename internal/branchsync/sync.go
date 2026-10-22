@@ -550,7 +550,7 @@ func (s *Service) apply(ctx context.Context, strictFastForward bool) State {
 		return plan
 	}
 	if strictFastForward && plan.State == StateDiverged {
-		blocked := blockedPlan(plan, StateDiverged, "blocked_recover_diverged", fmt.Sprintf("%s; recovery requires a strict fast-forward; inspect both histories before reconciling manually; no files or branch refs were changed", divergenceRefusalDetail(ctx, s.workDir(), plan.Local.Head, plan.Pipeline.PushedHead, "pipeline-pushed head", plan.Safety == SafetySafeEquivalentAdvance)))
+		blocked := blockedPlan(plan, StateDiverged, "blocked_recover_diverged", fmt.Sprintf("%s; recovery requires a strict fast-forward; inspect both histories before reconciling manually; no files or branch refs were changed", collectDivergenceDiagnostic(ctx, s.workDir(), plan.Local.Head, plan.Pipeline.PushedHead, "pipeline-pushed head").divergenceDescription()))
 		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right " + plan.Local.Head + "..." + plan.Pipeline.PushedHead}
 		return blocked
 	}
@@ -1079,7 +1079,7 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 			return s.recoverAdoptPreserved(ctx, run, state, preserved, trustedEqualTreeRewrite)
 		}
 		state.Relation = RelationDiverged
-		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_diverged", fmt.Sprintf("%s; the preserved commits are anchored at %s - reconcile manually and re-run the recovery, or use --keep-local to keep the current head. `no-mistakes rerun` resumes validating the selected preserved head, but refuses a known clean caller HEAD mismatch. If heads differ, inspect `no-mistakes axi status` and follow its exact `branch_sync.next_action.command` for custody or synchronization, then submit intended local commits with a fresh `no-mistakes axi run` once custody permits; no files or refs were changed", divergenceRefusalDetail(ctx, wd, local, preserved, "preserved pipeline head", false), anchorRef))
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_diverged", fmt.Sprintf("%s; the preserved commits are anchored at %s - reconcile manually and re-run the recovery, or use --keep-local to keep the current head. `no-mistakes rerun` resumes validating the selected preserved head, but refuses a known clean caller HEAD mismatch. If heads differ, inspect `no-mistakes axi status` and follow its exact `branch_sync.next_action.command` for custody or synchronization, then submit intended local commits with a fresh `no-mistakes axi run` once custody permits; no files or refs were changed", collectDivergenceDiagnostic(ctx, wd, local, preserved, "preserved pipeline head").divergenceDescription(), anchorRef))
 		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right " + local + "..." + preserved}
 		return blocked
 	}
@@ -1419,85 +1419,6 @@ func preservedContainsLocalWork(ctx context.Context, dir, local, preserved strin
 		return false
 	}
 	return mergeTreePreservesFinalHead(ctx, dir, base, local, preserved)
-}
-
-// localHeadPatchMatch names a commit on the preserved side whose patch-ID
-// matches the local head's, or "" when no match is found or the scan fails.
-//
-// This is a DIAGNOSTIC, never a proof and never a path. Patch identity
-// discards hunk locations and whitespace, so it cannot tell a genuine replay
-// from a same-shaped edit to a different identical block - which is exactly
-// why preservedContainsLocalWork refuses to adopt a head on patch identity
-// alone. A historical match also says nothing about whether the change
-// survives at the preserved head. It is an advisory lead for the operator's
-// inspection; the refusal stands either way.
-//
-// The scan covers the preserved side of the divergence, which is where a
-// rewritten copy can live: a commit reachable from the preserved head but not
-// from the local head. The shared history is excluded on purpose, because a
-// commit both sides already share was never rewritten.
-func localHeadPatchMatch(ctx context.Context, dir, local, preserved string) string {
-	if local == "" || preserved == "" || local == preserved {
-		return ""
-	}
-	localID, err := git.CommitPatchID(ctx, dir, local)
-	if err != nil || localID == "" {
-		return ""
-	}
-	ids, err := git.CommitPatchIDs(ctx, dir, preserved, "--not", local)
-	if err != nil || len(ids) == 0 {
-		return ""
-	}
-	// The map is unordered, so the candidates are re-listed in Git's own order
-	// (newest first) and the first match wins. A commit that is not in the
-	// list was not read, so it is never named.
-	candidates, err := revList(ctx, dir, "rev-list", "--no-merges", preserved, "--not", local)
-	if err != nil || len(candidates) == 0 {
-		return ""
-	}
-	for _, candidate := range candidates {
-		if ids[candidate] == localID {
-			return candidate
-		}
-	}
-	return ""
-}
-
-// divergenceRefusalDetail names the two commits a divergence refusal
-// compared, states which tests related them, and reports a patch-identity
-// match as a diagnostic.
-//
-// "Diverged" alone reads as "your work was lost", which is the opposite of
-// what a rewritten head usually means: the operator's change is often in the
-// preserved head under a new identity. The operator needs the two commits and
-// the tests that ran, so they can see what was proved and what was not.
-//
-// The report reuses the target branch's check outcomes and conflict-path
-// rendering, while its patch scan uses the complete preserved-side range.
-// No diagnostic result participates in the containment decision.
-func divergenceRefusalDetail(ctx context.Context, dir, local, other, otherRole string, _ bool) string {
-	diagnostic := divergenceDiagnostic{
-		LocalHead: local, PreservedHead: other, PreservedLabel: otherRole,
-	}
-	diagnostic.Ancestry = ancestryOutcome(ctx, dir, local, other)
-	reverse := ancestryOutcome(ctx, dir, other, local)
-	if base, err := git.Run(ctx, dir, "merge-base", local, other); err == nil && base != "" {
-		diagnostic.MergeBase = base
-		diagnostic.MergeProof, diagnostic.ConflictPaths = runContainmentProof(ctx, dir, base, local, other)
-	}
-	detail := diagnostic.divergenceDescription()
-	switch reverse {
-	case checkPassed:
-		detail += "; ancestry in both directions was checked; the other head is an ancestor of the local head"
-	case checkFailed:
-		detail += "; ancestry in both directions was checked; the other head is not an ancestor of the local head"
-	default:
-		detail += "; reverse ancestry could not be determined, so this refusal claims no result for it"
-	}
-	if match := localHeadPatchMatch(ctx, dir, local, other); match != "" {
-		detail += fmt.Sprintf("; the %s carries a commit whose patch-ID matches the local head's change (%s), the same patch identity; a patch-ID match is a lead for the operator, not a finding of containment and not a containment proof; patch IDs discard hunk locations and whitespace; it was not one of the tests that decided this and nothing was adopted; this needs an operator decision", otherRole, match)
-	}
-	return detail
 }
 
 func reviewedHeadProvesEquivalentTarget(ctx context.Context, dir, local, reviewed, target string) bool {

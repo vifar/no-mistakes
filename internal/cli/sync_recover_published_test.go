@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +8,6 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 )
 
@@ -207,9 +204,6 @@ func TestHumanSyncRecoverPublishedBehindFastForwards(t *testing.T) {
 	}
 }
 
-// Git's short gitlink diff is the protocol oracle. Presentation settings must
-// neither hide its identity nor hide the replay in a published-head refusal.
-// A producer that emits a submodule log or suppresses gitlinks fails both checks.
 func TestAxiSyncRecoverPublishedFindsSubmoduleReplayDespiteDiffConfig(t *testing.T) {
 	for _, setting := range []struct{ key, value string }{
 		{"diff.submodule", "log"},
@@ -249,29 +243,13 @@ func TestAxiSyncRecoverPublishedFindsSubmoduleReplayDespiteDiffConfig(t *testing
 				t.Fatal(err)
 			}
 
-			// This specified patch comes from the fixture's two known gitlinks,
-			// not from the producer whose configuration isolation is under test.
-			patch := fmt.Sprintf("diff --git a/module b/module\nindex %.7s..%.7s 160000\n--- a/module\n+++ b/module\n@@ -1 +1 @@\n-Subproject commit %s\n+Subproject commit %s\n", f.base, f.old, f.base, f.old)
-			oracle, err := git.RunWithInput(context.Background(), f.local, patch, "patch-id", "--stable")
-			if err != nil || len(strings.Fields(oracle)) != 2 {
-				t.Fatalf("specified gitlink patch identity: %q, %v", oracle, err)
-			}
-			want := strings.Fields(oracle)[0]
 			cliGit(t, f.local, "config", setting.key, setting.value)
-			identity, err := git.CommitPatchID(context.Background(), f.local, head)
-			if err != nil || identity != want {
-				t.Fatalf("single identity = %q, %v; want %s", identity, err, want)
-			}
-			ids, err := git.CommitPatchIDs(context.Background(), f.local, preserved, "--not", head)
-			if err != nil || len(ids) != 1 || ids[replay] != want {
-				t.Fatalf("range identities = %v, %v; want only replay %s: %s", ids, err, replay, want)
-			}
 			out, err := executeCmd("axi", "sync", "--recover")
 			var ee *exitError
 			if err == nil || !asExitError(err, &ee) || ee.code != 1 {
 				t.Fatalf("divergence should refuse: %v\n%s", err, out)
 			}
-			for _, want := range []string{head, preserved, replay, "blocked_recover_diverged", "changed: false", "patch-ID matches", "not a finding of containment"} {
+			for _, want := range []string{head, preserved, cliGit(t, f.local, "rev-parse", "--short", replay), "blocked_recover_diverged", "changed: false", "patch-ID matches", "not a finding of containment"} {
 				if !strings.Contains(out, want) {
 					t.Errorf("submodule replay refusal missing %q:\n%s", want, out)
 				}
