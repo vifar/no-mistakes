@@ -2,12 +2,16 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -114,9 +118,23 @@ func (e *Executor) refreshReviewTestSupport(ctx context.Context, run *db.Run, re
 		e.emitLogChunk(run, repo, types.StepTest, message+"\n")
 	}
 	sctx := &StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: workDir, GateDir: e.paths.RepoDir(repo.ID), Config: e.config, ForgeContext: e.forge, DB: e.db, PRTarget: e.prTarget, PRContext: receipt, StepResultID: owner.ID, Log: write, LogChunk: write, LogFile: writeFile, Shared: e.shared}
+	started := time.Now()
 	outcome, err := executeWithConfigProtection(types.StepTest, sctx, refresher.RefreshReviewSupport)
 	if err != nil {
-		return fmt.Errorf("refresh final Test support: %w", err)
+		err = fmt.Errorf("refresh final Test support: %w", err)
+		if errors.Is(err, errSharedConfigBoundary) {
+			durationMS := time.Since(started).Milliseconds()
+			if owner.DurationMS != nil {
+				durationMS += *owner.DurationMS
+			}
+			message := safeurl.RedactText(err.Error())
+			write("error: " + message)
+			if dbErr := e.db.FailStep(owner.ID, message, durationMS); dbErr != nil {
+				return errors.Join(err, fmt.Errorf("record failed Test refresh: %w", dbErr))
+			}
+			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, types.StepTest, string(types.StepStatusFailed), "", message, &durationMS)
+		}
+		return err
 	}
 	afterHead, err := git.HeadSHA(ctx, workDir)
 	if err != nil {

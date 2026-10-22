@@ -53,16 +53,22 @@ func (s *refreshingTestOwner) proof(c *StepContext) (*StepOutcome, error) {
 }
 
 func TestExecutorRefreshesPendingTestProofAfterForwardDocumentCommit(t *testing.T) {
-	testFinalTestSupportRefresh(t, "ordinary")
+	testFinalTestSupportRefresh(t, "ordinary", true)
 }
 
 func TestIssue131ProtectsEvidenceRefresh(t *testing.T) {
 	for _, mode := range []string{"git-write", "direct-write", "direct-write-error"} {
-		t.Run(mode, func(t *testing.T) { testFinalTestSupportRefresh(t, mode) })
+		for _, atCI := range []bool{true, false} {
+			location := "final-completion"
+			if atCI {
+				location = "ci-completion"
+			}
+			t.Run(mode+"/"+location, func(t *testing.T) { testFinalTestSupportRefresh(t, mode, atCI) })
+		}
 	}
 }
 
-func testFinalTestSupportRefresh(t *testing.T, mode string) {
+func testFinalTestSupportRefresh(t *testing.T, mode string, atCI bool) {
 	database, p, run, repo := setupTest(t)
 	ctx := context.Background()
 	seed := t.TempDir()
@@ -124,7 +130,7 @@ func testFinalTestSupportRefresh(t *testing.T, mode string) {
 			return nil
 		}
 	}
-	executor := NewExecutor(database, p, &config.Config{}, nil, []Step{
+	steps := []Step{
 		&adaptiveCallStep{name: types.StepReview, fn: func(c *StepContext) (*StepOutcome, error) {
 			return &StepOutcome{Findings: encoded, ReviewApprovedHeadSHA: c.Run.HeadSHA}, nil
 		}}, owner,
@@ -144,7 +150,25 @@ func testFinalTestSupportRefresh(t *testing.T, mode string) {
 			receipt.DiffDigest = fmt.Sprintf("%064d", 2)
 			_, err = c.DB.AdvanceRunPRContext(c.Run.ID, receipt)
 			return &StepOutcome{}, err
-		}}, newPassStep(types.StepCI)}, func(event ipc.Event) {
+		}},
+	}
+	if atCI {
+		steps = append(steps, newPassStep(types.StepCI))
+	}
+	var failedTestEvents []ipc.Event
+	executor := NewExecutor(database, p, &config.Config{}, nil, steps, func(event ipc.Event) {
+		if event.Type == ipc.EventStepCompleted && event.StepName != nil && *event.StepName == types.StepTest && event.Status != nil && *event.Status == string(types.StepStatusFailed) {
+			failedTestEvents = append(failedTestEvents, event)
+			rows, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range rows {
+				if row.StepName == types.StepTest && row.Status != types.StepStatusFailed {
+					t.Fatalf("failure event preceded saved Test failure: %s", row.Status)
+				}
+			}
+		}
 		if event.Type == ipc.EventLogChunk && event.Content != nil && len(*event.Content) > 65536 {
 			t.Errorf("refresh emitted oversized log chunk: %d bytes", len(*event.Content))
 		}
@@ -160,10 +184,29 @@ func testFinalTestSupportRefresh(t *testing.T, mode string) {
 		if owner.calls != 1 {
 			t.Fatalf("refresh calls = %d, want 1", owner.calls)
 		}
+		rows, readErr := database.GetStepsByRun(run.ID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		var savedTest *db.StepResult
+		for _, row := range rows {
+			if row.StepName == types.StepTest {
+				savedTest = row
+			}
+		}
+		if savedTest == nil || savedTest.Status != types.StepStatusFailed || savedTest.Error == nil || !strings.Contains(*savedTest.Error, "test shared config boundary") || !strings.Contains(*savedTest.Error, configPath) {
+			t.Fatalf("Test writer failure was not saved: %+v", savedTest)
+		}
+		if len(failedTestEvents) != 1 || failedTestEvents[0].Error == nil || *failedTestEvents[0].Error != *savedTest.Error {
+			t.Fatalf("Test failure event = %+v", failedTestEvents)
+		}
 		return
 	}
 	if err != nil {
 		t.Fatalf("forward edit could not finish with fresh proof: %v", err)
+	}
+	if len(failedTestEvents) != 0 {
+		t.Fatalf("successful refresh emitted Test failure: %+v", failedTestEvents)
 	}
 	after, err := os.ReadFile(configPath)
 	if err != nil {
