@@ -1775,7 +1775,7 @@ func normalizeRenderedText(text string) string {
 			text = strings.TrimSpace(rest)
 		}
 		text = strings.TrimSpace(text)
-		text = strings.Trim(text, "`")
+		text = strings.ReplaceAll(text, "`", "")
 		text = strings.TrimSpace(text)
 		switch {
 		case len(text) >= 4 && strings.HasPrefix(text, "**") && strings.HasSuffix(text, "**"):

@@ -31,6 +31,10 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 		{"generated with", "Generated with [Claude Code](https://claude.ai/code)"},
 		{"generated with plain", "Generated with Claude Code"},
 		{"generated with codex", "Generated with Codex"},
+		{"generated with inline code", "Generated with `Codex`"},
+		{"generated with double inline code", "Generated with ``Codex``"},
+		{"co-authored inline code", "Co-Authored-By: `Codex` <bot@example.invalid>"},
+		{"co-authored double inline code", "Co-Authored-By: ``Codex`` <code@example.com>"},
 		{"model trailer", "Co-Authored-By: gpt-5.5 <model@example.com>"},
 		{"assisted trailer", "Assisted-by: OpenCode"},
 		{"claude session", "Claude-Session: session-id"},
@@ -79,6 +83,8 @@ func TestNeutralizeAIAttributionKeepsAHumanTrailer(t *testing.T) {
 	for _, line := range []string{
 		"Co-Authored-By: A Person <person@example.com>",
 		"Co-Authored-By: Claude Smith <human@example.com>",
+		"Co-Authored-By: `Claude Smith` <human@example.com>",
+		"Co-Authored-By: ``Claude Smith`` <human@example.com>",
 		"Co-Authored-By: Claude Smith <code@example.com>",
 		// The underscore is in the MAILBOX, so removing the markup must
 		// not turn a person's address into the AI's.
