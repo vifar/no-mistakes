@@ -41,11 +41,11 @@ func attestedAcceptedGaps(sr *db.StepResult, configuredTrailers ...string) *pipe
 	return &pipelineAttestationAcceptedGaps{FindingIDs: gaps.FindingIDs, ReasonDigest: acceptedGapTextDigest(gaps.Reason, configuredTrailers...), CoveredByDigest: acceptedGapTextDigest(gaps.CoveredBy, configuredTrailers...)}
 }
 
-// canonicalAcceptedGapText redacts the reason and covering tests before both
-// digesting and rendering them, so the digest never binds text publication
-// would redact. Redaction is idempotent, so later whole-body redaction cannot
-// change it. Rendering also escapes text and neutralizes reserved markers and
-// closing references; those presentation rewrites are not part of the digest.
+// canonicalAcceptedGapText applies attribution filtering, human-coauthor
+// presentation, and home-path redaction before both digesting and rendering,
+// so the digest binds the same canonical text as the published audit.
+// Rendering also escapes text and neutralizes reserved markers and closing
+// references; those presentation rewrites are not part of the digest.
 func canonicalAcceptedGapText(text string, configuredTrailers ...string) string {
 	return safepath.RedactText(prDisplayText(text, configuredTrailers...))
 }
@@ -94,8 +94,8 @@ func preserveAcceptedGapAudit(body, prefix, pipelineMD string, limit int, units 
 }
 
 // buildAcceptedGapsBlock renders each accepted finding with its description,
-// plus the approval reason and the covering tests verbatim. It returns "" when
-// no completed Test step carries a recorded gap.
+// plus the approval reason and covering tests through canonicalAcceptedGapText.
+// It returns "" when no completed Test step carries a recorded gap.
 func buildAcceptedGapsBlock(steps []*db.StepResult, provider scm.Provider, configuredTrailers ...string) string {
 	flavor := prBodyFlavorFor(provider)
 	for _, sr := range steps {
