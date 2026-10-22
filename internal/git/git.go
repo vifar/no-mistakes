@@ -221,10 +221,11 @@ func gitCommand(ctx context.Context, dir string, extraEnv []string, args ...stri
 		cmd.Err = &exec.Error{Name: "git", Err: exec.ErrNotFound}
 	}
 	cmd.Dir = dir
-	cmd.Env = env
-	if len(args) > 0 && strings.HasPrefix(args[0], "--git-dir=") {
-		cmd.Env = bareRepositoryEnv(cmd.Env)
-	}
+	// A command must run against the repository its caller named. An inherited
+	// GIT_DIR/GIT_COMMON_DIR/GIT_WORK_TREE/GIT_CONFIG names a DIFFERENT
+	// repository and silently redirects discovery based commands into it, so
+	// they are removed for every form, not only the explicitly named bare one.
+	cmd.Env = stripRepositorySelectionEnv(env)
 	winproc.Harden(cmd)
 	return cmd
 }
@@ -491,6 +492,14 @@ func InitBare(ctx context.Context, path string) error {
 		return err
 	}
 	if _, err := os.Lstat(filepath.Join(path, "HEAD")); err == nil {
+		// A directory that already holds a HEAD is a Git directory. It is a
+		// bare repository only if Git itself says so; a working checkout's Git
+		// directory is not, and `git init --bare` over one rewrites its
+		// configuration with core.bare=true, which stops the checkout from
+		// being a work tree (issue #121, #183).
+		if !isBareGitDir(path) {
+			return fmt.Errorf("refuse bare initialization of the non-bare Git directory %s", path)
+		}
 		return ValidateBareRepository(ctx, path)
 	} else if !os.IsNotExist(err) {
 		return err
@@ -1018,20 +1027,6 @@ func CopyLocalUserIdentity(ctx context.Context, srcDir, dstDir string) error {
 		}
 	}
 	return nil
-}
-
-// isWorktreeConfigWriteUnavailable reports whether a `git config --worktree`
-// write failed because per-worktree config cannot be used on this repo: either
-// the installed Git is too old for the flag (isWorktreeConfigUnsupported), or
-// the repo has more than one worktree without extensions.worktreeConfig enabled
-// ("--worktree cannot be used with multiple working trees unless the config
-// extension worktreeConfig is enabled"). Both mean the caller should fall back
-// to the shared --local config.
-func isWorktreeConfigWriteUnavailable(err error) bool {
-	if isWorktreeConfigUnsupported(err) {
-		return true
-	}
-	return strings.Contains(err.Error(), "worktreeConfig")
 }
 
 // WorktreeAdd creates a detached worktree at wtPath checked out to the given SHA.

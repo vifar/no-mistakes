@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -16,15 +17,139 @@ import (
 
 const sharedConfigBaselineFile = "no-mistakes-shared-config.json"
 
-// SetWorktreeConfig follows CopyLocalUserIdentity's scope policy. In an
-// isolated gate it never acquires the shared config lock. Legacy repositories
-// fall back only when Git reports that per-worktree scope is unavailable.
-func SetWorktreeConfig(ctx context.Context, dir, key, value string) error {
-	if _, err := Run(ctx, dir, "config", "--worktree", key, value); err != nil {
-		if !isWorktreeConfigWriteUnavailable(err) {
-			return err
+// commonConfigFile returns the path of the SHARED configuration file of the
+// repository that contains dir.
+//
+// A linked worktree shares its repository's configuration with every other
+// worktree of the same repository, so the shared file is the common
+// directory's "config", never a per-worktree file. Reading that one path is
+// how a write is checked for landing where it was meant to land.
+func commonConfigFile(ctx context.Context, dir string) (string, error) {
+	out, err := Run(ctx, dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return "", fmt.Errorf("resolve the shared configuration file of %s: %w", dir, err)
+	}
+	common := strings.TrimSpace(out)
+	if common == "" {
+		return "", fmt.Errorf("resolve the shared configuration file of %s: empty git common directory", dir)
+	}
+	return filepath.Join(common, "config"), nil
+}
+
+// sharedConfigValue reads one key from the SHARED configuration file of the
+// repository that contains dir. The read names the file explicitly, so it
+// answers for that file alone and not for the effective configuration.
+func sharedConfigValue(ctx context.Context, dir, key string) (string, bool, error) {
+	path, err := commonConfigFile(ctx, dir)
+	if err != nil {
+		return "", false, err
+	}
+	// The internal runner is used deliberately: it does not inject --git-dir,
+	// so --file names the one file this read is about.
+	raw, err := runInDirWithEnvRaw(ctx, dir, nil, "config", "--file", path, "--no-includes", "--get", key)
+	if err != nil {
+		if configKeyAbsent(err) {
+			return "", false, nil
 		}
-		_, err = Run(ctx, dir, "config", "--local", key, value)
+		return "", false, fmt.Errorf("read %s from %s: %w", key, path, err)
+	}
+	return strings.TrimSpace(string(raw)), true, nil
+}
+
+// configKeyAbsent reports whether a configuration read failed because the key
+// is not set, which Git answers with exit status 1.
+func configKeyAbsent(err error) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
+}
+
+// worktreeConfigEnabled reports whether the repository that contains dir has
+// the worktreeConfig extension enabled.
+//
+// It is the precondition for per-worktree scope to mean anything. Without the
+// extension, `git config --worktree` does not fail: in a repository with a
+// single worktree it writes to the SHARED configuration instead, and in a
+// repository with several it refuses outright. Either way the shared
+// configuration is the repository's, and a write there is inherited by every
+// other worktree of that repository - which is how a registered checkout ends
+// up with core.bare=true (issue #183).
+func worktreeConfigEnabled(ctx context.Context, dir string) (bool, error) {
+	value, found, err := sharedConfigValue(ctx, dir, "extensions.worktreeConfig")
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	return strings.EqualFold(strings.TrimSpace(value), "true"), nil
+}
+
+// isManagedGateRepository reports whether the repository that contains dir is
+// a gate no-mistakes owns.
+//
+// Only such a repository's shared configuration may be written by no-mistakes.
+// A gate is a bare repository: no-mistakes created it, its shared
+// configuration is no-mistakes' own state, and it is guarded separately (see
+// ProtectSharedConfig). The shared configuration of every other repository -
+// a working checkout, and every worktree of one - belongs to whoever owns
+// that repository.
+//
+// The answer is Git's own, not a path shape: a working checkout's Git
+// directory has the same file layout as a bare repository, so only Git can
+// tell them apart.
+func isManagedGateRepository(ctx context.Context, dir string) bool {
+	out, err := Run(ctx, dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return false
+	}
+	common := strings.TrimSpace(out)
+	if common == "" {
+		return false
+	}
+	return ValidateBareRepository(ctx, common) == nil
+}
+
+// SetWorktreeConfig writes one key into the repository's PER-WORKTREE
+// configuration.
+//
+// The write is per-worktree or it is refused. The shared configuration of a
+// repository belongs to whoever owns that repository, and a shared write is
+// inherited by every other worktree of it: a `git config --worktree` write
+// that lands in the shared file of a registered checkout is how that checkout
+// came to carry core.bare=true and stop being a work tree (issue #183).
+//
+// A gate no-mistakes owns is the one exception, and only for a Git too old to
+// support per-worktree configuration at all. A gate's shared configuration is
+// no-mistakes' own state, and it is guarded separately (see ProtectSharedConfig).
+func SetWorktreeConfig(ctx context.Context, dir, key, value string) error {
+	enabled, err := worktreeConfigEnabled(ctx, dir)
+	if err != nil {
+		return err
+	}
+	if enabled {
+		if _, err := Run(ctx, dir, "config", "--worktree", key, value); err != nil {
+			if !isWorktreeConfigUnsupported(err) {
+				return err
+			}
+			// The installed Git does not know per-worktree scope. Fall back
+			// only for a gate no-mistakes owns.
+			return setSharedConfigForGate(ctx, dir, key, value)
+		}
+		return nil
+	}
+	// Per-worktree scope is not available here. `git config --worktree` would
+	// write the shared configuration instead - silently, in a repository with
+	// a single worktree - so the write is only allowed for a gate.
+	return setSharedConfigForGate(ctx, dir, key, value)
+}
+
+// setSharedConfigForGate writes one key into the SHARED configuration of a
+// gate no-mistakes owns, and refuses for every other repository.
+func setSharedConfigForGate(ctx context.Context, dir, key, value string) error {
+	if !isManagedGateRepository(ctx, dir) {
+		return fmt.Errorf("per-worktree configuration is unavailable for %s: refusing to write %s into the shared configuration of a repository no-mistakes does not own", dir, key)
+	}
+	if _, err := Run(ctx, dir, "config", "--local", key, value); err != nil {
 		return err
 	}
 	return nil

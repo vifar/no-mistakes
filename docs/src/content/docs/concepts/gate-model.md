@@ -51,8 +51,18 @@ registered gate validates the existing bare repository instead of running
 `git init --bare` again. Explicit bare operations use an
 [isolated Git environment](/no-mistakes/reference/environment/#git-repository-selection)
 so inherited repository selection cannot redirect configuration writes into the
-caller's checkout. A checkout previously marked bare can be restored with
+caller's checkout. Every Git operation uses that isolation, not only the bare
+ones: a `GIT_DIR` or `GIT_COMMON_DIR` inherited from a lane, a hook, or an
+agent names a different repository, and a command that honored it would read
+and write that repository instead of the one it was aimed at. A checkout
+previously marked bare can be restored with
 `git config core.bare false` from that checkout; its files and commits are retained.
+
+The working checkout's own shared configuration is the operator's. A run never
+writes it: a configuration write is per-worktree, or it is refused, and the
+gate is the only repository whose shared configuration no-mistakes owns. A
+checkout's `no-mistakes` remote is the one deliberate exception, and a refresh
+that finds it already pointing at the gate writes nothing at all.
 
 Each executing step and final Test evidence refresh reserves the gate's shared
 `config.lock`, disabling shared configuration writes from dependency scripts

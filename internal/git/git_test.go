@@ -167,19 +167,20 @@ func TestRemoveRemote(t *testing.T) {
 func TestCopyLocalUserIdentity(t *testing.T) {
 	ctx := context.Background()
 	src := initTestRepo(t)
-	dst := initTestRepo(t)
-
-	run(t, dst, "git", "config", "--local", "--unset", "user.name")
-	run(t, dst, "git", "config", "--local", "--unset", "user.email")
+	// The destination of a real identity copy is a run's worktree, which is
+	// a linked worktree of the gate. The identity belongs to that worktree,
+	// never to the gate's shared configuration, so it is written per
+	// worktree and read back from there.
+	_, dst := issue131Gate(t)
 
 	if err := CopyLocalUserIdentity(ctx, src, dst); err != nil {
 		t.Fatalf("CopyLocalUserIdentity failed: %v", err)
 	}
 
-	if got := run(t, dst, "git", "config", "--local", "--get", "user.name"); got != "Test" {
+	if got := run(t, dst, "git", "config", "--worktree", "--get", "user.name"); got != "Test" {
 		t.Fatalf("user.name = %q, want %q", got, "Test")
 	}
-	if got := run(t, dst, "git", "config", "--local", "--get", "user.email"); got != "test@test.com" {
+	if got := run(t, dst, "git", "config", "--worktree", "--get", "user.email"); got != "test@test.com" {
 		t.Fatalf("user.email = %q, want %q", got, "test@test.com")
 	}
 }
