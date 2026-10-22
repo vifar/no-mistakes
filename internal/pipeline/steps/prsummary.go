@@ -1711,9 +1711,20 @@ func neutralizeAIAttribution(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
 		text := prAttributionHTMLWrapper.ReplaceAllString(html.UnescapeString(line), "")
+		text = prAttributionBlockPrefix.ReplaceAllString(strings.TrimSpace(text), "")
+		identity, mailbox, hasMailbox := strings.Cut(text, "<")
+		for {
+			plain := prAttributionInlineWrapper.ReplaceAllString(identity, "${1}${2}${3}${4}")
+			if plain == identity {
+				break
+			}
+			identity = plain
+		}
+		text = identity
+		if hasMailbox {
+			text += "<" + mailbox
+		}
 		text = strings.Trim(strings.TrimSpace(text), "`*_~ \t")
-		text = prAttributionBlockPrefix.ReplaceAllString(text, "")
-		text = strings.Trim(text, "`*_~ \t")
 		if git.IsAIAttributionTrailer(text) {
 			lines[i] = "<no-mistakes: AI attribution line neutralized>"
 		}
@@ -1722,7 +1733,8 @@ func neutralizeAIAttribution(s string) string {
 }
 
 var prAttributionHTMLWrapper = regexp.MustCompile(`(?i)</?(?:code|pre|p|div|span|b|strong|i|em|s|del|blockquote|li|ol|ul|h[1-6]|summary|details|a|u|small|mark|kbd|samp)(?:[ \t][^>]*)?>`)
-var prAttributionBlockPrefix = regexp.MustCompile(`^(?:[ \t]*(?:>[ \t]*|[-+*][ \t]+|[0-9]+[.)][ \t]+|#{1,6}[ \t]+|\[[ xX]\][ \t]+))+`)
+var prAttributionBlockPrefix = regexp.MustCompile("^(?:[ \t`*_~]+|>[ \t]*|[-+][ \t]+|[0-9]+[.)][ \t]+|#{1,6}[ \t]+|\\[[ xX]\\][ \t]+)+")
+var prAttributionInlineWrapper = regexp.MustCompile("\\*{1,3}([^*]+)\\*{1,3}|_{1,3}([^_]+)_{1,3}|~{2}([^~]+)~{2}|`+([^`]+)`+")
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {
 	switch sr.Status {
