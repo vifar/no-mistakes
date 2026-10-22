@@ -22,7 +22,7 @@ func TestPublishedBodyRendersAQuotedCoAuthorAsALabelledField(t *testing.T) {
 	if strings.Contains(got, "Co-Authored-By:") {
 		t.Fatalf("the published body carries a raw co-author trailer: %q", got)
 	}
-	if !strings.Contains(got, "Co-author:") {
+	if !strings.Contains(got, "co-author (quoted):") {
 		t.Fatalf("the co-author was dropped instead of rendered as a labelled field: %q", got)
 	}
 	if !strings.Contains(got, "Claude Smith <code@example.com>") {

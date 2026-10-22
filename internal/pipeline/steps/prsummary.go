@@ -1685,6 +1685,10 @@ func escapePipelineFoldMarkers(s string) string {
 // publishedCoAuthorKey matches the commit trailer key that PUBLISHED text must
 // not carry raw.
 //
+// The key is rendered as a labelled field that says what it is: a co-author
+// the body QUOTED. A fixture, an example, a review finding quoted whole - none
+// of them is this work's attribution, and the label says so.
+//
 // A consumer that scans the pull request body for attribution - the merge
 // bar, a reviewer - reads a raw "Co-Authored-By:" line as a claim of AI
 // attribution, and it reads it that way even inside a code fence, because it
@@ -1710,7 +1714,7 @@ var publishedGeneratedWithEmoji = regexp.MustCompile(`(?i)(^|\n)([ \t]*)\x{1F916
 // distinction, so a quoted trailer is rendered in a form none of them reads as
 // a claim. The quote stays a quote: the name and the address are still there.
 func renderQuotedAttributionAsLabelledFields(s string) string {
-	s = publishedCoAuthorKey.ReplaceAllString(s, "Co-author${1}")
+	s = publishedCoAuthorKey.ReplaceAllString(s, "co-author (quoted)${1}")
 	return publishedGeneratedWithEmoji.ReplaceAllString(s, "$1$2$3")
 }
 
