@@ -116,6 +116,24 @@ func RunRaw(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	return runInDirWithEnvRaw(ctx, dir, nil, args...)
 }
 
+// RunAllowingFailure executes a git command and returns its trimmed stdout even
+// when the command exits nonzero.
+//
+// Some git plumbing reports its result on stdout and signals the result through
+// the exit code: `git merge-tree --write-tree` prints the written tree and the
+// conflicted paths on stdout and exits 1 when the merge conflicts. Run discards
+// stdout on failure, so a caller that needs that answer has to read it here.
+// The error is still returned, so the caller can tell a reported conflict from
+// a command that failed without producing output.
+func RunAllowingFailure(ctx context.Context, dir string, args ...string) (string, error) {
+	if isBareGitDir(dir) {
+		out, err := runInDirWithEnvRawCaptured(ctx, dir, nil, append([]string{"--git-dir=" + dir}, args...)...)
+		return strings.TrimSpace(string(out)), err
+	}
+	out, err := runInDirWithEnvRawCaptured(ctx, dir, nil, args...)
+	return strings.TrimSpace(string(out)), err
+}
+
 // RunWithInput executes a git command with exact standard input and returns
 // trimmed stdout. It carries the same bare-repository handling as Run.
 func RunWithInput(ctx context.Context, dir, input string, args ...string) (string, error) {
@@ -174,7 +192,23 @@ func runInDirWithEnvRaw(ctx context.Context, dir string, extraEnv []string, args
 	return runInDirWithEnvAndInputRaw(ctx, dir, extraEnv, "", args...)
 }
 
+func runInDirWithEnvRawCaptured(ctx context.Context, dir string, extraEnv []string, args ...string) ([]byte, error) {
+	return runInDirWithEnvAndInputRawCaptured(ctx, dir, extraEnv, "", args...)
+}
+
 func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []string, input string, args ...string) ([]byte, error) {
+	out, err := runInDirWithEnvAndInputRawCaptured(ctx, dir, extraEnv, input, args...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// runInDirWithEnvAndInputRawCaptured runs a git command and keeps its stdout
+// even when the command fails, so a caller can read a result git reports on
+// stdout and signals through the exit code. The plain raw runner drops stdout
+// on failure, because most callers treat a failed command as no output at all.
+func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEnv []string, input string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(nonInteractiveEnvForContext(ctx, dir), extraEnv...)
@@ -259,7 +293,7 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 		if ctx.Err() != nil {
 			err = errors.Join(err, ctx.Err())
 		}
-		return nil, &CommandError{
+		return out, &CommandError{
 			Command: safeurl.RedactText(strings.Join(args, " ")),
 			Stderr:  safeurl.RedactText(stderr.String()),
 			Err:     err,
@@ -296,6 +330,80 @@ func StablePatchID(ctx context.Context, dir, from, to, path string) (string, err
 		return "", fmt.Errorf("git patch-id --stable returned no identity")
 	}
 	return fields[0], nil
+}
+
+// PatchIdentity pairs a stable patch identity with the commit that carries it.
+type PatchIdentity struct {
+	// PatchID is Git's stable patch identity.
+	PatchID string
+	// Commit is the commit the identity was measured from, when the diff
+	// stream named one. It is empty when the stream carried no commit.
+	Commit string
+}
+
+// StablePatchIDFromDiff returns Git's stable patch identity for one whole
+// diff, across every file it touches.
+//
+// StablePatchID measures a single file, so its identity is scoped to that
+// path. This measures a complete change, the way `git show <commit> | git
+// patch-id --stable` does, so one commit's own change can be compared with
+// another commit's own change.
+//
+// A patch identity discards hunk locations and whitespace, so two different
+// changes can share one. It is evidence for a human reading a refusal, never
+// a proof that one commit carries another's work.
+func StablePatchIDFromDiff(ctx context.Context, dir, diff string) (string, error) {
+	if strings.TrimSpace(diff) == "" {
+		return "", nil
+	}
+	out, err := runPatchID(ctx, dir, diff)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		return "", fmt.Errorf("git patch-id --stable returned no identity")
+	}
+	return fields[0], nil
+}
+
+// StablePatchIdentities returns every stable patch identity in a diff stream,
+// in stream order, each paired with the commit that carries it.
+//
+// The stream is a multi-commit diff, the output of `git log --format=commit %H
+// -p` for example. Git reports one identity per patch, followed by the commit
+// that produced it.
+func StablePatchIdentities(ctx context.Context, dir, stream string) ([]PatchIdentity, error) {
+	if strings.TrimSpace(stream) == "" {
+		return nil, nil
+	}
+	out, err := runPatchID(ctx, dir, stream)
+	if err != nil {
+		return nil, err
+	}
+	var identities []PatchIdentity
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		identity := PatchIdentity{PatchID: fields[0]}
+		if len(fields) > 1 {
+			identity.Commit = fields[1]
+		}
+		identities = append(identities, identity)
+	}
+	return identities, nil
+}
+
+// runPatchID feeds a diff to `git patch-id --stable` and returns its raw
+// output.
+func runPatchID(ctx context.Context, dir, diff string) ([]byte, error) {
+	args := []string{"patch-id", "--stable"}
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	return runInDirWithEnvAndInputRaw(ctx, dir, nil, diff, args...)
 }
 
 // ValidateBareRepository verifies both the filesystem shape and Git's own bare
@@ -928,6 +1036,23 @@ func ResolveRef(ctx context.Context, dir, ref string) (string, error) {
 		return "", fmt.Errorf("resolve ref %s: %w", ref, err)
 	}
 	return out, nil
+}
+
+// ExitCode returns the process exit code of a failed git command, and whether
+// the error carried one.
+//
+// Some git plumbing reports its result through the exit code alone.
+// `git merge-base --is-ancestor` answers 0 for yes and 1 for no, and
+// `git merge-tree --write-tree` answers 1 when the merge conflicts. A caller
+// that must tell "the command ran and said no" from "the command could not
+// run" needs the code, not only the fact that it failed: the first is a
+// result and the second establishes nothing.
+func ExitCode(err error) (int, bool) {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return 0, false
+	}
+	return exitErr.ExitCode(), true
 }
 
 func DirectRefTarget(ctx context.Context, dir, ref string) (string, bool, error) {
