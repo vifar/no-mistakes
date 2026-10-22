@@ -13,12 +13,11 @@ import (
 // processWasCancelled reports whether a process exit is the exit of a
 // subprocess THIS command's context stopped.
 //
-// A stop reaches the child as SIGKILL: that is what the standard library's
-// own kill does. The shell package terminates the child's whole PROCESS
-// GROUP when the command returns, and it sends SIGTERM first, escalating to
-// SIGKILL if the group has not gone within the grace period. Which of the
-// two arrives is a consequence of that race, and it says nothing about WHO
-// stopped the work - so both are the context's doing.
+// ConfigureShellCommand replaces the standard library's kill with a
+// process-group SIGTERM followed by asynchronous SIGKILL escalation after
+// the grace period. A cooperative child can exit from SIGTERM; a child
+// that survives it can exit from SIGKILL. Both signals can therefore be
+// the context's doing.
 //
 // Any other signal is the child's own. A child that SEGFAULTed or ABORTed
 // kept its own outcome, and the cancellation did not cause it, so the exit
