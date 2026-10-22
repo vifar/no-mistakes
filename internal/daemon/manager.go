@@ -473,12 +473,13 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 			}
 		}
 		m.mu.Unlock()
-		// A setup failure is the SETUP's own outcome. The cancellation is
-		// the reason only when the setup error IS the cancellation: a
-		// worktree operation that was interrupted reports the operation's
-		// own failure - the signal it died of - and that failure keeps
-		// its own outcome.
-		cancelled := pipeline.CancellationOnly(setupErr, cause)
+		// A setup failure is the SETUP's own outcome, unless the
+		// cancellation is what stopped it. A git command that this run's
+		// own context stopped IS the cancellation's doing, and the git
+		// package records that provenance at the execution boundary,
+		// where it is known. A setup that failed on its own keeps its
+		// own outcome.
+		cancelled := pipeline.CancellationAttributable(setupErr, cause)
 		if cancelled {
 			status, message = types.RunCancelled, cause.Error()
 			var planned *pipeline.ControlledShutdownCause
