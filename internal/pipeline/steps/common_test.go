@@ -1292,8 +1292,8 @@ func TestExecuteFixMode_NonReviewChangesCanonicalizeMisleadingAgentSummary(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary != "no changes applied: checked formatting" {
-		t.Fatalf("fix summary = %q, want %q", summary, "no changes applied: checked formatting")
+	if summary != "changes applied" {
+		t.Fatalf("fix summary = %q, want %q", summary, "changes applied")
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got == headSHA {
 		t.Fatal("expected committed fix to advance HEAD")
