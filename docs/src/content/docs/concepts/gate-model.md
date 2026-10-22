@@ -48,14 +48,9 @@ If daemon startup fails during a refresh, `init` reports the error but does not 
 
 Enrollment keeps the working checkout non-bare. Re-initializing a
 registered gate validates the existing bare repository instead of running
-`git init --bare` again. Explicit bare operations use an
-[isolated Git environment](/no-mistakes/reference/environment/#git-repository-selection)
-so inherited repository selection cannot redirect configuration writes into the
-caller's checkout. Every Git operation uses that isolation, not only the bare
-ones: a `GIT_DIR` or `GIT_COMMON_DIR` inherited from a lane, a hook, or an
-agent names a different repository, and a command that honored it would read
-and write that repository instead of the one it was aimed at. A checkout
-previously marked bare can be restored with
+`git init --bare` again. Git commands follow the
+[repository-selection isolation rule](/no-mistakes/reference/environment/#git-repository-selection).
+A checkout previously marked bare can be restored with
 `git config core.bare false` from that checkout; its files and commits are retained.
 
 The working checkout's own shared configuration is the operator's. A run never

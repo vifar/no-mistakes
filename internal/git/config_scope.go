@@ -111,18 +111,14 @@ func isManagedGateRepository(ctx context.Context, dir string) bool {
 	return ValidateBareRepository(ctx, common) == nil
 }
 
-// SetWorktreeConfig writes one key into the repository's PER-WORKTREE
-// configuration.
+// SetWorktreeConfig writes one key into the repository's per-worktree
+// configuration when that scope is enabled and supported.
 //
-// The write is per-worktree or it is refused. The shared configuration of a
-// repository belongs to whoever owns that repository, and a shared write is
-// inherited by every other worktree of it: a `git config --worktree` write
-// that lands in the shared file of a registered checkout is how that checkout
-// came to carry core.bare=true and stop being a work tree (issue #183).
-//
-// A gate no-mistakes owns is the one exception, and only for a Git too old to
-// support per-worktree configuration at all. A gate's shared configuration is
-// no-mistakes' own state, and it is guarded separately (see ProtectSharedConfig).
+// Otherwise, a shared write is allowed only for a gate repository accepted by
+// isManagedGateRepository. A working checkout's shared configuration belongs
+// to its operator and is inherited by all its worktrees, so unavailable
+// per-worktree scope must cause a refusal there (issue #183). Gate shared
+// configuration is guarded separately by ProtectSharedConfig.
 func SetWorktreeConfig(ctx context.Context, dir, key, value string) error {
 	enabled, err := worktreeConfigEnabled(ctx, dir)
 	if err != nil {

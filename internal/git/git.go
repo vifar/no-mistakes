@@ -161,11 +161,11 @@ func RunBare(ctx context.Context, bareDir string, args ...string) (string, error
 }
 
 // RunWithEnv is Run with extra KEY=VALUE entries appended to the git
-// environment. Later entries win, so a caller can override anything
-// NonInteractiveEnv sets. It exists for plumbing that is configured only
-// through the environment - GIT_INDEX_FILE for a scratch index, the
-// GIT_AUTHOR_*/GIT_COMMITTER_* identity for commit-tree - and carries the same
-// bare-repository handling as Run.
+// environment. Later entries override NonInteractiveEnv defaults, but
+// gitCommand still removes repository-selection variables. It exists for
+// plumbing configured only through the environment: GIT_INDEX_FILE selects a
+// scratch index; GIT_AUTHOR_*/GIT_COMMITTER_* set identity for commit-tree.
+// It carries the same bare-repository handling as Run.
 func RunWithEnv(ctx context.Context, dir string, extraEnv []string, args ...string) (string, error) {
 	if isBareGitDir(dir) {
 		return runInDirWithEnv(ctx, dir, extraEnv, append([]string{"--git-dir=" + dir}, args...)...)
@@ -1012,7 +1012,7 @@ func CommitAll(ctx context.Context, dir, message string) error {
 // on that single lock and one fails with "could not lock config file ...
 // config: File exists". Writing per-worktree puts each run's identity in its own
 // <bare>/worktrees/<id>/config.worktree, so concurrent startups never contend.
-// Older Git without `--worktree` support falls back to `--local`.
+// Scope selection and fallback restrictions are owned by SetWorktreeConfig.
 func CopyLocalUserIdentity(ctx context.Context, srcDir, dstDir string) error {
 	for _, key := range []string{"user.name", "user.email"} {
 		value, err := Run(ctx, srcDir, "config", "--local", "--get", "--default", "", key)

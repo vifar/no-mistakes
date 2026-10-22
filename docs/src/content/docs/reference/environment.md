@@ -359,11 +359,13 @@ Git commands use the `PATH` in their effective subprocess environment to select 
 
 ## Git repository selection
 
-Explicit bare-repository operations, including bare initialization, remove
-inherited `GIT_DIR`, `GIT_COMMON_DIR`, `GIT_WORK_TREE`, and `GIT_CONFIG` from
-their subprocess environment. These variables cannot redirect the operation
-into the caller's checkout or select another configuration file. Identity,
-credentials, and explicit scratch-index settings remain available.
+All commands issued through no-mistakes' Git runner, including checkout
+discovery and bare initialization, remove `GIT_DIR`, `GIT_COMMON_DIR`,
+`GIT_WORK_TREE`, and `GIT_CONFIG` from their subprocess environment, including
+command-specific environment overrides. These variables cannot redirect the
+operation into another repository or select another configuration file.
+Identity, credentials, and explicit scratch-index and object-directory settings
+remain available.
 
 ## Environment the daemon sees
 
