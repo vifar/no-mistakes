@@ -213,6 +213,24 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 // gitBinaryForEnv uses execpath.Resolve so binary lookup sees the same
 // environment as the child. Passing a bare name to exec.CommandContext would
 // resolve it against the process's PATH before the child's environment is set.
+// gitCommand builds a git command whose BINARY is resolved from the
+// environment the command will run in.
+//
+// exec.CommandContext resolves a bare name against the PROCESS's PATH, so a
+// command whose environment names its own PATH - the context's overlay, or a
+// step's - would have that environment honoured for the child and ignored for
+// the binary. Every git command in this package resolves the binary the same
+// way, so none of them can pick a different git from the one the caller
+// chose.
+func gitCommand(ctx context.Context, workDir string, env []string, args ...string) *exec.Cmd {
+	binary, found := gitBinaryForEnv(workDir, env)
+	cmd := exec.CommandContext(ctx, binary, args...)
+	if !found {
+		cmd.Err = &exec.Error{Name: "git", Err: exec.ErrNotFound}
+	}
+	return cmd
+}
+
 func gitBinaryForEnv(workDir string, env []string) (string, bool) {
 	path, hasPath, found := execpath.Resolve(env, "git", workDir)
 	if !hasPath {
@@ -505,8 +523,9 @@ func InitBare(ctx context.Context, path string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "git", "init", "--bare", path)
-	cmd.Env = bareRepositoryEnv(nonInteractiveEnvForContext(ctx, ""))
+	env := bareRepositoryEnv(nonInteractiveEnvForContext(ctx, ""))
+	cmd := gitCommand(ctx, "", env, "init", "--bare", path)
+	cmd.Env = env
 	winproc.Harden(cmd)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -772,8 +791,10 @@ func CurrentBranch(ctx context.Context, dir string) (string, error) {
 // (HEAD points at a commit rather than a branch ref). Uses `git symbolic-ref`
 // which fails cleanly when HEAD is not a symbolic ref.
 func IsDetachedHEAD(ctx context.Context, dir string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD")
+	env := nonInteractiveEnvForContext(ctx, dir)
+	cmd := gitCommand(ctx, dir, env, "symbolic-ref", "-q", "HEAD")
 	cmd.Dir = dir
+	cmd.Env = env
 	winproc.Harden(cmd)
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -1143,8 +1164,9 @@ func ExactRefTarget(ctx context.Context, dir, ref string) (string, bool, error) 
 // `git rev-parse --verify --quiet` so a missing ref is a clean (nil, false)
 // result rather than a loud error.
 func RefExists(ctx context.Context, dir, ref string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
-	cmd.Env = nonInteractiveEnvForContext(ctx, dir)
+	env := nonInteractiveEnvForContext(ctx, dir)
+	cmd := gitCommand(ctx, dir, env, "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	cmd.Env = env
 	winproc.Harden(cmd)
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
