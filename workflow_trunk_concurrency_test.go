@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -45,29 +46,70 @@ func TestTrunkWorkflowsDoNotCancelTheTrunk(t *testing.T) {
 				t.Fatalf("%s workflow's cancel-in-progress = %v (%T), want an expression that is false for a push to the trunk",
 					name, wf.Concurrency.CancelInProgress, wf.Concurrency.CancelInProgress)
 			}
-			for _, tc := range []struct {
-				event string
-				want  bool
-			}{
-				{"push", false},
-				{"pull_request", true},
-			} {
-				got, err := evaluateWorkflowCondition(expression, workflowConditionContext{EventName: tc.event})
+			contexts := []workflowConditionContext{
+				{EventName: "push", Ref: "refs/heads/main", RunID: "101"},
+				{EventName: "push", Ref: "refs/heads/main", RunID: "102"},
+				{EventName: "push", Ref: "refs/heads/main", RunID: "103"},
+				{EventName: "pull_request", Ref: "refs/pull/101/merge", PRNumber: "101", RunID: "104"},
+				{EventName: "pull_request", Ref: "refs/pull/101/merge", PRNumber: "101", RunID: "105"},
+				{EventName: "pull_request", Ref: "refs/pull/102/merge", PRNumber: "102", RunID: "106"},
+				{EventName: "workflow_dispatch", Ref: "refs/heads/main", RunID: "107"},
+				{EventName: "workflow_dispatch", Ref: "refs/heads/main", RunID: "108"},
+			}
+			groups := make([]string, len(contexts))
+			for i, context := range contexts {
+				groups[i], err = evaluateWorkflowGroup(wf.Concurrency.Group, context)
 				if err != nil {
-					t.Fatalf("%s workflow's cancel-in-progress on %s: %v", name, tc.event, err)
+					t.Fatal(err)
 				}
-				if got != tc.want {
-					t.Errorf("%s workflow's cancel-in-progress on %s = %v, want %v", name, tc.event, got, tc.want)
+				cancel, err := evaluateWorkflowCondition(expression, context)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if cancel != (context.EventName == "pull_request") {
+					t.Errorf("event %d (%s): cancel = %t", i, context.EventName, cancel)
 				}
 			}
-			// The group has to keep a pull request's run apart from the
-			// trunk's, or the two cancel each other.
-			group := wf.Concurrency.Group
-			for _, part := range []string{"github.event.pull_request.number", "github.ref"} {
-				if !strings.Contains(group, part) {
-					t.Errorf("%s workflow's concurrency group = %q, want it to name %q so a pull request and a trunk push do not share a group", name, group, part)
+			for i := range groups {
+				for j := 0; j < i; j++ {
+					wantShared := i == 4 && j == 3
+					if shared := strings.EqualFold(groups[i], groups[j]); shared != wantShared {
+						t.Errorf("events %d and %d: groups %q and %q share = %t, want %t", i, j, groups[i], groups[j], shared, wantShared)
+					}
 				}
 			}
 		})
+	}
+}
+
+func evaluateWorkflowGroup(template string, context workflowConditionContext) (string, error) {
+	var result strings.Builder
+	for {
+		prefix, expression, found := strings.Cut(template, "${{")
+		result.WriteString(prefix)
+		if !found {
+			return result.String(), nil
+		}
+		expression, template, found = strings.Cut(expression, "}}")
+		if !found {
+			return "", fmt.Errorf("unterminated workflow group expression")
+		}
+		parts, _, err := splitWorkflowCondition(expression, "||")
+		if err != nil {
+			return "", err
+		}
+		if len(parts) == 0 {
+			parts = []string{expression}
+		}
+		for _, part := range parts {
+			value, err := workflowConditionValue(part, context)
+			if err != nil {
+				return "", err
+			}
+			if value != "" {
+				result.WriteString(value)
+				break
+			}
+		}
 	}
 }

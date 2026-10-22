@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
   # A pull request's newer commit SUPERSEDES its older one, so the older
   # run's result is worthless and the runner time is better spent on the new
   # head.
