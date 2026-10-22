@@ -2820,7 +2820,17 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		trackStartFailure("configure_worktree_identity")
 		return "", fmt.Errorf("configure worktree git identity: %w", err)
 	}
-	if storedPRBaseBranch != "" {
+	// A base branch the operator REQUESTED for this run, and a strict shipping
+	// run's own pinned target, must exist on the remote before the run starts.
+	//
+	// An INHERITED base branch is only the PROSPECTIVE target. When an open PR
+	// exists, its live target takes precedence and the inherited value is
+	// never fetched, so a stale inherited branch must not refuse a valid
+	// continuation here. When no open PR exists the inherited value IS the
+	// target, and the comparison boundary fails closed on it instead: the
+	// Rebase step fetches the recorded base and refuses the run when that
+	// fetch fails, rather than falling back to the repository default.
+	if storedPRBaseBranch != "" && (run.PRBaseBranchRequested || run.Shipping != nil) {
 		if err := steps.VerifyRemoteBranchExists(ctx, wtDir, storedPRBaseBranch); err != nil {
 			trackStartFailure("pr_base_branch_missing")
 			return "", err

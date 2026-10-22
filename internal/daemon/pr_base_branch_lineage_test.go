@@ -466,8 +466,81 @@ func TestALineageBaseBranchThatNoLongerExistsIsStillCarried(t *testing.T) {
 	if successor.PRBaseBranchRequested {
 		t.Fatal("the inherited base branch became a fresh retarget request")
 	}
-	if successor.Status == types.RunCompleted {
-		t.Fatal("a successor whose lineage base branch no longer exists completed")
+	// The inherited base branch is only the PROSPECTIVE target. It must not
+	// refuse the successor at setup: when an open PR exists, its live target
+	// takes precedence and the inherited value is never fetched, so a stale
+	// inherited branch must not stop a valid continuation. Where the inherited
+	// value IS the target - no open PR - the comparison boundary (the Rebase
+	// step's fetch of the base) fails closed there instead.
+	if successor.Status == types.RunFailed && successor.Error != nil && strings.Contains(*successor.Error, "gone/base") {
+		t.Fatalf("the successor was refused at setup for the missing inherited base: %s", *successor.Error)
+	}
+}
+
+// A base branch the operator REQUESTED for this run must still exist on the
+// remote before the run starts, so an explicit request for a branch that is
+// not there is refused at setup instead of failing later. The exemption for
+// an inherited base branch must not weaken this.
+func TestRequestedBaseBranchThatNoLongerExistsIsRefusedAtSetup(t *testing.T) {
+	step := &mockPassStep{name: types.StepReview}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{step}
+	})
+
+	_, firstSHA := lineageRepo(t, p, d, "pr-base-requested-missing-repo")
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	// The caller asks for a base branch that does not exist on the remote.
+	var result ipc.PushReceivedResult
+	err = client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate:         p.RepoDir("pr-base-requested-missing-repo"),
+		Ref:          "refs/heads/epic/feature",
+		Old:          "0000000000000000000000000000000000000000",
+		New:          firstSHA,
+		PRBaseBranch: "gone/base",
+	}, &result)
+	if err != nil && !strings.Contains(err.Error(), "gone/base") {
+		t.Fatal(err)
+	}
+	runs, listErr := d.GetRunsByRepo("pr-base-requested-missing-repo")
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	var requested *db.Run
+	for _, run := range runs {
+		if run.Branch == "epic/feature" {
+			requested = run
+		}
+	}
+	if requested == nil {
+		t.Fatal("the requested run was not recorded")
+	}
+	if requested.PRBaseBranch == nil || *requested.PRBaseBranch != "gone/base" {
+		t.Fatalf("requested PRBaseBranch = %#v, want gone/base", requested.PRBaseBranch)
+	}
+	if !requested.PRBaseBranchRequested {
+		t.Fatal("the fresh --base-branch request lost its recorded authority")
+	}
+	waitForRunTerminalState(t, d, requested.ID)
+	runs, listErr = d.GetRunsByRepo("pr-base-requested-missing-repo")
+	if listErr != nil {
+		t.Fatal(listErr)
+	}
+	for _, run := range runs {
+		if run.ID != requested.ID {
+			continue
+		}
+		if run.Status != types.RunFailed {
+			t.Fatalf("run status = %q, want failed: a requested base branch that does not exist must be refused", run.Status)
+		}
+		if run.Error == nil || !strings.Contains(*run.Error, "gone/base") {
+			t.Fatalf("run error = %#v, want it to name the missing requested base branch", run.Error)
+		}
 	}
 }
 
