@@ -13,22 +13,21 @@ import (
 // processWasCancelled reports whether a process exit is the exit of a
 // subprocess THIS command's context stopped.
 //
-// The context stops its own child with SIGTERM, so a signalled exit by that
-// signal is the cancellation's doing. Any other exit - a child that died of
-// SIGSEGV on its own, or one that was killed by something else - is not.
+// The child is stopped by the context, and the shell package terminates the
+// child's whole PROCESS GROUP when the command returns: SIGTERM first, and
+// SIGKILL if the group has not gone within the grace period. Which of the
+// two arrives is a consequence of that race, and it says nothing about WHO
+// stopped the work. So a signalled exit of ANY signal is the context's
+// doing when the context's own stop was invoked.
 //
-// The signal matters, and not only because it names the killer. The shell
-// package terminates the child's whole PROCESS GROUP when the command
-// returns: SIGTERM first, and SIGKILL if the group has not gone within the
-// grace period. A child killed by that escalation died of the package's
-// cleanup, not of the context's stop, and the difference is the difference
-// between the cancellation's failure and an independent one.
+// An exit that is not signalled is not: a child that exited 1 on its own, or
+// one that died of a fault it raised, kept its own outcome.
 func processWasCancelled(err *exec.ExitError) bool {
 	if err == nil {
 		return false
 	}
 	status, ok := err.Sys().(syscall.WaitStatus)
-	return ok && status.Signaled() && status.Signal() == syscall.SIGTERM
+	return ok && status.Signaled()
 }
 
 // cancelRefusalPrefix is the standard library's report of a REFUSED stop. It
