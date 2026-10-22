@@ -85,12 +85,12 @@ func TestPRReviewConfiguredTrailersAreRemovedFromRecordedFindingDisplays(t *test
 						if strings.Count(markdown, "Build-Agent: private-identifier") != 1 {
 							t.Error("exact configured trailer must survive only inside ordinary prose")
 						}
-						for _, kept := range []string{disclosure, "preserved human co-author: Claude Smith", prose, "Build-Agent: unconfigured-human"} {
+						for _, kept := range []string{disclosure, "co-author (quoted): Claude Smith", prose, "Build-Agent: unconfigured-human"} {
 							if !strings.Contains(markdown, kept) {
 								t.Errorf("ordinary finding content lost: %q", kept)
 							}
 						}
-						if field == "Description" && !strings.Contains(markdown, disclosure+"\n\n"+"preserved human co-author: Claude Smith") {
+						if field == "Description" && !strings.Contains(markdown, disclosure+"\n\n"+"co-author (quoted): Claude Smith") {
 							t.Error("finding paragraph spacing lost")
 						}
 						rounds, err := sctx.DB.GetRoundsByStep(step.ID)
@@ -158,7 +158,7 @@ func TestBuildPipelineSummary_ReviewAttributionDoesNotLeakFromRoundFindings(t *t
 						t.Errorf("Review findings reintroduced attribution %q:\n%s", forbidden, markdown)
 					}
 				}
-				if !strings.Contains(html.UnescapeString(markdown), strings.Replace(foldedHuman, "Co-Authored-By:", "preserved human co-author:", 1)) || !strings.Contains(markdown, disclosure) || !strings.Contains(markdown, "preserved human co-author: Claude") || !strings.Contains(markdown, recorder+"\n\n"+disclosure) {
+				if !strings.Contains(html.UnescapeString(markdown), strings.Replace(foldedHuman, "Co-Authored-By:", "co-author (quoted):", 1)) || !strings.Contains(markdown, disclosure) || !strings.Contains(markdown, "co-author (quoted): Claude") || !strings.Contains(markdown, recorder+"\n\n"+disclosure) {
 					t.Errorf("disclosure or human co-author lost:\n%s", markdown)
 				}
 				if *step.FindingsJSON != final || *rounds["review"][0].FindingsJSON != initial {

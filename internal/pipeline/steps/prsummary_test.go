@@ -1274,12 +1274,12 @@ func TestBuildTestingSummaryFiltersRawEvidenceBeforeRendering(t *testing.T) {
 					t.Errorf("%s compact=%t retained %q: %s", provider, compact, forbidden, body)
 				}
 			}
-			for _, kept := range []string{"Captured output:", "Tested detail", "Artifact caption", "File output", "preserved human co-author: Claude Smith", "claude@example.com", disclosure} {
+			for _, kept := range []string{"Captured output:", "Tested detail", "Artifact caption", "File output", "co-author (quoted): Claude Smith", "claude@example.com", disclosure} {
 				if strings.Count(decoded, kept) == 0 {
 					t.Errorf("%s compact=%t lost %q: %s", provider, compact, kept, body)
 				}
 			}
-			if strings.Count(decoded, "preserved human co-author:") != 4 {
+			if strings.Count(decoded, "co-author (quoted):") != 4 {
 				t.Errorf("%s compact=%t did not present all four raw evidence copies: %s", provider, compact, body)
 			}
 		}

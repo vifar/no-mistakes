@@ -412,8 +412,8 @@ func TestAcceptedGapDigestsBindPresentedHumanEvidence(t *testing.T) {
 	t.Parallel()
 	const reason = "Co-Authored-By: Claude Smith <claude@example.com>"
 	const covered = "Co-Authored-By: Claude <claude@example.com>"
-	const wantReason = "preserved human co-author: Claude Smith <claude@example.com>"
-	const wantCovered = "preserved human co-author: Claude <claude@example.com>"
+	const wantReason = "co-author (quoted): Claude Smith <claude@example.com>"
+	const wantCovered = "co-author (quoted): Claude <claude@example.com>"
 	steps := acceptedGapStepsForTest(t)
 	var gaps db.AcceptedGaps
 	if err := json.Unmarshal([]byte(*steps[1].AcceptedGapsJSON), &gaps); err != nil {

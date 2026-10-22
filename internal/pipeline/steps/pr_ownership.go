@@ -94,11 +94,20 @@ func wrapPRAppendix(appendix string) string {
 // publication fails. That includes suffix text/closing lines added after the
 // generated block. Model-authored copies of ownership markers in evidence are
 // escaped before the actual delimiters are inserted, like foreign attestations.
-func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit int) (prContent, error) {
+func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit int, configuredTrailers ...string) (prContent, error) {
 	before := redactPRContent(prContent{Body: parts.before}).Body
 	after := redactPRContent(prContent{Body: parts.after}).Body
 	appendix = escapePRAppendixMarkers(appendix)
 	appendix = redactPRContent(prContent{Body: appendix}).Body
+	// The owned body is assembled from several owners and a preserved human
+	// co-author can reach any of them, including the evidence a previous
+	// publication left in the body. The body is therefore filtered as one text
+	// block, BEFORE the appendix digest is stamped, so the published copy of a
+	// preserved human co-author is a labelled field and the digest still binds
+	// the bytes that are published.
+	before = prDisplayBody(before, configuredTrailers...)
+	after = prDisplayBody(after, configuredTrailers...)
+	appendix = prDisplayBody(appendix, configuredTrailers...)
 	if !parts.managed && before != "" {
 		before += "\n\n"
 	}
@@ -128,6 +137,14 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 	if !ok {
 		return fmt.Errorf("provider cannot read PR content; author-safe template updates are unsupported")
 	}
+	// The body that is republished is the one a previous publication left
+	// behind, so the configured trailers have to be known here as well: the
+	// published copy of a preserved human co-author becomes a labelled field
+	// and the exactly configured trailers are removed from it.
+	configuredTrailers, err := configuredAttributionTrailers(sctx)
+	if err != nil {
+		return err
+	}
 	current := initial
 	for attempt := 0; attempt < 3; attempt++ {
 		parts, err := parsePROwnedBody(current.Body)
@@ -140,7 +157,7 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		// The author text around the appendix is kept verbatim, so only
 		// references it does not already close are added.
 		authorText := parts.before + "\n" + parts.after
-		content, err := composeOwnedPRContent(parts, title, appendIssuesSection(appendix, issuesSection(sctx, authorText)), bodyLimit)
+		content, err := composeOwnedPRContent(parts, title, appendIssuesSection(appendix, issuesSection(sctx, authorText)), bodyLimit, configuredTrailers...)
 		if err != nil {
 			return err
 		}
@@ -201,6 +218,11 @@ func rebindOwnedPRAttestation(body, head string, steps []*db.StepResult, policy 
 			rebound = true
 		}
 		if rebound {
+			// A restamp republishes the body a previous publication left
+			// behind, so the published copy of a preserved human co-author is
+			// normalised here as well: it becomes a labelled field instead of a
+			// raw trailer line.
+			updated = prDisplayBody(updated, configuredTrailers...)
 			if len(updated) > maxPullRequestBodyBytes {
 				return "", false, fmt.Errorf("restamped PR body exceeds the publication budget")
 			}
@@ -225,6 +247,12 @@ func rebindOwnedPRAttestation(body, head string, steps []*db.StepResult, policy 
 	// appendix is ours, so route it through the same publication redaction before
 	// the integrity guard is recomputed; author text outside it is untouched.
 	appendix = safepath.RedactText(appendix)
+	// The body that is restamped is the one a previous publication left behind,
+	// so it is normalised as one text block before the integrity guard is
+	// stamped: a preserved human co-author is published as a labelled field.
+	parts.before = prDisplayBody(parts.before, configuredTrailers...)
+	parts.after = prDisplayBody(parts.after, configuredTrailers...)
+	appendix = prDisplayBody(appendix, configuredTrailers...)
 	updated := parts.before + wrapPRAppendix(appendix) + parts.after
 	if len(updated) > maxPullRequestBodyBytes {
 		return "", false, fmt.Errorf("restamped PR body exceeds the publication budget")

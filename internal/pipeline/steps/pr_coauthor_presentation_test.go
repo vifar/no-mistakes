@@ -26,7 +26,7 @@ func assertPRHumanCoauthorEvidence(t *testing.T, body string) {
 	if bar.MatchString(body) {
 		t.Error("published evidence still resembles an attribution trailer")
 	}
-	for _, want := range []string{"preserved human co-author: Claude Smith", "claude@example.com", humanCoauthorDisclosure} {
+	for _, want := range []string{"co-author (quoted): Claude Smith", "claude@example.com", humanCoauthorDisclosure} {
 		if !strings.Contains(body, want) {
 			t.Errorf("published evidence lost %q", want)
 		}
@@ -55,7 +55,7 @@ func TestPRHumanCoauthorPresentation_BuildPRContent(t *testing.T) {
 				t.Fatal(err)
 			}
 			assertPRHumanCoauthorEvidence(t, content.Body)
-			if strings.Count(content.Body, "preserved human co-author: Claude Smith") < 3 {
+			if strings.Count(content.Body, "co-author (quoted): Claude Smith") < 3 {
 				t.Error("narrative, Review finding, and captured output must all retain the named human evidence")
 			}
 			rounds, err := sctx.DB.GetRoundsByStep(step.ID)
@@ -81,7 +81,7 @@ func TestPRHumanCoauthorPresentation_RefreshAndBudgets(t *testing.T) {
 					buildPRBody(narrative, "Low risk", evidence, pipelineMD, sctx, provider),
 				} {
 					assertPRHumanCoauthorEvidence(t, body)
-					if !strings.Contains(body, "preserved human co-author: Claude Smith &lt;claude@example.com&gt;") {
+					if !strings.Contains(body, "co-author (quoted): Claude Smith &lt;claude@example.com&gt;") {
 						t.Error("escaped captured evidence was lost or changed beyond its field label")
 					}
 				}
@@ -193,7 +193,7 @@ func TestPRHumanCoauthorPresentation_FoldedEntries(t *testing.T) {
 	t.Parallel()
 	for _, address := range []string{"<claude@example.com>", "&lt;claude@example.com&gt;"} {
 		input := "Co-Authored-By: Claude\n " + address + "\n\n" + humanCoauthorDisclosure
-		want := "preserved human co-author: Claude\n " + address + "\n\n" + humanCoauthorDisclosure
+		want := "co-author (quoted): Claude\n " + address + "\n\n" + humanCoauthorDisclosure
 		if got := prDisplayText(input); got != want {
 			t.Errorf("human evidence = %q, want %q", got, want)
 		}
@@ -213,7 +213,7 @@ func TestPRHumanCoauthorPresentation_WrappedFoldedEntries(t *testing.T) {
 		for _, escaped := range []bool{false, true} {
 			address := "<claude@example.com>"
 			human := wrapper + "Co-Authored-By: Claude" + close + "\n" + wrapper + address + close
-			want := wrapper + "preserved human co-author: Claude" + close + "\n" + wrapper + address + close
+			want := wrapper + "co-author (quoted): Claude" + close + "\n" + wrapper + address + close
 			if escaped {
 				human = html.EscapeString(human)
 				want = html.EscapeString(want)
@@ -293,7 +293,7 @@ func TestPRConfiguredAttributionCaseSensitive(t *testing.T) {
 			t.Errorf("native attribution survived: %q", got)
 		}
 	}
-	if got := prDisplayText(humanCoauthorFixture, "Build-Agent: Worker-A"); got != "preserved human co-author: Claude Smith <claude@example.com>" {
+	if got := prDisplayText(humanCoauthorFixture, "Build-Agent: Worker-A"); got != "co-author (quoted): Claude Smith <claude@example.com>" {
 		t.Errorf("human evidence changed: %q", got)
 	}
 }

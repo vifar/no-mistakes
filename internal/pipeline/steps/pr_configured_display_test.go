@@ -157,7 +157,7 @@ func TestPRConfiguredAttributionEveryDisplay(t *testing.T) {
 								t.Errorf("body %d retained configured attribution %q", i, forbidden)
 							}
 						}
-						for _, kept := range []string{"preserved human co-author: Claude <claude@example.com>", prose, disclosure} {
+						for _, kept := range []string{"co-author (quoted): Claude <claude@example.com>", prose, disclosure} {
 							if !strings.Contains(decoded, kept) {
 								t.Errorf("body %d lost %q", i, kept)
 							}
@@ -213,7 +213,7 @@ func TestPRConfiguredPresentationKeepsProseAndHuman(t *testing.T) {
 		t.Errorf("prose changed: %q", got)
 	}
 	const human = "Co-Authored-By: Claude <claude@example.com>"
-	if got := prDisplayText(human, trailers...); got != "preserved human co-author: Claude <claude@example.com>" {
+	if got := prDisplayText(human, trailers...); got != "co-author (quoted): Claude <claude@example.com>" {
 		t.Errorf("human = %q", got)
 	}
 	for _, trailer := range trailers {
@@ -352,7 +352,7 @@ func TestPRWholeBodyRawDisplayBoundary(t *testing.T) {
 								}
 							}
 						}
-						for _, kept := range []string{"Narrative marker", "Intent marker", "File marker", "Description marker", "Tested marker", "Testing marker", "Scenario marker", "Evidence marker", "Reason marker", "Label marker", "Caption marker", "Capture marker", "Risk marker", "Question marker", "Answer marker", "Withdrawal marker", "Error marker", "Accepted gaps", "preserved human co-author: Claude Smith", "human@example.com", "Disclosure: fixtures were generated with the repository recorder.", "Ordinary prose remains.", "Build-Agent: public-identifier"} {
+						for _, kept := range []string{"Narrative marker", "Intent marker", "File marker", "Description marker", "Tested marker", "Testing marker", "Scenario marker", "Evidence marker", "Reason marker", "Label marker", "Caption marker", "Capture marker", "Risk marker", "Question marker", "Answer marker", "Withdrawal marker", "Error marker", "Accepted gaps", "co-author (quoted): Claude Smith", "human@example.com", "Disclosure: fixtures were generated with the repository recorder.", "Ordinary prose remains.", "Build-Agent: public-identifier"} {
 							if !strings.Contains(decoded, kept) {
 								t.Errorf("published body lost %q", kept)
 							}
