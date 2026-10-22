@@ -636,9 +636,9 @@ func normalizeCoveredPath(value string) string {
 //
 // This is the only way a selected-and-fixed finding leaves the outstanding set
 // besides an explicit operator action (approve/skip/abort). A file the round
-// did not list (without the strict restored-anchor proof), a missing coverage
-// record, a round that re-reports the defect,
-// or a round that reports ANY OTHER finding in the same file all leave the
+// did not list (without a strict restored- or deleted-anchor proof), a missing
+// coverage record, a round that re-reports the defect, or a round that reports
+// ANY OTHER finding in the same file all leave the
 // item in place. Any file-less finding in the current round also blocks
 // verification of every selected item in that round: silence, or
 // a round that did not look, is never resolution, and neither is an ambiguous

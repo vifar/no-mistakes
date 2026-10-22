@@ -85,9 +85,9 @@ func resolveReviewCarry(sctx *StepContext, raw string, pending []string, outcome
 					// change carries the file the finding is about. The deletion
 					// is the resolution, and the branch's own history has to show
 					// the code was removed rather than moved. The two proofs are
-					// independent: a selection made while the file was still
-					// there does not make the restored proof fire later, so the
-					// deletion still has to be provable on its own.
+					// independent: deletion before selection leaves no selected
+					// head where the anchor differed from the target, so the
+					// deletion must be provable without the restored proof.
 					if len(headEntry) == 0 && deletedAnchorNotRelocated(sctx, item, comparison) {
 						resolved[item.ID] = true
 					}
