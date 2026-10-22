@@ -1,0 +1,101 @@
+package steps
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
+
+// TestPRContextGuardAcceptsTheRunsOwnRebaseAdvance covers the case measured on
+// run 01M5HC8ADAB4AP32KNMVJMR42B (vifar/no-mistakes#136): the target branch
+// advanced, so the run rebased - and the post-rebase guard then refused the
+// run's OWN rebase:
+//
+//	check PR context after rebase: PR comparison changed after rebase; start a
+//	new run for the current target and head: run is not eligible for a target
+//	advance rewind: PR identity or local head differs from the recorded
+//	comparison
+//
+// Both facts are needed, exactly as in production: the TARGET advanced (so
+// the comparison changed and the rewind machinery classifies it), and the run
+// rebased (so the local head moved to a commit that is NOT a descendant of
+// the one the receipt names).
+//
+// A rebase REWRITES the head: the same logical changes land on a new base, so
+// the ancestry proof the other steps use cannot apply to it.
+func TestPRContextGuardAcceptsTheRunsOwnRebaseAdvance(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	prURL := "https://github.com/test/repo/pull/42"
+	selection := pipeline.PRTargetSelection{PRURL: prURL, SourceRepo: "test/repo", SourceBranch: "feature", ForgeHeadSHA: head, TargetBranch: "main"}
+	if _, err := guardPRContextWithSelection(sctx, types.StepPR, selection, false); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := sctx.DB.GetRunPRContext(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	preRebaseHead := receipt.LocalHeadSHA
+
+	// The TARGET advances: main moves on. This is what forces the rebase.
+	gitCmd(t, dir, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(dir, "upstream.txt"), []byte("upstream\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "upstream.txt")
+	gitCmd(t, dir, "commit", "-m", "upstream advances")
+	newTarget := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	// The run REBASES onto the new target: a NEW commit, not a descendant of
+	// the one it replaces.
+	gitCmd(t, dir, "checkout", "-b", "rebased", newTarget)
+	if err := os.WriteFile(filepath.Join(dir, "rebased.txt"), []byte("rebased\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "rebased.txt")
+	gitCmd(t, dir, "commit", "-m", "rebase onto main")
+	rebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	if rebasedHead == preRebaseHead {
+		t.Fatal("the rebase did not change the head")
+	}
+	if isAncestor(t.Context(), dir, preRebaseHead, rebasedHead) {
+		t.Fatal("the rebased head is a descendant; the fixture must model a REWRITE")
+	}
+	// The rebase leaves the worktree on the rebased head; the guard reads the
+	// worktree's own head to build the candidate comparison.
+	gitCmd(t, dir, "checkout", "-B", "feature", rebasedHead)
+
+	// The run's own record: it is now working on the rebased head, and the
+	// target it compared against is the advanced one.
+	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, rebasedHead); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run.HeadSHA = rebasedHead
+
+	// The post-rebase guard: the Rebase step completed, so the receipt must
+	// follow the run's own rebase.
+	sctx.Config.Rebase.MaxTargetAdvanceRewinds = 3
+	sctx.PRContextAfterStep = true
+	sctx.PRContextRebaseCompleted = true
+	decision, err := guardPRContextWithSelection(sctx, types.StepRebase, selection, false)
+	if err != nil {
+		t.Fatalf("the guard refused the run's own rebase: %v", err)
+	}
+	// The target advanced, so the run rewinds to Rebase - the same outcome a
+	// target advance without a rebase produces. What must NOT happen is the
+	// refusal that told the operator to start a new run.
+	if decision.RestartFrom != types.StepRebase {
+		t.Fatalf("the run's own rebase asked for a restart from %q, want %q", decision.RestartFrom, types.StepRebase)
+	}
+	advanced, err := sctx.DB.GetRunPRContext(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if advanced.LocalHeadSHA != rebasedHead {
+		t.Fatalf("the receipt did not follow the run's own rebase: %+v", advanced)
+	}
+}
