@@ -24,16 +24,59 @@ import (
 // step asked for.
 func TestRunWithEnvUsesTheEnvironmentItIsGiven(t *testing.T) {
 	dir := t.TempDir()
-	binDir := t.TempDir()
-	writeEnvironmentGit(t, binDir)
+	t.Chdir(dir)
+	binDir := filepath.Join(dir, "bin")
+	if err := os.Mkdir(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir("repo", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(binDir, "git")
+	script := "#!/bin/sh\nprintf 'the-environment-git'\n"
+	if runtime.GOOS == "windows" {
+		fake += ".exe"
+		source := filepath.Join(dir, "main.go")
+		if err := os.WriteFile(source, []byte("package main\nimport \"fmt\"\nfunc main() { fmt.Print(\"the-environment-git\") }\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("go", "build", "-o", fake, source).CombinedOutput(); err != nil {
+			t.Fatalf("build git fixture: %v\n%s", err, out)
+		}
+	} else {
+		if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-	out, err := RunWithEnv(context.Background(), dir, []string{"PATH=" + binDir}, "version")
-	if err != nil {
-		t.Fatalf("git with the given environment: %v", err)
+	for _, tc := range []struct {
+		name, workDir, path string
+	}{
+		{"absolute", dir, binDir},
+		{"current", ".", "bin"},
+		{"relative", "repo", filepath.Join("..", "bin")},
+		{"empty", "", "bin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := RunWithEnv(context.Background(), tc.workDir, []string{"PATH=" + tc.path}, "version")
+			if err != nil {
+				t.Fatalf("git with the given environment: %v", err)
+			}
+			if out != "the-environment-git" {
+				t.Fatalf("the command ran a git the given environment does not name: %q", out)
+			}
+		})
 	}
-	if !strings.Contains(out, "the-environment-git") {
-		t.Fatalf("the command ran a git the given environment does not name: %q", out)
-	}
+	t.Run("bare", func(t *testing.T) {
+		t.Chdir(binDir)
+		out, err := RunWithEnv(context.Background(), ".", []string{"PATH=."}, "version")
+		if err != nil {
+			t.Fatalf("git with the current-directory PATH: %v", err)
+		}
+		if out != "the-environment-git" {
+			t.Fatalf("the command ran a git the given environment does not name: %q", out)
+		}
+	})
 
 	// An environment with no PATH of its own keeps the process's PATH, so
 	// every caller that does not choose one is unaffected.
