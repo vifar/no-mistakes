@@ -74,14 +74,16 @@ func configKeyAbsent(err error) bool {
 // other worktree of that repository - which is how a registered checkout ends
 // up with core.bare=true (issue #183).
 func worktreeConfigEnabled(ctx context.Context, dir string) (bool, error) {
-	value, found, err := sharedConfigValue(ctx, dir, "extensions.worktreeConfig")
+	path, err := commonConfigFile(ctx, dir)
 	if err != nil {
 		return false, err
 	}
-	if !found {
-		return false, nil
+	// Let Git interpret every valid boolean spelling in the shared file.
+	raw, err := runInDirWithEnvRaw(ctx, dir, nil, "config", "--file", path, "--no-includes", "--type=bool", "--get", "--default=false", "extensions.worktreeConfig")
+	if err != nil {
+		return false, fmt.Errorf("read extensions.worktreeConfig from %s: %w", path, err)
 	}
-	return strings.EqualFold(strings.TrimSpace(value), "true"), nil
+	return strings.TrimSpace(string(raw)) == "true", nil
 }
 
 // isManagedGateRepository reports whether the repository that contains dir is

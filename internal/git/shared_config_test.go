@@ -134,6 +134,37 @@ func TestIssue183InheritedRepositoryEnvironmentCannotRedirectACommand(t *testing
 	}
 }
 
+func TestIssue183SetWorktreeConfigUsesGitBooleanSemantics(t *testing.T) {
+	// Git's boolean contract enables worktree scope for yes, on, and 1.
+	// A successful write must leave the shared file byte-identical and put
+	// the requested value in config.worktree, regardless of that spelling.
+	for _, value := range []string{"yes", "on", "1"} {
+		t.Run(value, func(t *testing.T) {
+			bare, wt := issue131Gate(t)
+			config := filepath.Join(bare, "config")
+			runGitOrFatal(t, bare, "config", "--file", config, "extensions.worktreeConfig", value)
+			before, err := os.ReadFile(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := SetWorktreeConfig(context.Background(), wt, "user.name", "Gate Identity"); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(before) {
+				t.Fatal("per-worktree write changed the shared configuration")
+			}
+			perWorktree := filepath.Join(bare, "worktrees", "run", "config.worktree")
+			if got := strings.TrimSpace(runGitOrFatal(t, wt, "config", "--file", perWorktree, "--get", "user.name")); got != "Gate Identity" {
+				t.Fatalf("per-worktree identity = %q, want Gate Identity", got)
+			}
+		})
+	}
+}
+
 // The gate is the one repository whose shared configuration no-mistakes owns,
 // so a per-worktree write there still lands in the gate's per-worktree
 // configuration and the gate's shared configuration stays untouched.
