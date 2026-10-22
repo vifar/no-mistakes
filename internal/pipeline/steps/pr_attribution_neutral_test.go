@@ -33,6 +33,7 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 		{"generated with codex", "Generated with Codex"},
 		{"generated with inline code", "Generated with `Codex`"},
 		{"generated with double inline code", "Generated with ``Codex``"},
+		{"co-authored inline bot name", "Co-Authored-By: `Claude` <noreply@anthropic.com>"},
 		{"co-authored inline code", "Co-Authored-By: `Codex` <bot@example.invalid>"},
 		{"co-authored double inline code", "Co-Authored-By: ``Codex`` <code@example.com>"},
 		{"model trailer", "Co-Authored-By: gpt-5.5 <model@example.com>"},
@@ -90,6 +91,14 @@ func TestNeutralizeAIAttributionKeepsAHumanTrailer(t *testing.T) {
 		// not turn a person's address into the AI's.
 		"Co-Authored-By: Claude <no_reply@anthropic.com>",
 		"Co-Authored-By: Claude <human@example.com>",
+		"Co-Authored-By: Claude <no_reply@anthropic.com>",
+		"Co-Authored-By: Claude<no_reply@anthropic.com>",
+		"Co-Authored-By: Claude <no*reply@anthropic.com>",
+		"Co-Authored-By: Claude <no~reply@anthropic.com>",
+		"Co-Authored-By: Claude <no`reply@anthropic.com>",
+		"Co-Authored-By: **Claude** <no_reply@anthropic.com>",
+		"Co-Authored-By: `Claude` <no`reply@anthropic.com>",
+		"Assisted-by: Claude <no_reply@anthropic.com>",
 		"Assisted-by: Claude Smith <human@example.com>",
 		"We tested fixtures generated with Codex.",
 	} {
@@ -126,7 +135,7 @@ func TestPRSummaryFiltersAttributionBeforeRendering(t *testing.T) {
 					t.Run(string(provider)+"/"+source+"/"+wrapper+"/"+map[bool]string{false: "AI", true: "human"}[human], func(t *testing.T) {
 						line := "Co-Authored-By: Codex <code@example.com>"
 						if human {
-							line = "Co-Authored-By: Claude Smith <human@example.com>"
+							line = "Co-Authored-By: Claude <no_reply@anthropic.com>"
 						}
 						line = wrapper + line + wrapper
 						findings := types.Findings{}
@@ -189,7 +198,7 @@ func TestPRSummaryFiltersAttributionBeforeRendering(t *testing.T) {
 						}
 						for _, output := range outputs {
 							if human {
-								if !strings.Contains(html.UnescapeString(output), "Co-Authored-By: Claude Smith <human@example.com>") {
+								if !strings.Contains(html.UnescapeString(output), "Co-Authored-By: Claude <no_reply@anthropic.com>") {
 									t.Fatalf("human attribution lost from published summary:\n%s", output)
 								}
 							} else if strings.Contains(output, "Codex") || !strings.Contains(output, "AI attribution line neutralized") {
