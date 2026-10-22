@@ -188,9 +188,16 @@ func newAxiRunCmd() *cobra.Command {
 			"Before driving, AXI emits a receipt with the durable run ID, created or\n" +
 			"reused disposition, full submitted head, and a digest of the exact\n" +
 			"persisted intent; raw intent is never included.\n\n" +
-			"--base-branch targets an integration branch other than the repository default\n" +
-			"for this run only (for example an epic branch). It overrides pr.base_branch\n" +
-			"in repo config and is persisted on the run for review, rebase, PR, and CI steps.\n\n" +
+			"--base-branch records an integration branch other than the repository\n" +
+			"default (for example an epic branch). It overrides pr.base_branch in repo\n" +
+			"config and is persisted on the run for review, rebase, PR, and CI steps.\n" +
+			"The request belongs to the run that carries it, and only that run may use\n" +
+			"it to retarget its own open pull request. A run that continues the same\n" +
+			"branch's lineage inherits the recorded base branch, so the base a review\n" +
+			"is about is not silently re-scoped to the repository default; a fresh\n" +
+			"--base-branch request on a later run wins for that run. Strict shipping\n" +
+			"runs neither inherit nor record a lineage base branch: they resolve their\n" +
+			"base from their own pinned target.\n\n" +
 			"--no-publish-intent keeps the generated public Intent section out of the\n" +
 			"PR body for this run. It is tighten-only: it can never publish intent on a\n" +
 			"repository whose trusted pr.publish_intent disabled it. The full intent\n" +
@@ -275,7 +282,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&intentFile, "intent-file", "", "read intent from this file, relative to the current directory (exclusive with --intent)")
 	cmd.Flags().StringVar(&launchNonce, "launch-nonce", "", "opaque nonce for a daemon-bound pre-drive launch receipt")
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
-	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
+	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against (overrides pr.base_branch; a run continuing that branch's lineage inherits the recorded base branch)")
 	cmd.Flags().StringVar(&externalCIOwner, "external-ci-owner", "", "explicit external CI owner (controller-ship-pr); requires --skip=push,pr,ci")
 	cmd.Flags().BoolVar(&noPublishIntent, "no-publish-intent", false, "keep the generated Intent section out of the PR body for this run (tighten-only; full intent still reaches every step prompt except PR drafting)")
 	cmd.Flags().StringArrayVar(&closesIssues, "closes", nil, "issue this PR closes when merged; repeat for multiple issues (42, owner/repo#42, or a nested GitLab project path)")
