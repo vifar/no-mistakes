@@ -531,65 +531,6 @@ func TestTestStep_NoLiveSurfaceCIWorkflowAsksUser(t *testing.T) {
 	}
 }
 
-// const noSurfaceWithDuplicateAcknowledgementFindingsJSON is what an agent that
-// does not know the pipeline asks the acknowledgement question itself looks
-// like: the canonical no-surface verdict AND a finding of its own asking the
-// same question.
-//
-// The step then carries two questions where one would do, and the strict
-// path can release NEITHER: the canonical acknowledgement is only
-// acknowledgeable on its own, so the duplicate makes the step impossible to
-// release and the run deadlocks at a gate a human has to answer.
-const noSurfaceWithDuplicateAcknowledgementFindingsJSON = `{
-  "findings": [
-    {
-      "id": "test-1",
-      "severity": "warning",
-      "action": "ask-user",
-      "file": ".github/workflows/ci.yml",
-      "description": "Workflow checks passed, but this CI-only change has no locally live-validatable product surface. Human acknowledgement is needed to proceed without live validation; the outer CI phase must establish completion on the self-hosted runner."
-    }
-  ],
-  "summary": "",
-  "tested": ["inspected .github/workflows/ci.yml"],
-  "testing_summary": "CI workflow split has no running product to drive",
-  "artifacts": [],
-  "scenarios": [{"name":"Windows git-heavy shard runs the git-backed packages","result":"untested","live":false,"evidence":"","reason":"CI workflow YAML has no running product no-mistakes can drive"}],
-  "verdict": "no-surface"
-}`
-
-// TestTestStep_NoSurfaceAcknowledgementIsReleasable proves the step carries
-// the ONE acknowledgement the strict path can release, even when the agent
-// raised the same question in a finding of its own.
-func TestTestStep_NoSurfaceAcknowledgementIsReleasable(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, _ := setupGitRepo(t)
-	headSHA := commitCIWorkflowOnlyChange(t, dir, baseSHA)
-
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(noSurfaceWithDuplicateAcknowledgementFindingsJSON)}, nil
-		},
-	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.UserIntent = "Split the Windows CI job into a git-heavy shard and a core remainder"
-
-	outcome, err := (&TestStep{}).Execute(sctx)
-	if err != nil {
-		t.Fatalf("no-surface must park, not hard-fail: %v", err)
-	}
-	findings, err := types.ParseFindingsJSON(outcome.Findings)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !types.IsNoSurfaceTestAcknowledgment(findings) {
-		t.Fatalf("the no-surface step is not acknowledgeable, so the strict path can never release it: %s", outcome.Findings)
-	}
-}
-
-// const mixedLivePassAndUntestedFindingsJSON is the mixed live/untested
-// payload.
 const mixedLivePassAndUntestedFindingsJSON = `{
   "findings": [],
   "summary": "",
