@@ -244,3 +244,45 @@ func TestResolveEmptyEntriesUseWorkDirInPathOrder(t *testing.T) {
 		}
 	}
 }
+
+// An execute bit that belongs to somebody else is not an execute bit for us.
+// A file of ours with mode 0641 carries the OTHER user's execute bit, and
+// launching it fails with "permission denied", so the resolver has to skip it
+// and keep looking.
+func TestResolveSkipsAFileTheCurrentUserCannotRun(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the executable contract differs on Windows")
+	}
+	first := t.TempDir()
+	second := t.TempDir()
+	blocked := filepath.Join(first, "git")
+	if err := os.WriteFile(blocked, []byte("x"), 0o641); err != nil {
+		t.Fatal(err)
+	}
+	usable := filepath.Join(second, "git")
+	if err := os.WriteFile(usable, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// The mode says "somebody may run this"; the access check says whether
+	// WE may. The owner of the first file cannot run it.
+	if err := os.Chmod(blocked, 0o641); err != nil {
+		t.Fatal(err)
+	}
+	path, _, found := Resolve([]string{"PATH=" + first + string(os.PathListSeparator) + second}, "git", second)
+	if !found {
+		t.Fatal("the resolver found no git at all")
+	}
+	// The paths are compared by identity: a temporary directory is reached
+	// through a symlink on some systems, and the FILE is what matters.
+	resolvedInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usableInfo, err := os.Stat(usable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(resolvedInfo, usableInfo) {
+		t.Fatalf("resolved %q, want the candidate this user may run (%q)", path, usable)
+	}
+}

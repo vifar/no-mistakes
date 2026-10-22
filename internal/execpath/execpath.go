@@ -86,7 +86,12 @@ func UsableForOS(goos, path string, fi os.FileInfo) bool {
 	if goos == "windows" {
 		return filepath.Ext(path) != ""
 	}
-	return fi.Mode().Perm()&0o111 != 0
+	// An execute bit that belongs to somebody else is not an execute bit for
+	// us: a file of ours with mode 0641 carries the OTHER user's execute
+	// bit, and launching it fails with "permission denied". The mode says
+	// "somebody may run this"; the access check says whether WE may, and a
+	// candidate we may not run is skipped so the search continues.
+	return fi.Mode().Perm()&0o111 != 0 && executableByCurrentUser(path)
 }
 
 // Resolve returns the program named name in the environment's PATH.
