@@ -18,16 +18,38 @@ var reviewGeneratedWith = regexp.MustCompile(`(?i)^(?:🤖[ \t]*)?generated[ \t]
 func reviewAttributionLine(line string) (string, bool) {
 	content := strings.TrimLeft(line, " \t\r")
 	indented, bullet := content != line, false
-	for {
+	content = strings.TrimRight(content, " \t\r")
+	for len(content) > 0 {
 		bullet = bullet || reviewMarkdownList.MatchString(content)
-		unwrapped := strings.TrimLeft(content, ">\"'`*-")
-		if unwrapped == content {
-			break
+		var unwrapped string
+		switch content[0] {
+		case '>':
+			unwrapped = content[1:]
+		case '-', '+':
+			if !reviewMarkdownList.MatchString(content) {
+				return content, indented && !bullet
+			}
+			unwrapped = content[1:]
+		case '"', '\'', '`', '*':
+			n := 1
+			for n < len(content) && content[n] == content[0] {
+				n++
+			}
+			if content[0] == '*' && reviewMarkdownList.MatchString(content) {
+				unwrapped = content[1:]
+			} else if len(content) >= 2*n && strings.HasSuffix(content, content[:n]) {
+				unwrapped = content[n : len(content)-n]
+			} else {
+				return content, indented && !bullet
+			}
+		default:
+			return content, indented && !bullet
 		}
 		content = strings.TrimLeft(unwrapped, " \t\r")
 		indented = indented || content != unwrapped
+		content = strings.TrimRight(content, " \t\r")
 	}
-	return strings.TrimRight(content, " \t\r\"'`*-"), indented && !bullet
+	return content, indented && !bullet
 }
 
 func reviewAttributionStart(line string, configuredTrailers []string) bool {
@@ -74,33 +96,50 @@ func reviewConfiguredAttributionMatches(line string, configuredTrailers []string
 	return false
 }
 
-func reviewAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
-	end = start + 1
-	unfolded, _ = reviewAttributionLine(lines[start])
-	if !reviewAttributionStart(unfolded, configuredTrailers) {
-		return end, unfolded, false, false
+func reviewAttributionContinuation(first, following string, configuredTrailers []string) (string, bool) {
+	next, continuation := reviewAttributionLine(following)
+	if !continuation || next == "" || reviewTrailerKey.MatchString(next) || reviewConfiguredAttributionMatches(first, configuredTrailers) {
+		return first, false
 	}
-	key, value, hasKey := strings.Cut(unfolded, ":")
+	key, value, hasKey := strings.Cut(first, ":")
 	addressForm := false
 	switch strings.ToLower(strings.TrimSpace(key)) {
 	case "co-authored-by", "assisted-by", "signed-off-by", "reviewed-by", "co-committed-by":
-		addressForm = hasKey && strings.TrimSpace(value) != "" && !strings.ContainsAny(value, "<>@") && !reviewAttributionAddressComplete(unfolded)
+		addressForm = hasKey && strings.TrimSpace(value) != "" && !strings.ContainsAny(value, "<>@") && !reviewAttributionAddressComplete(first)
 	}
 	if strings.EqualFold(strings.TrimSpace(key), "Assisted-by") && strings.Contains(value, ":") {
 		addressForm = false
 	}
-	if end < len(lines) && !reviewConfiguredAttributionMatches(unfolded, configuredTrailers) {
-		next, continuation := reviewAttributionLine(lines[end])
-		_, addressErr := mail.ParseAddress(next)
-		emptyGenerated := reviewGeneratedWith.MatchString(unfolded) && strings.HasSuffix(strings.ToLower(unfolded), "with")
-		if continuation && next != "" && !reviewTrailerKey.MatchString(next) &&
-			((addressForm && addressErr == nil) || (emptyGenerated && git.IsAIAttributionTrailer(unfolded+" "+next))) {
-			unfolded += " " + next
-			end++
+	_, addressErr := mail.ParseAddress(next)
+	emptyGenerated := reviewGeneratedWith.MatchString(first) && strings.HasSuffix(strings.ToLower(first), "with")
+	joined := first + " " + next
+	return joined, (addressForm && addressErr == nil) || (emptyGenerated && git.IsAIAttributionTrailer(joined))
+}
+
+func reviewAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
+	end = start + 1
+	unfolded, _ = reviewAttributionLine(lines[start])
+	if end < len(lines) {
+		paired, _ := reviewAttributionLine(lines[start] + "\n" + lines[end])
+		first, following, hasPair := strings.Cut(paired, "\n")
+		if !reviewAttributionStart(unfolded, configuredTrailers) && hasPair && first != unfolded && reviewAttributionStart(first, configuredTrailers) {
+			if joined, ok := reviewAttributionContinuation(first, following, configuredTrailers); ok {
+				unfolded = joined
+				end++
+			}
+		}
+		if end == start+1 && reviewAttributionStart(unfolded, configuredTrailers) {
+			if joined, ok := reviewAttributionContinuation(unfolded, lines[end], configuredTrailers); ok {
+				unfolded = joined
+				end++
+			}
 		}
 	}
+	if !reviewAttributionStart(unfolded, configuredTrailers) {
+		return end, unfolded, false, false
+	}
 	ai = git.IsAIAttributionTrailer(unfolded) || reviewConfiguredAttributionMatches(unfolded, configuredTrailers)
-	_, value, hasKey = strings.Cut(unfolded, ":")
+	_, value, hasKey := strings.Cut(unfolded, ":")
 	entry = ai || (hasKey && strings.TrimSpace(value) != "" && !reviewGeneratedWith.MatchString(unfolded))
 	return end, unfolded, entry, ai
 }

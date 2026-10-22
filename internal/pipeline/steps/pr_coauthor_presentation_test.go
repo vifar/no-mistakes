@@ -208,11 +208,12 @@ func TestPRHumanCoauthorPresentation_FoldedEntries(t *testing.T) {
 
 func TestPRHumanCoauthorPresentation_WrappedFoldedEntries(t *testing.T) {
 	t.Parallel()
-	for _, wrapper := range []string{"> ", "** ", "` ", "\" ", "' "} {
+	for _, wrappers := range [][2]string{{"> ", ""}, {"** ", "**"}, {"` ", "`"}, {"\" ", "\""}, {"' ", "'"}} {
+		wrapper, close := wrappers[0], wrappers[1]
 		for _, escaped := range []bool{false, true} {
 			address := "<claude@example.com>"
-			human := wrapper + "Co-Authored-By: Claude\n" + wrapper + address
-			want := wrapper + "preserved human co-author: Claude\n" + wrapper + address
+			human := wrapper + "Co-Authored-By: Claude" + close + "\n" + wrapper + address + close
+			want := wrapper + "preserved human co-author: Claude" + close + "\n" + wrapper + address + close
 			if escaped {
 				human = html.EscapeString(human)
 				want = html.EscapeString(want)
