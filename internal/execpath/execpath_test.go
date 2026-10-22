@@ -98,7 +98,10 @@ func TestResolveFindsTheProgram(t *testing.T) {
 	if err := os.WriteFile(plain, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, found := Resolve([]string{"PATH=" + filepath.Join(dir, "empty")}, "not-executable", dir); found {
+	// The fixture's ACTUAL directory is searched, so the executable
+	// permission is the oracle: a resolver that accepted every
+	// non-directory file would find it and fail this assertion.
+	if _, _, found := Resolve([]string{"PATH=" + dir}, "not-executable", dir); found {
 		t.Fatal("a file without the executable bit was resolved")
 	}
 }

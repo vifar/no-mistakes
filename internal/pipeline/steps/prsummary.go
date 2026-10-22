@@ -1709,12 +1709,47 @@ func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 func neutralizeAIAttribution(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		text := strings.Trim(strings.TrimSpace(html.UnescapeString(line)), "`")
-		if git.IsAIAttributionTrailer(text) {
+		if git.IsAIAttributionTrailer(unwrapRenderedText(html.UnescapeString(line))) {
 			lines[i] = "<no-mistakes: AI attribution line neutralized>"
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// unwrapRenderedText removes the wrappers a rendered detail carries around its
+// text, so the classifier sees the text a reader sees.
+//
+// A detail is rendered as a backtick-wrapped bullet, as Markdown emphasis, or
+// inside an HTML <code> element, and the wrappers combine. The classifier is
+// a COMPLETE-LINE classifier: it decides about a whole line, so a line that
+// still wears a wrapper is a line it rejects, and the attribution survives
+// publication.
+//
+// Only the wrappers are removed, and only from the outside: the text under
+// them is what the classifier has to judge, and a trailer that names a PERSON
+// is still a trailer that names a person.
+func unwrapRenderedText(text string) string {
+	for {
+		before := text
+		text = strings.TrimSpace(text)
+		if strings.HasPrefix(text, "<code>") && strings.HasSuffix(text, "</code>") {
+			text = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(text, "<code>"), "</code>"))
+		}
+		text = strings.TrimSpace(text)
+		text = strings.Trim(text, "`")
+		text = strings.TrimSpace(text)
+		switch {
+		case len(text) >= 4 && strings.HasPrefix(text, "**") && strings.HasSuffix(text, "**"):
+			text = strings.TrimSpace(text[2 : len(text)-2])
+		case len(text) >= 2 && strings.HasPrefix(text, "*") && strings.HasSuffix(text, "*"):
+			text = strings.TrimSpace(text[1 : len(text)-1])
+		case len(text) >= 2 && strings.HasPrefix(text, "_") && strings.HasSuffix(text, "_"):
+			text = strings.TrimSpace(text[1 : len(text)-1])
+		}
+		if text == before {
+			return text
+		}
+	}
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {

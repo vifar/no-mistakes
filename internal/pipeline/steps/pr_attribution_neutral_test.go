@@ -37,7 +37,16 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 		{"robot emoji", "\U0001F916 Generated with Codex"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, line := range []string{tc.line, html.EscapeString(tc.line), "`" + tc.line + "`", "`` " + html.EscapeString(tc.line) + " ``"} {
+			for _, line := range []string{
+				tc.line,
+				html.EscapeString(tc.line),
+				"`" + tc.line + "`",
+				"`` " + html.EscapeString(tc.line) + " ``",
+				"**" + tc.line + "**",
+				"<code>" + tc.line + "</code>",
+				"**`" + tc.line + "`**",
+				"* " + tc.line + " *",
+			} {
 				body := "## Testing\n\n```text\n" + line + "\n```\n"
 				got := neutralizeAttestationMarkers(scm.ProviderGitHub, body)
 				want := "## Testing\n\n```text\n<no-mistakes: AI attribution line neutralized>\n```\n"
