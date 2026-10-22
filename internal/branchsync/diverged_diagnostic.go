@@ -55,7 +55,8 @@ type divergenceDiagnostic struct {
 	PreservedLabel string
 	// MergeBase is the common ancestor the three-way merge proof used.
 	MergeBase string
-	// Ancestry reports what the Git ancestry check established.
+	// Ancestry and ReverseAncestry report whether the local head is an
+	// ancestor of the preserved head and vice versa, respectively.
 	Ancestry        checkOutcome
 	ReverseAncestry checkOutcome
 	// MergeProof reports what the executable three-way merge proof
@@ -165,8 +166,8 @@ func (d divergenceDiagnostic) divergenceDescription() string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "the refusal compared the local head %s with the %s %s", d.LocalHead, preservedLabel, d.PreservedHead)
 	if d.Ancestry == checkUndetermined || d.ReverseAncestry == checkUndetermined || d.MergeProof == checkUndetermined {
-		// One of the two checks established nothing, so this refusal may
-		// not say both of them ran.
+		// At least one check established nothing, so this refusal may
+		// not say all of them ran.
 		b.WriteString("; the only tests it used were Git ancestry (git merge-base --is-ancestor) and the executable three-way merge proof (git merge-tree --write-tree --merge-base)")
 	} else {
 		b.WriteString("; the only tests it ran were Git ancestry (git merge-base --is-ancestor) and the executable three-way merge proof (git merge-tree --write-tree --merge-base)")
@@ -336,6 +337,11 @@ func patchIdentityDiagnostic(ctx context.Context, dir, local, preserved string) 
 	// measurement does not, so a file with such a filter would be measured
 	// as its displayed content on one side and as its stored content on the
 	// other - two identities for one change, and another false negative.
+	//
+	// Both producers also disable paging and color and force short, visible
+	// submodule diffs. Presentation settings must not hide a gitlink change
+	// or replace a parseable patch with a summary or colored headers, which
+	// patch-id could silently accept as producing no identities.
 	stream, err := git.Run(ctx, dir, "--no-pager", "log", "--no-color", "--submodule=short", "--ignore-submodules=none", "--format=commit %H", "-p", "-M", "--no-textconv", "--no-merges", "--no-ext-diff",
 		"--max-count="+strconv.Itoa(divergencePatchScanLimit), preserved, "^"+local)
 	if err != nil {
