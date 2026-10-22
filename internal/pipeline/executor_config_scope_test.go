@@ -2,19 +2,37 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func TestIssue131FailsTheStepThatChangesSharedConfig(t *testing.T) {
+	testSharedConfigWriterFails(t, false, false)
+}
+
+func TestIssue131SharedConfigViolationCannotBecomeProtectedPathApproval(t *testing.T) {
+	for _, fixing := range []bool{false, true} {
+		name := "initial"
+		if fixing {
+			name = "fix-round"
+		}
+		t.Run(name, func(t *testing.T) { testSharedConfigWriterFails(t, true, fixing) })
+	}
+}
+
+func testSharedConfigWriterFails(t *testing.T, protected, fixing bool) {
 	database, p, run, repo := setupTest(t)
 	seed := completionFixture(t, database, run)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	bare := p.RepoDir(repo.ID)
 	if err := git.InitBare(ctx, bare); err != nil {
 		t.Fatal(err)
@@ -34,8 +52,20 @@ func TestIssue131FailsTheStepThatChangesSharedConfig(t *testing.T) {
 	}
 	path := filepath.Join(bare, "config")
 	var later bool
-	executor := NewExecutor(database, p, nil, nil, []Step{
-		&adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+	var cfg *config.Config
+	if fixing {
+		cfg = &config.Config{AutoFix: config.AutoFix{Review: 1}}
+	}
+	executor := NewExecutor(database, p, cfg, nil, []Step{
+		&adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+			if fixing && !sctx.Fixing {
+				return &StepOutcome{AutoFixable: true, Findings: `{"findings":[{"id":"repair","severity":"error","description":"repair needed","action":"auto-fix"}]}`}, nil
+			}
+			if protected {
+				if err := os.WriteFile(filepath.Join(wt, "package.lock"), []byte("protected repair\n"), 0o600); err != nil {
+					return nil, err
+				}
+			}
 			// Simulate a tool bypassing git's config lock with a direct file write.
 			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
 			if err != nil {
@@ -46,13 +76,31 @@ func TestIssue131FailsTheStepThatChangesSharedConfig(t *testing.T) {
 			if err != nil {
 				return nil, err
 			}
-			return &StepOutcome{}, closeErr
+			if closeErr != nil {
+				return nil, closeErr
+			}
+			if protected {
+				return nil, fmt.Errorf("stage repair: %w", &ProtectedPathError{Path: "package.lock", Rule: "*.lock"})
+			}
+			return &StepOutcome{}, nil
 		}},
 		&adaptiveCallStep{name: types.StepDocument, fn: func(*StepContext) (*StepOutcome, error) { later = true; return &StepOutcome{}, nil }},
 	}, nil)
 	err := executor.Execute(ctx, run, repo, wt)
 	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "core.bare") {
 		t.Fatalf("want shared file/key failure, got %v", err)
+	}
+	stored, dbErr := database.GetRun(run.ID)
+	if dbErr != nil || stored == nil || stored.Status != types.RunFailed {
+		t.Fatalf("writer run did not fail: %+v, %v", stored, dbErr)
+	}
+	if protected {
+		if !strings.Contains(err.Error(), "dirty protected path") {
+			t.Fatalf("lost protected-path error: %v", err)
+		}
+		if data, readErr := os.ReadFile(filepath.Join(wt, "package.lock")); readErr != nil || string(data) != "protected repair\n" {
+			t.Fatalf("protected edit lost: %q, %v", data, readErr)
+		}
 	}
 	if later {
 		t.Fatal("later Document ran after Review polluted config")
