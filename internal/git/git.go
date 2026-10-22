@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -208,8 +209,64 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 // even when the command fails, so a caller can read a result git reports on
 // stdout and signals through the exit code. The plain raw runner drops stdout
 // on failure, because most callers treat a failed command as no output at all.
+// gitBinaryForEnv resolves the git binary from the PATH in the environment
+// the command is GIVEN.
+//
+// exec.CommandContext resolves a bare name against the PROCESS's PATH, so an
+// environment that carries its own PATH - the step's, with its scoped
+// credentials and its injected binaries - is honoured for the child's
+// environment but IGNORED for the binary lookup. That is the wrong way round:
+// the environment the caller chose is the environment the command has to run
+// in, and a step's contract is that every git command it runs uses the step's
+// environment.
+//
+// An environment with no PATH of its own keeps the process's PATH, which is
+// what every caller that does not choose one expects.
+func gitBinaryForEnv(extraEnv []string) (string, bool) {
+	path, ok := envValueForOS(extraEnv, "PATH", runtime.GOOS)
+	if !ok || path == "" {
+		return "git", true
+	}
+	names := []string{"git"}
+	if runtime.GOOS == "windows" {
+		names = []string{"git.exe", "git.cmd", "git.bat", "git"}
+	}
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			continue
+		}
+		for _, name := range names {
+			candidate := filepath.Join(dir, name)
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+				return candidate, true
+			}
+		}
+	}
+	// The environment's PATH has no git in it. Say so rather than quietly
+	// running a different binary than the caller asked for.
+	return "", false
+}
+
+// envValueForOS reads one KEY=VALUE entry out of an environment list.
+func envValueForOS(env []string, key, goos string) (string, bool) {
+	prefix := key + "="
+	for _, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			return strings.TrimPrefix(entry, prefix), true
+		}
+		if goos == "windows" && len(entry) >= len(prefix) && strings.EqualFold(entry[:len(prefix)], prefix) {
+			return entry[len(prefix):], true
+		}
+	}
+	return "", false
+}
+
 func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEnv []string, input string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	binary, found := gitBinaryForEnv(extraEnv)
+	cmd := exec.CommandContext(ctx, binary, args...)
+	if !found {
+		cmd.Err = &exec.Error{Name: "git", Err: exec.ErrNotFound}
+	}
 	cmd.Dir = dir
 	cmd.Env = append(nonInteractiveEnvForContext(ctx, dir), extraEnv...)
 	if len(args) > 0 && strings.HasPrefix(args[0], "--git-dir=") {
