@@ -53,18 +53,17 @@ func TestPRContextGuardAcceptsTheRunsOwnRebaseAdvance(t *testing.T) {
 
 	// The run REBASES onto the new target: a NEW commit, not a descendant of
 	// the one it replaces.
-	gitCmd(t, dir, "checkout", "-b", "rebased", newTarget)
-	if err := os.WriteFile(filepath.Join(dir, "rebased.txt"), []byte("rebased\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, dir, "add", "rebased.txt")
-	gitCmd(t, dir, "commit", "-m", "rebase onto main")
+	gitCmd(t, dir, "checkout", "feature")
+	gitCmd(t, dir, "rebase", newTarget)
 	rebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
 	if rebasedHead == preRebaseHead {
 		t.Fatal("the rebase did not change the head")
 	}
 	if isAncestor(t.Context(), dir, preRebaseHead, rebasedHead) {
 		t.Fatal("the rebased head is a descendant; the fixture must model a REWRITE")
+	}
+	if got := gitCmd(t, dir, "show", "HEAD:feature.txt"); got != "feature code" {
+		t.Fatalf("rebase lost the submitted feature: %q", got)
 	}
 	// The rebase leaves the worktree on the rebased head; the guard reads the
 	// worktree's own head to build the candidate comparison.
@@ -126,12 +125,8 @@ func TestPRContextGuardRefusesAForeignHeadMoveAfterRebase(t *testing.T) {
 	gitCmd(t, dir, "add", "upstream.txt")
 	gitCmd(t, dir, "commit", "-m", "upstream advances")
 	newTarget := gitCmd(t, dir, "rev-parse", "HEAD")
-	gitCmd(t, dir, "checkout", "-b", "rebased", newTarget)
-	if err := os.WriteFile(filepath.Join(dir, "rebased.txt"), []byte("rebased\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, dir, "add", "rebased.txt")
-	gitCmd(t, dir, "commit", "-m", "rebase onto main")
+	gitCmd(t, dir, "checkout", "feature")
+	gitCmd(t, dir, "rebase", newTarget)
 	rebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "checkout", "-B", "feature", rebasedHead)
 	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, rebasedHead); err != nil {
@@ -154,4 +149,65 @@ func TestPRContextGuardRefusesAForeignHeadMoveAfterRebase(t *testing.T) {
 		t.Fatalf("unexpected refusal: %v", err)
 	}
 	t.Logf("refused the foreign head move as required: %v", err)
+}
+
+// A rewritten local head is not sufficient authority. The intent for #174
+// requires a completed Rebase and unchanged PR, source, target and forge head.
+// Each case breaks exactly one of those conditions and must preserve the receipt.
+func TestPRContextGuardRefusesUnprovenRebaseAdvance(t *testing.T) {
+	for _, boundary := range []string{"incomplete", "PR identity", "source repository", "source branch", "target branch", "forge head"} {
+		t.Run(boundary, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			c := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+			selected := pipeline.PRTargetSelection{
+				PRURL: "https://github.com/test/repo/pull/42", SourceRepo: "test/repo",
+				SourceBranch: "feature", ForgeHeadSHA: head, TargetBranch: "main",
+			}
+			if _, err := guardPRContextWithSelection(c, types.StepPR, selected, false); err != nil {
+				t.Fatal(err)
+			}
+			before, err := c.DB.GetRunPRContext(c.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "checkout", "main")
+			if err := os.WriteFile(filepath.Join(dir, "upstream.txt"), []byte("upstream\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", "upstream.txt")
+			gitCmd(t, dir, "commit", "-m", "advance target")
+			gitCmd(t, dir, "branch", "release")
+			gitCmd(t, dir, "checkout", "feature")
+			gitCmd(t, dir, "rebase", "main")
+			c.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+			if err := c.DB.UpdateRunHeadSHA(c.Run.ID, c.Run.HeadSHA); err != nil {
+				t.Fatal(err)
+			}
+			c.Config.Rebase.MaxTargetAdvanceRewinds = 3
+			c.PRContextAfterStep, c.PRContextRebaseCompleted = true, true
+			switch boundary {
+			case "incomplete":
+				c.PRContextRebaseCompleted = false
+			case "PR identity":
+				selected.PRURL = "https://github.com/test/repo/pull/43"
+			case "source repository":
+				selected.SourceRepo = "other/repo"
+			case "source branch":
+				selected.SourceBranch = "other"
+			case "target branch":
+				selected.TargetBranch = "release"
+			case "forge head":
+				selected.ForgeHeadSHA = c.Run.HeadSHA
+			}
+			decision, err := guardPRContextWithSelection(c, types.StepRebase, selected, false)
+			if err == nil {
+				t.Fatalf("accepted %s: %+v", boundary, decision)
+			}
+			after, readErr := c.DB.GetRunPRContext(c.Run.ID)
+			if readErr != nil || after == nil || *after != *before {
+				t.Fatalf("refusal changed the receipt: before=%+v after=%+v error=%v", before, after, readErr)
+			}
+			t.Logf("refused %s and preserved the receipt: %v", boundary, err)
+		})
+	}
 }
