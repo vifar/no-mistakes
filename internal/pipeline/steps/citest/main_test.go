@@ -14,7 +14,7 @@ import (
 
 func TestMain(m *testing.M) {
 	if handled, err := git.HandleAttributionHook(os.Args[1:]); handled {
-		os.Exit(git.AttributionHookExitCode(err))
+		os.Exit(git.AttributionHookResult(err, os.Stderr))
 	}
 	testgit.ClearConfigEnv()
 	// Fixtures must not depend on the machine's system git config: some

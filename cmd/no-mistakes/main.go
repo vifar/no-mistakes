@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -29,11 +28,7 @@ func main() {
 
 func run() int {
 	if handled, err := git.HandleAttributionHook(os.Args[1:]); handled {
-		// Delegated hooks already wrote their output to the inherited streams.
-		if _, delegated := err.(*exec.ExitError); err != nil && !delegated {
-			fmt.Fprintln(os.Stderr, err)
-		}
-		return git.AttributionHookExitCode(err)
+		return git.AttributionHookResult(err, os.Stderr)
 	}
 	if handled, exitCode, err := shellenv.RunWindowsCooperativeCommandHelper(os.Args[1:]); handled {
 		if err != nil {

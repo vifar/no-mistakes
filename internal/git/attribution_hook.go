@@ -51,14 +51,19 @@ func writeAttributionFile(path string, data []byte, mode os.FileMode) error {
 	return os.Rename(file.Name(), path)
 }
 
-func AttributionHookExitCode(err error) int {
+type delegatedAttributionHookError struct {
+	error
+	code int
+}
+
+func AttributionHookResult(err error, stderr io.Writer) int {
 	if err == nil {
 		return 0
 	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() > 0 {
-		return exitErr.ExitCode()
+	if delegated, ok := err.(*delegatedAttributionHookError); ok {
+		return delegated.code
 	}
+	fmt.Fprintln(stderr, err)
 	return 1
 }
 
@@ -210,6 +215,9 @@ func HandleAttributionHook(args []string) (bool, error) {
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	winproc.Harden(cmd)
 	hookErr := cmd.Run()
+	if exitErr, ok := hookErr.(*exec.ExitError); ok && exitErr.ExitCode() > 0 {
+		hookErr = &delegatedAttributionHookError{error: hookErr, code: exitErr.ExitCode()}
+	}
 	if hookErr != nil && name != "post-rewrite" {
 		return true, hookErr
 	}

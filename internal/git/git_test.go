@@ -17,7 +17,7 @@ import (
 
 func TestMain(m *testing.M) {
 	if handled, err := HandleAttributionHook(os.Args[1:]); handled {
-		os.Exit(AttributionHookExitCode(err))
+		os.Exit(AttributionHookResult(err, os.Stderr))
 	}
 	dir, err := os.MkdirTemp("", "no-mistakes-git-tests-")
 	if err != nil {

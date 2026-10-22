@@ -52,9 +52,10 @@ func TestAttributionInternalGitFailureDispatch(t *testing.T) {
 	}
 	env = append(env, "NM_TEST_ATTRIBUTION_DISPATCH=1")
 	policy := filepath.Join(invoke("rev-parse", "--absolute-git-dir"), "no-mistakes-attribution", "policy.json")
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
+	executable := filepath.Join(t.TempDir(), "no-mistakes")
+	build := exec.Command("go", "build", "-p", "4", "-o", executable, ".")
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build production dispatcher: %v %s", err, out)
 	}
 	dispatch := func(cwd string, input string, args ...string) (int, string) {
 		t.Helper()
