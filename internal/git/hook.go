@@ -464,12 +464,46 @@ func EnsureHooksPathIsolation(ctx context.Context, bareDir string) (bool, error)
 // extensions.worktreeConfig: Git otherwise leaks core.bare=true from shared
 // scope into linked worktrees, breaking rebase/merge/etc. and provider CLI
 // repo resolution from worktree cwd.
+//
+// The write is refused unless per-worktree scope is actually in force.
+// `git config --worktree` does not fail when the worktreeConfig extension is
+// off: in a repository with a single worktree it writes the SHARED
+// configuration, which is inherited by every other worktree of that
+// repository. That is how core.bare=true reached a registered working
+// checkout's .git/config and made it stop being a work tree (issue #183), so
+// the shared file is checked before and after the write rather than assumed.
 func relocateCoreBareToWorktreeScope(ctx context.Context, bareDir string) error {
+	enabled, err := worktreeConfigEnabled(ctx, bareDir)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return fmt.Errorf("refuse to write core.bare for %s: per-worktree configuration is not enabled, so the write would land in the shared configuration", bareDir)
+	}
+	before, beforeFound, err := sharedConfigValue(ctx, bareDir, "core.bare")
+	if err != nil {
+		return err
+	}
 	if _, err := runGit(ctx, bareDir, "config", "--worktree", "core.bare", "true"); err != nil {
 		if isWorktreeConfigUnsupported(err) {
 			return nil
 		}
 		return fmt.Errorf("pin core.bare per-worktree: %w", err)
+	}
+	// The per-worktree write must not have touched the shared configuration.
+	// The shared file is what every other worktree of the repository reads,
+	// and core.bare=true there is exactly what stops those worktrees from
+	// being work trees.
+	landed, landedFound, err := sharedConfigValue(ctx, bareDir, "core.bare")
+	if err != nil {
+		return err
+	}
+	if landedFound && (landed != before || !beforeFound) {
+		// The write landed in the shared configuration. Take it back out and
+		// refuse, rather than leave a repository whose worktrees all stopped
+		// being work trees.
+		_, _ = runGit(ctx, bareDir, "config", "--local", "--unset", "core.bare")
+		return fmt.Errorf("refuse to write core.bare into the shared configuration of %s", bareDir)
 	}
 	if _, err := runGit(ctx, bareDir, "config", "--local", "--unset", "core.bare"); err != nil {
 		if isConfigKeyMissing(err) {

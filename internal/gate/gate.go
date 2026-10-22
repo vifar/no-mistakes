@@ -230,24 +230,34 @@ func provisionGate(ctx context.Context, bareDir, absRoot, upstreamURL, reposDir 
 	return nil
 }
 
+// ensureWorkingRemote points the working checkout's "no-mistakes" remote at the
+// gate.
+//
+// The remote lives in the checkout's SHARED configuration, so it is inherited
+// by every worktree of that checkout - which is exactly what a gate remote
+// has to be. It is therefore written as rarely as possible: a refresh that
+// finds the remote already pointing at the gate writes nothing at all, so
+// re-registering a checkout never rewrites the configuration the operator's
+// own tools share (issue #183).
 func ensureWorkingRemote(ctx context.Context, absRoot, bareDir, reposDir string, refresh bool) error {
-	if refresh {
-		return git.EnsureRemote(ctx, absRoot, RemoteName, bareDir)
-	}
 	existingURL, err := git.GetRemoteURL(ctx, absRoot, RemoteName)
 	if err != nil {
 		return git.AddRemote(ctx, absRoot, RemoteName, bareDir)
 	}
 	if existingURL == bareDir {
+		// Already pointing at this gate. Nothing to write.
 		return nil
 	}
-	// A leftover remote pointing into our own repos dir is stale gate wiring
-	// (e.g. the working directory was copied, or its gate was half-ejected);
-	// repoint it. Anything else is a user-managed remote we must not touch.
-	if filepath.Dir(existingURL) == reposDir {
-		return git.EnsureRemote(ctx, absRoot, RemoteName, bareDir)
+	if !refresh {
+		// A leftover remote pointing into our own repos dir is stale gate wiring
+		// (e.g. the working directory was copied, or its gate was half-ejected);
+		// repoint it. Anything else is a user-managed remote we must not touch.
+		if filepath.Dir(existingURL) == reposDir {
+			return git.EnsureRemote(ctx, absRoot, RemoteName, bareDir)
+		}
+		return fmt.Errorf("remote %q already exists with url %q", RemoteName, existingURL)
 	}
-	return fmt.Errorf("remote %q already exists with url %q", RemoteName, existingURL)
+	return git.EnsureRemote(ctx, absRoot, RemoteName, bareDir)
 }
 
 // reattachRelocatedRepo detects a working directory that was renamed or moved

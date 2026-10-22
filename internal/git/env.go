@@ -87,7 +87,37 @@ func NonInteractiveEnvFrom(base []string, dir string) []string {
 // bareRepositoryEnv prevents inherited discovery and config-file selection from
 // redirecting an explicitly named bare operation into the caller's checkout.
 // Preserve identity, credentials and explicit scratch-index settings.
+//
+// It is the same rule stripRepositorySelectionEnv applies to every command; it
+// is kept as a name for the bare form's call site.
 func bareRepositoryEnv(env []string) []string {
+	return stripRepositorySelectionEnv(env)
+}
+
+// stripRepositorySelectionEnv removes the environment variables that name a
+// repository or a configuration file, so a Git command runs against the
+// directory its caller named and nowhere else.
+//
+// This is the general form of what bareRepositoryEnv does for the explicitly
+// named bare form, and it exists because the discovery form was the open half
+// of the same hole. A caller that inherits GIT_DIR or GIT_COMMON_DIR - a T3
+// lane, a Git hook, an agent harness, or any process that ran inside a
+// repository and exported its location - silently redirects every discovery
+// based Git command into THAT repository, no matter which directory the command
+// was aimed at. The redirected command then reads and writes the wrong
+// repository's configuration: a `git config --worktree` write intended for a
+// run worktree lands in a registered checkout's shared .git/config, which is
+// how core.bare=true got into a working checkout that stopped being a work
+// tree (issue #183).
+//
+// The command line always wins over the environment, so the explicitly named
+// bare form (--git-dir=) is unaffected by this; stripping the variables for
+// that form too keeps one rule instead of two.
+//
+// Identity, credentials, and the scratch-index and object-directory settings
+// are preserved: they configure HOW a command runs, not WHICH repository it
+// runs against.
+func stripRepositorySelectionEnv(env []string) []string {
 	result := make([]string, 0, len(env))
 	for _, entry := range env {
 		key, _, _ := strings.Cut(entry, "=")
