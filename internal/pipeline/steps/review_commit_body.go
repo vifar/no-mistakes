@@ -12,24 +12,31 @@ import (
 
 var reviewTrailerKey = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*[ \t]*:`)
 
+const reviewAttributionLeadingWrappers = " \t\r>\"'`*-"
+
+func normalizeReviewAttributionLine(line string) string {
+	return strings.TrimRight(strings.TrimLeft(line, reviewAttributionLeadingWrappers), " \t\r\"'`*-")
+}
+
 func stripReviewAIAttribution(text string, configuredTrailers []string) string {
 	var kept []string
 	lines := strings.Split(text, "\n")
 	for start := 0; start < len(lines); {
 		end := start + 1
-		entry := lines[start]
-		unquoted := strings.TrimRight(strings.TrimLeft(entry, " \t\r>\"'`*-"), " \t\r\"'`")
-		if reviewTrailerKey.MatchString(unquoted) || git.IsAIAttributionTrailer(unquoted) {
-			for end < len(lines) && strings.TrimSpace(lines[end]) != "" && (strings.HasPrefix(lines[end], " ") || strings.HasPrefix(lines[end], "\t")) {
-				entry += " " + strings.TrimSpace(lines[end])
-				unquoted += " " + strings.TrimSpace(lines[end])
+		entry := normalizeReviewAttributionLine(lines[start])
+		if reviewTrailerKey.MatchString(entry) || git.IsAIAttributionTrailer(entry) {
+			for end < len(lines) {
+				next := normalizeReviewAttributionLine(lines[end])
+				if next == "" || strings.TrimLeft(lines[end], reviewAttributionLeadingWrappers) == lines[end] || reviewTrailerKey.MatchString(next) || git.IsAIAttributionTrailer(next) {
+					break
+				}
+				entry += " " + next
 				end++
 			}
 		}
-		unquoted = strings.TrimRight(unquoted, " \t\r\"'`")
-		attribution := git.IsAIAttributionTrailer(entry) || git.IsAIAttributionTrailer(unquoted)
+		attribution := git.IsAIAttributionTrailer(entry)
 		for _, trailer := range configuredTrailers {
-			if strings.EqualFold(unquoted, strings.TrimRight(trailer, " \t\r\"'`")) {
+			if strings.EqualFold(entry, normalizeReviewAttributionLine(trailer)) {
 				attribution = true
 				break
 			}

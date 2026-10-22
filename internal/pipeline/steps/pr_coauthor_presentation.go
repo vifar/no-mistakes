@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-var prCoauthorContent = regexp.MustCompile(`(?i)\bco-authored-by[\t ]*:[\t ]*((?:[^<>\r\n]|\r?\n[\t ]+)*?(?:<[^>\r\n]+>|&lt;[^\r\n]*?&gt;))`)
+var prCoauthorContent = regexp.MustCompile(`(?i)\bco-authored-by[\t ]*:[\t ]*((?:[^<>\r\n]|\r?\n(?:[\t >"'\x60*\-]|&gt;|&#34;|&#39;)+)*?(?:<[^>\r\n]+>|&lt;[^\r\n]*?&gt;))`)
 
 // presentPRCoauthors distinguishes quoted evidence from commit attribution.
 // The name and address remain visible, including their existing escaping;

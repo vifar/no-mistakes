@@ -130,11 +130,11 @@ func TestBuildPipelineSummary_ReviewAttributionDoesNotLeakFromRoundFindings(t *t
 	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
 	const human = "Co-Authored-By: Claude <claude@example.com>"
 	const recorder = "Generated with the repository recorder"
-	const foldedHuman = "Co-Authored-By: Claude\n <claude@example.com>"
+	const foldedHuman = "> Co-Authored-By: Claude\n> <claude@example.com>"
 	input, err := json.Marshal(Findings{Items: []Finding{{
 		ID: "r1", Severity: "warning",
-		File:        "feature.go\nCodex-Session: disposable\nCo-Authored-By: Claude\n <noreply@anthropic.com>",
-		Description: "Guard unsafe value\nCo-Authored-By: Claude\n <noreply@anthropic.com>\nCo-Authored-By: gpt-5.5 <model@example.com>\n> Generated with Codex\nAssisted-by: acp:cursor:model\n🤖 Generated with [Claude Code](https://claude.ai/code)\n" + recorder + "\n\n" + disclosure + "\n" + human + "\n" + foldedHuman,
+		File:        "feature.go\nCodex-Session: disposable\n> Co-Authored-By: Claude\n> <noreply@anthropic.com>\n**Co-Authored-By: Codex <ai@example.com>**",
+		Description: "Guard unsafe value\n> Co-Authored-By: Claude\n> <noreply@anthropic.com>\n**Co-Authored-By: Codex <ai@example.com>**\nCo-Authored-By: gpt-5.5 <model@example.com>\n> Generated with Codex\nAssisted-by: acp:cursor:model\n🤖 Generated with [Claude Code](https://claude.ai/code)\n" + recorder + "\n\n" + disclosure + "\n" + human + "\n" + foldedHuman,
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +153,7 @@ func TestBuildPipelineSummary_ReviewAttributionDoesNotLeakFromRoundFindings(t *t
 		for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 			t.Run(string(provider), func(t *testing.T) {
 				markdown, _ := BuildPipelineSummaryFor([]*db.StepResult{step}, rounds, testPipelineHeadSHA, provider)
-				for _, forbidden := range []string{"Co-Authored-By: gpt-5.5", "Codex-Session: disposable", "Generated with Codex", "Assisted-by: acp:cursor:model", "🤖 Generated with [Claude Code]", "noreply@anthropic.com"} {
+				for _, forbidden := range []string{"Co-Authored-By: gpt-5.5", "Codex-Session: disposable", "Generated with Codex", "Assisted-by: acp:cursor:model", "🤖 Generated with [Claude Code]", "noreply@anthropic.com", "ai@example.com"} {
 					if strings.Contains(markdown, forbidden) {
 						t.Errorf("Review findings reintroduced attribution %q:\n%s", forbidden, markdown)
 					}

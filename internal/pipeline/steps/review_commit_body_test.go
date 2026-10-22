@@ -206,6 +206,9 @@ func TestReviewFixCommitFoldedAttribution(t *testing.T) {
 	t.Parallel()
 	for _, entry := range []string{
 		"Co-Authored-By: Claude\n <noreply@anthropic.com>",
+		"> Co-Authored-By: Claude\n> <noreply@anthropic.com>",
+		"**Co-Authored-By: Codex <ai@example.com>**",
+		"> **Co-Authored-By: Claude**\n> **<noreply@anthropic.com>**",
 		"Co-Authored-By: gpt-5.5\n\t<model@example.com>",
 		"> \"Co-Authored-By: Claude\n <noreply@anthropic.com>\"",
 	} {
@@ -263,7 +266,7 @@ func assertUnconfiguredReviewAttributionFiltered(t *testing.T, attribution strin
 	const quotedHuman = `Co-Authored-By: "Claude Smith" <claude@example.com>`
 	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
 	const personalClaude = "Co-Authored-By: Claude <claude@example.com>"
-	const foldedHuman = "Co-Authored-By: Claude\n <claude@example.com>"
+	const foldedHuman = "> **Co-Authored-By: Claude**\n> **<claude@example.com>**"
 	const recorder = "Generated with the repository recorder"
 	const cleanSummary = "guard unsafe value\n\n" + disclosure + "\n\n" + human + "\n" + quotedHuman + "\n" + personalClaude + "\n" + foldedHuman + "\n" + recorder
 	dir, base, head := setupGitRepo(t)
@@ -296,11 +299,11 @@ func assertUnconfiguredReviewAttributionFiltered(t *testing.T, attribution strin
 	if summary != cleanSummary {
 		t.Errorf("returned summary = %q, want %q", summary, cleanSummary)
 	}
-	wantSubject := "no-mistakes(review): guard unsafe value " + disclosure + " " + human + " " + quotedHuman + " " + personalClaude + " Co-Authored-By: Claude <claude@example.com> " + recorder
+	wantSubject := "no-mistakes(review): guard unsafe value " + disclosure + " " + human + " " + quotedHuman + " " + personalClaude + " > **Co-Authored-By: Claude** > **<claude@example.com>** " + recorder
 	if subject := lastCommitMessage(t, dir); subject != wantSubject {
 		t.Errorf("subject = %q, want %q", subject, wantSubject)
 	}
-	wantBody := cleanSummary + "\n\nRound findings:\n- receipt.go: " + disclosure + " " + human + " " + quotedHuman + "\n- " + quotedHuman + ": " + disclosure + "\n- " + personalClaude + ": " + recorder
+	wantBody := cleanSummary + "\n\nRound findings:\n- receipt.go: " + disclosure + " " + human + " " + quotedHuman + "\n- " + quotedHuman + ": " + disclosure + "\n- > **Co-Authored-By: Claude** > **<claude@example.com>**: " + recorder
 	if body := gitCmd(t, dir, "show", "-s", "--format=%b"); body != wantBody {
 		t.Errorf("body = %q, want %q", body, wantBody)
 	}

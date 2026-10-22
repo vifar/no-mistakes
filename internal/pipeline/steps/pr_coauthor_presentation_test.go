@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"html"
 	"regexp"
 	"strings"
 	"testing"
@@ -201,6 +202,28 @@ func TestPRHumanCoauthorPresentation_FoldedEntries(t *testing.T) {
 		input := "Co-Authored-By: Claude\n " + address + "\n\n" + humanCoauthorDisclosure
 		if got := presentPRCoauthors(input); got != "\n\n"+humanCoauthorDisclosure {
 			t.Errorf("folded AI evidence survived: %q", got)
+		}
+	}
+}
+
+func TestPRHumanCoauthorPresentation_WrappedFoldedEntries(t *testing.T) {
+	t.Parallel()
+	for _, wrapper := range []string{"> ", "**", "`", "- ", "\"", "'"} {
+		for _, escaped := range []bool{false, true} {
+			address := "<claude@example.com>"
+			human := wrapper + "Co-Authored-By: Claude\n" + wrapper + address
+			want := wrapper + "preserved human co-author: Claude\n" + wrapper + address
+			if escaped {
+				human = html.EscapeString(human)
+				want = html.EscapeString(want)
+			}
+			if got := presentPRCoauthors(human); got != want {
+				t.Errorf("human = %q, want %q", got, want)
+			}
+			ai := strings.ReplaceAll(human, "claude@example.com", "noreply@anthropic.com")
+			if got := presentPRCoauthors(ai); strings.Contains(got, "noreply@anthropic.com") || strings.Contains(got, "co-author") || strings.Contains(got, "Co-Authored-By") {
+				t.Errorf("AI attribution survived: %q", got)
+			}
 		}
 	}
 }

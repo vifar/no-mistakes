@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"html"
 	"strings"
 	"testing"
 
@@ -404,5 +405,74 @@ func TestBitbucketStyleRestampAddsReplacesAndRemovesTheAcceptedGapAudit(t *testi
 	foreign, rebound, err := rebindOwnedPRAttestation("someone else's description", newHead, withGap, pipelineAttestationPolicy{}, scm.ProviderBitbucket)
 	if err != nil || rebound || foreign != "someone else's description" {
 		t.Fatalf("foreign body touched: %q %v %v", foreign, rebound, err)
+	}
+}
+
+func TestAcceptedGapDigestsBindPresentedHumanEvidence(t *testing.T) {
+	t.Parallel()
+	const reason = "Preserve Co-Authored-By: Claude Smith <claude@example.com>"
+	const covered = "TestHumanEvidence: Co-Authored-By: Claude <claude@example.com>"
+	const wantReason = "Preserve preserved human co-author: Claude Smith <claude@example.com>"
+	const wantCovered = "TestHumanEvidence: preserved human co-author: Claude <claude@example.com>"
+	steps := acceptedGapStepsForTest(t)
+	var gaps db.AcceptedGaps
+	if err := json.Unmarshal([]byte(*steps[1].AcceptedGapsJSON), &gaps); err != nil {
+		t.Fatal(err)
+	}
+	gaps.Reason, gaps.CoveredBy = reason, covered
+	raw, err := json.Marshal(gaps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorded := string(raw)
+	steps[1].AcceptedGapsJSON = &recorded
+	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+		md, _ := buildPipelineSummaryFor(steps, nil, testPipelineHeadSHA, provider, pipelineAttestationPolicy{})
+		sctx := &pipeline.StepContext{Config: &config.Config{}}
+		ownedMD := md
+		if provider == scm.ProviderBitbucket {
+			ownedMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, nil, testPipelineHeadSHA, pipelineAttestationPolicy{}) + "\n```"
+		}
+		owned, err := composeOwnedPRContent(prOwnedBody{before: "Author text"}, "repair", ownedMD, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bodies := []string{
+			md,
+			assembleDraftPRBody(sctx, "Details", "Low", "", md, 0, provider),
+			buildPRBody("Details", "Low", "", md, sctx, provider),
+			owned.Body,
+		}
+		for _, body := range append([]string(nil), bodies...) {
+			updated, rebound, err := rebindOwnedPRAttestation(body, strings.Repeat("b", 40), steps, pipelineAttestationPolicy{}, provider)
+			if err != nil || !rebound {
+				t.Fatalf("restamp: %t, %v", rebound, err)
+			}
+			bodies = append(bodies, updated)
+		}
+		for _, body := range bodies {
+			decoded := html.UnescapeString(body)
+			if !strings.Contains(decoded, "- Approved: "+wantReason+"\n") || !strings.Contains(decoded, "- Covered by: "+wantCovered+"\n") {
+				t.Fatalf("published audit text disagrees: %s", body)
+			}
+			if strings.Contains(body, pipelineAttestationCommentPrefix) {
+				var found bool
+				for _, step := range parsePipelineAttestationForTest(t, body).Steps {
+					if step.Step == types.StepTest {
+						found = true
+						g := step.AcceptedGaps
+						if g == nil || g.ReasonDigest != fmt.Sprintf("%x", sha256.Sum256([]byte(wantReason))) || g.CoveredByDigest != fmt.Sprintf("%x", sha256.Sum256([]byte(wantCovered))) {
+							t.Fatalf("digest does not bind published text: %+v", g)
+						}
+					}
+				}
+				if !found {
+					t.Fatal("Test attestation missing")
+				}
+			}
+		}
+	}
+	if *steps[1].AcceptedGapsJSON != string(raw) {
+		t.Fatal("publication changed the raw accepted-gap record")
 	}
 }
