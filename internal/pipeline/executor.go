@@ -1951,6 +1951,7 @@ rounds:
 		}
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
+		sctx.FixApplied = nil
 		if run.Shipping != nil && run.Shipping.Mode == types.ShippingImmutableSource {
 			if sctx.Fixing {
 				return false, "", fmt.Errorf("immutable source forbids repair rounds")
@@ -2140,12 +2141,12 @@ rounds:
 		roundTrigger := nextTrigger
 		if stepName == types.StepReview {
 			if e.config != nil && e.config.CaptureEvalProvenance {
-				inserted, dbErr = e.db.InsertReviewStepRoundWithProvenance(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, reviewStartingHeadSHA, e.config.TrustedConfigSHA, e.config.ReplayGlobalYAML, e.config.ReplayRepoYAML, roundDuration)
+				inserted, dbErr = e.db.InsertReviewStepRoundWithProvenance(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, reviewStartingHeadSHA, e.config.TrustedConfigSHA, e.config.ReplayGlobalYAML, e.config.ReplayRepoYAML, roundDuration, sctx.FixApplied)
 			} else {
-				inserted, dbErr = e.db.InsertReviewStepRound(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, roundDuration)
+				inserted, dbErr = e.db.InsertReviewStepRound(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, reviewApprovedHeadSHA, roundDuration, sctx.FixApplied)
 			}
 		} else {
-			inserted, dbErr = e.db.InsertStepRoundWithRepair(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, outcome.RepairPublished, roundDuration)
+			inserted, dbErr = e.db.InsertStepRoundWithRepair(sr.ID, roundNum, roundTrigger, findingsPtr, fixSummaryPtr, outcome.RepairPublished, roundDuration, sctx.FixApplied)
 		}
 		if dbErr != nil {
 			currentRoundID = roundInsertID(currentRoundID, inserted, dbErr)

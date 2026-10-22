@@ -96,6 +96,7 @@ type StepContext struct {
 	// combination is reachable - not to forbid it.
 	FinalizingAnswers     bool
 	ReviewStartingHeadSHA string
+	FixApplied            *bool
 	// CarriedFindings is the outstanding set an ANSWER round carries in, minus
 	// the reviewer's own open-question rows (see answerRoundCarriedFindings),
 	// so the finalize turn re-adjudicates by id only findings it made itself.

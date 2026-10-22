@@ -1168,15 +1168,15 @@ This non-executing field is read from the pushed branch without enabling `allow_
 
 ### commit.trailers
 
-Override the trailers appended to agent-produced commits for this repository.
+Override the configured attribution patterns for this repository.
 
 | | |
 | --- | --- |
 | Type | `list` of `string` templates |
 | Default | Inherits from global config, where it is unset |
 
-The entries follow the [global `commit.trailers` placeholders and validation rules](/no-mistakes/reference/global-config/#committrailers).
-A list here replaces the inherited one rather than extending it, and `trailers: []` turns inherited trailers off for this repository.
+The [global `commit.trailers` reference](/no-mistakes/reference/global-config/#committrailers) owns the filtering policy, placeholders, and validation rules.
+A list here replaces the inherited one rather than extending it, and `trailers: []` clears inherited patterns; built-in AI attribution filtering remains active.
 
 This non-executing field is read from the pushed branch without enabling `allow_repo_commands`, like `commit.fix_message`: it shapes only the messages of commits the pipeline makes on that branch.
 

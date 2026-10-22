@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
@@ -287,8 +288,18 @@ CI logs:
 	prompt += executionContextPromptSection(sctx.WorkDir)
 	prompt = fixerPrompt(testguidance.LateRepairPrompt(string(s.Name()), prompt))
 
+	var attributionEnv []string
+	if rebase {
+		attributionEnv, err = sctx.CommitAttributionEnv(nil, func(args ...string) (string, error) {
+			return git.Run(ctx, sctx.WorkDir, args...)
+		}, rebaseBaseSHA)
+		if err != nil {
+			return ciRepairResult{}, err
+		}
+	}
 	sctx.Log("running agent to fix CI issues...")
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
+		Env:        attributionEnv,
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
 		JSONSchema: ciFixConclusionSchema,
@@ -298,7 +309,7 @@ CI logs:
 		return ciRepairResult{}, fmt.Errorf("agent CI fix: %w", err)
 	}
 
-	conclusion, conclusionErr := extractCIFixConclusion(result)
+	conclusion, conclusionErr := extractCIFixConclusion(result, sctx.Config.Commit.Trailers...)
 	if conclusionErr != nil {
 		sctx.Log(fmt.Sprintf("warning: could not parse CI repair conclusion: %v", conclusionErr))
 	}
@@ -462,8 +473,8 @@ var ciFixConclusionSchema = json.RawMessage(fmt.Sprintf(`{
 	"required": ["summary", "code_change_needed"]
 }`, config.MaxFixMessageSummaryBytes))
 
-func extractCIFixConclusion(result *agent.Result) (ciFixConclusion, error) {
-	summary, err := extractCommitSummary(result)
+func extractCIFixConclusion(result *agent.Result, configured ...string) (ciFixConclusion, error) {
+	summary, err := extractCommitSummary(result, configured...)
 	if err != nil {
 		return ciFixConclusion{}, err
 	}

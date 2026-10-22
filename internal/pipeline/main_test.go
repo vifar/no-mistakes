@@ -4,9 +4,17 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/git"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func TestMain(m *testing.M) {
+	if handled, err := git.HandleAttributionHook(os.Args[1:]); handled {
+		os.Exit(git.AttributionHookResult(err, os.Stderr))
+	}
+	testgit.ClearConfigEnv()
 	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	globalConfigDir, err := os.MkdirTemp("", "no-mistakes-pipeline-tests-")
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -67,7 +68,7 @@ func configurableFixCommitScenario(t *testing.T, fixSummary string) string {
 }
 
 func TestConfigurableFixCommitMessageJourney(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, "guard unsafe value")})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, "guard unsafe value\\n\\nCo-Authored-By: Claude <noreply@anthropic.com>\\nClaude-Session: abc")})
 
 	globalConfig := filepath.Join(h.NMHome, "config.yaml")
 	globalData, err := os.ReadFile(globalConfig)
@@ -123,7 +124,8 @@ commit:
 }
 
 func TestFixCommitTrailersJourney(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, "guard unsafe value")})
+	// Exercise folded raw attribution before the summary becomes a subject.
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, "guard unsafe value\\n\\nCo-Authored-By: Claude\\n <noreply@anthropic.com>\\nClaude-Session: abc\\nCodex-Session: def\\nAssisted-by: pi:local\\nGenerated with Claude Code")})
 
 	globalConfig := filepath.Join(h.NMHome, "config.yaml")
 	globalData, err := os.ReadFile(globalConfig)
@@ -131,7 +133,7 @@ func TestFixCommitTrailersJourney(t *testing.T) {
 		t.Fatalf("read global config: %v", err)
 	}
 	globalSource := strings.Replace(string(globalData), "  review: 0\n", "  review: 1\n", 1)
-	globalSource += "commit:\n  trailers:\n    - 'Assisted-by: no-mistakes:{{.Agent}}:{{.Model}}'\n"
+	globalSource += "commit:\n  trailers:\n    - 'Assisted-by: no-mistakes:{{.Agent}}:{{.Model}}'\n    - 'Assisted-by: pi:local'\n    - 'Codex-Session: abc'\n    - 'Co-Authored-By: Claude Smith <claude@example.com>'\n    - 'Co-Authored-By: Claude <claude@example.com>'\n    - 'Signed-off-by: Some Person <person@example.com>'\n    - 'Disclosure: fixtures were generated with the repository recorder.'\n    - 'Context: Discuss Claude-Session: abc and Assisted-by: pi:local handling'\n"
 	if err := os.WriteFile(globalConfig, []byte(globalSource), 0o644); err != nil {
 		t.Fatalf("write global config: %v", err)
 	}
@@ -140,10 +142,24 @@ func TestFixCommitTrailersJourney(t *testing.T) {
 	}
 
 	const branch = "feature/fix-commit-trailers"
-	h.CommitChange(branch, "feature.txt", "unsafe\n", "add unsafe feature")
+	const submittedMessage = "add unsafe feature\n\nKeep this submitted body.\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nCodex-Session: submitted"
+	submitted := h.CommitChange(branch, "feature.txt", "unsafe\n", submittedMessage)
 	h.PushToGate(branch)
 
 	gated := waitForStepStatus(t, h, branch, types.StepReview, types.StepStatusFixReview, 60*time.Second)
+
+	worktree := paths.WithRoot(h.NMHome).WorktreeDir(gated.RepoID, gated.ID)
+	beforePush, err := h.runGit(context.Background(), worktree, "log", "-1", "--format=%B")
+	if err != nil {
+		t.Fatalf("read correction before publication: %v\n%s", err, beforePush)
+	}
+	if got, want := strings.TrimSpace(string(beforePush)), "no-mistakes(review): guard unsafe value"; got != want {
+		t.Fatalf("correction before publication = %q, want %q", got, want)
+	}
+	if out, err := h.runGit(context.Background(), h.UpstreamDir, "show-ref", "--verify", "refs/heads/"+branch); err == nil {
+		t.Fatalf("branch was published before the review gate was released: %s", out)
+	}
+	t.Logf("correction already sanitized while review is parked, before publication:\n%s", beforePush)
 	h.Respond(gated.ID, types.StepReview, types.ActionApprove)
 	run := h.WaitForRun(branch, 60*time.Second)
 	if run.Status != types.RunCompleted {
@@ -151,7 +167,7 @@ func TestFixCommitTrailersJourney(t *testing.T) {
 	}
 
 	// git's own trailer parser reads the pushed commits, so this checks that
-	// the trailer survives the run as a trailer, not merely as message text.
+	// human attribution survives as a trailer and AI attribution is absent.
 	log, err := h.runGit(context.Background(), h.UpstreamDir, "log", "--format=%s%x00%(trailers:only,unfold)%x00", "main..refs/heads/"+branch)
 	if err != nil {
 		t.Fatalf("read upstream commits: %v\n%s", err, log)
@@ -168,16 +184,20 @@ func TestFixCommitTrailersJourney(t *testing.T) {
 			userTrailers = append(userTrailers, trailers)
 		}
 	}
-	// The model is whatever the recorded claude fixture served; it must arrive
-	// as reported, not as the unknown placeholder.
-	const prefix = "Assisted-by: no-mistakes:claude:"
-	if len(fixTrailers) != 1 || !strings.HasPrefix(fixTrailers[0], prefix) ||
-		strings.Contains(fixTrailers[0], "\n") || strings.TrimPrefix(fixTrailers[0], prefix) == "unknown" {
-		t.Fatalf("review fix commit trailers = %q, want one %q trailer carrying the served model", fixTrailers, prefix+"<model>")
+	if len(fixTrailers) != 1 || fixTrailers[0] != "" {
+		t.Fatalf("review fix commit trailers = %q, want none", fixTrailers)
 	}
-	if len(userTrailers) != 1 || userTrailers[0] != "" {
+	if len(userTrailers) != 1 || userTrailers[0] != "Co-Authored-By: Claude <noreply@anthropic.com>\nCodex-Session: submitted" {
 		t.Fatalf("user commit trailers = %q, want the user's commit left untouched", userTrailers)
 	}
+	if out, err := h.runGit(context.Background(), h.UpstreamDir, "merge-base", "--is-ancestor", submitted, "refs/heads/"+branch); err != nil {
+		t.Fatalf("submitted commit was rewritten: %v\n%s", err, out)
+	}
+	submittedBody, err := h.runGit(context.Background(), h.UpstreamDir, "log", "-1", "--format=%B", submitted)
+	if err != nil || strings.TrimSpace(string(submittedBody)) != submittedMessage {
+		t.Fatalf("submitted message changed: %v\n%s", err, submittedBody)
+	}
+	t.Logf("submitted commit %s remains an ancestor with its original message:\n%s", submitted, submittedBody)
 	t.Logf("completed pipeline upstream commits and trailers:\n%s", strings.ReplaceAll(string(log), "\x00", " | "))
 }
 
@@ -237,7 +257,7 @@ commit:
 }
 
 func TestPerRepositoryMachineLocalFixCommitJourney(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, "guard unsafe value")})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, "guard unsafe value\\n\\nCo-Authored-By: Claude <noreply@anthropic.com>\\nClaude-Session: abc")})
 
 	globalConfig := filepath.Join(h.NMHome, "config.yaml")
 	globalData, err := os.ReadFile(globalConfig)

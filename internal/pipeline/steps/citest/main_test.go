@@ -6,11 +6,17 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func TestMain(m *testing.M) {
-	os.Unsetenv("GIT_CONFIG_COUNT")
+	if handled, err := git.HandleAttributionHook(os.Args[1:]); handled {
+		os.Exit(git.AttributionHookResult(err, os.Stderr))
+	}
+	testgit.ClearConfigEnv()
 	// Fixtures must not depend on the machine's system git config: some
 	// distributions ship safe.bareRepository=explicit there, which refuses
 	// the in-directory use of the bare fixture repositories these tests

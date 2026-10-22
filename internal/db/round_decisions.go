@@ -48,7 +48,7 @@ func (d *DB) GetBranchDecisionRounds(repoID, branch, excludeRunID string, limit 
 		        sr.reviewed_head_sha, sr.starting_head_sha, sr.trusted_config_sha,
 		        sr.global_config_yaml, sr.repo_config_yaml, sr.user_findings_json,
 		        sr.selected_finding_ids, sr.selection_source, sr.fix_summary,
-		        sr.duration_ms, sr.created_at,
+		        sr.duration_ms, sr.created_at, sr.fix_applied,
 		        res.step_name, res.run_id
 		   FROM step_rounds sr
 		   JOIN step_results res ON res.id = sr.step_result_id
@@ -76,7 +76,7 @@ func (d *DB) GetBranchDecisionRounds(repoID, branch, excludeRunID string, limit 
 			&r.ReviewedHeadSHA, &r.StartingHeadSHA, &r.TrustedConfigSHA,
 			&r.GlobalConfigYAML, &r.RepoConfigYAML, &r.UserFindingsJSON,
 			&r.SelectedFindingIDs, &r.SelectionSource, &r.FixSummary,
-			&r.DurationMS, &r.CreatedAt,
+			&r.DurationMS, &r.CreatedAt, &r.FixApplied,
 			&entry.StepName, &entry.RunID,
 		); err != nil {
 			return nil, false, fmt.Errorf("scan branch decision round: %w", err)

@@ -351,7 +351,7 @@ func commitPipelineCorrectionWithCleanup(
 	if err != nil {
 		return fmt.Errorf("prepare hook-free commit environment: %w", err)
 	}
-	_, commitErr := git.Run(ctx, workDir, "-c", "core.hooksPath="+emptyHooksDir, "commit", "--no-verify", "-m", message)
+	_, commitErr := git.Run(ctx, workDir, "-c", "core.hooksPath="+emptyHooksDir, "commit", "--no-verify", "-m", git.StripAIAttributionTrailers(message))
 	if cleanupErr := cleanup(emptyHooksDir); cleanupErr != nil {
 		if logf != nil {
 			logf(fmt.Sprintf("warning: failed to remove temporary hook-free commit directory %s: %v", emptyHooksDir, cleanupErr))
@@ -362,11 +362,9 @@ func commitPipelineCorrectionWithCleanup(
 	return commitErr
 }
 
-// withCommitTrailers appends commit.trailers rendered for producer. Changes not
-// attributable to a single invocation get none rather than a guessed agent.
 func withCommitTrailers(sctx *pipeline.StepContext, message string, producer *agent.Result) (string, error) {
 	if producer == nil || len(sctx.Config.Commit.Trailers) == 0 {
-		return message, nil
+		return git.StripAIAttributionTrailers(message, sctx.Config.Commit.Trailers...), nil
 	}
 	// A fallback chain reports the agent that actually ran in Provider; a bare
 	// adapter leaves it empty, and then the step agent is the one that ran.
@@ -374,11 +372,11 @@ func withCommitTrailers(sctx *pipeline.StepContext, message string, producer *ag
 	if agentName == "" && sctx.Agent != nil {
 		agentName = sctx.Agent.Name()
 	}
-	trailers, err := sctx.Config.Commit.RenderTrailers(config.TrailerData{Agent: agentName, Model: producer.Model})
+	_, err := sctx.Config.Commit.RenderTrailers(config.TrailerData{Agent: agentName, Model: producer.Model})
 	if err != nil {
 		return "", err
 	}
-	return message + "\n\n" + strings.Join(trailers, "\n"), nil
+	return git.StripAIAttributionTrailers(message, sctx.Config.Commit.Trailers...), nil
 }
 
 // stagedChangesPresent is the handoff between catch-all staging and commit.
@@ -398,10 +396,12 @@ func commitAgentFixes(sctx *pipeline.StepContext, stepName types.StepName, summa
 	return err
 }
 
-// commitAgentFixesWithResult commits the worktree changes left by producer, the
-// agent invocation that made them. A nil producer commits without trailers.
+// commitAgentFixesWithResult preserves direct agent commits as applied repairs
+// even when there are no remaining worktree edits. The result records whether
+// the head advanced, independently of the producer's descriptive summary.
 func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepName, summary, fallbackSummary string, producer *agent.Result) (bool, error) {
 	ctx := sctx.Ctx
+	recordedHead := sctx.Run.HeadSHA
 	if err := assertPipelineHeadContinuity(sctx, stepName); err != nil {
 		return false, err
 	}
@@ -417,8 +417,14 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 		if err != nil {
 			return false, fmt.Errorf("resolve agent head: %w", err)
 		}
-		return false, recordAgentFixHead(sctx, stepName, headSHA)
+		if err := recordAgentFixHead(sctx, stepName, headSHA); err != nil {
+			return false, err
+		}
+		committed := headSHA != recordedHead
+		sctx.FixApplied = &committed
+		return committed, nil
 	}
+	summary = git.StripAIAttributionTrailers(summary, sctx.Config.Commit.Trailers...)
 	if summary == "" {
 		summary = fallbackSummary
 	}
@@ -463,7 +469,9 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if err := recordAgentFixHead(sctx, stepName, headSHA); err != nil {
 		return false, err
 	}
-	return headSHA != headBeforeCommit, nil
+	committed := headSHA != recordedHead
+	sctx.FixApplied = &committed
+	return committed, nil
 }
 
 func runPipelineCorrectionAgent(sctx *pipeline.StepContext, invoke func() (*agent.Result, error)) (*agent.Result, error) {
@@ -489,6 +497,9 @@ func runPipelineCorrectionAgent(sctx *pipeline.StepContext, invoke func() (*agen
 }
 
 func recordPipelineHeadRange(sctx *pipeline.StepContext, before, after string) error {
+	if err := sctx.ValidateCommitAttribution(before, after, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }); err != nil {
+		return err
+	}
 	if sctx.DB == nil || before == after {
 		return nil
 	}
@@ -518,6 +529,9 @@ func recordPipelineHeadRange(sctx *pipeline.StepContext, before, after string) e
 }
 
 func recordAgentFixHead(sctx *pipeline.StepContext, stepName types.StepName, headSHA string) error {
+	if err := sctx.ValidateCommitAttribution(sctx.Run.HeadSHA, headSHA, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }); err != nil {
+		return err
+	}
 	if headSHA == sctx.Run.HeadSHA {
 		return nil
 	}
@@ -548,7 +562,7 @@ func fixResultSummary(committed bool) string {
 	return NoChangesAppliedSummary
 }
 
-func extractCommitSummary(result *agent.Result) (string, error) {
+func extractCommitSummary(result *agent.Result, configured ...string) (string, error) {
 	var summary commitSummary
 	if result.Output == nil {
 		return "", fmt.Errorf("agent returned no structured summary")
@@ -562,7 +576,9 @@ func extractCommitSummary(result *agent.Result) (string, error) {
 	if len(summary.Summary) > config.MaxFixMessageSummaryBytes {
 		return "", fmt.Errorf("%w: commit summary must not exceed %d bytes", errRejectedCommitSummary, config.MaxFixMessageSummaryBytes)
 	}
-	cleaned := strings.Join(strings.Fields(summary.Summary), " ")
+	// Strip while the raw summary still has trailer boundaries; flattening
+	// first would turn the attribution into irreversible subject prose.
+	cleaned := strings.Join(strings.Fields(git.StripAIAttributionTrailers(summary.Summary, configured...)), " ")
 	cleaned = strings.Trim(cleaned, " \t\r\n\"'.;:,-")
 	return cleaned, nil
 }
@@ -589,13 +605,11 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		Purpose:    purpose,
 		Workload:   opts.Workload,
 	}
-	var startingHead string
+	startingHead, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
+	if err != nil {
+		return "", fmt.Errorf("resolve head before %s fix: %w", stepName, err)
+	}
 	if opts.RequireVerification {
-		head, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
-		if err != nil {
-			return "", fmt.Errorf("resolve head before %s fix: %w", stepName, err)
-		}
-		startingHead = head
 		runOpts.JSONSchema = verifiedFixSummarySchema
 	}
 	if opts.RequireVerification {
@@ -607,7 +621,6 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		}()
 	}
 	var result *agent.Result
-	var err error
 	result, err = runPipelineCorrectionAgent(sctx, func() (*agent.Result, error) {
 		if opts.RunAgent != nil {
 			return opts.RunAgent(runOpts)
@@ -625,7 +638,7 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 			return "", err
 		}
 	}
-	summary, err := extractCommitSummary(result)
+	summary, err := extractCommitSummary(result, sctx.Config.Commit.Trailers...)
 	if err != nil {
 		if errors.Is(err, errRejectedCommitSummary) {
 			return "", fmt.Errorf("validate %s fix summary: %w", stepName, err)
@@ -637,9 +650,14 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 			return "", err
 		}
 	}
-	committed, err := commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result)
+	_, err = commitAgentFixesWithResult(sctx, stepName, summary, opts.FallbackSummary, result)
 	if err != nil {
 		return "", err
+	}
+	committed := sctx.Run.HeadSHA != startingHead
+	sctx.FixApplied = &committed
+	if committed && stepName == types.StepReview && summary != "" {
+		return summary, nil
 	}
 	return fixResultSummary(committed), nil
 }

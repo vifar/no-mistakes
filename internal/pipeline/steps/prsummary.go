@@ -1556,6 +1556,12 @@ const (
 )
 
 func fixRoundOutcome(r *db.StepRound) fixOutcome {
+	if r.FixApplied != nil {
+		if *r.FixApplied {
+			return fixOutcomeApplied
+		}
+		return fixOutcomeNoChange
+	}
 	if r.FixSummary == nil || strings.TrimSpace(*r.FixSummary) == "" {
 		return fixOutcomeUnreported
 	}

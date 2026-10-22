@@ -4,9 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func TestMain(m *testing.M) {
+	testgit.ClearConfigEnv()
 	os.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	globalConfigDir, err := os.MkdirTemp("", "no-mistakes-intent-tests-")
 	if err != nil {

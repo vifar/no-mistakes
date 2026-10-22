@@ -1210,8 +1210,8 @@ func TestExecuteFixMode_WorktreeChangesCanonicalizesMisleadingAgentSummary(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary != changesAppliedSummary {
-		t.Fatalf("fix summary = %q, want %q", summary, changesAppliedSummary)
+	if summary != "no changes applied: checked formatting" {
+		t.Fatalf("fix summary = %q, want %q", summary, "no changes applied: checked formatting")
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got == headSHA {
 		t.Fatal("expected committed fix to advance HEAD")
@@ -1221,7 +1221,7 @@ func TestExecuteFixMode_WorktreeChangesCanonicalizesMisleadingAgentSummary(t *te
 		[]*db.StepResult{{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted}},
 		map[string][]*db.StepRound{"s1": {
 			{Round: 1, Trigger: "initial", FindingsJSON: &findings},
-			{Round: 2, Trigger: "auto_fix", FixSummary: &summary},
+			{Round: 2, Trigger: "auto_fix", FixSummary: &summary, FixApplied: sctx.FixApplied},
 		}},
 		testPipelineHeadSHA,
 	)

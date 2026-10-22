@@ -465,7 +465,7 @@ func isRemoteBranchRewritten(ctx context.Context, workDir, remoteRef string) boo
 // tryRebase attempts a rebase onto targetRef. Returns conflicted files when the
 // rebase stops on merge conflicts. The rebase is aborted before returning.
 func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string) ([]string, error) {
-	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
+	skip, targetSHA, err := shouldSkipRebase(ctx, sctx, targetRef)
 	if err != nil {
 		return nil, err
 	}
@@ -474,7 +474,7 @@ func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	if _, err := git.Run(ctx, sctx.WorkDir, "rebase", targetRef); err != nil {
+	if _, err := stepGitRun(sctx, "rebase", targetSHA); err != nil {
 		conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
 		_, _ = git.Run(ctx, sctx.WorkDir, "rebase", "--abort")
 
@@ -488,7 +488,7 @@ func tryRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string
 
 // rebaseWithAgent performs a rebase and uses the agent to resolve any conflicts.
 func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
-	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
+	skip, targetSHA, err := shouldSkipRebase(ctx, sctx, targetRef)
 	if err != nil {
 		return err
 	}
@@ -497,7 +497,7 @@ func rebaseWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef 
 	}
 
 	sctx.Log(fmt.Sprintf("rebasing onto %s...", targetRef))
-	if _, err := git.Run(ctx, sctx.WorkDir, "rebase", targetRef); err == nil {
+	if _, err := stepGitRun(sctx, "rebase", targetSHA); err == nil {
 		return nil
 	}
 
@@ -523,7 +523,7 @@ Instructions:
 - Preserve the intent of both the current branch changes and the upstream changes.
 - Return JSON with a single "summary" field describing what you resolved.
 - Keep the summary under 10 words.`,
-		targetRef,
+		targetSHA,
 		strings.Join(conflictFiles, "\n- "),
 	)
 	prompt += "\n" + agent.MemoryFilesConflictRule
@@ -576,9 +576,6 @@ func integrationVerb(merging bool) string {
 // TWO parents behind, so whether a conflict resolution dropped content one side
 // introduced stays decidable afterwards from outside the pipeline. A merge that
 // silently fast-forwarded would leave nothing to compare.
-// --no-edit keeps git's own "Merge remote-tracking branch 'origin/main' into
-// <branch>" subject rather than inventing a second convention for the same
-// commit.
 func mergeArgs(targetRef string) []string {
 	return []string{"merge", "--no-ff", "--no-edit", targetRef}
 }
@@ -587,7 +584,7 @@ func mergeArgs(targetRef string) []string {
 // targetRef into the branch and returns the conflicted files when the merge
 // stops on conflicts, aborting before returning.
 func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string) ([]string, error) {
-	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
+	skip, targetSHA, err := shouldSkipRebase(ctx, sctx, targetRef)
 	if err != nil {
 		return nil, err
 	}
@@ -596,7 +593,7 @@ func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string)
 	}
 
 	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
-	if _, err := git.Run(ctx, sctx.WorkDir, mergeArgs(targetRef)...); err != nil {
+	if _, err := stepGitRun(sctx, mergeArgs(targetSHA)...); err != nil {
 		conflictFiles := rebaseConflictFiles(ctx, sctx.WorkDir)
 		_, _ = git.Run(ctx, sctx.WorkDir, "merge", "--abort")
 
@@ -617,7 +614,7 @@ func tryMerge(ctx context.Context, sctx *pipeline.StepContext, targetRef string)
 // merge commit does, so the prompt asks for the resolution that commit can
 // actually be audited against: keep what both sides introduced.
 func mergeWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef string) error {
-	skip, err := shouldSkipRebase(ctx, sctx, targetRef)
+	skip, targetSHA, err := shouldSkipRebase(ctx, sctx, targetRef)
 	if err != nil {
 		return err
 	}
@@ -625,21 +622,13 @@ func mergeWithAgent(ctx context.Context, sctx *pipeline.StepContext, targetRef s
 		return nil
 	}
 
-	// Snapshot what the merge must prove before it runs. The target is pinned
-	// to a SHA here rather than checked by refname afterwards because an agent
-	// that fetches while resolving can advance the ref under us and fail a
-	// merge that actually landed.
+	// Snapshot what the merge must prove before it runs.
 	preMergeHead, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
 		return fmt.Errorf("get pre-merge head: %w", err)
 	}
-	targetSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", targetRef)
-	if err != nil {
-		return fmt.Errorf("get target head %s: %w", targetRef, err)
-	}
-
 	sctx.Log(fmt.Sprintf("merging %s...", targetRef))
-	if _, err := git.Run(ctx, sctx.WorkDir, mergeArgs(targetRef)...); err == nil {
+	if _, err := stepGitRun(sctx, mergeArgs(targetSHA)...); err == nil {
 		return nil
 	}
 
@@ -666,7 +655,7 @@ Instructions:
 - Preserve the intent of both the current branch changes and the upstream changes.
 - Return JSON with a single "summary" field describing what you resolved.
 - Keep the summary under 10 words.`,
-		targetRef,
+		targetSHA,
 		strings.Join(conflictFiles, "\n- "),
 	)
 	prompt += "\n" + agent.MemoryFilesConflictRule
@@ -773,44 +762,44 @@ func restorePreMergeHead(ctx context.Context, sctx *pipeline.StepContext, preMer
 
 // shouldSkipRebase checks whether a rebase onto targetRef can be skipped.
 // Returns true if targetRef doesn't exist, is already merged, or can be fast-forwarded.
-func shouldSkipRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string) (bool, error) {
-	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", targetRef); err != nil {
+func shouldSkipRebase(ctx context.Context, sctx *pipeline.StepContext, targetRef string) (bool, string, error) {
+	targetSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", targetRef+"^{commit}")
+	if err != nil {
 
 		if sctx.DB != nil && sctx.Run != nil {
 			pending, readErr := sctx.DB.GetPendingTargetRewind(sctx.Run.ID)
 			if readErr != nil {
-				return false, readErr
+				return false, "", readErr
 			}
 			if pending != nil {
-				return false, fmt.Errorf("resolve checked rewind target: %w", err)
+				return false, "", fmt.Errorf("resolve checked rewind target: %w", err)
 			}
 		}
-		return true, nil
+		return true, "", nil
 	}
 	localSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
-		return false, fmt.Errorf("get local head: %w", err)
+		return false, "", fmt.Errorf("get local head: %w", err)
 	}
-	targetSHA, err := git.Run(ctx, sctx.WorkDir, "rev-parse", targetRef)
-	if err != nil {
-		return false, fmt.Errorf("get target head %s: %w", targetRef, err)
+	if _, err := sctx.CommitAttributionEnv(nil, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }, targetSHA); err != nil {
+		return false, "", err
 	}
 	if localSHA == targetSHA {
 		sctx.Log(fmt.Sprintf("already up-to-date with %s", targetRef))
-		return true, nil
+		return true, targetSHA, nil
 	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", targetRef, "HEAD"); err == nil {
+	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", targetSHA, "HEAD"); err == nil {
 		sctx.Log(fmt.Sprintf("already ahead of %s", targetRef))
-		return true, nil
+		return true, targetSHA, nil
 	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", "HEAD", targetRef); err == nil {
+	if _, err := git.Run(ctx, sctx.WorkDir, "merge-base", "--is-ancestor", "HEAD", targetSHA); err == nil {
 		sctx.Log(fmt.Sprintf("fast-forwarding to %s", targetRef))
-		if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", targetRef); err != nil {
-			return false, fmt.Errorf("fast-forward to %s: %w", targetRef, err)
+		if _, err := git.Run(ctx, sctx.WorkDir, "reset", "--hard", targetSHA); err != nil {
+			return false, "", fmt.Errorf("fast-forward to %s: %w", targetRef, err)
 		}
-		return true, nil
+		return true, targetSHA, nil
 	}
-	return false, nil
+	return false, targetSHA, nil
 }
 
 // rebaseInProgress returns true if a git rebase is currently in progress.
@@ -888,6 +877,9 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext, targetBranch
 	headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve head after rebase: %w", err)
+	}
+	if err := sctx.ValidateCommitAttribution(sctx.Run.HeadSHA, headSHA, func(args ...string) (string, error) { return stepGitRun(sctx, args...) }); err != nil {
+		return nil, err
 	}
 	if headSHA != "" && headSHA != sctx.Run.HeadSHA {
 		oldHead := sctx.Run.HeadSHA

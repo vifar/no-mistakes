@@ -6,11 +6,17 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func TestMain(m *testing.M) {
+	if handled, err := git.HandleAttributionHook(os.Args[1:]); handled {
+		os.Exit(git.AttributionHookResult(err, os.Stderr))
+	}
 	if handled, exitCode, err := shellenv.RunWindowsCooperativeCommandHelper(os.Args[1:]); handled {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -21,7 +27,7 @@ func TestMain(m *testing.M) {
 	// Agent harnesses inject git config (e.g. safe.bareRepository=explicit)
 	// via GIT_CONFIG_COUNT/KEY_n/VALUE_n; tests that need it re-set it with
 	// t.Setenv (issue #362).
-	os.Unsetenv("GIT_CONFIG_COUNT")
+	testgit.ClearConfigEnv()
 	// Fixtures must not depend on the machine's system git config: some
 	// distributions ship safe.bareRepository=explicit there, which refuses
 	// the in-directory use of the bare fixture repositories these tests

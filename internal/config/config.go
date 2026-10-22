@@ -1831,10 +1831,9 @@ ci:
 #   fix_message: "no-mistakes({{.Step}}): {{.Summary}}"
 # To use the captured identifier in the subject, replace fix_message with:
 #   fix_message: "{{.Branch}}: {{.Summary}}"
-# Trailers appended to commits made from one agent invocation's changes.
-# Available variables: {{.Agent}} (the agent that actually ran) and
-# {{.Model}} (the model it reported, or "unknown"). Repo config may replace
-# the list.
+# Attribution patterns omitted from newly authored pipeline commits.
+# Policy, placeholders and validation: docs/src/content/docs/reference/global-config.md (commit.trailers).
+# Repo config may replace the list; built-in filtering remains active.
 #   trailers:
 #     - "Assisted-by: no-mistakes:{{.Agent}}:{{.Model}}"
 

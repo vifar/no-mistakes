@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 )
@@ -145,8 +146,19 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 		return nil, err
 	}
 	defer release()
+	var before string
+	if sctx != nil && sctx.Run != nil && sctx.WorkDir != "" {
+		before, err = git.HeadSHA(parent, sctx.WorkDir)
+		if err != nil {
+			return nil, err
+		}
+		opts.Env, err = sctx.CommitAttributionEnv(opts.Env, func(args ...string) (string, error) { return git.Run(parent, sctx.WorkDir, args...) })
+		if err != nil {
+			return nil, err
+		}
+	}
 	activity := observeAgentActivity(&opts)
-	return invokeAgent(parent, timeout, working, stall, cause, activity, func(ctx context.Context) (*agent.Result, error) {
+	result, runErr := invokeAgent(parent, timeout, working, stall, cause, activity, func(ctx context.Context) (*agent.Result, error) {
 		if sessionRole != "" && sctx != nil && sctx.Sessions != nil {
 			return sctx.Sessions.Run(ctx, ag, sessionRole, opts, sctx.Log)
 		}
@@ -155,6 +167,16 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 		}
 		return ag.Run(ctx, opts)
 	})
+	if runErr == nil && before != "" {
+		after, err := git.HeadSHA(parent, sctx.WorkDir)
+		if err != nil {
+			return result, err
+		}
+		if err := sctx.ValidateCommitAttribution(before, after, func(args ...string) (string, error) { return git.Run(parent, sctx.WorkDir, args...) }); err != nil {
+			return result, err
+		}
+	}
+	return result, runErr
 }
 
 // invokeAgent combines upstream's activity-aware budget with the fork's progress bound.

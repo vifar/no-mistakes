@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func TestMain(m *testing.M) {
@@ -21,9 +23,7 @@ func TestMain(m *testing.M) {
 	}
 	globalConfig := filepath.Join(globalConfigDir, "gitconfig")
 	os.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
-	if err := os.Unsetenv("GIT_CONFIG_COUNT"); err != nil {
-		panic(err)
-	}
+	testgit.ClearConfigEnv()
 	code := m.Run()
 	gitfault.Cleanup()
 	os.RemoveAll(globalConfigDir)
