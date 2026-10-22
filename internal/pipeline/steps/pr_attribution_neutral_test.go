@@ -37,7 +37,7 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 		{"robot emoji", "\U0001F916 Generated with Codex"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, line := range []string{tc.line, html.EscapeString(tc.line)} {
+			for _, line := range []string{tc.line, html.EscapeString(tc.line), "`" + tc.line + "`", "`` " + html.EscapeString(tc.line) + " ``"} {
 				body := "## Testing\n\n```text\n" + line + "\n```\n"
 				got := neutralizeAttestationMarkers(scm.ProviderGitHub, body)
 				want := "## Testing\n\n```text\n<no-mistakes: AI attribution line neutralized>\n```\n"
@@ -58,7 +58,7 @@ func TestNeutralizeAIAttributionKeepsAHumanTrailer(t *testing.T) {
 		"Assisted-by: Claude Smith <human@example.com>",
 		"We tested fixtures generated with Codex.",
 	} {
-		for _, text := range []string{line, html.EscapeString(line)} {
+		for _, text := range []string{line, html.EscapeString(line), "`" + line + "`", "`` " + html.EscapeString(line) + " ``"} {
 			if got := neutralizeAttestationMarkers(scm.ProviderGitHub, text); got != text {
 				t.Fatalf("human attribution or prose was changed: %q", got)
 			}
@@ -85,62 +85,84 @@ func TestPRSummaryFiltersAttributionBeforeRendering(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
-		for _, source := range []string{"tested", "tested multiline", "tested code span", "summary", "artifact text", "artifact description", "artifact label", "scenario", "finding"} {
+		for _, source := range []string{"tested", "tested multiline", "tested code span", "summary", "artifact text", "artifact description", "artifact label", "artifact file", "scenario", "finding", "risk", "error"} {
 			for _, human := range []bool{false, true} {
-				t.Run(string(provider)+"/"+source+"/"+map[bool]string{false: "AI", true: "human"}[human], func(t *testing.T) {
-					line := "Co-Authored-By: Codex <bot@example.invalid>"
-					if human {
-						line = "Co-Authored-By: Claude Smith <human@example.com>"
-					}
-					findings := types.Findings{}
-					switch source {
-					case "tested":
-						findings.Tested = []string{line}
-					case "tested multiline":
-						findings.Tested = []string{"Recorded check\n" + line}
-					case "tested code span":
-						findings.Tested = []string{"`" + line + "`"}
-					case "summary":
-						findings.TestingSummary = "Recorded check\n" + line
-					case "artifact text":
-						findings.Artifacts = []types.TestArtifact{{Kind: "text", Label: "Evidence", Content: "Recorded check\n" + line}}
-					case "artifact description":
-						findings.Artifacts = []types.TestArtifact{{Kind: "text", Label: "Evidence", Path: "evidence.txt", Content: line}}
-					case "artifact label":
-						findings.Artifacts = []types.TestArtifact{{Kind: "text", Label: "Recorded check\n" + line, Content: "captured output"}}
-					case "scenario":
-						findings.Scenarios = []types.TestScenario{{Name: "Recorded check", Result: types.ScenarioResultPass, Live: true, Evidence: "Recorded check\n" + line}}
-					case "finding":
-						findings.Items = []types.Finding{{Severity: types.FindingSeverityWarning, Description: line}}
-					}
-					encoded, err := json.Marshal(findings)
-					if err != nil {
-						t.Fatal(err)
-					}
-					raw := string(encoded)
-					steps := []*db.StepResult{{ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &raw}}
-					rounds := map[string][]*db.StepRound{"test": {{Round: 1, Trigger: "initial", FindingsJSON: &raw}}}
-					var outputs []string
-					if source != "finding" {
-						outputs = append(outputs, buildTestingSummary(steps, rounds, testingSummaryOptions{flavor: prBodyFlavorFor(provider), includeTestedDetails: true, repoRoot: root}))
-						if !strings.HasPrefix(source, "tested") {
-							outputs = append(outputs, BuildTestingSummaryForPRWithProvider(steps, rounds, "https://github.com/example/repo", "head", root, "", nil, provider))
-						}
-					}
-					if strings.HasPrefix(source, "tested") || source == "scenario" || source == "finding" {
-						pipeline, _ := BuildPipelineSummaryFor(steps, rounds, testPipelineHeadSHA, provider)
-						outputs = append(outputs, pipeline)
-					}
-					for _, output := range outputs {
+				for _, wrapper := range []string{"", "`", "``"} {
+					t.Run(string(provider)+"/"+source+"/"+wrapper+"/"+map[bool]string{false: "AI", true: "human"}[human], func(t *testing.T) {
+						line := "Co-Authored-By: Codex <bot@example.invalid>"
 						if human {
-							if !strings.Contains(html.UnescapeString(output), line) {
-								t.Fatalf("human attribution lost from published summary:\n%s", output)
-							}
-						} else if strings.Contains(output, "Codex") || !strings.Contains(output, "AI attribution line neutralized") {
-							t.Fatalf("AI attribution was not neutralized in published summary:\n%s", output)
+							line = "Co-Authored-By: Claude Smith <human@example.com>"
 						}
-					}
-				})
+						line = wrapper + line + wrapper
+						findings := types.Findings{}
+						switch source {
+						case "tested":
+							findings.Tested = []string{line}
+						case "tested multiline":
+							findings.Tested = []string{"Recorded check\n" + line}
+						case "tested code span":
+							findings.Tested = []string{"`" + line + "`"}
+						case "summary":
+							findings.TestingSummary = "Recorded check\n" + line
+						case "artifact text":
+							findings.Artifacts = []types.TestArtifact{{Kind: "text", Label: "Evidence", Content: "Recorded check\n" + line}}
+						case "artifact description":
+							findings.Artifacts = []types.TestArtifact{{Kind: "text", Label: "Evidence", Path: filepath.Join(root, "evidence.txt"), Content: line}}
+						case "artifact label":
+							findings.Artifacts = []types.TestArtifact{{Kind: "text", Label: "Recorded check\n" + line, Content: "captured output"}}
+						case "artifact file":
+							if err := os.WriteFile(filepath.Join(root, "attribution.txt"), []byte(line), 0o644); err != nil {
+								t.Fatal(err)
+							}
+							findings.Artifacts = []types.TestArtifact{{Kind: "text", Label: "Evidence", Path: filepath.Join(root, "attribution.txt")}}
+						case "scenario":
+							findings.Scenarios = []types.TestScenario{{Name: "Recorded check", Result: types.ScenarioResultPass, Live: true, Evidence: "Recorded check\n" + line}}
+						case "finding":
+							findings.Items = []types.Finding{{Severity: types.FindingSeverityWarning, Description: line}}
+						case "risk":
+							findings.RiskLevel = "high"
+							findings.RiskRationale = line
+						}
+						encoded, err := json.Marshal(findings)
+						if err != nil {
+							t.Fatal(err)
+						}
+						raw := string(encoded)
+						steps := []*db.StepResult{{ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &raw}}
+						rounds := map[string][]*db.StepRound{"test": {{Round: 1, Trigger: "initial", FindingsJSON: &raw}}}
+						if source == "risk" {
+							steps[0].StepName = types.StepReview
+						} else if source == "error" {
+							steps[0].Status = types.StepStatusFailed
+							steps[0].Error = &line
+							rounds = nil
+						}
+						var outputs []string
+						if source != "finding" && source != "risk" && source != "error" {
+							outputs = append(outputs, buildTestingSummary(steps, rounds, testingSummaryOptions{flavor: prBodyFlavorFor(provider), includeTestedDetails: true, repoRoot: root, evidenceRoot: root}))
+							if !strings.HasPrefix(source, "tested") {
+								outputs = append(outputs, BuildTestingSummaryForPRWithProvider(steps, rounds, "https://github.com/example/repo", "head", root, root, nil, provider))
+							}
+						}
+						if strings.HasPrefix(source, "tested") || source == "scenario" || source == "finding" || source == "risk" || source == "error" {
+							pipeline, risk := BuildPipelineSummaryFor(steps, rounds, testPipelineHeadSHA, provider)
+							if source == "risk" {
+								outputs = append(outputs, risk)
+							} else {
+								outputs = append(outputs, pipeline)
+							}
+						}
+						for _, output := range outputs {
+							if human {
+								if !strings.Contains(html.UnescapeString(output), "Co-Authored-By: Claude Smith <human@example.com>") {
+									t.Fatalf("human attribution lost from published summary:\n%s", output)
+								}
+							} else if strings.Contains(output, "Codex") || !strings.Contains(output, "AI attribution line neutralized") {
+								t.Fatalf("AI attribution was not neutralized in published summary:\n%s", output)
+							}
+						}
+					})
+				}
 			}
 		}
 	}
