@@ -33,9 +33,9 @@ import (
 // divergencePatchScanLimit bounds how many preserved-side commits the patch
 // identity diagnostic reads.
 //
-// The search is a diagnostic, so a bounded miss is safe: it reports nothing
-// rather than guessing. The bound keeps a long preserved history from turning
-// one refusal into an unbounded diff stream.
+// An unsuccessful search limited by this bound is reported as bounded,
+// never as an exhaustive absence of a matching patch. The bound keeps a long
+// preserved history from turning one refusal into an unbounded diff stream.
 const divergencePatchScanLimit = 200
 
 // divergenceDiagnostic is the read-only evidence behind one diverged refusal.
@@ -153,8 +153,9 @@ func (d divergenceDiagnostic) divergenceDescription() string {
 }
 
 // collectDivergenceDiagnostic gathers the read-only evidence behind a diverged
-// refusal. It runs the same ancestry and three-way merge tests the refusal
-// decision used, and adds a patch identity diagnostic.
+// refusal. After the caller has refused recovery, it runs ancestry and
+// three-way merge checks for the report and adds a patch identity diagnostic.
+// Strict fast-forward recovery still refuses even when the merge proof holds.
 //
 // The function never returns a decision. A caller that wants the containment
 // answer must ask preservedContainsLocalWork.
