@@ -280,6 +280,70 @@ func TestRerunInheritsTheLineageBaseBranchWhenTheSelectedRunHasNone(t *testing.T
 	}
 }
 
+// The existing HandleRerun inheritance must not regress, and a rerun whose
+// caller passes a DIFFERENT base branch keeps the CALLER's request: the
+// caller's explicit request wins for that run, and the selected run's own
+// base branch and the lineage's base branch do not override it.
+//
+// This is the case the pre-existing rerun test cannot distinguish, because it
+// reruns with the SAME value it started with. Here the rerun names another
+// branch, so a run that silently preferred the selected run's value or the
+// lineage's value would be caught.
+func TestRerunWithADifferentBaseBranchKeepsTheCallersRequest(t *testing.T) {
+	step := &mockPassStep{name: types.StepReview}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{step}
+	})
+
+	repo, firstSHA := lineageRepo(t, p, d, "pr-base-rerun-different-repo")
+	// The caller's different base branch has to exist on the remote too,
+	// because the run setup resolves the recorded base branch against the
+	// remote before the run starts.
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/release/1.x")
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	// The first run establishes the lineage's base branch.
+	var first ipc.PushReceivedResult
+	err = client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+		Gate:         p.RepoDir("pr-base-rerun-different-repo"),
+		Ref:          "refs/heads/epic/feature",
+		Old:          "0000000000000000000000000000000000000000",
+		New:          firstSHA,
+		PRBaseBranch: "develop",
+	}, &first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRun := waitForRunTerminalState(t, d, first.RunID)
+	if firstRun.PRBaseBranch == nil || *firstRun.PRBaseBranch != "develop" {
+		t.Fatalf("first run PRBaseBranch = %#v, want develop", firstRun.PRBaseBranch)
+	}
+
+	// A rerun that names a DIFFERENT base branch keeps the caller's request.
+	var rerun ipc.RerunResult
+	err = client.Call(ipc.MethodRerun, &ipc.RerunParams{
+		RepoID:        "pr-base-rerun-different-repo",
+		Branch:        "epic/feature",
+		PreviousRunID: firstRun.ID,
+		PRBaseBranch:  "release/1.x",
+	}, &rerun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rerunRun := waitForRunTerminalState(t, d, rerun.RunID)
+	if rerunRun.PRBaseBranch == nil || *rerunRun.PRBaseBranch != "release/1.x" {
+		t.Fatalf("rerun PRBaseBranch = %#v, want the caller's release/1.x", rerunRun.PRBaseBranch)
+	}
+	if !rerunRun.PRBaseBranchRequested {
+		t.Fatal("the caller's fresh --base-branch request lost its retarget authority")
+	}
+}
+
 // A base branch that cannot be carried is not silently replaced. A recorded
 // lineage base branch that is not a usable branch name is refused visibly,
 // naming the branch, instead of being dropped for the repository default.
