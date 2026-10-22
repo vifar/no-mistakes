@@ -1,11 +1,13 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
@@ -466,5 +468,63 @@ func TestALineageBaseBranchThatNoLongerExistsIsStillCarried(t *testing.T) {
 	}
 	if successor.Status == types.RunCompleted {
 		t.Fatal("a successor whose lineage base branch no longer exists completed")
+	}
+}
+
+func TestReplacementLineageIgnoresStrictAndEmptyRecords(t *testing.T) {
+	for _, source := range []string{"strict", "legacy"} {
+		t.Run(source, func(t *testing.T) {
+			p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+				return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+			})
+			repo, head := lineageRepo(t, p, d, "lineage-source-"+source)
+			ordinary, err := d.InsertRunWithIntent(repo.ID, "epic/feature", head, head, nil, "develop")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunStatus(ordinary.ID, types.RunCompleted); err != nil {
+				t.Fatal(err)
+			}
+			var shipping *types.ShippingOptions
+			base := ""
+			if source == "strict" {
+				shipping = &types.ShippingOptions{Mode: types.ShippingFull, TargetBranch: "main"}
+				base = "main"
+			}
+			newer, err := d.InsertRunWithShipping(repo.ID, "epic/feature", head, head, nil, "", "", "", base, false, nil, shipping)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunStatus(newer.ID, types.RunCompleted); err != nil {
+				t.Fatal(err)
+			}
+			service := &branchsync.Service{DB: d, Repo: repo, WorkDir: repo.WorkingPath}
+			state := service.InspectCached(context.Background())
+			if state.Pipeline.RunID != newer.ID {
+				t.Fatalf("selected run = %q, want %q", state.Pipeline.RunID, newer.ID)
+			}
+			if state.Pipeline.PRBaseBranch != "develop" {
+				t.Errorf("handoff base = %q, want develop", state.Pipeline.PRBaseBranch)
+			}
+			nextHead := advanceLineage(t, repo, "successor.txt")
+			client, err := ipc.Dial(p.Socket())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			var result ipc.PushReceivedResult
+			if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+				Gate: p.RepoDir(repo.ID), Ref: "refs/heads/epic/feature", Old: head, New: nextHead,
+			}, &result); err != nil {
+				t.Fatal(err)
+			}
+			successor := waitForRunTerminalState(t, d, result.RunID)
+			if successor.PRBaseBranch == nil || *successor.PRBaseBranch != "develop" {
+				t.Fatalf("successor base = %#v, want develop", successor.PRBaseBranch)
+			}
+			if successor.PRBaseBranchRequested {
+				t.Fatal("inherited base gained retarget authority")
+			}
+		})
 	}
 }

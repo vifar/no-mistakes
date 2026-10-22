@@ -64,3 +64,41 @@ func TestRecoverHandoffCarriesTheLineageBaseBranch(t *testing.T) {
 		t.Fatalf("recovery state.Pipeline.PRBaseBranch = %q, want develop", state.Pipeline.PRBaseBranch)
 	}
 }
+
+func TestLineageHandoffSkipsStrictAndEmptyRecords(t *testing.T) {
+	for _, action := range []string{"inspect", "recover"} {
+		for _, source := range []string{"legacy", types.ShippingFull, types.ShippingImmutableSource} {
+			for _, older := range []string{"", "develop"} {
+				t.Run(action+"/"+source+"/"+older, func(t *testing.T) {
+					f := newSyncFixture(t)
+					if older != "" {
+						lineageRunWithBaseBranch(t, f, older)
+					}
+					var shipping *types.ShippingOptions
+					base := ""
+					if source != "legacy" {
+						base = "main"
+						shipping = &types.ShippingOptions{Mode: source, TargetBranch: "main"}
+					}
+					run, err := f.db.InsertRunWithShipping(f.repo.ID, "feature/sync", f.old, f.base, nil, "", "", "", base, false, nil, shipping)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := f.db.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+						t.Fatal(err)
+					}
+					state := f.service.InspectCached(f.ctx)
+					if state.Pipeline.RunID != run.ID {
+						t.Fatalf("selected run = %q, want %q", state.Pipeline.RunID, run.ID)
+					}
+					if action == "recover" {
+						state = f.service.Recover(f.ctx, true)
+					}
+					if state.Pipeline.PRBaseBranch != older {
+						t.Fatalf("handoff base = %q, want %q", state.Pipeline.PRBaseBranch, older)
+					}
+				})
+			}
+		}
+	}
+}

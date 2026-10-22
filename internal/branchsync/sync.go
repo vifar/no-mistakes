@@ -133,19 +133,6 @@ type NextAction struct {
 	Command string
 }
 
-// lineagePRBaseBranch returns the base branch the run's lineage recorded, or
-// "" when the run recorded none.
-//
-// Only the per-run override is a lineage base branch. A strict shipping run
-// persists its own pinned target at launch and resolves its base from that
-// pin, so the pin is not reported as a lineage base branch.
-func lineagePRBaseBranch(run *db.Run) string {
-	if run == nil || run.PRBaseBranch == nil {
-		return ""
-	}
-	return strings.TrimSpace(*run.PRBaseBranch)
-}
-
 // RecoveryEvidence describes the exact preservation proof behind a recovery
 // action. Bound archive recovery is deliberately keep-local-only: the archive
 // preserves the divergent later head while custody returns at RequiredHead.
@@ -2120,7 +2107,7 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 	state.Pipeline = PipelineState{
 		RunID: run.ID, Status: string(run.Status), SubmittedHead: ptr(run.SubmittedHeadSHA), CurrentHead: run.HeadSHA,
 		PushedHead: ptr(run.LastPushedSHA), PushedAt: value(run.LastPushedAt), PushGeneration: value(run.PushGeneration),
-		PRBaseBranch: lineagePRBaseBranch(run),
+		PRBaseBranch: db.LineagePRBaseBranch(runs, branch),
 	}
 	state.PRState = normalizePRState(run.PRState)
 	if run.Shipping != nil && run.Shipping.Mode == types.ShippingImmutableSource {
