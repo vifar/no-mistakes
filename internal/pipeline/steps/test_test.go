@@ -1429,6 +1429,11 @@ func TestTestStep_InitialAgent_NoTargetedEvidenceRequiresHonestFinding(t *testin
 		"perform manual verification with evidence",
 		"report a warning finding that sufficient targeted evidence is not possible",
 		"If sufficient evidence is not possible, report a warning finding",
+		// The emitted prompt is the agent interface. The author's single-question
+		// policy requires an explicit exception here; an unconditional missing-
+		// evidence warning would ask for a second no-surface acknowledgement.
+		"That finding is for a scenario that COULD be driven live but could not be",
+		`A change with NO live-exercisable surface at all is the "no-surface" verdict, and the pipeline asks that question itself, so raise no finding of your own for it`,
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("expected no-targeted-evidence guidance %q in prompt:\n%s", want, prompt)
