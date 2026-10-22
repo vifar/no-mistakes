@@ -245,7 +245,7 @@ func TestPRConfiguredAttributionHTMLForms(t *testing.T) {
 	t.Parallel()
 	for _, configured := range []string{"Build-Agent: private&#45;identifier", "Build-Agent: private-identifier", "Build&#45;Agent: private-identifier"} {
 		decoded := html.UnescapeString(configured)
-		for _, input := range []string{configured, decoded, html.EscapeString(configured), html.EscapeString(decoded), "**" + configured + "**", "> " + configured} {
+		for _, input := range []string{configured, decoded, html.EscapeString(decoded), "**" + configured + "**", "> " + configured} {
 			if got := prDisplayText(input, configured); got != "" {
 				t.Errorf("display retained exact configured form %q: %q", input, got)
 			}
@@ -295,5 +295,24 @@ func TestPRConfiguredAttributionCaseSensitive(t *testing.T) {
 	}
 	if got := prDisplayText(humanCoauthorFixture, "Build-Agent: Worker-A"); got != "preserved human co-author: Claude Smith <claude@example.com>" {
 		t.Errorf("human evidence changed: %q", got)
+	}
+}
+
+func TestPRConfiguredAttributionSingleDecode(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ configured, input, want string }{
+		{"Build-Agent: worker&amp;copy;", "Build-Agent: worker&amp;copy;", ""},
+		{"Build-Agent: worker&copy;", "Build-Agent: worker&amp;copy;", "Build-Agent: worker&amp;copy;"},
+		{"Build-Agent: worker&amp;copy;", "Build-Agent: worker&copy;", "Build-Agent: worker&copy;"},
+		{"Build-Agent: worker", "Build-Agent: worker", ""},
+		{"Build-Agent: worker-A", "Build-Agent: worker&#45;A", ""},
+		{"Build-Agent: worker-A", "Build-Agent: worker-A", ""},
+	} {
+		if got := prDisplayText(tc.input, tc.configured); got != tc.want {
+			t.Errorf("display(%q, %q) = %q, want %q", tc.input, tc.configured, got, tc.want)
+		}
+		if got := stripReviewAIAttribution(tc.input, []string{tc.configured}); got != tc.want {
+			t.Errorf("Review(%q, %q) = %q, want %q", tc.input, tc.configured, got, tc.want)
+		}
 	}
 }

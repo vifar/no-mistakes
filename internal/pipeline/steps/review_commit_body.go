@@ -53,10 +53,7 @@ func reviewAttributionLine(line string) (string, bool) {
 	return content, indented && !bullet
 }
 
-func reviewAttributionStart(line string, configuredTrailers []string) bool {
-	if reviewConfiguredAttributionMatches(line, configuredTrailers) {
-		return true
-	}
+func reviewAttributionStart(line string) bool {
 	if !reviewTrailerKey.MatchString(line) {
 		return reviewGeneratedWith.MatchString(line)
 	}
@@ -81,21 +78,19 @@ func reviewAttributionAddressComplete(line string) bool {
 }
 
 func reviewConfiguredAttributionMatches(line string, configuredTrailers []string) bool {
-	raw, _ := reviewAttributionLine(line)
 	decoded, _ := reviewAttributionLine(html.UnescapeString(line))
 	for _, trailer := range configuredTrailers {
-		configured, _ := reviewAttributionLine(trailer)
 		decodedConfigured, _ := reviewAttributionLine(html.UnescapeString(trailer))
-		if raw == configured || decoded == decodedConfigured {
+		if decoded == decodedConfigured {
 			return true
 		}
 	}
 	return false
 }
 
-func reviewAttributionContinuation(first, following string, configuredTrailers []string) (string, bool) {
+func reviewAttributionContinuation(first, following string) (string, bool) {
 	next, continuation := reviewAttributionLine(following)
-	if !continuation || next == "" || reviewTrailerKey.MatchString(next) || reviewConfiguredAttributionMatches(first, configuredTrailers) {
+	if !continuation || next == "" || reviewTrailerKey.MatchString(next) {
 		return first, false
 	}
 	key, value, hasKey := strings.Cut(first, ":")
@@ -115,27 +110,39 @@ func reviewAttributionContinuation(first, following string, configuredTrailers [
 
 func reviewAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
 	end = start + 1
-	unfolded, _ = reviewAttributionLine(lines[start])
+	if reviewConfiguredAttributionMatches(lines[start], configuredTrailers) {
+		return end, lines[start], true, true
+	}
+	firstLine := html.UnescapeString(lines[start])
+	unfolded, _ = reviewAttributionLine(firstLine)
 	if end < len(lines) {
-		paired, _ := reviewAttributionLine(lines[start] + "\n" + lines[end])
+		nextLine := html.UnescapeString(lines[end])
+		paired, _ := reviewAttributionLine(firstLine + "\n" + nextLine)
 		first, following, hasPair := strings.Cut(paired, "\n")
-		if !reviewAttributionStart(unfolded, configuredTrailers) && hasPair && first != unfolded && reviewAttributionStart(first, configuredTrailers) {
-			if joined, ok := reviewAttributionContinuation(first, following, configuredTrailers); ok {
+		if !reviewAttributionStart(unfolded) && hasPair && first != unfolded && reviewAttributionStart(first) {
+			if joined, ok := reviewAttributionContinuation(first, following); ok {
 				unfolded = joined
 				end++
 			}
 		}
-		if end == start+1 && reviewAttributionStart(unfolded, configuredTrailers) {
-			if joined, ok := reviewAttributionContinuation(unfolded, lines[end], configuredTrailers); ok {
+		if end == start+1 && reviewAttributionStart(unfolded) {
+			if joined, ok := reviewAttributionContinuation(unfolded, nextLine); ok {
 				unfolded = joined
 				end++
 			}
 		}
 	}
-	if !reviewAttributionStart(unfolded, configuredTrailers) {
+	if !reviewAttributionStart(unfolded) {
 		return end, unfolded, false, false
 	}
-	ai = git.IsAIAttributionTrailer(unfolded) || reviewConfiguredAttributionMatches(unfolded, configuredTrailers)
+	ai = git.IsAIAttributionTrailer(unfolded)
+	if end > start+1 {
+		rawPair, _ := reviewAttributionLine(strings.Join(lines[start:end], "\n"))
+		rawFirst, rawNext, _ := strings.Cut(rawPair, "\n")
+		rawFirst, _ = reviewAttributionLine(rawFirst)
+		rawNext, _ = reviewAttributionLine(rawNext)
+		ai = ai || reviewConfiguredAttributionMatches(rawFirst+" "+rawNext, configuredTrailers)
+	}
 	_, value, hasKey := strings.Cut(unfolded, ":")
 	entry = ai || (hasKey && strings.TrimSpace(value) != "" && !reviewGeneratedWith.MatchString(unfolded))
 	return end, unfolded, entry, ai

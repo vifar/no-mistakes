@@ -29,6 +29,8 @@ func TestAttributionEntryContract(t *testing.T) {
 		{name: "unconfigured value case", input: "Build-Agent: worker-a", kept: "Build-Agent: worker-a", presented: "Build-Agent: worker-a", configured: []string{"Build-Agent: Worker-A"}},
 		{name: "native mixed case", input: "cO-aUTHORED-bY: cOdEx <ai@example.com>", forbidden: "ai@example.com"},
 		{name: "generated mixed case", input: "gEnErAtEd WiTh cOdEx", forbidden: "cOdEx"},
+		{name: "configured nested entity", input: "Build-Agent: worker&amp;copy;", presented: "Build-Agent: worker&amp;copy;", forbidden: "worker&copy;", configured: []string{"Build-Agent: worker&amp;copy;"}},
+		{name: "distinct nested entity", input: "Build-Agent: worker&amp;copy;", kept: "Build-Agent: worker&amp;copy;", presented: "Build-Agent: worker&amp;copy;", configured: []string{"Build-Agent: worker&copy;"}},
 		{name: "configured exact", input: "Build-Agent: worker", presented: "Build-Agent: worker", forbidden: "Build-Agent: worker", configured: []string{"Build-Agent: worker"}},
 		{name: "configured blockquote", input: "> Build-Agent: worker", presented: "> Build-Agent: worker", forbidden: "Build-Agent: worker", configured: []string{"Build-Agent: worker"}},
 		{name: "configured bold", input: "**Build-Agent: worker**", presented: "**Build-Agent: worker**", forbidden: "Build-Agent: worker", configured: []string{"Build-Agent: worker"}},
@@ -139,6 +141,9 @@ func TestAttributionEntryContract(t *testing.T) {
 						want := strings.TrimLeft(tc.presented, "\n")
 						if len(tc.configured) > 0 {
 							want = tc.kept
+							if provider == scm.ProviderBitbucket {
+								want = html.UnescapeString(want)
+							}
 						}
 						if !strings.Contains(decoded, want) {
 							t.Errorf("published content lost %q: %s", want, md)

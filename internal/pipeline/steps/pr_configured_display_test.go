@@ -228,7 +228,7 @@ func TestPRConfiguredPresentationKeepsProseAndHuman(t *testing.T) {
 
 func TestPRWholeBodyRawDisplayBoundary(t *testing.T) {
 	t.Parallel()
-	for _, configured := range []string{"Build-Agent: /Users/alex/private-identifier", "Build-Agent: /Users/alex/private&#45;identifier"} {
+	for _, configured := range []string{"Build-Agent: /Users/alex/private-identifier", "Build-Agent: /Users/alex/private&#45;identifier", "Build-Agent: /Users/alex/private&amp;copy;"} {
 		noise := configured + "\nCo-Authored-By: Codex <ai@example.com>\n&#67;o-Authored-By: &#67;odex &lt;ai@example.com&gt;\nGenerated with &#67;odex\nCo-Authored-By: Claude Smith <human@example.com>\nDisclosure: fixtures were generated with the repository recorder.\nOrdinary prose remains.\nBuild-Agent: public-identifier"
 		for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 			for _, templated := range []bool{false, true} {

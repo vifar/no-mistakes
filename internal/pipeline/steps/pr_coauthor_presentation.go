@@ -1,7 +1,6 @@
 package steps
 
 import (
-	"html"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -9,13 +8,9 @@ import (
 
 func prDisplayText(text string, configuredTrailers ...string) string {
 	lines := strings.Split(text, "\n")
-	decoded := make([]string, len(lines))
-	for i, line := range lines {
-		decoded[i] = html.UnescapeString(line)
-	}
 	var kept []string
 	for start := 0; start < len(lines); {
-		end, unfolded, entry, ai := reviewAttributionEntry(decoded, start, configuredTrailers)
+		end, unfolded, entry, ai := reviewAttributionEntry(lines, start, configuredTrailers)
 		if !ai {
 			key, _, _ := strings.Cut(unfolded, ":")
 			if entry && strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && reviewAttributionAddressComplete(unfolded) {

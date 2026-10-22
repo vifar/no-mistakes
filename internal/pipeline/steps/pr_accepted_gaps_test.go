@@ -609,3 +609,34 @@ func TestAcceptedGapConfiguredCaseSensitiveDigest(t *testing.T) {
 		t.Fatal("raw accepted-gap record changed")
 	}
 }
+
+func TestAcceptedGapConfiguredSingleDecodeDigest(t *testing.T) {
+	t.Parallel()
+	const kept = "Build-Agent: worker&amp;copy;"
+	trailers := []string{"Build-Agent: worker&copy;"}
+	steps := acceptedGapStepsForTest(t)
+	gaps := db.AcceptedGaps{FindingIDs: []string{"test-verdict"}, Findings: []db.AcceptedGapFinding{{ID: "test-verdict", Category: types.FindingCategoryTestVerdict, Description: kept}}, Reason: kept, CoveredBy: "Build-Agent: worker&copy;", Verdict: types.TestVerdictInconclusive}
+	payload, err := json.Marshal(gaps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(payload)
+	steps[1].AcceptedGapsJSON = &raw
+	policy := pipelineAttestationPolicy{ConfiguredTrailers: trailers, acceptedGapSteps: steps}
+	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+		body, _ := buildPipelineSummaryFor(steps, nil, testPipelineHeadSHA, provider, policy, trailers...)
+		if !strings.Contains(body, "worker&amp;") {
+			t.Errorf("distinct accepted-gap evidence lost: %q", body)
+		}
+		for _, step := range parsePipelineAttestationForTest(t, buildPipelineAttestationWithPolicy(steps, nil, testPipelineHeadSHA, policy)).Steps {
+			if step.Step == types.StepTest {
+				if g := step.AcceptedGaps; g == nil || g.ReasonDigest != fmt.Sprintf("%x", sha256.Sum256([]byte(kept))) || g.CoveredByDigest != fmt.Sprintf("%x", sha256.Sum256(nil)) {
+					t.Errorf("digest does not bind preserved text: %+v", g)
+				}
+			}
+		}
+	}
+	if *steps[1].AcceptedGapsJSON != string(payload) {
+		t.Fatal("raw accepted-gap record changed")
+	}
+}
