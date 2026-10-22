@@ -464,7 +464,8 @@ func isBareGitDir(dir string) bool {
 	return err == nil && fi.IsDir()
 }
 
-// InitBare creates a new bare git repository at the given path.
+// InitBare creates a new bare repository or validates an existing one, refusing
+// working checkouts and their non-bare Git directories.
 func InitBare(ctx context.Context, path string) error {
 	// Refuse both the checkout root and its non-bare Git directory before any
 	// `init --bare` write. Refreshing a registered gate needs validation, not

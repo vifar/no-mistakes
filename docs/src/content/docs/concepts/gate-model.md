@@ -54,9 +54,10 @@ so inherited repository selection cannot redirect configuration writes into the
 caller's checkout. A checkout previously marked bare can be restored with
 `git config core.bare false` from that checkout; its files and commits are retained.
 
-Each executing step reserves the gate's shared `config.lock`, disabling shared
-configuration writes from dependency scripts and agent children. Commands that
-need a worktree-specific setting must use `git config --worktree`, for example
+Each executing step and final Test evidence refresh reserves the gate's shared
+`config.lock`, disabling shared configuration writes from dependency scripts
+and agent children. Commands that need a worktree-specific setting must use
+`git config --worktree`, for example
 `git config --worktree core.hooksPath .husky/_`. The gate's shared
 `extensions.worktreeConfig` opt-in is established during enrollment; steps do
 not enable it by writing to shared config.
@@ -68,12 +69,16 @@ URL scopes, are also stored only as `sha256:<digest>` identities, so credentials
 in a key never enter the baseline. Ordinary keys remain readable. With worktree
 config enabled, shared `core.bare` and `core.hooksPath` must be absent: the bare
 gate keeps those settings in its own per-worktree file. Before and after each
-step or fix round, the executor checks the shared file against that baseline, including remote
-changes. A missing gate or a missing, unreadable, invalid, or empty baseline
-fails preflight before the step executes. A violation detected after execution
-fails that step and names the config file and key; subsection-bearing keys are
-identified only by their redacted hash, including when read from an older
-baseline. Config values are not included in the failure. A foreign config lock
+step, fix round, or final Test evidence refresh, the executor checks the shared
+file against that baseline, including remote changes. A missing gate or a
+missing, unreadable, invalid, or empty baseline fails preflight before execution.
+A violation detected after execution fails that step and names the config file
+and key. It remains fatal even when
+the same execution also encounters a protected-path refusal. A violation during
+a final Test evidence refresh marks the existing Test result failed and emits
+its failed status. Subsection-bearing keys are identified only by their redacted
+hash, including when read from an older baseline. Config values are not included
+in the failure. A foreign config lock
 is never removed. An abrupt daemon kill can leave its reservation behind; verify
 that no writer is alive before removing a stale lock and retrying.
 
