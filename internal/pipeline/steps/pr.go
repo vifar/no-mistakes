@@ -376,7 +376,7 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		if err != nil {
 			return prContent{}, err
 		}
-		configuredTrailers, err := configuredPRDisplayTrailers(sctx)
+		configuredTrailers, err := configuredAttributionTrailers(sctx)
 		if err != nil {
 			return prContent{}, fmt.Errorf("prepare PR attribution filtering: %w", err)
 		}
@@ -457,7 +457,7 @@ Final diff paths and statuses:
 	if err := validateAcceptedGapAuditBudget(pipelineMD, bodyLimit); err != nil {
 		return prContent{}, err
 	}
-	configuredTrailers, displayErr := configuredPRDisplayTrailers(sctx)
+	configuredTrailers, displayErr := configuredAttributionTrailers(sctx)
 	if displayErr != nil {
 		return prContent{}, fmt.Errorf("prepare PR attribution filtering: %w", displayErr)
 	}
@@ -717,7 +717,7 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	if sctx.Config != nil {
 		policy.AllowTestCommandOverride = strings.TrimSpace(sctx.Config.Test.AllowApproveOverFailure)
 	}
-	trailers, err := recordedPRConfiguredTrailers(sctx, steps, rounds)
+	trailers, err := recordedAttributionTrailers(sctx, steps, rounds)
 	if err != nil {
 		slog.Warn("failed to prepare Review attribution filtering for pipeline summary")
 		return "", "", ""
@@ -747,7 +747,7 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	return renderCoAuthorAsLabelledField(pipelineMD), renderCoAuthorAsLabelledField(riskLine), renderCoAuthorAsLabelledField(testingMD)
 }
 
-func configuredPRDisplayTrailers(sctx *pipeline.StepContext) ([]string, error) {
+func configuredAttributionTrailers(sctx *pipeline.StepContext, producers ...*agent.Result) ([]string, error) {
 	if sctx == nil {
 		return nil, nil
 	}
@@ -766,10 +766,21 @@ func configuredPRDisplayTrailers(sctx *pipeline.StepContext) ([]string, error) {
 			}
 		}
 	}
-	return recordedPRConfiguredTrailers(sctx, steps, rounds)
+	trailers, err := recordedAttributionTrailers(sctx, steps, rounds)
+	if err != nil {
+		return nil, err
+	}
+	for _, producer := range producers {
+		rendered, err := renderCommitTrailers(sctx, producer)
+		if err != nil {
+			return nil, err
+		}
+		trailers = append(trailers, rendered...)
+	}
+	return trailers, nil
 }
 
-func recordedPRConfiguredTrailers(sctx *pipeline.StepContext, steps []*db.StepResult, rounds map[string][]*db.StepRound) ([]string, error) {
+func recordedAttributionTrailers(sctx *pipeline.StepContext, steps []*db.StepResult, rounds map[string][]*db.StepRound) ([]string, error) {
 	var invocations []db.AgentInvocation
 	if sctx.DB != nil && sctx.Run != nil {
 		var err error

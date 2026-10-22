@@ -1024,7 +1024,7 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 		}
 	}
 	policy := attestationPolicyFrom(sctx)
-	policy.ConfiguredTrailers, err = configuredPRDisplayTrailers(sctx)
+	policy.ConfiguredTrailers, err = configuredAttributionTrailers(sctx)
 	if err != nil {
 		return fmt.Errorf("%w: prepare PR attribution filtering: %w", errAttestationWriteFailed, err)
 	}

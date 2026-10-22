@@ -108,7 +108,7 @@ func TestPRConfiguredAttributionEveryDisplay(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					trailers, err := configuredPRDisplayTrailers(sctx)
+					trailers, err := configuredAttributionTrailers(sctx)
 					if err != nil {
 						t.Fatal(err)
 					}

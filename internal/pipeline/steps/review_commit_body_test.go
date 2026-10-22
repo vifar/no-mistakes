@@ -362,3 +362,117 @@ func TestReviewAttributionEntriesPreserveUnchangedText(t *testing.T) {
 		t.Errorf("complete non-address entry absorbed a following line: %q", got)
 	}
 }
+
+func TestReviewFixCommitRecordedProducerTrailers(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []string{"template", "snapshots", "literal", "native"} {
+		t.Run(mode, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			const disclosure = "Disclosure: fixtures were generated with the repository recorder."
+			const human = "Co-Authored-By: Claude <claude@example.com>"
+			reviewer, fixer, other := "Build-Identity: acp:reviewer / read-model", "Build-Identity: acp:fixer / write-model", "Build-Identity: acp:observer / other-model"
+			lookalike := "Build-Identity: acp:unrecorded / unknown-model"
+			configured := []string{"Build-Identity: {{.Agent}} / {{.Model}}"}
+			if mode == "literal" {
+				configured = []string{"Build-Agent: registered"}
+				reviewer, fixer, other = "Build-Agent: registered", "Build-Agent: registered", "Build-Agent: registered"
+				lookalike = "Build-Agent: unregistered"
+			} else if mode == "native" {
+				configured = nil
+				reviewer, fixer, other = "Co-Authored-By: Claude <noreply@anthropic.com>", "Co-Authored-By: gpt-5.5 <model@example.com>", "Generated with Codex"
+			}
+			noise := reviewer + "\n" + fixer + "\n" + other
+			if mode == "snapshots" {
+				noise += "\nHistoric-Identity: acp:reviewer / read-model\nHistoric-Identity: acp:observer / other-model"
+			}
+			rawSummary := "Guard unsafe value\n\n" + noise + "\n\n" + disclosure + "\n\n" + human + "\n\n" + lookalike
+			output, err := json.Marshal(map[string]string{"summary": rawSummary, "verification": "passed"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ag := &mockAgent{name: "fallback", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				writeAgentChange(t, dir)
+				return &agent.Result{Output: output, Provider: "acp:fixer", Model: "write-model"}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+			sctx.Fixing = true
+			sctx.Config.Commit.Trailers = configured
+			findings, err := json.Marshal(Findings{Items: []Finding{{ID: "file", File: "review.go\n" + reviewer, Description: "Guard unsafe value"}, {ID: "description", File: "fix.go", Description: "Keep verification\n" + reviewer + "\n" + fixer + "\n" + other}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rawFindings := string(findings)
+			sctx.PreviousFindings = rawFindings
+			var recordedSteps []*db.StepResult
+			for _, producer := range []struct {
+				step        types.StepName
+				name, model string
+			}{{types.StepReview, "acp:reviewer", "read-model"}, {types.StepDocument, "acp:observer", "other-model"}} {
+				step, err := sctx.DB.InsertStepResult(sctx.Run.ID, producer.step)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := sctx.DB.SetStepFindings(step.ID, rawFindings); err != nil {
+					t.Fatal(err)
+				}
+				global, repo := []byte(nil), []byte(nil)
+				if mode == "snapshots" {
+					global = []byte("{}\n")
+					repo = []byte("commit:\n  trailers:\n    - 'Historic-Identity: {{.Agent}} / {{.Model}}'\n")
+				}
+				if _, err := sctx.DB.InsertReviewStepRoundWithProvenance(step.ID, 1, "initial", &rawFindings, nil, head, base, base, global, repo, 1); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := sctx.DB.InsertAgentInvocation(db.AgentInvocation{RunID: sctx.Run.ID, StepName: string(producer.step), Round: 1, Purpose: string(producer.step), Agent: producer.name, Model: producer.model, SessionMode: db.InvocationModeCold, ExitStatus: "ok"}); err != nil {
+					t.Fatal(err)
+				}
+				recordedSteps = append(recordedSteps, step)
+			}
+			summary, err := executeFixMode(sctx, types.StepReview, fixExecutionOptions{FallbackSummary: "repair", RequireVerification: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "Guard unsafe value\n\n\n" + disclosure + "\n\n" + human + "\n\n" + lookalike
+			if summary != want {
+				t.Errorf("returned summary=%q, want %q", summary, want)
+			}
+			subject := gitCmd(t, dir, "show", "-s", "--format=%s")
+			body := gitCmd(t, dir, "show", "-s", "--format=%b")
+			message := gitCmd(t, dir, "show", "-s", "--format=%B")
+			for _, forbidden := range []string{reviewer, fixer, other, "Historic-Identity:"} {
+				if strings.Contains(message, forbidden) {
+					t.Errorf("assembled commit retained %q", forbidden)
+				}
+			}
+			wantBody := "Guard unsafe value\n\n" + disclosure + "\n\n" + human + "\n\n" + lookalike
+			if !strings.Contains(subject, lookalike) || !strings.HasPrefix(body, wantBody+"\n\nRound findings:") {
+				t.Errorf("rationale or unrendered lookalike lost: subject=%q body=%q", subject, body)
+			}
+			for _, finding := range []string{"- review.go: Guard unsafe value", "- fix.go: Keep verification"} {
+				if !strings.Contains(body, finding) {
+					t.Errorf("finding display missing %q: %s", finding, body)
+				}
+			}
+			if _, err := sctx.DB.InsertStepRound(recordedSteps[0].ID, 2, "auto_fix", nil, &summary, 1); err != nil {
+				t.Fatal(err)
+			}
+			persisted, err := sctx.DB.GetRoundsByStep(recordedSteps[0].ID)
+			if err != nil || len(persisted) != 2 || persisted[1].FixSummary == nil || *persisted[1].FixSummary != want {
+				t.Fatal("persisted Review summary differs from the cleaned current fixer summary")
+			}
+			if sctx.PreviousFindings != rawFindings {
+				t.Fatal("raw previous findings changed")
+			}
+			for _, step := range recordedSteps {
+				stored, err := sctx.DB.GetStepResult(step.ID)
+				if err != nil || stored.FindingsJSON == nil || *stored.FindingsJSON != rawFindings {
+					t.Fatal("recorded findings changed")
+				}
+				rounds, err := sctx.DB.GetRoundsByStep(step.ID)
+				if err != nil || len(rounds) == 0 || rounds[0].FindingsJSON == nil || *rounds[0].FindingsJSON != rawFindings {
+					t.Fatal("recorded round changed")
+				}
+			}
+		})
+	}
+}

@@ -432,7 +432,7 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	var reviewBody string
 	var reviewTrailers []string
 	if stepName == types.StepReview {
-		reviewTrailers, err = renderCommitTrailers(sctx, producer)
+		reviewTrailers, err = configuredAttributionTrailers(sctx, producer)
 		if err != nil {
 			return false, fmt.Errorf("render %s fix commit trailers: %w", stepName, err)
 		}
@@ -675,7 +675,7 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	committed := sctx.Run.HeadSHA != startingHead
 	sctx.FixApplied = &committed
 	if committed && stepName == types.StepReview {
-		trailers, err := renderCommitTrailers(sctx, result)
+		trailers, err := configuredAttributionTrailers(sctx, result)
 		if err != nil {
 			return "", fmt.Errorf("render %s fix summary trailers: %w", stepName, err)
 		}

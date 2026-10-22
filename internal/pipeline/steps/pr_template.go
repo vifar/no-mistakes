@@ -196,7 +196,7 @@ func templateStructureLines(text string) []string {
 }
 
 func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provider) (string, error) {
-	configuredTrailers, err := configuredPRDisplayTrailers(sctx)
+	configuredTrailers, err := configuredAttributionTrailers(sctx)
 	if err != nil {
 		return "", fmt.Errorf("prepare PR attribution filtering: %w", err)
 	}
