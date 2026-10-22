@@ -23,8 +23,8 @@ import (
 // in order, rather than overwriting a fake's latest state. Real CLI subprocesses
 // drive the daemon, Git and pipeline; only the agent and forge are substitutes.
 type journeyStatusPost struct {
-	SHA, State string
-	At         time.Time
+	SHA, State, Description string
+	At                      time.Time
 }
 
 type journeyStatusServer struct {
@@ -35,7 +35,7 @@ type journeyStatusServer struct {
 }
 
 func (s *journeyStatusServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var body struct{ State, Context string }
+	var body struct{ State, Context, Description string }
 	sha := strings.TrimPrefix(r.URL.Path, "/repos/example/closes/statuses/")
 	if r.Method != http.MethodPost || sha == r.URL.Path || len(sha) != 40 ||
 		json.NewDecoder(r.Body).Decode(&body) != nil || body.Context != "no-mistakes" ||
@@ -45,7 +45,7 @@ func (s *journeyStatusServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	s.mu.Lock()
-	s.posts = append(s.posts, journeyStatusPost{sha, body.State, time.Now()})
+	s.posts = append(s.posts, journeyStatusPost{SHA: sha, State: body.State, At: time.Now(), Description: body.Description})
 	reject := s.reject
 	s.mu.Unlock()
 	if reject {

@@ -405,8 +405,8 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 }
 
 // RespondWithAcceptedGaps is RespondWithOverrides for an approval that may
-// carry an owner-accepted Test gap (strict shipping only). The gap is admitted
-// by db.StepResult.AcceptedGapRefusal and recorded durably before the step
+// carry an owner-accepted Test gap. The gap is admitted by
+// db.StepResult.AcceptedGapRefusal and recorded durably before the step
 // completes; its reason comes from gaps and is not stored as a Test exception
 // reason.
 func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.ApprovalAction, findingIDs, ignoreFindingIDs []string, instructions map[string]string, addedFindings []types.Finding, approvalReason string, gaps *db.AcceptedGaps, expected *types.GateIdentity) (RespondDispositions, error) {
@@ -495,9 +495,16 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 			e.mu.Unlock()
 			return RespondDispositions{}, errors.New(refusal)
 		}
-	} else if gaps != nil {
-		e.mu.Unlock()
-		return RespondDispositions{}, errors.New((&db.StepResult{StepName: step}).AcceptedGapRefusal(false, *gaps))
+	} else if action == types.ActionApprove && (step == types.StepTest || gaps != nil) {
+		row, err := e.db.GetStepResult(e.waitingStepResultID)
+		if err != nil || row == nil {
+			e.mu.Unlock()
+			return RespondDispositions{}, fmt.Errorf("cannot read the parked step")
+		}
+		if refusal := row.NonStrictApprovalRefusalWithGaps(approvalReason, gaps); refusal != "" {
+			e.mu.Unlock()
+			return RespondDispositions{}, errors.New(refusal)
+		}
 	}
 	if action == types.ActionApprove && e.waitingApprovalRefusal != "" {
 		refusal := e.waitingApprovalRefusal
@@ -2573,8 +2580,13 @@ func (e *Executor) applyApprovalOverride(step Step, sctx *StepContext, stepResul
 		if row == nil || row.ValidAcceptedGaps() == nil {
 			return fmt.Errorf("accepted gap was not durably recorded for step %s", step.Name())
 		}
-		if refusal := row.StrictApprovalRefusal(""); refusal != "" {
-			return errors.New(refusal)
+		// Strict shipping's own admission rules still apply on top of the
+		// recorded gap. A plain run's re-check is the recorded gap itself,
+		// which ValidAcceptedGaps already re-validated against the row.
+		if strict {
+			if refusal := row.StrictApprovalRefusal(""); refusal != "" {
+				return errors.New(refusal)
+			}
 		}
 	} else if step.Name() == types.StepTest {
 		// A daemon stop between recording a gap and completing the step leaves
@@ -2589,6 +2601,16 @@ func (e *Executor) applyApprovalOverride(step Step, sctx *StepContext, stepResul
 				return err
 			}
 			reuse = row != nil && approvalReason == "" && row.ValidAcceptedGaps() != nil && row.StrictApprovalRefusal("") == ""
+		} else if approvalReason == "" {
+			// A plain run reuses the recorded audit the same way: the gap rule
+			// refuses a row that already carries a Test exception, so writing
+			// an ordinary approval reason would silently discard an
+			// owner-approved audit and leave the status pending.
+			row, err := e.db.GetStepResult(stepResultID)
+			if err != nil {
+				return err
+			}
+			reuse = row != nil && row.ValidAcceptedGaps() != nil
 		}
 		if !reuse {
 			// Every Test approval keeps its reason; db.StepResult.TestOverrideReason

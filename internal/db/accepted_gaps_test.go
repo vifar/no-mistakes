@@ -43,7 +43,7 @@ func TestAcceptedGapRefusal(t *testing.T) {
 		{"accepted", gapRow(gapFindings("inconclusive")), true, gapRequest("test-verdict"), ""},
 		{"accepted with no-op sibling", gapRow(gapFindings("inconclusive", noop)), true, gapRequest("test-verdict"), ""},
 		{"accepted with padded and duplicate ids", gapRow(gapFindings("inconclusive")), true, gapRequest(" test-verdict ", "test-verdict"), ""},
-		{"non-strict", gapRow(gapFindings("inconclusive")), false, gapRequest("test-verdict"), "use --reason"},
+		{"non-strict", gapRow(gapFindings("inconclusive")), false, gapRequest("test-verdict"), ""},
 		{"wrong step", &StepResult{StepName: types.StepReview, FindingsJSON: ptr(gapFindings("inconclusive"))}, true, gapRequest("test-verdict"), "only to the Test step"},
 		{"no ids", gapRow(gapFindings("inconclusive")), true, gapRequest(), "at least one finding id"},
 		{"unknown id", gapRow(gapFindings("inconclusive")), true, gapRequest("nope"), `unknown finding "nope"`},
@@ -132,9 +132,6 @@ func TestAcceptedGapLifecycle(t *testing.T) {
 	}
 	if _, err := d.RecordAcceptedGaps(step.ID, gapRequest("nope"), true); err == nil {
 		t.Fatal("unknown id recorded")
-	}
-	if _, err := d.RecordAcceptedGaps(step.ID, gapRequest("test-verdict"), false); err == nil {
-		t.Fatal("non-strict run recorded a gap")
 	}
 	record, err := d.RecordAcceptedGaps(step.ID, gapRequest("test-verdict"), true)
 	if err != nil {

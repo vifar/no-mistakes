@@ -360,7 +360,7 @@ no-mistakes axi respond --run <id> --action approve
 | `--ignore`       | `string` | (none)        | Comma-separated finding IDs to decline with `--action fix`; see the accounting rules below |
 | `--instructions` | `string` | (none)        | Guidance applied to selected findings with `--action fix`            |
 | `--reason`       | `string` | (none)        | Operator's explanation for Test acknowledgment or exception approval |
-| `--accept-gap`   | `string` | (none)        | Comma-separated Test finding IDs to accept as a strict-shipping gap, with `--action approve`, `--reason`, and `--covered-by` |
+| `--accept-gap`   | `string` | (none)        | Comma-separated Test finding IDs to accept as an owner-approved gap, with `--action approve`, `--reason`, and `--covered-by` |
 | `--covered-by`   | `string` | (none)        | Test names or paths covering the accepted gap (comma- or semicolon-separated or free text), recorded verbatim; requires `--accept-gap` |
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
 | `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve subsequent eligible gates until a decision point or outcome |
@@ -381,7 +381,7 @@ Revalidation, a new fix round, or skipping the step clears that current-step app
 This is separate from the configured-command waiver and trusted repository opt-in used by [PR enforcement](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation); neither that policy nor approval authority changes.
 `--instructions` remains fix guidance, not an approval-reason input.
 
-A strict-shipping Test parked on an `inconclusive` verdict, where the unreachable scenarios are covered only by mocked tests, refuses plain approval and skip. The owner can accept that specific gap instead:
+A Test parked on an `inconclusive` verdict, where the unreachable scenarios are covered only by mocked tests, can be completed by the owner accepting that specific gap:
 
 ```bash
 no-mistakes axi respond --step test --action approve \
@@ -390,7 +390,9 @@ no-mistakes axi respond --step test --action approve \
   --covered-by "TestBrokerTimeoutMocked; internal/broker/timeout_test.go"
 ```
 
-`--accept-gap` requires `--action approve`, a single-line `--reason` of at least 10 characters after trimming surrounding whitespace (up to 500 characters including that whitespace) that names who approved the gap and where, and a non-empty single-line `--covered-by` of at most 500 characters. Neither field may contain a Unicode control character (including C1 such as U+0085) or a line or paragraph separator (U+2028, U+2029); limits count Unicode characters, not bytes. Both strings are stored verbatim. The CLI probes the daemon first and refuses with ``the daemon predates accepted gaps; restart it with `no-mistakes daemon restart` `` when it cannot honor `--accept-gap`, because an older daemon would silently drop the fields. [Accepted Test gaps](/no-mistakes/reference/pipeline-steps/#accepted-test-gaps) owns eligibility, durable recording, and publication in receipts and the PR.
+See [Accepted Test gaps](/no-mistakes/reference/pipeline-steps/#accepted-test-gaps) for eligibility on ordinary and strict runs, the difference from plain approval, durable recording, and publication in receipts and the PR.
+
+`--accept-gap` requires `--action approve`, a single-line `--reason` of at least 10 characters after trimming surrounding whitespace (up to 500 characters including that whitespace) that names who approved the gap and where, and a non-empty single-line `--covered-by` of at most 500 characters. Neither field may contain a Unicode control character (including C1 such as U+0085) or a line or paragraph separator (U+2028, U+2029); limits count Unicode characters, not bytes. Both strings are stored verbatim. The CLI probes the daemon first and refuses with ``the daemon predates accepted gaps; restart it with `no-mistakes daemon restart` `` when it cannot honor `--accept-gap`, because an older daemon would silently drop the fields.
 
 Plain `--step test --action approve` acknowledges a genuine strict `no-surface` Test; [strict shipping](#strict-shipping-and-review-receipts) owns its admission requirements.
 

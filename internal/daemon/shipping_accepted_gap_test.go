@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -37,6 +38,12 @@ func TestAcceptedGapApprovalManagerAndExecutor(t *testing.T) {
 				run, err := database.InsertRunWithShipping(repo.ID, "feature", head, head, nil, "", "", "", "main", false, nil, shipping)
 				if err != nil {
 					t.Fatal(err)
+				}
+				if !strict {
+					// A plain run completes against the PR comparison, so the
+					// fixture binds one the way the pipeline does.
+					target := gitOutput(t, repo.WorkingPath, "rev-parse", "--abbrev-ref", "HEAD")
+					testgit.BindRunComparison(t, database, run, repo.WorkingPath, target, "https://github.com/test/repo/pull/1", "test/repo", "feature")
 				}
 				raw := inconclusiveGapEvidence
 				step := &noSurfaceApprovalStep{findings: raw}
@@ -137,19 +144,17 @@ func TestAcceptedGapApprovalManagerAndExecutor(t *testing.T) {
 						return err
 					})
 				} else {
-					refused("non-strict accept-gap", func() error {
-						_, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, gaps, managerGateSnapshot(t, manager, run.ID, types.StepTest))
+					// A plain run admits the same owner-approved gap: the eligibility
+					// rule is the same on every run (issue #158). The refusals that
+					// still hold are the rule's own.
+					refused("unknown finding", func() error {
+						_, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, &db.AcceptedGaps{FindingIDs: []string{"missing"}, Reason: reason, CoveredBy: coveredBy}, managerGateSnapshot(t, manager, run.ID, types.StepTest))
 						return err
 					})
-					refused("executor non-strict accept-gap", func() error {
-						_, err := executor.RespondWithAcceptedGaps(types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, gaps, gateSnapshot(executor))
+					refused("gap on a fix action", func() error {
+						_, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionFix, []string{"test-verdict"}, nil, nil, nil, reason, gaps, managerGateSnapshot(t, manager, run.ID, types.StepTest))
 						return err
 					})
-					if err := executor.Respond(types.StepTest, types.ActionAbort, nil, nil); err != nil {
-						t.Fatal(err)
-					}
-					<-done
-					return
 				}
 
 				if _, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, gaps, managerGateSnapshot(t, manager, run.ID, types.StepTest)); err != nil {
@@ -184,6 +189,15 @@ func TestAcceptedGapApprovalManagerAndExecutor(t *testing.T) {
 // a parked row holding a valid durable acceptance. Recovery must complete on
 // that acceptance, not overwrite it with an ordinary approval reason.
 func TestAcceptedGapSurvivesACrashBetweenRecordAndCompletion(t *testing.T) {
+	testAcceptedGapSurvivesACrash(t, true)
+}
+
+func TestNonStrictAcceptedGapSurvivesACrashBetweenRecordAndCompletion(t *testing.T) {
+	testAcceptedGapSurvivesACrash(t, false)
+}
+
+func testAcceptedGapSurvivesACrash(t *testing.T, strict bool) {
+	t.Helper()
 	const reason = "owner approved via first mate, 2026-10-14"
 	const coveredBy = "TestBrokerTimeoutMocked"
 	for _, response := range []string{"plain", "repeat-gap", "plain-with-reason"} {
@@ -195,9 +209,17 @@ func TestAcceptedGapSurvivesACrashBetweenRecordAndCompletion(t *testing.T) {
 			}
 			defer database.Close()
 			repo, head := setupTestGitRepo(t, p, database, "shipping-accepted-gap-crash")
-			run, err := database.InsertRunWithShipping(repo.ID, "feature", head, head, nil, "", "", "", "main", false, nil, &types.ShippingOptions{Mode: types.ShippingFull})
+			var shipping *types.ShippingOptions
+			if strict {
+				shipping = &types.ShippingOptions{Mode: types.ShippingFull}
+			}
+			run, err := database.InsertRunWithShipping(repo.ID, "feature", head, head, nil, "", "", "", "main", false, nil, shipping)
 			if err != nil {
 				t.Fatal(err)
+			}
+			if !strict {
+				target := gitOutput(t, repo.WorkingPath, "rev-parse", "--abbrev-ref", "HEAD")
+				testgit.BindRunComparison(t, database, run, repo.WorkingPath, target, "https://github.com/test/repo/pull/1", "test/repo", "feature")
 			}
 			raw := inconclusiveGapEvidence
 			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
@@ -217,7 +239,7 @@ func TestAcceptedGapSurvivesACrashBetweenRecordAndCompletion(t *testing.T) {
 				t.Fatal(err)
 			}
 			// The previous daemon wrote the acceptance, then stopped.
-			if _, err := database.RecordAcceptedGaps(sr.ID, db.AcceptedGaps{FindingIDs: []string{"test-verdict"}, Reason: reason, CoveredBy: coveredBy}, true); err != nil {
+			if _, err := database.RecordAcceptedGaps(sr.ID, db.AcceptedGaps{FindingIDs: []string{"test-verdict"}, Reason: reason, CoveredBy: coveredBy}, strict); err != nil {
 				t.Fatal(err)
 			}
 			run, err = database.GetRun(run.ID)
@@ -265,12 +287,20 @@ func TestAcceptedGapSurvivesACrashBetweenRecordAndCompletion(t *testing.T) {
 				t.Fatal("run info does not expose the recovered accepted gap")
 			}
 
+			before := *parked.AcceptedGapsJSON
 			if response == "plain-with-reason" {
+				_, liveErr := executor.RespondWithOverrides(types.StepTest, types.ActionApprove, nil, nil, nil, nil, "another reason entirely", gateSnapshot(executor))
+				if liveErr == nil {
+					t.Fatal("live admission accepted a new reason over a recorded gap")
+				}
+				if !strict && (!strings.Contains(liveErr.Error(), "recorded audit is reused") || !strings.Contains(liveErr.Error(), "axi respond --action approve") || !strings.Contains(liveErr.Error(), "without --reason")) {
+					t.Fatalf("refusal does not explain recovery: %v", liveErr)
+				}
 				if _, err := manager.HandleRespondWithOverrides(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, "another reason entirely", managerGateSnapshot(t, manager, run.ID, types.StepTest)); err == nil {
 					t.Fatal("a plain approval carrying its own reason was admitted over a recorded gap")
 				}
 				got, err := database.GetStepResult(sr.ID)
-				if err != nil || got.Status != types.StepStatusAwaitingApproval || got.ApprovalReason != nil || got.ValidAcceptedGaps() == nil {
+				if err != nil || got.Status != types.StepStatusAwaitingApproval || got.ApprovalReason != nil || got.ValidAcceptedGaps() == nil || got.AcceptedGapsJSON == nil || *got.AcceptedGapsJSON != before {
 					t.Fatalf("refusal damaged the recorded gap: %+v, %v", got, err)
 				}
 				if err := executor.Respond(types.StepTest, types.ActionAbort, nil, nil); err != nil {
@@ -297,6 +327,9 @@ func TestAcceptedGapSurvivesACrashBetweenRecordAndCompletion(t *testing.T) {
 			}
 			if got.Status != types.StepStatusCompleted || got.ApprovalReason != nil || got.OverrideReason != nil || got.ValidAcceptedGaps() == nil || got.StrictApprovalRefusal("") != "" {
 				t.Fatalf("recovered completion invalidated the gap: %+v", got)
+			}
+			if response == "plain" && (got.AcceptedGapsJSON == nil || *got.AcceptedGapsJSON != before) {
+				t.Fatal("plain recovery rewrote the recorded audit")
 			}
 			if !strings.Contains(got.TestOverrideReason(), "Test gap accepted") || final.Status == nil || *final.Status != string(types.RunCompleted) {
 				t.Fatalf("completion lost the audit: %q, %+v", got.TestOverrideReason(), final)

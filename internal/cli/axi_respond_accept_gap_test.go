@@ -120,7 +120,7 @@ func TestGateHelpOffersTheAcceptedGapCommandForEligibleStrictTest(t *testing.T) 
 
 func TestGateHelpKeepsPlainApproveWhereAGapIsNotEligible(t *testing.T) {
 	for name, out := range map[string]string{
-		"non-strict run":    axiDoc(gateFieldsFor(acceptGapGate(t), "", false)...),
+		"non-strict run":    axiDoc(gateFieldsFor(acceptGapGate(t, types.Finding{ID: "test-2", Severity: "error", Action: types.ActionAskUser, Description: "defect"}), "", false)...),
 		"other unresolved":  axiDoc(gateFieldsFor(acceptGapGate(t, types.Finding{ID: "test-2", Severity: "error", Action: types.ActionAskUser, Description: "defect"}), "", true)...),
 		"command exception": axiDoc(gateFieldsFor(acceptGapGate(t, types.Finding{ID: "cmd", Category: types.FindingCategoryTestCommand, Severity: "error", Action: types.ActionAutoFix, Description: "failed"}), "", true)...),
 	} {
