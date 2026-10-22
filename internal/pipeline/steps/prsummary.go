@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1709,13 +1710,19 @@ func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 func neutralizeAIAttribution(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		text := strings.Trim(strings.TrimSpace(html.UnescapeString(line)), "`*_~ \t")
+		text := prAttributionHTMLWrapper.ReplaceAllString(html.UnescapeString(line), "")
+		text = strings.Trim(strings.TrimSpace(text), "`*_~ \t")
+		text = prAttributionBlockPrefix.ReplaceAllString(text, "")
+		text = strings.Trim(text, "`*_~ \t")
 		if git.IsAIAttributionTrailer(text) {
 			lines[i] = "<no-mistakes: AI attribution line neutralized>"
 		}
 	}
 	return strings.Join(lines, "\n")
 }
+
+var prAttributionHTMLWrapper = regexp.MustCompile(`(?i)</?(?:code|pre|p|div|span|b|strong|i|em|s|del|blockquote|li|ol|ul|h[1-6]|summary|details|a|u|small|mark|kbd|samp)(?:[ \t][^>]*)?>`)
+var prAttributionBlockPrefix = regexp.MustCompile(`^(?:[ \t]*(?:>[ \t]*|[-+*][ \t]+|[0-9]+[.)][ \t]+|#{1,6}[ \t]+|\[[ xX]\][ \t]+))+`)
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {
 	switch sr.Status {
