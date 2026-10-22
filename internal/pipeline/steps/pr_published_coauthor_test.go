@@ -68,37 +68,36 @@ func TestPublishedBodyRendersACoAuthorOnEveryAssemblyPath(t *testing.T) {
 			ctx.Config.PR.Appendix = mode
 			narrative := "## What Changed\n\nCo-Authored-By: Claude Smith <code@example.com>\n"
 			risk := "Low: Recorded risk Co-Authored-By: Claude <risk@example.com>\n"
-			testing := "## Testing\n\nCo-Authored-By: Claude <artifact@example.com>\n"
+			testingMD := "## Testing\n\nCo-Authored-By: Claude <artifact@example.com>\n"
 			pipelineMD := "## Pipeline\n\nCo-Authored-By: Claude <pipeline@example.com>\n"
-			for _, body := range []string{
-				assemblePRBody(ctx, narrative, risk, testing, pipelineMD, 0, scm.ProviderGitHub),
-				buildPRBodyWithin(narrative, risk, testing, pipelineMD, ctx, scm.ProviderGitHub, 0),
-				appendixEvidence(mode, prBodyHTML, risk, testing, pipelineMD, scm.ProviderGitHub),
+			bodyIdentities := []string{"Claude Smith <code@example.com>", "Claude <risk@example.com>"}
+			evidenceIdentities := []string{"Claude <risk@example.com>"}
+			if mode != config.PRAppendixMinimal {
+				bodyIdentities = append(bodyIdentities, "Claude <artifact@example.com>", "Claude <pipeline@example.com>")
+				evidenceIdentities = append(evidenceIdentities, "Claude <artifact@example.com>", "Claude <pipeline@example.com>")
+			}
+			for _, path := range []struct {
+				name       string
+				body       string
+				identities []string
+			}{
+				{"assemble", assemblePRBody(ctx, narrative, risk, testingMD, pipelineMD, 0, scm.ProviderGitHub), bodyIdentities},
+				{"build", buildPRBodyWithin(narrative, risk, testingMD, pipelineMD, ctx, scm.ProviderGitHub, maxPullRequestBodyBytes), bodyIdentities},
+				{"evidence", appendixEvidence(mode, prBodyHTML, risk, testingMD, pipelineMD, scm.ProviderGitHub), evidenceIdentities},
 			} {
-				if strings.TrimSpace(body) == "" {
-					// This appendix mode publishes no evidence at
-					// all, so there is nothing to check.
-					continue
-				}
-				if strings.Contains(body, "Co-Authored-By:") {
-					t.Fatalf("the published body carries a raw co-author trailer: %q", body)
-				}
-				// Every co-author the body carries is rendered as a
-				// labelled field, and it keeps its name and its
-				// address: they are the evidence. An appendix mode
-				// may drop a section entirely, so the check is on
-				// the co-authors the body actually carries.
-				for _, rest := range strings.Split(body, "co-author (quoted):")[1:] {
-					identity := strings.TrimSpace(strings.FieldsFunc(rest, func(r rune) bool {
-						return r == '\n' || r == '|' || r == '<' || r == '>'
-					})[0])
-					if identity == "" {
-						t.Fatalf("a co-author was rendered without its name: %q", body)
+				t.Run(path.name, func(t *testing.T) {
+					if strings.TrimSpace(path.body) == "" {
+						t.Fatal("the published body unexpectedly omitted all retained sections")
 					}
-					if !strings.Contains(body, identity) {
-						t.Fatalf("the co-author %q lost its name or address: %q", identity, body)
+					if strings.Contains(path.body, "Co-Authored-By:") {
+						t.Fatalf("the published body carries a raw co-author trailer: %q", path.body)
 					}
-				}
+					for _, identity := range path.identities {
+						if !strings.Contains(path.body, "co-author (quoted): "+identity) {
+							t.Errorf("the published body lost the labelled name or address %q: %q", identity, path.body)
+						}
+					}
+				})
 			}
 		})
 	}
