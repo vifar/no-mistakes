@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/execpath"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
@@ -74,31 +75,19 @@ func mergeEnv(extra []string) []string {
 	return merged
 }
 
+// executableCandidates returns the file names to look for, in the order the
+// platform would try them. It is the SHARED resolver's, so the step's lookup
+// and the git package's lookup select the same program.
 func executableCandidates(name string, env []string) []string {
-	return executableCandidatesForOS(runtime.GOOS, name, env)
+	return execpath.Candidates(env, name)
 }
 
 func executableCandidatesForOS(goos, name string, env []string) []string {
-	candidates := []string{name}
-	if goos != "windows" || filepath.Ext(name) != "" {
-		return candidates
-	}
-	pathExt := ".COM;.EXE;.BAT;.CMD"
-	if customPathExt, ok := envValueForOS(env, "PATHEXT", goos); ok {
-		pathExt = customPathExt
-	}
-	for _, ext := range strings.Split(pathExt, ";") {
-		ext = strings.TrimSpace(ext)
-		if ext == "" {
-			continue
-		}
-		candidates = append(candidates, name+ext)
-	}
-	return candidates
+	return execpath.CandidatesForOS(goos, name, env)
 }
 
 func findInCustomPath(workDir string, env []string, name string) string {
-	customPath, ok := envValue(env, "PATH")
+	customPath, ok := execpath.Value(env, "PATH")
 	if !ok {
 		return ""
 	}
@@ -120,17 +109,11 @@ func findInCustomPath(workDir string, env []string, name string) string {
 }
 
 func pathCandidateUsable(goos, path string, fi os.FileInfo) bool {
-	if fi.IsDir() {
-		return false
-	}
-	if goos == "windows" {
-		return filepath.Ext(path) != ""
-	}
-	return fi.Mode().Perm()&0o111 != 0
+	return execpath.UsableForOS(goos, path, fi)
 }
 
 func missingFromCustomPath(env []string, name string) string {
-	customPath, ok := envValue(env, "PATH")
+	customPath, ok := execpath.Value(env, "PATH")
 	if !ok {
 		return ""
 	}
