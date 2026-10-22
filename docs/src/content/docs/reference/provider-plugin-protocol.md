@@ -303,8 +303,8 @@ a full merge commit SHA.
 
 ### pr retarget (capability `set_pr_base_branch`)
 
-Retarget an existing PR when a per-run `--base-branch` override disagrees
-with its live base.
+Retarget an existing PR only when authorized by the
+[`pr.base_branch` retarget rules](/no-mistakes/reference/repo-config/#prbase_branch).
 
 - **args:** `<number> --base=<branch>`
 - **result:** `{ "pr": PR }` whose `base_branch` is the new base.
