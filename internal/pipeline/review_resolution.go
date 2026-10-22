@@ -131,10 +131,11 @@ func deletedAnchorNotRelocated(sctx *StepContext, item types.Finding, comparison
 		return false
 	}
 	if len(removed) == 0 {
-		return true
+		touched, err := git.Run(sctx.Ctx, sctx.WorkDir, "--literal-pathspecs", "log", "--format=%H", "--no-patch", "--diff-merges=first-parent", comparison.MergeBaseSHA+".."+comparison.HeadSHA, "--", item.File)
+		return err == nil && strings.TrimSpace(touched) == ""
 	}
 	for _, commit := range removed {
-		changes, err := git.RunRaw(sctx.Ctx, sctx.WorkDir, "show", "--name-status", "-z", "--find-renames", "--find-copies", "--no-ext-diff", "--no-textconv", "--format=", commit)
+		changes, err := git.RunRaw(sctx.Ctx, sctx.WorkDir, "show", "--diff-merges=first-parent", "--name-status", "-z", "--find-renames", "--find-copies", "--no-ext-diff", "--no-textconv", "--format=", commit)
 		if err != nil {
 			return false
 		}
@@ -151,7 +152,7 @@ func deletedAnchorNotRelocated(sctx *StepContext, item types.Finding, comparison
 // magic, and a magic pathspec would silently match a different set of files
 // than the anchor the finding is about.
 func anchorRemovalCommits(sctx *StepContext, item types.Finding, comparison *db.ReviewComparison) ([]string, error) {
-	out, err := git.Run(sctx.Ctx, sctx.WorkDir, "--literal-pathspecs", "log", "--format=%H", "--diff-filter=D", comparison.MergeBaseSHA+".."+comparison.HeadSHA, "--", item.File)
+	out, err := git.Run(sctx.Ctx, sctx.WorkDir, "--literal-pathspecs", "log", "--format=%H", "--no-patch", "--diff-filter=D", "--diff-merges=first-parent", comparison.MergeBaseSHA+".."+comparison.HeadSHA, "--", item.File)
 	if err != nil {
 		return nil, err
 	}
@@ -175,13 +176,7 @@ func commitReplacedPath(changes []byte) bool {
 		if strings.HasPrefix(status, "A") || strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
 			return true
 		}
-		// A rename or copy entry carries the old and the new path; every other
-		// entry carries one path.
-		if strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
-			i += 3
-		} else {
-			i += 2
-		}
+		i += 2
 	}
 	return false
 }

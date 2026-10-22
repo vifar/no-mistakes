@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -17,6 +18,7 @@ const deletedAnchorFinding = `{"findings":[{"id":"review-1","severity":"error","
 
 // deletedAnchorShape describes the branch history a fixture builds.
 type deletedAnchorShape struct {
+	merge bool
 	// replacement: the commit that removed the file also carried a path with
 	// it, which is how git records a rewritten rename.
 	replacement bool
@@ -71,8 +73,20 @@ func deletedAnchorFixture(t *testing.T, shape deletedAnchorShape) (*StepContext,
 	}
 	// The fix removes it again: the answer to the reviewer's question was
 	// "remove", so the file is gone before the operator selects the finding.
+	if shape.merge {
+		execGit(t, dir, "checkout", "-b", "anchor-main")
+		execGit(t, dir, "checkout", "-b", "anchor-side")
+		if shape.replacement {
+			write("moved-suite.go", "rewritten implementation at another anchor\n")
+			execGit(t, dir, "add", ".")
+		}
+		execGit(t, dir, "commit", "--allow-empty", "-m", "side branch")
+		execGit(t, dir, "checkout", "anchor-main")
+		execGit(t, dir, "commit", "--allow-empty", "-m", "main branch")
+		execGit(t, dir, "merge", "--no-ff", "--no-commit", "anchor-side")
+	}
 	execGit(t, dir, "--literal-pathspecs", "rm", "--", "duplicate-suite.go")
-	if shape.replacement {
+	if shape.replacement && !shape.merge {
 		write("moved-suite.go", "rewritten implementation at another anchor\n")
 		execGit(t, dir, "add", ".")
 	}
@@ -296,5 +310,29 @@ func TestStrictReviewResolutionDeletedAnchorKeepsReplacedCode(t *testing.T) {
 	got, _ := resolveReviewCarry(sctx, deletedAnchorFinding, []string{"review-1"}, outcome, `{"findings":[]}`)
 	if got != deletedAnchorFinding {
 		t.Fatalf("replaced code was treated as removed: %s", got)
+	}
+}
+
+func TestStrictReviewResolutionDeletedAnchorMerge(t *testing.T) {
+	for _, replacement := range []bool{false, true} {
+		name := "removal only"
+		if replacement {
+			name = "removal with replacement"
+		}
+		t.Run(name, func(t *testing.T) {
+			sctx, outcome := deletedAnchorFixture(t, deletedAnchorShape{merge: true, replacement: replacement})
+			parents, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-list", "--parents", "-n", "1", sctx.Run.HeadSHA)
+			if err != nil || len(strings.Fields(parents)) != 3 {
+				t.Fatalf("fixture head must have two parents: %q, %v", parents, err)
+			}
+			got, _ := resolveReviewCarry(sctx, deletedAnchorFinding, []string{"review-1"}, outcome, `{"findings":[]}`)
+			want := ""
+			if replacement {
+				want = deletedAnchorFinding
+			}
+			if got != want {
+				t.Fatalf("merge removal resolution = %q, want %q", got, want)
+			}
+		})
 	}
 }
