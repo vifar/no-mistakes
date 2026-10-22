@@ -9,13 +9,13 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -1695,11 +1695,6 @@ func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 	return closingGrammarFor(provider).neutralize(neutralizeAIAttribution(escaped))
 }
 
-// aiAttributionPattern matches the lines a consumer of the pull request body
-// reads as AI attribution of THIS work: a "Generated with" line, a robot
-// emoji, and a Co-Authored-By trailer naming an AI.
-var aiAttributionPattern = regexp.MustCompile(`(?i)(generated with \[?claude code|co-authored-by:.*(claude|anthropic|openai|codex|chatgpt|grok|copilot|noreply@anthropic\.com)|\x{1F916} generated with.*)`)
-
 // neutralizeAIAttribution breaks those lines.
 //
 // The body is generated, but the evidence it embeds is not: a test that
@@ -1711,7 +1706,13 @@ var aiAttributionPattern = regexp.MustCompile(`(?i)(generated with \[?claude cod
 // The text is broken, not dropped: the evidence still shows what the test did
 // and that it ran, and the body claims no attribution.
 func neutralizeAIAttribution(s string) string {
-	return aiAttributionPattern.ReplaceAllString(s, "<no-mistakes: AI attribution line neutralized>")
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if git.IsAIAttributionTrailer(html.UnescapeString(line)) {
+			lines[i] = "<no-mistakes: AI attribution line neutralized>"
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {
