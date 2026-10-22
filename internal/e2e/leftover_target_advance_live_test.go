@@ -50,7 +50,7 @@ func TestLeftoverTargetAdvanceLiveJourney(t *testing.T) {
 			}
 			commands := fmt.Sprintf("#!/bin/sh\nset -eu\nn=0\nif [ -f %s ]; then n=$(cat %s); fi\nn=$((n+1))\nprintf '%%s' \"$n\" > %s\nif [ \"$n\" = 1 ]; then printf 'preserved validation edit\\n' > feature.txt; fi\n", shellQuote(count), shellQuote(count), shellQuote(count))
 			if kind == "spent budget scratch" || kind == "second real edit" {
-				commands += "mkdir -p .journal-live\nprintf 'scratch retained\\n' > .journal-live/postgres.log\ngit add .journal-live/postgres.log\n"
+				commands += "if [ \"$n\" = 1 ]; then mkdir -p .journal-live; printf 'scratch retained\\n' > .journal-live/postgres.log; else test \"$(cat .journal-live/postgres.log)\" = 'scratch retained'; fi\ngit add .journal-live/postgres.log\n"
 			}
 			if kind == "second real edit" {
 				commands += "if [ \"$n\" = 2 ]; then printf 'second edit retained\\n' > feature.txt; fi\n"

@@ -40,6 +40,11 @@ func TestLaunchOwner(t *testing.T) {
 					t.Fatal(err)
 				}
 				activeID = active.ID
+				t.Cleanup(func() {
+					if err := d.UpdateRunStatus(activeID, types.RunCancelled); err != nil {
+						t.Error(err)
+					}
+				})
 				if err := d.UpdateRunStatus(activeID, types.RunRunning); err != nil {
 					t.Fatal(err)
 				}

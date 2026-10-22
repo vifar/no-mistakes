@@ -125,8 +125,13 @@ func TestDocumentCapAcceptanceCleanAfterHeadAdvance(t *testing.T) {
 				}
 			})
 			gateJourneyDaemon(t, h, "start")
-			documentJourneyNextGate(t, h, parked.ID, types.StepReview, "")
-			h.Respond(parked.ID, types.StepReview, types.ActionFix)
+			if kind == "reviewed-code-fix-strict" {
+				// Strict shipping bypasses the ordinary PR-context guard,
+				// so its seeded Review gate still needs a response. Ordinary
+				// recovery detects the changed head and restarts Review itself.
+				documentJourneyNextGate(t, h, parked.ID, types.StepReview, "")
+				h.Respond(parked.ID, types.StepReview, types.ActionFix)
+			}
 			published := waitForStepStatus(t, h, branch, types.StepPR, types.StepStatusCompleted, 90*time.Second)
 			if kind == "reviewed-code-fix-strict" && (published.Shipping == nil || published.Shipping.Mode != types.ShippingFull) {
 				t.Fatal("live run did not use strict shipping")

@@ -45,12 +45,13 @@ func TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary(t *testing.T) {
 	if err := os.WriteFile(scenario, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	h := NewHarness(t, SetupOpts{
+	j := newScopeJourney(t, SetupOpts{
 		Agent:             "claude",
 		Scenario:          scenario,
 		GlobalConfigExtra: "ci:\n  rebase_behind: true\n  carry_review_on_replay: true\nci_timeout: 180s\n",
 	})
-	setupStatefulGitHub(t, h)
+	h := j.h
+	j.setForge(forgeState{Checks: []forgeCheck{greenCheck("fixture-build")}})
 	const branch = "feature/ci-replay-comparison"
 	marker := filepath.Join(h.HomeDir, "behind-head")
 	delegateDir := filepath.Join(h.BinDir, "delegate")
@@ -65,8 +66,7 @@ func TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary(t *testing.T) {
 	if err := os.Remove(gh); err != nil {
 		t.Fatal(err)
 	}
-	checks := `{"data":{"repository":{"object":{"statusCheckRollup":{"contexts":{"nodes":[{"__typename":"CheckRun","databaseId":1,"name":"fixture-build","status":"COMPLETED","conclusion":"SUCCESS","checkSuite":{"app":{"slug":"fixture-ci"}}}],"pageInfo":{"hasNextPage":false,"endCursor":null}}}}}}}`
-	script := "#!/bin/sh\ncase \"$*\" in\n*'statusCheckRollup'*) printf '%s\\n' " + shellQuote(checks) + " ; exit 0 ;;\n*'mergeable,mergeStateStatus'*)\n" +
+	script := "#!/bin/sh\ncase \"$*\" in\n*'mergeable,mergeStateStatus'*)\n" +
 		"if [ -f " + shellQuote(marker) + " ] && [ \"$(git --git-dir=" + shellQuote(h.UpstreamDir) + " rev-parse refs/heads/" + branch + ")\" = \"$(cat " + shellQuote(marker) + ")\" ]; then printf 'MERGEABLE BEHIND\\n'; else printf 'MERGEABLE CLEAN\\n'; fi\nexit 0 ;;\nesac\nexec " + shellQuote(delegate) + " \"$@\"\n"
 	if err := os.WriteFile(gh, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
@@ -77,6 +77,7 @@ func TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary(t *testing.T) {
 	head := h.CommitChange(branch, "feature.txt", "reviewed feature\n", "add reviewed feature")
 	h.PushToGate(branch)
 	monitoring := waitForStepStatus(t, h, branch, types.StepCI, types.StepStatusRunning, 90*time.Second)
+	h.WaitForCIReady(monitoring.ID, true, 90*time.Second)
 	if out, err := h.runGit(t.Context(), h.WorkDir, "checkout", "main"); err != nil {
 		t.Fatalf("checkout main: %v\n%s", err, out)
 	}
@@ -92,7 +93,7 @@ func TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := h.WaitForRun(branch, 150*time.Second)
-	if run.ID != monitoring.ID || run.Status != types.RunFailed || run.Error == nil || !strings.Contains(*run.Error, "PR comparison changed after rebase") || run.HeadSHA != head {
+	if run.ID != monitoring.ID || run.Status != types.RunFailed || run.Error == nil || !strings.Contains(*run.Error, "qualified head mergeability is BEHIND after target advance") || run.HeadSHA != head {
 		t.Fatalf("moved comparison was not refused: status=%s head=%s error=%s", run.Status, run.HeadSHA, deref(run.Error))
 	}
 	database, err := db.OpenReadOnly(filepath.Join(h.NMHome, "state.sqlite"))
