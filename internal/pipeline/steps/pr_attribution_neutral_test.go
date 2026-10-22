@@ -37,7 +37,7 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 		{"robot emoji", "\U0001F916 Generated with Codex"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, line := range []string{tc.line, html.EscapeString(tc.line), "`" + tc.line + "`", "`` " + html.EscapeString(tc.line) + " ``"} {
+			for _, line := range []string{tc.line, html.EscapeString(tc.line), "`" + tc.line + "`", "`` " + html.EscapeString(tc.line) + " ``", "**" + tc.line + "**", "_" + tc.line + "_", "~~" + tc.line + "~~", "** _`" + tc.line + "`_ **"} {
 				body := "## Testing\n\n```text\n" + line + "\n```\n"
 				got := neutralizeAttestationMarkers(scm.ProviderGitHub, body)
 				want := "## Testing\n\n```text\n<no-mistakes: AI attribution line neutralized>\n```\n"
@@ -58,7 +58,7 @@ func TestNeutralizeAIAttributionKeepsAHumanTrailer(t *testing.T) {
 		"Assisted-by: Claude Smith <human@example.com>",
 		"We tested fixtures generated with Codex.",
 	} {
-		for _, text := range []string{line, html.EscapeString(line), "`" + line + "`", "`` " + html.EscapeString(line) + " ``"} {
+		for _, text := range []string{line, html.EscapeString(line), "`" + line + "`", "`` " + html.EscapeString(line) + " ``", "**" + line + "**", "_" + line + "_", "~~" + line + "~~", "** _`" + line + "`_ **"} {
 			if got := neutralizeAttestationMarkers(scm.ProviderGitHub, text); got != text {
 				t.Fatalf("human attribution or prose was changed: %q", got)
 			}
@@ -87,7 +87,7 @@ func TestPRSummaryFiltersAttributionBeforeRendering(t *testing.T) {
 	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 		for _, source := range []string{"tested", "tested multiline", "tested code span", "summary", "artifact text", "artifact description", "artifact label", "artifact file", "scenario", "finding", "risk", "error"} {
 			for _, human := range []bool{false, true} {
-				for _, wrapper := range []string{"", "`", "``"} {
+				for _, wrapper := range []string{"", "`", "``", "*", "**", "_", "__", "***", "~~", "**_"} {
 					t.Run(string(provider)+"/"+source+"/"+wrapper+"/"+map[bool]string{false: "AI", true: "human"}[human], func(t *testing.T) {
 						line := "Co-Authored-By: Codex <bot@example.invalid>"
 						if human {

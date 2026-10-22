@@ -98,7 +98,7 @@ func TestResolveFindsTheProgram(t *testing.T) {
 	if err := os.WriteFile(plain, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, found := Resolve([]string{"PATH=" + filepath.Join(dir, "empty")}, "not-executable", dir); found {
+	if _, _, found := Resolve([]string{"PATH=" + dir}, "not-executable", dir); found {
 		t.Fatal("a file without the executable bit was resolved")
 	}
 }

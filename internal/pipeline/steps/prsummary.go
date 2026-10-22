@@ -1709,7 +1709,7 @@ func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 func neutralizeAIAttribution(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		text := strings.Trim(strings.TrimSpace(html.UnescapeString(line)), "`")
+		text := strings.Trim(strings.TrimSpace(html.UnescapeString(line)), "`*_~ \t")
 		if git.IsAIAttributionTrailer(text) {
 			lines[i] = "<no-mistakes: AI attribution line neutralized>"
 		}
