@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net/mail"
 	"net/url"
 	"os"
 	"path"
@@ -1735,6 +1736,26 @@ func listItemMarker(text string) (string, string, bool) {
 }
 
 func normalizeRenderedText(text string) string {
+	mailbox := ""
+	for offset := 0; offset < len(text); {
+		start := strings.IndexByte(text[offset:], '<')
+		if start < 0 {
+			break
+		}
+		start += offset
+		end := strings.IndexByte(text[start:], '>')
+		if end < 0 {
+			break
+		}
+		end += start + 1
+		candidate := text[start:end]
+		if _, err := mail.ParseAddress(candidate); err == nil {
+			mailbox = candidate
+			text = text[:start] + text[end:]
+			break
+		}
+		offset = end
+	}
 	for {
 		before := text
 		text = strings.TrimSpace(text)
@@ -1762,7 +1783,11 @@ func normalizeRenderedText(text string) string {
 			break
 		}
 	}
-	return strings.NewReplacer("**", "", "*", "", "_", "", "~", "").Replace(text)
+	text = strings.NewReplacer("**", "", "*", "", "_", "", "~", "").Replace(text)
+	if mailbox != "" {
+		text = strings.TrimSpace(text) + " " + mailbox
+	}
+	return text
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {
