@@ -24,5 +24,8 @@ func executeWithConfigProtection(step Step, sctx *StepContext) (out *StepOutcome
 			err = errors.Join(err, fmt.Errorf("%s shared config boundary: %w", step.Name(), configErr))
 		}
 	}()
+	if err := git.RegisterWorktreeSubmodules(sctx.Ctx, sctx.WorkDir); err != nil {
+		return nil, fmt.Errorf("%s worktree submodule registration: %w", step.Name(), err)
+	}
 	return step.Execute(sctx)
 }

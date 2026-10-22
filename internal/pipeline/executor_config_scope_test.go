@@ -96,3 +96,87 @@ func TestIssue131MissingGateFailsPreflightBeforeStep(t *testing.T) {
 		})
 	}
 }
+
+func TestIssue131GuardAllowsSubmodulePreparationAndRestoration(t *testing.T) {
+	ctx := context.Background()
+	command := func(dir string, args ...string) string {
+		t.Helper()
+		out, err := git.Run(ctx, dir, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	base := t.TempDir()
+	module := filepath.Join(base, "module")
+	command(base, "init", module)
+	command(module, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "module")
+	inner := filepath.Join(base, "inner")
+	command(base, "init", inner)
+	command(inner, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "nested module")
+	command(module, "-c", "protocol.file.allow=always", "submodule", "add", inner, "nested")
+	command(module, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-am", "nested dependency")
+	seed := filepath.Join(base, "seed")
+	command(base, "init", seed)
+	command(seed, "-c", "protocol.file.allow=always", "submodule", "add", module, "dependency")
+	command(seed, "config", "--file", ".gitmodules", "submodule.dependency.url", "../module")
+	command(seed, "config", "--file", ".gitmodules", "submodule.dependency.update", "checkout")
+	command(seed, "add", ".gitmodules", "dependency")
+	command(seed, "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-m", "superproject")
+	bare := filepath.Join(base, "gate.git")
+	command(base, "clone", "--bare", seed, bare)
+	if err := git.IsolateHooksPath(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.RecordSharedConfigBaseline(ctx, bare); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(bare, "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"test", "lint"} {
+		wt := filepath.Join(base, name)
+		if err := git.WorktreeAdd(ctx, bare, wt, "HEAD"); err != nil {
+			t.Fatal(err)
+		}
+		step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+			if _, err := git.Run(ctx, wt, "config", "forbidden.shared", "write"); err == nil {
+				t.Fatal("shared config lock was relaxed")
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				if _, err := git.Run(ctx, wt, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"); err != nil {
+					return nil, err
+				}
+				if got := command(filepath.Join(wt, "dependency"), "rev-parse", "HEAD"); got != command(module, "rev-parse", "HEAD") {
+					t.Fatalf("prepared checkout = %s", got)
+				}
+				if got := command(filepath.Join(wt, "dependency", "nested"), "rev-parse", "HEAD"); got != command(inner, "rev-parse", "HEAD") {
+					t.Fatalf("nested prepared checkout = %s", got)
+				}
+				if err := os.RemoveAll(filepath.Join(wt, "dependency")); err != nil {
+					return nil, err
+				}
+				if _, err := git.Run(ctx, wt, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive", "--no-fetch", "--checkout", "--force", "--", "dependency"); err != nil {
+					return nil, err
+				}
+			}
+			return &StepOutcome{}, nil
+		}}
+		if _, err := executeWithConfigProtection(step, &StepContext{Ctx: ctx, GateDir: bare, WorkDir: wt}); err != nil {
+			t.Fatalf("%s preparation: %v", name, err)
+		}
+		for key, want := range map[string]string{"submodule.dependency.url": module, "submodule.dependency.update": "checkout"} {
+			if got := command(wt, "config", "--worktree", "--get", key); got != want {
+				t.Fatalf("worktree %s = %q, want %q", key, got, want)
+			}
+		}
+	}
+	after, err := os.ReadFile(filepath.Join(bare, "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("submodule preparation changed shared config")
+	}
+}
