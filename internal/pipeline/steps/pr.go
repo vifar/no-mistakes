@@ -870,8 +870,8 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 	return appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, maxPullRequestBodyBytes, provider)
 }
 
-// appendGeneratedSectionsToCleanBodyWithinLimit is the single choke point that
-// decides which attestation comment a body consumer sees.
+// appendGeneratedSectionsToCleanBodyWithinLimit applies the attestation boundary
+// when assembling an ordinary body with a full appendix.
 //
 // pipelineMD carries the run's real attestation. Every other component -
 // what-changed, intent, risk, and above all the Testing section, which embeds
@@ -888,23 +888,11 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 // still shipped three live foreign markers ahead of the real one. Fencing is no
 // defense either - verify.py reads raw text, so a marker inside a ```text block
 // counts exactly the same.
-// appendGeneratedSectionsToCleanBodyWithinLimit assembles the published body
-// and renders a quoted co-author as a labelled field.
 //
-// The rendering is HERE, at the assembly, because this is the one place every
-// published section passes through: the prose, the risk line, the Testing
-// section and the Pipeline section all reach the reader through it, and a
-// consumer that scans the body for attribution scans all of them.
+// Co-author keys must be rendered before budgeting because the replacement
+// grows the text. Compact and template bodies apply the same policy at their
+// own assembly boundaries.
 func appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
-	// The sections render a co-author's trailer key as a labelled field, so
-	// no consumer that scans the body for attribution reads a quoted
-	// fixture's trailer as a claim. The name and the address survive the
-	// rendering; only the key is rendered.
-	//
-	// The components are rendered BEFORE the body is budgeted. The
-	// rendering grows the text, and a body that fits the budget before it
-	// would exceed it after it, which the later budget validation refuses
-	// instead of truncating normally.
 	body = renderCoAuthorAsLabelledField(body)
 	riskLine = renderCoAuthorAsLabelledField(riskLine)
 	testingMD = renderCoAuthorAsLabelledField(testingMD)

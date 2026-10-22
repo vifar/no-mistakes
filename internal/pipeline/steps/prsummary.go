@@ -1748,27 +1748,13 @@ func renderCoAuthorAsLabelledField(s string) string {
 // ownership markers (e.g. Testing evidence quoting a templated body): a raw
 // pair in an ordinary body makes every later restamp refuse it as ambiguous.
 // And it neutralizes closing references in the provider's own grammar
-// (closingGrammarFor), since every PR-body site that generates text passes
-// through here - the grammar has to travel with the text, because GitLab
+// (closingGrammarFor). The grammar has to travel with the text, because GitLab
 // resolves a reference inside a code block where GitHub does not.
-// neutralizeAttestationMarkers is the chokepoint for the PUBLISHED text's
-// rules.
 //
-// It breaks every attestation comment prefix in agent-authored PR-body prose,
-// so only the pipeline-authored marker in the Pipeline section stays
-// parseable by the compliance check, which binds the first marker in the body
-// to the PR head. It also breaks copied PR-appendix ownership markers (e.g.
-// Testing evidence quoting a templated body): a raw pair in an ordinary body
-// makes every later restamp refuse it as ambiguous. And it neutralizes closing
-// references in the provider's own grammar (closingGrammarFor), since every
-// PR-body site that generates text passes through here.
-//
-// It also renders a co-author's trailer key as a labelled field. That is a
-// published-text rule, and it belongs here because this is the one place every
-// published text passes through: the narrative, the intent, a template
-// narrative, a generated appendix. The rendering happens AFTER the AI
-// attribution is broken, so a line that IS an AI attribution is replaced by
-// the notice and never reaches the key rendering.
+// Within this helper, AI attribution must be neutralized before retained
+// co-author keys are rendered. Rendering a key first would hide the trailer
+// from the AI classifier. Pipeline and Testing sections also render their
+// retained keys at their sources, before callers budget the body.
 func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 	s = strings.NewReplacer(acceptedGapsStart, "<!-- no-mistakes:accepted\\-gaps:start -->", acceptedGapsEnd, "<!-- no-mistakes:accepted\\-gaps:end -->").Replace(s)
 	escaped := escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
