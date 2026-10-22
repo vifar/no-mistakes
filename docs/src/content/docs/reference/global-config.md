@@ -1250,21 +1250,20 @@ Attribution trailer templates recognized and omitted from newly authored pipelin
 | Type | `list` of `string` templates |
 | Default | Unset; no additional configured attribution patterns |
 
-Each entry renders to one trailer line. It supports literal text and two Go-style placeholders:
+Each entry describes one trailer line. It supports literal text and two Go-style placeholders:
 
 | Variable | Value |
 | --- | --- |
-| `{{.Agent}}` | The agent that actually ran the invocation; with an `agent` fallback list, the one that answered, not the first configured |
-| `{{.Model}}` | The model the agent reported serving the invocation, or `unknown` when it reports none |
+| `{{.Agent}}` | Any single agent identity token |
+| `{{.Model}}` | Any single model identity token |
 
 Every entry in this setting defines attribution to omit, including entries that name a human. Recognized AI co-author and assistant identities, session attribution, and standalone generated-with AI footers are also removed, even when this list is empty. Matching uses complete attribution lines and identities in footer context, not words inside a disclosure, body example, or a human name such as Claude Smith. A Git-recognized footer can share a paragraph with ordinary body text; folded continuations stay with their trailer. Subject and body prose, comments, human co-authors not matched by this setting, and other retained trailers survive.
 
 The policy covers newly authored pipeline commits, including direct agent commits, corrections, and automatic or agent-assisted integrations. Existing submitted and pinned target history is preserved; each integration, including CI repair, registers its exact resolved target before invoking an integration agent or validating adoption. Proven replays retain their canonical original message bytes, including whitespace and final newlines, across successive rebases. Before adopting a new head, validation refuses attributed bypass commits or altered canonical replay messages rather than rewriting them.
 
-Hook redirection is bound to the run's actual Git directory. Ordinary subdirectories remain covered; unrelated or nested repositories and other linked worktrees retain their own effective hooks and messages under inherited agent environments. Delegation preserves original hook arguments, input, output, side effects, and exit status, with Git retaining its native rules for informational hooks. Replay bookkeeping completes even when the original `post-rewrite` hook fails. Message hooks run before filtering new messages or restoring canonical replay bytes; the `prepare-commit-msg` boundary also applies to `--no-verify`. Stable run-owned hooks read atomically refreshed policy so persistent agents use current attribution patterns and imported-history exclusions without repository or user Git configuration changes.
+Hook redirection is bound to the run's actual Git directory. Ordinary subdirectories remain covered; unrelated or nested repositories and other linked worktrees retain their own effective hooks and messages under inherited agent environments. Delegation preserves original hook arguments, input, output, side effects, and exit status, with Git retaining its native rules for informational hooks. A delegated hook failure alone retains its exit status and output without added diagnostics. An internal policy, Git lookup, or replay-bookkeeping failure instead returns status 1 with diagnostics, including when the original hook also fails. Replay bookkeeping completes even when the original `post-rewrite` hook fails. New messages are filtered before and after the original `prepare-commit-msg` hook, and again after the original `commit-msg` hook; canonical replay bytes are restored after each original message hook. The `prepare-commit-msg` boundary also applies to `--no-verify`. Stable run-owned hooks read atomically refreshed policy so persistent agents use current attribution patterns and imported-history exclusions without repository or user Git configuration changes.
 
-`{{.Agent}}` and `{{.Model}}` come from agent output, so each is cut to its first whitespace-separated token, reduced to letters, digits, and `-_.:/`, and limited to 64 bytes; a value with nothing left renders as `unknown`.
-Claude, Codex, Grok, and Pi report the model they served; other agents render `unknown`.
+Each placeholder matches 1–64 letters, digits, or `-_.:/` characters, independently of which agent or model ran the invocation.
 Every entry must render to a `Key: value` line that git recognizes as a trailer.
 The key must be literal: an entry starts with its full `Key: ` prefix as plain text, and placeholders are allowed only in the value after it, so `{{.Agent}}-assisted: yes` is rejected.
 Entries are limited to 1,024 bytes and 16 placeholders, the list to 16 entries, and the same template restrictions and unsafe-character rules as `commit.fix_message` apply.
