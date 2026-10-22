@@ -11,11 +11,7 @@ import "github.com/kunchenguid/no-mistakes/internal/db"
 // lineagePRBaseBranch returns the base branch established by the branch's
 // lineage, or "" when the branch has no lineage base branch.
 //
-// The lookup walks the branch's runs newest first and takes the first run
-// that recorded a base branch, so a lineage that established a base branch
-// keeps it even when a later member of the same lineage recorded none. A
-// member that requested a new base branch moves the lineage onto it, and the
-// members that follow inherit the new base.
+// Selection is shared with recovery handoffs through db.LineagePRBaseBranch.
 func (m *RunManager) lineagePRBaseBranch(repoID, branch string) (string, error) {
 	if repoID == "" || branch == "" {
 		return "", nil

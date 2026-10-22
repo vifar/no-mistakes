@@ -149,7 +149,7 @@ no-mistakes axi run --intent "the user's goal" --closes 95 --closes owner/repo#1
 | `--verification-plan` | `string` | (none) | Path to a nonempty UTF-8 verification plan, at most 64 KiB (65,536 bytes), captured as separate evidence for a new run only |
 | `-y`, `--yes`   | `bool`   | `false` | Auto-resolve eligible gates until a decision point or outcome                                       |
 | `--skip`        | `string` | (none)  | Comma-separated pipeline steps to skip                                                               |
-| `--base-branch` | `string` | (none)  | Integration branch for this run only; overrides [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) |
+| `--base-branch` | `string` | (none)  | Record the integration branch; see [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) for precedence, inheritance, and retarget rules |
 | `--shipping-mode` | `string` | (none) | Select `full` or `immutable-source`; see [strict shipping](#strict-shipping-and-review-receipts) |
 | `--draft` | `bool` | (unset) | Pin the GitHub draft choice; requires `--shipping-mode`, supports explicit `false` |
 | `--external-ci-owner` | `string` | (none) | For ordinary runs, hand off an explicit CI claim; requires exactly `--skip=push,pr,ci`. Unavailable in strict shipping. |

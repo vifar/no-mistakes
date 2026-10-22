@@ -104,14 +104,9 @@ type PipelineState struct {
 	PushedHead     string
 	PushedAt       int64
 	PushGeneration int64
-	// PRBaseBranch is the base branch the branch's lineage is on: the
-	// per-run base branch the lineage recorded, whether the operator
-	// requested it for that run or a later run of the same lineage inherited
-	// it. It is the base the successor run will target, so an operator
-	// reading a recovery handoff sees the review's subject instead of
-	// guessing it from the repository default. Empty when the lineage
-	// recorded none, in which case the repository's own default branch is
-	// the target.
+	// PRBaseBranch reports db.LineagePRBaseBranch's selection so a recovery
+	// handoff agrees with ordinary launch inheritance. Empty means no lineage
+	// value was recorded; it does not resolve configuration or a live PR target.
 	PRBaseBranch string
 }
 
