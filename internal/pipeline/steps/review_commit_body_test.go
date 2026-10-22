@@ -476,3 +476,42 @@ func TestReviewFixCommitRecordedProducerTrailers(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewFixCommitBodyConfiguredFoldedAttributionOnly(t *testing.T) {
+	t.Parallel()
+	for _, configured := range []bool{false, true} {
+		t.Run(fmt.Sprintf("configured=%t", configured), func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			output, err := json.Marshal(map[string]string{"summary": "Assisted-by: Codex\n <ai@example.com>", "verification": "passed"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				writeAgentChange(t, dir)
+				return &agent.Result{Output: output}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+			sctx.Fixing = true
+			if configured {
+				sctx.Config.Commit.Trailers = []string{"Assisted-by: Codex"}
+			}
+			sctx.PreviousFindings = `{"findings":[{"id":"r1","file":"receipt.go","description":"Guard stale receipt"}]}`
+			summary, err := executeFixMode(sctx, types.StepReview, fixExecutionOptions{FallbackSummary: "address review findings", RequireVerification: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const want = "body: unavailable - summary contained only attribution"
+			if summary != want {
+				t.Errorf("summary = %q, want %q", summary, want)
+			}
+			if got := lastCommitMessage(t, dir); got != "no-mistakes(review): address review findings" {
+				t.Errorf("subject = %q", got)
+			}
+			body := gitCmd(t, dir, "show", "-s", "--format=%b", "HEAD")
+			if !strings.HasPrefix(body, want+"\n\nRound findings:") || strings.Contains(body, "ai@example.com") || strings.Contains(body, "Assisted-by") {
+				t.Errorf("body = %q", body)
+			}
+			assertPersistedReviewFixSummary(t, sctx.DB, sctx.Run.ID, summary, want)
+		})
+	}
+}

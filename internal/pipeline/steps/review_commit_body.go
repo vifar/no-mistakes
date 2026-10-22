@@ -110,9 +110,6 @@ func reviewAttributionContinuation(first, following string) (string, bool) {
 
 func reviewAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
 	end = start + 1
-	if reviewConfiguredAttributionMatches(lines[start], configuredTrailers) {
-		return end, lines[start], true, true
-	}
 	firstLine := html.UnescapeString(lines[start])
 	unfolded, _ = reviewAttributionLine(firstLine)
 	if end < len(lines) {
@@ -131,6 +128,9 @@ func reviewAttributionEntry(lines []string, start int, configuredTrailers []stri
 				end++
 			}
 		}
+	}
+	if reviewConfiguredAttributionMatches(lines[start], configuredTrailers) {
+		return end, unfolded, true, true
 	}
 	if !reviewAttributionStart(unfolded) {
 		return end, unfolded, false, false
