@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1691,7 +1692,26 @@ func escapePipelineFoldMarkers(s string) string {
 func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 	s = strings.NewReplacer(acceptedGapsStart, "<!-- no-mistakes:accepted\\-gaps:start -->", acceptedGapsEnd, "<!-- no-mistakes:accepted\\-gaps:end -->").Replace(s)
 	escaped := escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
-	return closingGrammarFor(provider).neutralize(escaped)
+	return closingGrammarFor(provider).neutralize(neutralizeAIAttribution(escaped))
+}
+
+// aiAttributionPattern matches the lines a consumer of the pull request body
+// reads as AI attribution of THIS work: a "Generated with" line, a robot
+// emoji, and a Co-Authored-By trailer naming an AI.
+var aiAttributionPattern = regexp.MustCompile(`(?i)(generated with \[?claude code|co-authored-by:.*(claude|anthropic|openai|codex|chatgpt|grok|copilot|noreply@anthropic\.com)|\x{1F916} generated with.*)`)
+
+// neutralizeAIAttribution breaks those lines.
+//
+// The body is generated, but the evidence it embeds is not: a test that
+// exercises the attribution feature quotes the trailer it created, and every
+// consumer that scans the body for attribution - the merge bar, a reviewer -
+// reads that quoted trailer as an attribution of this work. A pull request
+// that quotes one is refused as AI-attributed even though the work is not.
+//
+// The text is broken, not dropped: the evidence still shows what the test did
+// and that it ran, and the body claims no attribution.
+func neutralizeAIAttribution(s string) string {
+	return aiAttributionPattern.ReplaceAllString(s, "<no-mistakes: AI attribution line neutralized>")
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {
