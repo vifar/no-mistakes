@@ -41,8 +41,10 @@ with whole packages assigned exactly once. The measured long poles
 their own shard; remaining packages are assigned by a checksum of their full
 import path. That assignment stays stable when unrelated packages are added.
 Package discovery must succeed before any shard starts. Each shard uses
-`-race -count=1` and a 25-minute timeout per package; the CI job has a
-60-minute wall-clock bound, including builds. The wrapper contracts are
+`-race -count=1 -p 2` and a 25-minute timeout per package, allowing at most
+six package test binaries across the three shards. CI sets `GOMAXPROCS=8`
+for the runner's eight vCPUs. The race job has a 90-minute wall-clock bound,
+including builds. The wrapper contracts are
 covered by `internal/e2edaemon/race_wrapper_test.go`.
 
 Every CI job checks out the exact PR head (or event SHA outside a PR) without
