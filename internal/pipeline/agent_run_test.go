@@ -609,6 +609,8 @@ func TestRunAgent_RetryMetadataIsNotObservedOutput(t *testing.T) {
 
 func TestRunAgent_FallbackResetsPriorAttemptActivity(t *testing.T) {
 	t.Parallel()
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
 	first := &hangingAgent{
 		name: "active",
 		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
@@ -621,14 +623,17 @@ func TestRunAgent_FallbackResetsPriorAttemptActivity(t *testing.T) {
 		name: "silent",
 		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			opts.OnLifecycle(agent.LifecycleEvent{Agent: "silent", Phase: agent.LifecyclePhaseStart, PID: 6161})
+			// Test per-attempt evidence, not whether the scheduler can launch
+			// the replacement before a short wall-clock deadline expires.
+			cancel(ErrAgentTimeout)
 			<-ctx.Done()
 			return nil, ctx.Err()
 		},
 	}
 	sctx := &StepContext{
-		Ctx:    context.Background(),
+		Ctx:    ctx,
 		Agent:  agent.NewFallback([]agent.Agent{first, second}),
-		Config: &config.Config{AgentTimeout: 20 * time.Millisecond},
+		Config: &config.Config{AgentTimeout: time.Minute},
 	}
 
 	var lifecycleLog strings.Builder
