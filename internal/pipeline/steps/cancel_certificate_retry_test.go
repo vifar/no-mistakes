@@ -77,6 +77,7 @@ func cancelWatcherWithReason(t *testing.T, sc *pipeline.StepContext, reason stri
 	if err := app.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
+	enrollExecutorGate(t, app, sc.Repo.ID)
 	executor := pipeline.NewExecutor(sc.DB, app, sc.Config, sc.Agent, []pipeline.Step{&PushStep{}, ci}, nil)
 	executor.SetSkippedSteps([]types.StepName{types.StepPush})
 	executor.SetForgeContext(&forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"})
@@ -320,6 +321,7 @@ func TestCancelSignalledGitCannotPreserveSuccess(t *testing.T) {
 	if err := app.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
+	enrollExecutorGate(t, app, sc.Repo.ID)
 	executor := pipeline.NewExecutor(sc.DB, app, sc.Config, sc.Agent, []pipeline.Step{&PushStep{}, ci}, nil)
 	executor.SetSkippedSteps([]types.StepName{types.StepPush})
 	executor.SetForgeContext(&forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"})

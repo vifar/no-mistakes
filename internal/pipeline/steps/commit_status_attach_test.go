@@ -201,6 +201,7 @@ func TestPipelineAttachCommitStatus(t *testing.T) {
 			if err := p.EnsureDirs(); err != nil {
 				t.Fatal(err)
 			}
+			enrollExecutorGate(t, p, sc.Repo.ID)
 			executor := pipeline.NewExecutor(sc.DB, p, sc.Config, sc.Agent, steps, nil)
 			executor.SetForgeContext(sc.ForgeContext)
 			guard := func(ctx *pipeline.StepContext, _ types.StepName) (pipeline.PRContextDecision, error) {
