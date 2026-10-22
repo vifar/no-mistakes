@@ -1627,8 +1627,8 @@ func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Fi
 		if sr.StepName == types.StepReview {
 			// Filter the raw display copy before escaping. Recorded findings
 			// remain intact for the audit trail and review decisions.
-			f.File = stripReviewAIAttribution(f.File, configuredTrailers)
-			f.Description = stripReviewAIAttribution(f.Description, configuredTrailers)
+			f.File = presentPRCoauthors(stripReviewAIAttribution(f.File, configuredTrailers))
+			f.Description = presentPRCoauthors(stripReviewAIAttribution(f.Description, configuredTrailers))
 		}
 		emoji := severityEmoji(f.Severity)
 		loc := ""

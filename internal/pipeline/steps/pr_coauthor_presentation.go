@@ -2,25 +2,39 @@ package steps
 
 import (
 	"html"
-	"regexp"
+	"net/mail"
 	"strings"
 )
 
-var prCoauthorContent = regexp.MustCompile(`(?i)\bco-authored-by[\t ]*:[\t ]*((?:[^<>\r\n]|\r?\n(?:[\t >"'\x60*\-]|&gt;|&#34;|&#39;)+)*?(?:<[^>\r\n]+>|&lt;[^\r\n]*?&gt;))`)
-
-// presentPRCoauthors distinguishes quoted evidence from commit attribution.
-// The name and address remain visible, including their existing escaping;
-// only the field label changes. Run before budgeting or stamping an appendix,
-// since the descriptive label is longer. This never changes the source
-// summary, audit findings, captured evidence files, or commit messages.
 func presentPRCoauthors(text string) string {
-	return prCoauthorContent.ReplaceAllStringFunc(text, func(content string) string {
-		// Reuse the Review classifier rather than relabeling an AI identity as
-		// human. Decode only the classification copy, not the published text.
-		if stripReviewAIAttribution(html.UnescapeString(content), nil) == "" {
-			return ""
+	lines := strings.Split(text, "\n")
+	decoded := make([]string, len(lines))
+	for i, line := range lines {
+		decoded[i] = html.UnescapeString(line)
+	}
+	var kept []string
+	for start := 0; start < len(lines); {
+		end, unfolded, entry, ai := reviewAttributionEntry(decoded, start, nil)
+		if !ai {
+			key, value, _ := strings.Cut(unfolded, ":")
+			if entry && strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") {
+				if i := strings.LastIndex(value, "<"); i >= 0 {
+					if _, err := mail.ParseAddress(strings.TrimSpace(value[i:])); err == nil {
+						line := lines[start]
+						label := strings.Index(strings.ToLower(line), "co-authored-by")
+						if label >= 0 {
+							if literalKey := reviewTrailerKey.FindString(line[label:]); literalKey != "" {
+								lines[start] = line[:label] + "preserved human co-author:" + line[label+len(literalKey):]
+							}
+						}
+					}
+				}
+			}
+			kept = append(kept, lines[start:end]...)
+		} else {
+			kept = append(kept, "")
 		}
-		_, identity, _ := strings.Cut(content, ":")
-		return "preserved human co-author: " + strings.TrimLeft(identity, "\t ")
-	})
+		start = end
+	}
+	return strings.Join(kept, "\n")
 }

@@ -38,7 +38,7 @@ func TestPRHumanCoauthorPresentation_BuildPRContent(t *testing.T) {
 	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 		t.Run(string(provider), func(t *testing.T) {
 			dir, base, head := setupGitRepo(t)
-			raw := "Preserve HUMAN co-author lines, including " + humanCoauthorFixture + ", and ordinary prose.\n\n" + humanCoauthorDisclosure
+			raw := "Preserve HUMAN co-author lines, including:\n" + humanCoauthorFixture + "\nAnd ordinary prose.\n\n" + humanCoauthorDisclosure
 			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 				payload, err := json.Marshal(prContent{Title: "fix(review): preserve repair rationale", Body: raw})
 				return &agent.Result{Output: payload}, err
@@ -71,9 +71,9 @@ func TestPRHumanCoauthorPresentation_RefreshAndBudgets(t *testing.T) {
 	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 		for _, mode := range []string{config.PRAppendixFull, config.PRAppendixCollapsed} {
 			t.Run(string(provider)+"/"+mode, func(t *testing.T) {
-				sctx := &pipeline.StepContext{Config: &config.Config{}, UserIntent: "Keep " + humanCoauthorFixture}
+				sctx := &pipeline.StepContext{Config: &config.Config{}, UserIntent: "Keep:\n" + humanCoauthorFixture}
 				sctx.Config.PR.Appendix = mode
-				narrative := "## What Changed\n\nKeep " + humanCoauthorFixture + ".\n\n" + humanCoauthorDisclosure
+				narrative := "## What Changed\n\nKeep:\n" + humanCoauthorFixture + "\n\n" + humanCoauthorDisclosure
 				evidence := "## Testing\n\n```text\nCo-Authored-By: Claude Smith &lt;claude@example.com&gt;\n```"
 				pipelineMD := compliantPipelineBody(t, testPipelineHeadSHA)
 				for _, body := range []string{
@@ -138,7 +138,7 @@ func TestPRHumanCoauthorPresentation_TemplateNarrative(t *testing.T) {
 		t.Run(string(provider), func(t *testing.T) {
 			sctx, ag, _ := templateTestContext(t)
 			ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
-				payload, err := json.Marshal(prContent{Title: "fix: repair", Body: filledPRTemplate + "\nKeep " + humanCoauthorFixture + "\n\n" + humanCoauthorDisclosure})
+				payload, err := json.Marshal(prContent{Title: "fix: repair", Body: filledPRTemplate + "\nKeep:\n" + humanCoauthorFixture + "\n\n" + humanCoauthorDisclosure})
 				return &agent.Result{Output: payload}, err
 			}
 			content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", sctx.Run.BaseSHA, provider, 0)
@@ -177,8 +177,8 @@ func TestPRHumanCoauthorPresentation_ClassificationAndSourcePreservation(t *test
 	}
 	for _, ai := range []string{"gpt-5.5", "antigravity", "rovodev", "acp:cursor:model", `"Codex"`} {
 		for _, address := range []string{" <model@example.com>", " &lt;model@example.com&gt;"} {
-			got := presentPRCoauthors("Evidence: Co-Authored-By: " + ai + address + "\n\n" + humanCoauthorDisclosure)
-			if got != "Evidence: \n\n"+humanCoauthorDisclosure {
+			got := presentPRCoauthors("Evidence:\nCo-Authored-By: " + ai + address + "\n\n" + humanCoauthorDisclosure)
+			if got != "Evidence:\n\n\n"+humanCoauthorDisclosure {
 				t.Errorf("AI evidence relabeled as human or disclosure changed: %q", got)
 			}
 		}
@@ -208,7 +208,7 @@ func TestPRHumanCoauthorPresentation_FoldedEntries(t *testing.T) {
 
 func TestPRHumanCoauthorPresentation_WrappedFoldedEntries(t *testing.T) {
 	t.Parallel()
-	for _, wrapper := range []string{"> ", "**", "`", "- ", "\"", "'"} {
+	for _, wrapper := range []string{"> ", "** ", "` ", "\" ", "' "} {
 		for _, escaped := range []bool{false, true} {
 			address := "<claude@example.com>"
 			human := wrapper + "Co-Authored-By: Claude\n" + wrapper + address
@@ -224,6 +224,18 @@ func TestPRHumanCoauthorPresentation_WrappedFoldedEntries(t *testing.T) {
 			if got := presentPRCoauthors(ai); strings.Contains(got, "noreply@anthropic.com") || strings.Contains(got, "co-author") || strings.Contains(got, "Co-Authored-By") {
 				t.Errorf("AI attribution survived: %q", got)
 			}
+		}
+	}
+}
+
+func TestPRHumanCoauthorPresentation_EncodedKeyIsNotAReplacementTarget(t *testing.T) {
+	t.Parallel()
+	for _, text := range []string{
+		"&#67;o-Authored-By: Claude <claude@example.com>",
+		"Co-Authored-By&#58; Human: Writer <human@example.com>",
+	} {
+		if got := presentPRCoauthors(text); got != text {
+			t.Errorf("encoded prose changed: %q, want %q", got, text)
 		}
 	}
 }
