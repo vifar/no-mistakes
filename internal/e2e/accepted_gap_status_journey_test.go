@@ -88,6 +88,15 @@ func TestAcceptedTestGapCommitStatusJourney(t *testing.T) {
 					}
 					waitForStepStatus(t, j.h, branch, types.StepTest, types.StepStatusAwaitingApproval, 30*time.Second)
 				}
+				if name == "accepted" {
+					for _, approvalReason := range []string{"", reason} {
+						out, err := j.h.Run("axi", "respond", "--action", "approve", "--step", "test", "--reason", approvalReason)
+						if err == nil || !strings.Contains(out, "--accept-gap") {
+							t.Fatalf("strict Test admitted plain approval or lost its gap hint: %v\n%s", err, out)
+						}
+						t.Logf("strict plain approval refused:\n%s", out)
+					}
+				}
 				args := []string{"axi", "respond", "--action", "approve", "--step", "test", "--reason", reason, "--wait", "90s"}
 				if accepted {
 					args = append(args, "--accept-gap", "test-verdict", "--covered-by", coveredBy)
@@ -166,6 +175,14 @@ func TestAcceptedTestGapCommitStatusJourney(t *testing.T) {
 			}
 			if accepted {
 				assertAcceptedGapJourneyAudit(t, j, runID, branch, head, reason, coveredBy)
+			}
+			if name == "accepted" {
+				j.setForge(forgeState{Protection: protectionJSON()})
+				out, err := j.receipt(j.h.WorkDir, runID)
+				if err == nil || !strings.Contains(out, "strict readiness") {
+					t.Fatalf("strict receipt admitted an empty observed rollup: %v\n%s", err, out)
+				}
+				j.setForge(forgeState{Protection: protectionJSON(), Checks: []forgeCheck{greenCheck("build")}})
 			}
 			if name == "recovered" {
 				// The Push contract revokes all earlier execution proofs on
