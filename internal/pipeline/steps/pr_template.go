@@ -205,8 +205,8 @@ func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provid
 		return "", fmt.Errorf("cannot publish template narrative without recorded pipeline evidence and attestation")
 	}
 	parts := []string{}
-	if intent := publicPRIntent(sctx); intent != "" {
-		parts = append(parts, "## Intent\n\n"+neutralizeAttestationMarkers(provider, presentPRCoauthors(intent, configuredTrailers...)))
+	if intent := publicPRIntent(sctx, configuredTrailers...); intent != "" {
+		parts = append(parts, "## Intent\n\n"+neutralizeAttestationMarkers(provider, prDisplayText(intent, configuredTrailers...)))
 	}
 	if evidence := appendixEvidence(appendixMode(sctx), prBodyFlavorFor(provider), risk, testing, pipelineMD, provider); evidence != "" {
 		// The appendix's evidence is published text like any other: a

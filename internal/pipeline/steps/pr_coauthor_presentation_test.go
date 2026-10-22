@@ -74,7 +74,7 @@ func TestPRHumanCoauthorPresentation_RefreshAndBudgets(t *testing.T) {
 				sctx := &pipeline.StepContext{Config: &config.Config{}, UserIntent: "Keep:\n" + humanCoauthorFixture}
 				sctx.Config.PR.Appendix = mode
 				narrative := "## What Changed\n\nKeep:\n" + humanCoauthorFixture + "\n\n" + humanCoauthorDisclosure
-				evidence := "## Testing\n\n```text\n" + html.EscapeString(presentPRCoauthors(humanCoauthorFixture)) + "\n```"
+				evidence := "## Testing\n\n```text\n" + html.EscapeString(prDisplayText(humanCoauthorFixture)) + "\n```"
 				pipelineMD := compliantPipelineBody(t, testPipelineHeadSHA)
 				for _, body := range []string{
 					assembleDraftPRBody(sctx, narrative, "Low risk", evidence, pipelineMD, 0, provider),
@@ -107,7 +107,7 @@ func TestPRHumanCoauthorPresentation_OwnedAndRestamp(t *testing.T) {
 	t.Parallel()
 	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 		t.Run(string(provider), func(t *testing.T) {
-			appendix := compliantPipelineBody(t, testPipelineHeadSHA) + "\n\n```text\n" + presentPRCoauthors(humanCoauthorFixture) + "\n```\n\n" + humanCoauthorDisclosure
+			appendix := compliantPipelineBody(t, testPipelineHeadSHA) + "\n\n```text\n" + prDisplayText(humanCoauthorFixture) + "\n```\n\n" + humanCoauthorDisclosure
 			content, err := composeOwnedPRContent(prOwnedBody{before: "author text"}, "fix: repair", appendix, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -171,20 +171,20 @@ func TestPRHumanCoauthorPresentation_ClassificationAndSourcePreservation(t *test
 		if !strings.Contains(body, human) {
 			t.Error("PR presentation changed the underlying commit body")
 		}
-		if got := presentPRCoauthors(body); strings.Contains(got, "Co-Authored-By:") || !strings.Contains(got, strings.TrimPrefix(human, "Co-Authored-By: ")) || !strings.Contains(got, humanCoauthorDisclosure) {
+		if got := prDisplayText(body); strings.Contains(got, "Co-Authored-By:") || !strings.Contains(got, strings.TrimPrefix(human, "Co-Authored-By: ")) || !strings.Contains(got, humanCoauthorDisclosure) {
 			t.Errorf("human identity/disclosure lost in presentation: %q", got)
 		}
 	}
 	for _, ai := range []string{"gpt-5.5", "antigravity", "rovodev", "acp:cursor:model", `"Codex"`} {
 		for _, address := range []string{" <model@example.com>", " &lt;model@example.com&gt;"} {
-			got := presentPRCoauthors("Evidence:\nCo-Authored-By: " + ai + address + "\n\n" + humanCoauthorDisclosure)
+			got := prDisplayText("Evidence:\nCo-Authored-By: " + ai + address + "\n\n" + humanCoauthorDisclosure)
 			if got != "Evidence:\n\n\n"+humanCoauthorDisclosure {
 				t.Errorf("AI evidence relabeled as human or disclosure changed: %q", got)
 			}
 		}
 	}
 	prose := "This documents the Co-Authored-By: field.\n\n" + humanCoauthorDisclosure
-	if got := presentPRCoauthors(prose); got != prose {
+	if got := prDisplayText(prose); got != prose {
 		t.Errorf("ordinary prose changed: %q", got)
 	}
 }
@@ -194,13 +194,13 @@ func TestPRHumanCoauthorPresentation_FoldedEntries(t *testing.T) {
 	for _, address := range []string{"<claude@example.com>", "&lt;claude@example.com&gt;"} {
 		input := "Co-Authored-By: Claude\n " + address + "\n\n" + humanCoauthorDisclosure
 		want := "preserved human co-author: Claude\n " + address + "\n\n" + humanCoauthorDisclosure
-		if got := presentPRCoauthors(input); got != want {
+		if got := prDisplayText(input); got != want {
 			t.Errorf("human evidence = %q, want %q", got, want)
 		}
 	}
 	for _, address := range []string{"<noreply@anthropic.com>", "&lt;noreply@anthropic.com&gt;"} {
 		input := "Co-Authored-By: Claude\n " + address + "\n\n" + humanCoauthorDisclosure
-		if got := presentPRCoauthors(input); got != "\n\n"+humanCoauthorDisclosure {
+		if got := prDisplayText(input); got != "\n\n"+humanCoauthorDisclosure {
 			t.Errorf("folded AI evidence survived: %q", got)
 		}
 	}
@@ -217,11 +217,11 @@ func TestPRHumanCoauthorPresentation_WrappedFoldedEntries(t *testing.T) {
 				human = html.EscapeString(human)
 				want = html.EscapeString(want)
 			}
-			if got := presentPRCoauthors(human); got != want {
+			if got := prDisplayText(human); got != want {
 				t.Errorf("human = %q, want %q", got, want)
 			}
 			ai := strings.ReplaceAll(human, "claude@example.com", "noreply@anthropic.com")
-			if got := presentPRCoauthors(ai); strings.Contains(got, "noreply@anthropic.com") || strings.Contains(got, "co-author") || strings.Contains(got, "Co-Authored-By") {
+			if got := prDisplayText(ai); strings.Contains(got, "noreply@anthropic.com") || strings.Contains(got, "co-author") || strings.Contains(got, "Co-Authored-By") {
 				t.Errorf("AI attribution survived: %q", got)
 			}
 		}
@@ -234,7 +234,7 @@ func TestPRHumanCoauthorPresentation_EncodedKeyIsNotAReplacementTarget(t *testin
 		"&#67;o-Authored-By: Claude <claude@example.com>",
 		"Co-Authored-By&#58; Human: Writer <human@example.com>",
 	} {
-		if got := presentPRCoauthors(text); got != text {
+		if got := prDisplayText(text); got != text {
 			t.Errorf("encoded prose changed: %q, want %q", got, text)
 		}
 	}

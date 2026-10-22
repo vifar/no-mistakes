@@ -62,7 +62,7 @@ func TestAttributionEntryContract(t *testing.T) {
 				if escaped {
 					input, want = html.EscapeString(input), html.EscapeString(want)
 				}
-				if got := presentPRCoauthors(input); got != want {
+				if got := prDisplayText(input); got != want {
 					t.Errorf("presentation = %q, want %q", got, want)
 				}
 			}

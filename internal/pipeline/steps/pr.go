@@ -384,7 +384,7 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		if err != nil {
 			return prContent{}, err
 		}
-		narrative := presentPRCoauthors(neutralizeAttestationMarkers(provider, content.Body), configuredTrailers...)
+		narrative := neutralizeAttestationMarkers(provider, prDisplayText(content.Body, configuredTrailers...))
 		appendix = appendIssuesSection(appendix, issuesSection(sctx, narrative))
 		return composeOwnedPRContent(prOwnedBody{before: narrative}, content.Title, appendix, bodyLimit)
 	}
@@ -727,7 +727,7 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	// The review conversation rides inside the Pipeline section as an ordinary
 	// `### ` group, so the existing body-budget logic can drop it whole rather
 	// than competing with the attestation it must never displace.
-	if conversationMD := buildReviewConversationSection(sctx); conversationMD != "" && pipelineMD != "" {
+	if conversationMD := buildReviewConversationSection(sctx, trailers...); conversationMD != "" && pipelineMD != "" {
 		pipelineMD += "\n\n" + conversationMD
 	}
 	// Ordinary Bitbucket descriptions keep their existing Markdown-only skin.
@@ -945,7 +945,7 @@ func buildPRBodyFull(body, riskLine, testingMD, pipelineMD string, sctx *pipelin
 	sections := appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, maxBytes, provider)
 	// Neutralized for the same reason as in prependIntentSection: intent is
 	// agent-extracted text placed ahead of the pipeline section.
-	cleaned := presentPRCoauthors(neutralizeAttestationMarkers(provider, publicPRIntent(sctx)), configuredTrailers...)
+	cleaned := prDisplayText(neutralizeAttestationMarkers(provider, publicPRIntent(sctx, configuredTrailers...)), configuredTrailers...)
 	if cleaned == "" {
 		return sections
 	}
@@ -1741,7 +1741,7 @@ func prependIntentSection(body string, sctx *pipeline.StepContext, configuredTra
 	// Intent is agent-extracted text that lands ahead of the pipeline section,
 	// so it can shadow the real attestation the same way the Testing section
 	// can. See appendGeneratedSectionsToCleanBodyWithinLimit.
-	cleaned := presentPRCoauthors(neutralizeAttestationMarkers(resolvedProviderForBody(sctx), publicPRIntent(sctx)), configuredTrailers...)
+	cleaned := prDisplayText(neutralizeAttestationMarkers(resolvedProviderForBody(sctx), publicPRIntent(sctx, configuredTrailers...)), configuredTrailers...)
 	if cleaned == "" {
 		return body
 	}

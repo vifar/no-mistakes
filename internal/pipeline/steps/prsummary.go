@@ -199,7 +199,7 @@ func buildPipelineSummaryForRaw(steps []*db.StepResult, rounds map[string][]*db.
 		b.WriteString(detail)
 	}
 
-	riskLine := extractRiskLine(steps, rounds)
+	riskLine := extractRiskLine(steps, rounds, configuredTrailers...)
 	return b.String(), riskLine
 }
 
@@ -233,9 +233,9 @@ func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.Step
 			Status: sr.Status,
 		}
 		if sr.StepName == types.StepTest && sr.OverrideReason != nil {
-			item.OverrideReason = strings.TrimSpace(*sr.OverrideReason)
+			item.OverrideReason = strings.TrimSpace(prDisplayText(*sr.OverrideReason, policy.ConfiguredTrailers...))
 			if item.OverrideReason != "" {
-				attestation.AllowTestCommandOverride = strings.TrimSpace(policy.AllowTestCommandOverride)
+				attestation.AllowTestCommandOverride = strings.TrimSpace(prDisplayText(policy.AllowTestCommandOverride, policy.ConfiguredTrailers...))
 			}
 		}
 		item.AcceptedGaps = attestedAcceptedGaps(sr, policy.ConfiguredTrailers...)
@@ -475,7 +475,7 @@ func buildTestingSummaryRaw(steps []*db.StepResult, rounds map[string][]*db.Step
 			b.WriteString(liveValidation)
 			b.WriteString("\n")
 		}
-		if table := renderScenarioTable(scenarios, opts.flavor); table != "" {
+		if table := renderScenarioTable(scenarios, opts.flavor, opts.configuredTrailers...); table != "" {
 			b.WriteString("\n")
 			b.WriteString(table)
 			b.WriteString("\n")
@@ -618,11 +618,11 @@ func testingSummaryFromFindings(raw *string, configuredTrailers ...string) strin
 	if raw == nil || strings.TrimSpace(*raw) == "" {
 		return ""
 	}
-	findings, err := types.ParseFindingsJSON(*raw)
+	findings, err := parsePRDisplayFindings(*raw, configuredTrailers...)
 	if err != nil {
 		return ""
 	}
-	return sanitizePromptMultilineText(presentPRCoauthors(findings.TestingSummary, configuredTrailers...))
+	return sanitizePromptMultilineText(findings.TestingSummary)
 }
 
 func collectTestingDetails(sr *db.StepResult, rounds []*db.StepRound, configuredTrailers ...string) []string {
@@ -670,7 +670,7 @@ func appendTestingArtifacts(artifacts []types.TestArtifact, seen map[string]bool
 	if raw == nil || strings.TrimSpace(*raw) == "" {
 		return artifacts
 	}
-	findings, err := types.ParseFindingsJSON(*raw)
+	findings, err := parsePRDisplayFindings(*raw, opts.configuredTrailers...)
 	if err != nil {
 		return artifacts
 	}
@@ -679,7 +679,7 @@ func appendTestingArtifacts(artifacts []types.TestArtifact, seen map[string]bool
 		artifact.Kind = strings.ToLower(sanitizePromptText(artifact.Kind))
 		artifact.Path = sanitizeArtifactPath(artifact.Path, opts)
 		artifact.URL = sanitizeArtifactURL(artifact.URL)
-		artifact.Content = sanitizePromptMultilineText(presentPRCoauthors(artifact.Content, opts.configuredTrailers...))
+		artifact.Content = sanitizePromptMultilineText(artifact.Content)
 		key := artifact.Kind + "\x00" + artifact.Label + "\x00" + artifact.Path + "\x00" + artifact.URL + "\x00" + artifact.Content
 		if artifact.Label == "" || seen[key] {
 			continue
@@ -697,12 +697,12 @@ func appendTestingDetails(details []string, seen map[string]bool, raw *string, c
 	if raw == nil || strings.TrimSpace(*raw) == "" {
 		return details
 	}
-	findings, err := types.ParseFindingsJSON(*raw)
+	findings, err := parsePRDisplayFindings(*raw, configuredTrailers...)
 	if err != nil {
 		return details
 	}
 	for _, detail := range findings.Tested {
-		clean := sanitizePromptText(presentPRCoauthors(neutralizeAIAttribution(detail), configuredTrailers...))
+		clean := sanitizePromptText(neutralizeAIAttribution(detail))
 		if clean == "" || seen[clean] {
 			continue
 		}
@@ -896,7 +896,7 @@ func embeddedArtifactText(artifact types.TestArtifact, opts testingSummaryOption
 	if err != nil {
 		return "", false
 	}
-	text = strings.TrimRight(presentPRCoauthors(text, opts.configuredTrailers...), "\n")
+	text = strings.TrimRight(prDisplayText(text, opts.configuredTrailers...), "\n")
 	if text == "" {
 		return "", false
 	}
@@ -1341,7 +1341,7 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 	return buildDetail(line)
 }
 
-func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound) string {
+func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound, configuredTrailers ...string) string {
 	for _, sr := range steps {
 		if sr.StepName != types.StepReview {
 			continue
@@ -1350,7 +1350,7 @@ func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound) 
 		var finalFindings *types.Findings
 		hasUnreadableFinal := false
 		if sr.FindingsJSON != nil {
-			if f, err := types.ParseFindingsJSON(*sr.FindingsJSON); err == nil {
+			if f, err := parsePRDisplayFindings(*sr.FindingsJSON, configuredTrailers...); err == nil {
 				finalFindings = &f
 			} else {
 				hasUnreadableFinal = true
@@ -1363,7 +1363,7 @@ func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound) 
 			if len(stepRounds) > 0 {
 				last := stepRounds[len(stepRounds)-1]
 				if last.FindingsJSON != nil {
-					if f, err := types.ParseFindingsJSON(*last.FindingsJSON); err == nil {
+					if f, err := parsePRDisplayFindings(*last.FindingsJSON, configuredTrailers...); err == nil {
 						src = &f
 					}
 				}
@@ -1498,7 +1498,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 	// anything, so "No issues found" under a "skipped" summary would
 	// claim a pass.
 	if len(rounds) == 0 || (sr.Status == types.StepStatusSkipped && !roundsHaveFindings(rounds)) {
-		writeStepStatusDetail(&inner, sr, flavor)
+		writeStepStatusDetail(&inner, sr, flavor, configuredTrailers...)
 		return foldPRBlock(summaryLine, inner.String(), flavor)
 	}
 
@@ -1537,7 +1537,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 			} else {
 				inner.WriteString("✅ No issues found.\n")
 			}
-			writeTestedDetails(&inner, sr, &findings, flavor)
+			writeTestedDetails(&inner, sr, &findings, flavor, configuredTrailers...)
 			inner.WriteString("\n")
 			continue
 		}
@@ -1633,13 +1633,8 @@ func fixRoundLine(stepName types.StepName, r *db.StepRound) string {
 // writeFindingItems renders each finding as a `file:line - description` bullet,
 // followed by any test command details for the test step.
 func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Findings, flavor prBodyFlavor, configuredTrailers ...string) {
-	for _, f := range findings.Items {
-		if sr.StepName == types.StepReview {
-			// Filter the raw display copy before escaping. Recorded findings
-			// remain intact for the audit trail and review decisions.
-			f.File = presentPRCoauthors(stripReviewAIAttribution(f.File, configuredTrailers), configuredTrailers...)
-			f.Description = presentPRCoauthors(stripReviewAIAttribution(f.Description, configuredTrailers), configuredTrailers...)
-		}
+	display := prDisplayFindings(*findings, configuredTrailers...)
+	for _, f := range display.Items {
 		emoji := severityEmoji(f.Severity)
 		loc := ""
 		if f.File != "" {
@@ -1651,7 +1646,7 @@ func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Fi
 		}
 		b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, escapePRText(f.Description, flavor)))
 	}
-	writeTestedDetails(b, sr, findings, flavor)
+	writeTestedDetails(b, sr, findings, flavor, configuredTrailers...)
 }
 
 // writeTestedDetails lists what the test step exercised: its live-validation
@@ -1662,16 +1657,18 @@ func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Fi
 // because the Pipeline fold is the per-round story: a reader following a
 // fix round wants to see which scenario changed result between rounds, which
 // the single collapsed Testing section cannot show.
-func writeTestedDetails(b *strings.Builder, sr *db.StepResult, findings *types.Findings, flavor prBodyFlavor) {
+func writeTestedDetails(b *strings.Builder, sr *db.StepResult, findings *types.Findings, flavor prBodyFlavor, configuredTrailers ...string) {
 	if sr.StepName != types.StepTest {
 		return
 	}
+	display := prDisplayFindings(*findings, configuredTrailers...)
+	findings = &display
 	if line := renderLiveValidationLine(findings.Scenarios, findings.Verdict); line != "" {
 		b.WriteString("- ")
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
-	if table := renderScenarioTable(findings.Scenarios, flavor); table != "" {
+	if table := renderScenarioTable(findings.Scenarios, flavor, configuredTrailers...); table != "" {
 		b.WriteString("\n")
 		b.WriteString(table)
 		b.WriteString("\n")
@@ -1907,7 +1904,7 @@ func normalizeRenderedText(text string) string {
 	return text
 }
 
-func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {
+func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor, configuredTrailers ...string) {
 	switch sr.Status {
 	case types.StepStatusPending:
 		b.WriteString("Step has not started yet.\n\n")
@@ -1923,7 +1920,7 @@ func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyF
 		b.WriteString("Step was skipped.\n\n")
 	case types.StepStatusFailed:
 		if sr.Error != nil && strings.TrimSpace(*sr.Error) != "" {
-			b.WriteString(escapePRText(strings.TrimSpace(*sr.Error), flavor))
+			b.WriteString(escapePRText(strings.TrimSpace(prDisplayText(*sr.Error, configuredTrailers...)), flavor))
 			b.WriteString("\n\n")
 			return
 		}
