@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/execpath"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 // A command that is handed an environment uses THAT environment, for the
@@ -172,6 +174,85 @@ func TestEnvValueForOSLastOverride(t *testing.T) {
 		got, ok := execpath.ValueForOS([]string{"PATH=first", "PATH=second", "Path=third"}, "PATH", tc.goos)
 		if !ok || got != tc.want {
 			t.Fatalf("%s PATH = %q, %v; want %q", tc.goos, got, ok, tc.want)
+		}
+	}
+}
+
+func TestContextGitHelpersUseTheSuppliedEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses a Unix forwarding script")
+	}
+	realGit, err := testgit.RealGit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := initTestRepo(t)
+	head := run(t, repo, "git", "rev-parse", "HEAD")
+	branch := run(t, repo, "git", "symbolic-ref", "HEAD")
+	bin := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s\\n' \"$PATH\" >> \"$ENV_GIT_LOG\"\nexec \"$ENV_REAL_GIT\" \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, operation := range []string{"run", "init bare", "existing ref", "missing ref", "transaction", "detached head"} {
+		for _, path := range []string{bin, t.TempDir(), ""} {
+			t.Run(operation+"/"+map[bool]string{true: "available", false: "missing"}[path == bin]+"/"+path, func(t *testing.T) {
+				log := filepath.Join(t.TempDir(), "calls")
+				ctx := WithEnvironment(context.Background(), runenv.Overlay{Set: map[string]string{
+					"PATH": path, "ENV_REAL_GIT": realGit, "ENV_GIT_LOG": log,
+				}})
+				var err error
+				switch operation {
+				case "run":
+					_, err = Run(ctx, repo, "version")
+				case "init bare":
+					bare := filepath.Join(t.TempDir(), "new.git")
+					err = InitBare(ctx, bare)
+					if err == nil {
+						if out, checkErr := Run(context.Background(), bare, "rev-parse", "--is-bare-repository"); checkErr != nil || out != "true" {
+							t.Fatalf("initialized repository is not bare: %q, %v", out, checkErr)
+						}
+					}
+				case "existing ref", "missing ref":
+					ref := "HEAD"
+					if operation == "missing ref" {
+						ref = "refs/heads/nonexistent"
+					}
+					var exists bool
+					exists, err = RefExists(ctx, repo, ref)
+					if err == nil && exists != (operation == "existing ref") {
+						t.Fatalf("RefExists(%q) = %v", ref, exists)
+					}
+				case "transaction":
+					called := false
+					err = WithPreparedRefTransaction(ctx, repo, fmt.Sprintf("verify %s %s\n", branch, head), func() error { called = true; return nil })
+					if called != (err == nil) {
+						t.Fatalf("prepared callback ran=%v, transaction error=%v", called, err)
+					}
+				case "detached head":
+					var detached bool
+					detached, err = IsDetachedHEAD(ctx, repo)
+					if err == nil && detached {
+						t.Fatal("attached fixture reported detached")
+					}
+				}
+				if path != bin {
+					if err == nil {
+						t.Fatal("helper used ambient Git when supplied PATH contained no Git")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				calls, err := os.ReadFile(log)
+				if err != nil {
+					t.Fatalf("supplied Git was not invoked: %v", err)
+				}
+				if string(calls) != path+"\n" {
+					t.Fatalf("supplied Git child PATH = %q, want %q", calls, path+"\n")
+				}
+			})
 		}
 	}
 }

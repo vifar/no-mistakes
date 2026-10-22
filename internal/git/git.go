@@ -210,29 +210,14 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	return out, nil
 }
 
-// gitBinaryForEnv uses execpath.Resolve so binary lookup sees the same
-// environment as the child. Passing a bare name to exec.CommandContext would
-// resolve it against the process's PATH before the child's environment is set.
-func gitBinaryForEnv(workDir string, env []string) (string, bool) {
-	path, hasPath, found := execpath.Resolve(env, "git", workDir)
-	if !hasPath {
-		return "git", true
-	}
-	if !found {
-		return "", false
-	}
-	return path, true
-}
-
-// runInDirWithEnvAndInputRawCaptured runs a git command and keeps its stdout
-// even when the command fails, so a caller can read a result git reports on
-// stdout and signals through the exit code. The plain raw runner drops stdout
-// on failure, because most callers treat a failed command as no output at all.
-func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEnv []string, input string, args ...string) ([]byte, error) {
+func gitCommand(ctx context.Context, dir string, extraEnv []string, args ...string) *exec.Cmd {
 	env := append(nonInteractiveEnvForContext(ctx, dir), extraEnv...)
-	binary, found := gitBinaryForEnv(dir, env)
+	binary, hasPath, found := execpath.Resolve(env, "git", dir)
+	if !hasPath {
+		binary = "git"
+	}
 	cmd := exec.CommandContext(ctx, binary, args...)
-	if !found {
+	if hasPath && !found {
 		cmd.Err = &exec.Error{Name: "git", Err: exec.ErrNotFound}
 	}
 	cmd.Dir = dir
@@ -240,10 +225,15 @@ func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEn
 	if len(args) > 0 && strings.HasPrefix(args[0], "--git-dir=") {
 		cmd.Env = bareRepositoryEnv(cmd.Env)
 	}
+	winproc.Harden(cmd)
+	return cmd
+}
+
+func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEnv []string, input string, args ...string) ([]byte, error) {
+	cmd := gitCommand(ctx, dir, extraEnv, args...)
 	if input != "" {
 		cmd.Stdin = strings.NewReader(input)
 	}
-	winproc.Harden(cmd)
 	// OutputShellCommand captures stdout only, so unlike cmd.Output it never
 	// fills ExitError.Stderr. Capture stderr explicitly or the git error text
 	// below silently becomes empty.
@@ -505,9 +495,8 @@ func InitBare(ctx context.Context, path string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "git", "init", "--bare", path)
-	cmd.Env = bareRepositoryEnv(nonInteractiveEnvForContext(ctx, ""))
-	winproc.Harden(cmd)
+	cmd := gitCommand(ctx, "", nil, "init", "--bare", path)
+	cmd.Env = bareRepositoryEnv(cmd.Env)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git init --bare: %w: %s", err, strings.TrimSpace(string(out)))
@@ -772,9 +761,7 @@ func CurrentBranch(ctx context.Context, dir string) (string, error) {
 // (HEAD points at a commit rather than a branch ref). Uses `git symbolic-ref`
 // which fails cleanly when HEAD is not a symbolic ref.
 func IsDetachedHEAD(ctx context.Context, dir string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "-q", "HEAD")
-	cmd.Dir = dir
-	winproc.Harden(cmd)
+	cmd := gitCommand(ctx, dir, nil, "symbolic-ref", "-q", "HEAD")
 	if err := cmd.Run(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			// Exit 1 means HEAD is not a symbolic ref — detached.
@@ -1143,9 +1130,7 @@ func ExactRefTarget(ctx context.Context, dir, ref string) (string, bool, error) 
 // `git rev-parse --verify --quiet` so a missing ref is a clean (nil, false)
 // result rather than a loud error.
 func RefExists(ctx context.Context, dir, ref string) (bool, error) {
-	cmd := exec.CommandContext(ctx, "git", "-C", dir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
-	cmd.Env = nonInteractiveEnvForContext(ctx, dir)
-	winproc.Harden(cmd)
+	cmd := gitCommand(ctx, dir, nil, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	if err := cmd.Run(); err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && ee.ExitCode() == 1 {
