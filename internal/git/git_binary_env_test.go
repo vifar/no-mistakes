@@ -56,6 +56,9 @@ func TestRunWithEnvUsesTheEnvironmentItIsGiven(t *testing.T) {
 		{"current", ".", "bin"},
 		{"relative", "repo", filepath.Join("..", "bin")},
 		{"empty", "", "bin"},
+		{"leading empty entry", binDir, string(os.PathListSeparator) + filepath.Join(dir, "missing")},
+		{"middle empty entry", binDir, filepath.Join(dir, "missing") + string(os.PathListSeparator) + string(os.PathListSeparator) + filepath.Join(dir, "missing-again")},
+		{"trailing empty entry", binDir, filepath.Join(dir, "missing") + string(os.PathListSeparator)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out, err := RunWithEnv(context.Background(), tc.workDir, []string{"PATH=" + tc.path}, "version")

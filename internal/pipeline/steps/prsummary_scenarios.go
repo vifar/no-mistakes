@@ -154,7 +154,7 @@ func renderScenarioTable(scenarios []types.TestScenario, flavor prBodyFlavor) st
 // agent string, and length-bounded so one verbose scenario cannot dominate the
 // PR body.
 func scenarioCell(text string, flavor prBodyFlavor) string {
-	clean := sanitizePromptText(text)
+	clean := sanitizePromptText(neutralizeAIAttribution(text))
 	if clean == "" {
 		return ""
 	}

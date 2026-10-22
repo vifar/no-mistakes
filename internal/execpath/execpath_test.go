@@ -197,3 +197,47 @@ func TestResolvePreservesSymlinkParentTraversal(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveEmptyEntriesUseWorkDirInPathOrder(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	name := "git"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	for _, dir := range []string{"repo", "other"} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("fixture"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sep := string(os.PathListSeparator)
+	other := filepath.Join(root, "other")
+	missing := filepath.Join(root, "missing")
+	for _, baseDir := range []string{"repo", filepath.Join(root, "repo")} {
+		for _, tc := range []struct{ path, directory string }{
+			{sep + other, "repo"},
+			{missing + sep + sep + other, "repo"},
+			{missing + sep, "repo"},
+			{other + sep, "other"},
+		} {
+			got, hasPath, found := Resolve([]string{"PATH=" + tc.path}, "git", baseDir)
+			if !hasPath || !found || !filepath.IsAbs(got) {
+				t.Fatalf("PATH=%q workdir=%q: resolve=%q, hasPath=%v, found=%v", tc.path, baseDir, got, hasPath, found)
+			}
+			info, err := os.Stat(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := os.Stat(filepath.Join(tc.directory, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(info, want) {
+				t.Fatalf("PATH=%q workdir=%q resolved %q, want %s/%s", tc.path, baseDir, got, tc.directory, name)
+			}
+		}
+	}
+}

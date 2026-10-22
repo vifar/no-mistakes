@@ -640,7 +640,7 @@ func appendTestingArtifacts(artifacts []types.TestArtifact, seen map[string]bool
 		return artifacts
 	}
 	for _, artifact := range findings.Artifacts {
-		artifact.Label = sanitizePromptText(artifact.Label)
+		artifact.Label = sanitizePromptText(neutralizeAIAttribution(artifact.Label))
 		artifact.Kind = strings.ToLower(sanitizePromptText(artifact.Kind))
 		artifact.Path = sanitizeArtifactPath(artifact.Path, opts)
 		artifact.URL = sanitizeArtifactURL(artifact.URL)
@@ -667,7 +667,7 @@ func appendTestingDetails(details []string, seen map[string]bool, raw *string) [
 		return details
 	}
 	for _, detail := range findings.Tested {
-		clean := sanitizePromptText(detail)
+		clean := sanitizePromptText(neutralizeAIAttribution(detail))
 		if clean == "" || seen[clean] {
 			continue
 		}
@@ -678,12 +678,12 @@ func appendTestingDetails(details []string, seen map[string]bool, raw *string) [
 }
 
 func renderTestedDetailFor(detail string, flavor prBodyFlavor) string {
-	clean := sanitizePromptMultilineText(detail)
+	clean := neutralizeAIAttribution(sanitizePromptMultilineText(detail))
 	if clean == "" {
 		return ""
 	}
 	if strings.HasPrefix(clean, "`") && strings.HasSuffix(clean, "`") && strings.Count(clean, "`") == 2 && !strings.Contains(clean[1:len(clean)-1], "\n") {
-		return clean
+		return "`" + neutralizeAIAttribution(clean[1:len(clean)-1]) + "`"
 	}
 	if !strings.Contains(clean, "`") && !strings.Contains(clean, "\n") {
 		return fmt.Sprintf("`%s`", clean)
@@ -697,7 +697,7 @@ func renderTestedDetailFor(detail string, flavor prBodyFlavor) string {
 }
 
 func renderTestingSummaryFor(summary string, flavor prBodyFlavor) string {
-	clean := sanitizePromptMultilineText(summary)
+	clean := neutralizeAIAttribution(sanitizePromptMultilineText(summary))
 	if clean == "" {
 		return ""
 	}
@@ -716,7 +716,7 @@ func renderTestingSummaryFor(summary string, flavor prBodyFlavor) string {
 }
 
 func renderTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptions, state *testingArtifactRenderState) string {
-	label := sanitizePromptText(artifact.Label)
+	label := sanitizePromptText(neutralizeAIAttribution(artifact.Label))
 	if label == "" {
 		return ""
 	}
@@ -762,7 +762,7 @@ func renderTestingArtifact(artifact types.TestArtifact, opts testingSummaryOptio
 		if b.Len() > 0 && !strings.HasSuffix(b.String(), "\n\n") {
 			b.WriteString("\n")
 		}
-		b.WriteString(fmt.Sprintf("**%s**\n\n```text\n%s\n```\n", html.EscapeString(label), escapeMarkdownFence(escapePipelineFoldMarkers(fenceBody))))
+		b.WriteString(fmt.Sprintf("**%s**\n\n```text\n%s\n```\n", html.EscapeString(label), escapeMarkdownFence(escapePipelineFoldMarkers(neutralizeAIAttribution(fenceBody)))))
 	}
 	return strings.TrimRight(b.String(), "\n") + "\n"
 }
@@ -814,7 +814,7 @@ func renderCompactTestingArtifact(artifact types.TestArtifact, opts testingSumma
 		inner.WriteString(renderTestedDetailFor(descriptionLine, opts.flavor))
 		inner.WriteString("\n\n")
 	}
-	inner.WriteString(fmt.Sprintf("```text\n%s\n```\n", escapeMarkdownFence(escapePipelineFoldMarkers(fenceBody))))
+	inner.WriteString(fmt.Sprintf("```text\n%s\n```\n", escapeMarkdownFence(escapePipelineFoldMarkers(neutralizeAIAttribution(fenceBody)))))
 	folded := foldPRBlock("Evidence: "+html.EscapeString(label), inner.String(), opts.flavor)
 	if attachment == "" {
 		return folded
@@ -1342,7 +1342,7 @@ func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound) 
 		emoji := riskEmoji(src.RiskLevel)
 		label := capitalizeRisk(src.RiskLevel)
 		if src.RiskRationale != "" {
-			return fmt.Sprintf("%s %s: %s", emoji, label, src.RiskRationale)
+			return fmt.Sprintf("%s %s: %s", emoji, label, neutralizeAIAttribution(src.RiskRationale))
 		}
 		return fmt.Sprintf("%s %s", emoji, label)
 	}
@@ -1638,6 +1638,7 @@ func writeTestedDetails(b *strings.Builder, sr *db.StepResult, findings *types.F
 }
 
 func escapePRText(s string, flavor prBodyFlavor) string {
+	s = neutralizeAIAttribution(s)
 	if flavor == prBodyMarkdown {
 		return escapePipelineFoldMarkers(s)
 	}

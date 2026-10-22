@@ -114,7 +114,7 @@ func Resolve(env []string, name string, baseDir string) (path string, hasPath bo
 	candidates := Candidates(env, name)
 	for _, dir := range filepath.SplitList(customPath) {
 		if dir == "" {
-			continue
+			dir = "."
 		}
 		if !filepath.IsAbs(dir) {
 			base := baseDir

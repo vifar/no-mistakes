@@ -1,11 +1,16 @@
 package steps
 
 import (
+	"encoding/json"
 	"html"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // The pull request body is generated, but the evidence it embeds is not: a
@@ -71,5 +76,72 @@ func TestNeutralizeAIAttributionAppliesInsideEmbeddedEvidence(t *testing.T) {
 	}
 	if !strings.Contains(got, "## Testing") {
 		t.Fatalf("the body lost its structure: %q", got)
+	}
+}
+
+func TestPRSummaryFiltersAttributionBeforeRendering(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "evidence.txt"), []byte("captured output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+		for _, source := range []string{"tested", "tested multiline", "tested code span", "summary", "artifact text", "artifact description", "artifact label", "scenario", "finding"} {
+			for _, human := range []bool{false, true} {
+				t.Run(string(provider)+"/"+source+"/"+map[bool]string{false: "AI", true: "human"}[human], func(t *testing.T) {
+					line := "Co-Authored-By: Codex <bot@example.invalid>"
+					if human {
+						line = "Co-Authored-By: Claude Smith <human@example.com>"
+					}
+					findings := types.Findings{}
+					switch source {
+					case "tested":
+						findings.Tested = []string{line}
+					case "tested multiline":
+						findings.Tested = []string{"Recorded check\n" + line}
+					case "tested code span":
+						findings.Tested = []string{"`" + line + "`"}
+					case "summary":
+						findings.TestingSummary = "Recorded check\n" + line
+					case "artifact text":
+						findings.Artifacts = []types.TestArtifact{{Kind: "text", Label: "Evidence", Content: "Recorded check\n" + line}}
+					case "artifact description":
+						findings.Artifacts = []types.TestArtifact{{Kind: "text", Label: "Evidence", Path: "evidence.txt", Content: line}}
+					case "artifact label":
+						findings.Artifacts = []types.TestArtifact{{Kind: "text", Label: "Recorded check\n" + line, Content: "captured output"}}
+					case "scenario":
+						findings.Scenarios = []types.TestScenario{{Name: "Recorded check", Result: types.ScenarioResultPass, Live: true, Evidence: "Recorded check\n" + line}}
+					case "finding":
+						findings.Items = []types.Finding{{Severity: types.FindingSeverityWarning, Description: line}}
+					}
+					encoded, err := json.Marshal(findings)
+					if err != nil {
+						t.Fatal(err)
+					}
+					raw := string(encoded)
+					steps := []*db.StepResult{{ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &raw}}
+					rounds := map[string][]*db.StepRound{"test": {{Round: 1, Trigger: "initial", FindingsJSON: &raw}}}
+					var outputs []string
+					if source != "finding" {
+						outputs = append(outputs, buildTestingSummary(steps, rounds, testingSummaryOptions{flavor: prBodyFlavorFor(provider), includeTestedDetails: true, repoRoot: root}))
+						if !strings.HasPrefix(source, "tested") {
+							outputs = append(outputs, BuildTestingSummaryForPRWithProvider(steps, rounds, "https://github.com/example/repo", "head", root, "", nil, provider))
+						}
+					}
+					if strings.HasPrefix(source, "tested") || source == "scenario" || source == "finding" {
+						pipeline, _ := BuildPipelineSummaryFor(steps, rounds, testPipelineHeadSHA, provider)
+						outputs = append(outputs, pipeline)
+					}
+					for _, output := range outputs {
+						if human {
+							if !strings.Contains(html.UnescapeString(output), line) {
+								t.Fatalf("human attribution lost from published summary:\n%s", output)
+							}
+						} else if strings.Contains(output, "Codex") || !strings.Contains(output, "AI attribution line neutralized") {
+							t.Fatalf("AI attribution was not neutralized in published summary:\n%s", output)
+						}
+					}
+				})
+			}
+		}
 	}
 }
