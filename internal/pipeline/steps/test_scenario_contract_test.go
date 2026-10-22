@@ -12,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -531,15 +532,6 @@ func TestTestStep_NoLiveSurfaceCIWorkflowAsksUser(t *testing.T) {
 	}
 }
 
-// const noSurfaceWithDuplicateAcknowledgementFindingsJSON is what an agent that
-// does not know the pipeline asks the acknowledgement question itself looks
-// like: the canonical no-surface verdict AND a finding of its own asking the
-// same question.
-//
-// The step then carries two questions where one would do, and the strict
-// path can release NEITHER: the canonical acknowledgement is only
-// acknowledgeable on its own, so the duplicate makes the step impossible to
-// release and the run deadlocks at a gate a human has to answer.
 const noSurfaceWithDuplicateAcknowledgementFindingsJSON = `{
   "findings": [
     {
@@ -558,37 +550,73 @@ const noSurfaceWithDuplicateAcknowledgementFindingsJSON = `{
   "verdict": "no-surface"
 }`
 
-// TestTestStep_NoSurfaceAcknowledgementIsReleasable proves the step is
-// releasable even when the agent raised the same question in a finding of
-// its own: the acknowledgement answers both.
-//
-// A finding that REPORTS is a different thing. It is preserved, and the step
-// waits for the fix round to repair it - a no-surface verdict says there is
-// nothing to drive live, not that there is nothing wrong.
 func TestTestStep_NoSurfaceAcknowledgementIsReleasable(t *testing.T) {
 	t.Parallel()
-	dir, baseSHA, _ := setupGitRepo(t)
-	headSHA := commitCIWorkflowOnlyChange(t, dir, baseSHA)
-
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-			return &agent.Result{Output: json.RawMessage(noSurfaceWithDuplicateAcknowledgementFindingsJSON)}, nil
-		},
-	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.UserIntent = "Split the Windows CI job into a git-heavy shard and a core remainder"
-
-	outcome, err := (&TestStep{}).Execute(sctx)
-	if err != nil {
-		t.Fatalf("no-surface must park, not hard-fail: %v", err)
-	}
-	findings, err := types.ParseFindingsJSON(outcome.Findings)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !types.IsNoSurfaceTestAcknowledgment(findings) {
-		t.Fatalf("the no-surface step is not acknowledgeable, so the strict path can never release it: %s", outcome.Findings)
+	for _, tc := range []struct {
+		name        string
+		description string
+		canonical   bool
+		want        bool
+	}{
+		{name: "canonical duplicate", canonical: true, want: true},
+		{name: "independent warning", description: "workflow validation found an unresolved runner-policy decision"},
+		{name: "unproven paraphrase", description: "Human acknowledgement is needed to proceed without live validation"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, _ := setupGitRepo(t)
+			headSHA := commitCIWorkflowOnlyChange(t, dir, baseSHA)
+			payload, err := types.ParseFindingsJSON(noSurfaceWithDuplicateAcknowledgementFindingsJSON)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.canonical {
+				payload.Items = []types.Finding{types.NoSurfaceTestFinding(payload.Scenarios)}
+			} else {
+				payload.Items[0].Description = tc.description
+			}
+			var wire map[string]any
+			if err := json.Unmarshal([]byte(noSurfaceWithDuplicateAcknowledgementFindingsJSON), &wire); err != nil {
+				t.Fatal(err)
+			}
+			wire["findings"] = payload.Items
+			raw, err := json.Marshal(wire)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: raw}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.UserIntent = "Split the Windows CI job into a git-heavy shard and a core remainder"
+			outcome, err := (&TestStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			findings, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := types.IsNoSurfaceTestAcknowledgment(findings); got != tc.want {
+				t.Fatalf("acknowledgeable = %v, want %v: %s", got, tc.want, outcome.Findings)
+			}
+			exitCode := 0
+			row := db.StepResult{StepName: types.StepTest, ExitCode: &exitCode, FindingsJSON: &outcome.Findings}
+			if got := row.StrictApprovalRefusal("") == ""; got != tc.want {
+				t.Fatalf("strict approval permitted = %v, want %v", got, tc.want)
+			}
+			if !tc.canonical {
+				found := false
+				for _, item := range findings.Items {
+					if item.Description == tc.description {
+						found = true
+					}
+				}
+				if !found {
+					t.Fatalf("independent finding lost: %s", outcome.Findings)
+				}
+			}
+		})
 	}
 }
 
