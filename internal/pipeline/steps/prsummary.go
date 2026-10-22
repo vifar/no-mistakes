@@ -1697,16 +1697,10 @@ func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 	return closingGrammarFor(provider).neutralize(neutralizeAIAttribution(escaped))
 }
 
-// neutralizeAIAttribution breaks those lines.
+// neutralizeAIAttribution replaces recognized AI attribution lines with a notice.
 //
-// The body is generated, but the evidence it embeds is not: a test that
-// exercises the attribution feature quotes the trailer it created, and every
-// consumer that scans the body for attribution - the merge bar, a reviewer -
-// reads that quoted trailer as an attribution of this work. A pull request
-// that quotes one is refused as AI-attributed even though the work is not.
-//
-// The text is broken, not dropped: the evidence still shows what the test did
-// and that it ran, and the body claims no attribution.
+// Quoted test output can contain trailers that readers mistake for attribution
+// of this PR, so fenced evidence follows the same rule as generated prose.
 func neutralizeAIAttribution(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
