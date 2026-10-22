@@ -169,6 +169,96 @@ func newLocationCollisionRecoverFixture(t *testing.T) (*recoverFixture, string) 
 	return f, preserved
 }
 
+// newRenameRecoverFixture models a rewritten commit whose change is a file
+// RENAME, which is the case where the two sides of the patch identity
+// comparison used to disagree.
+//
+// Git's `log -p` detects renames by default and `diff-tree` does not, so a
+// renamed file was measured as a rename on the search side and as a deletion
+// plus an addition on the local side. The same change then got two different
+// identities, and the diagnostic reported no match for work that was
+// provably in the preserved head.
+//
+// It returns the fixture and the commit that carries the replayed rename,
+// read straight from the fixture's own history.
+func newRenameRecoverFixture(t *testing.T) (*recoverFixture, string) {
+	t.Helper()
+	ctx := context.Background()
+	root := t.TempDir()
+	remote := filepath.Join(root, "upstream.git")
+	mustRun(t, root, "init", "--bare", remote)
+
+	local := filepath.Join(root, "operator")
+	mustRun(t, root, "init", "-b", "main", local)
+	configureIdentity(t, local)
+	mustWrite(t, filepath.Join(local, "file.txt"), "base\n")
+	mustRun(t, local, "add", "file.txt")
+	mustRun(t, local, "commit", "-m", "base")
+	base := mustRun(t, local, "rev-parse", "HEAD")
+
+	// The operator's own change is a rename.
+	mustRun(t, local, "checkout", "-b", "feature/recover")
+	mustRun(t, local, "mv", "file.txt", "renamed.txt")
+	mustRun(t, local, "commit", "-am", "operator: rename the file")
+	submitted := mustRun(t, local, "rev-parse", "HEAD")
+
+	// The target advances, so the pipeline's rebase rewrites the rename onto
+	// a newer main.
+	mustRun(t, local, "checkout", "main")
+	mustWrite(t, filepath.Join(local, "upstream.txt"), "upstream advance\n")
+	mustRun(t, local, "add", "upstream.txt")
+	mustRun(t, local, "commit", "-m", "upstream advance")
+	mustRun(t, local, "checkout", "feature/recover")
+
+	gate := filepath.Join(root, "gate.git")
+	mustRun(t, root, "init", "--bare", gate)
+	mustRun(t, local, "push", gate, "refs/heads/main:refs/heads/main", "refs/heads/feature/recover:refs/heads/feature/recover")
+
+	pipeline := filepath.Join(root, "pipeline")
+	mustRun(t, root, "-c", "core.autocrlf=false", "clone", gate, pipeline)
+	configureIdentity(t, pipeline)
+	mustRun(t, pipeline, "checkout", "feature/recover")
+	mustRun(t, pipeline, "rebase", "origin/main")
+	// The pipeline's rewrite of the rename, read from its own history.
+	replay := mustRun(t, pipeline, "rev-parse", "HEAD")
+	// The pipeline's later fix round rewrote the same file, so the two
+	// histories are genuinely not interchangeable and the containment proof
+	// does not hold.
+	mustWrite(t, filepath.Join(pipeline, "renamed.txt"), "base\nchanged by the pipeline\n")
+	mustRun(t, pipeline, "commit", "-am", "no-mistakes(review): change the renamed file")
+	preserved := mustRun(t, pipeline, "rev-parse", "HEAD")
+	mustRun(t, pipeline, "push", "--force", "origin", "HEAD:refs/heads/feature/recover")
+
+	database, err := db.Open(filepath.Join(root, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo(local, remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature/recover", submitted, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunHeadSHA(run.ID, preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatusWithVerifiedHead(run.ID, types.RunCancelled, preserved); err != nil {
+		t.Fatal(err)
+	}
+	run, _ = database.GetRun(run.ID)
+	f := &recoverFixture{
+		t: t, ctx: ctx, db: database, repo: repo, run: run,
+		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate},
+		local:   local, gate: gate, remote: remote,
+		base: base, submitted: submitted, preserved: preserved,
+	}
+	fetchPreservedHead(t, f)
+	return f, replay
+}
+
 // fetchPreservedHead brings the preserved head into the operator worktree, the
 // way recovery does before it compares the two heads.
 func fetchPreservedHead(t *testing.T, f *recoverFixture) {
@@ -462,6 +552,44 @@ func TestRecoverDivergedRefusalStillRefusesLocationCollision(t *testing.T) {
 	}
 	if f.custodyReturned() {
 		t.Fatal("refused recovery stamped custody")
+	}
+}
+
+// TestRecoverDivergedRefusalFindsRenamedReplay proves the diagnostic does not
+// report a false negative about rewritten work when the change is a rename.
+//
+// Git's `log -p` detects renames by default and `diff-tree` does not, so the
+// same renamed file was measured two different ways and the replayed rename
+// in the preserved head was not recognised. The refusal then told the
+// operator that no commit carried the change, which is untrue.
+func TestRecoverDivergedRefusalFindsRenamedReplay(t *testing.T) {
+	t.Parallel()
+
+	f, replay := newRenameRecoverFixture(t)
+	if preservedContainsLocalWork(f.ctx, f.local, f.submitted, f.preserved) {
+		t.Fatal("the containment proof held for a pair whose histories are not interchangeable")
+	}
+
+	// The replayed rename carries the local head's change, measured with
+	// Git directly.
+	localIdentity := shellPatchID(t, f.local, f.submitted)
+	if got := shellPatchID(t, f.local, replay); got != localIdentity {
+		t.Fatalf("the fixture's replay %s does not share the local head's patch identity %s (got %s)", replay, localIdentity, got)
+	}
+
+	refused := f.service.Recover(f.ctx, false)
+	if refused.Recovered || refused.Changed || refused.Safety != "blocked_recover_diverged" {
+		t.Fatalf("recover diverged = %#v", refused)
+	}
+	short := mustRun(t, f.local, "rev-parse", "--short", replay)
+	if !strings.Contains(refused.Error, short) {
+		t.Fatalf("refusal does not name the commit that carries the replayed rename %s: %q", short, refused.Error)
+	}
+	if !strings.Contains(refused.Error, "the same patch identity") {
+		t.Fatalf("refusal does not report the patch identity: %q", refused.Error)
+	}
+	if strings.Contains(refused.Error, "no commit in the preserved pipeline head carries the same patch identity") {
+		t.Fatalf("refusal reports a false negative about a replayed rename: %q", refused.Error)
 	}
 }
 

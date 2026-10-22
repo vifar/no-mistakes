@@ -257,7 +257,15 @@ func patchIdentityDiagnostic(ctx context.Context, dir, local, preserved string) 
 	// commit identity, which is the case a rewritten commit makes. The
 	// search covers the commits the preserved head has that the local head
 	// does not, so the local head itself is never a candidate.
-	stream, err := git.Run(ctx, dir, "log", "--format=commit %H", "-p", "--no-merges", "--no-ext-diff",
+	//
+	// Rename detection is requested EXPLICITLY, and the local head's own
+	// identity is measured with the same setting. Git's `log -p` detects
+	// renames by default but `diff-tree` does not, so without matching
+	// settings the two sides describe a renamed file differently - one as a
+	// rename, the other as a deletion plus an addition - and the same change
+	// gets two different identities. That is a false negative about
+	// rewritten work, which is the one thing this diagnostic must not do.
+	stream, err := git.Run(ctx, dir, "log", "--format=commit %H", "-p", "-M", "--no-merges", "--no-ext-diff",
 		"--max-count="+strconv.Itoa(divergencePatchScanLimit), preserved, "^"+local)
 	if err != nil {
 		evidence.Status = patchIdentityIncomplete
@@ -308,11 +316,17 @@ func shortCommit(ctx context.Context, dir, commit string) string {
 // `git show <sha> | git patch-id --stable`. The second result is false when
 // the commit has no own change to measure, or when the diff cannot be read, in
 // which case the caller has no identity to compare.
+//
+// Rename detection is requested EXPLICITLY, so this measurement matches the
+// search side (see patchIdentityDiagnostic). `git diff-tree` does not detect
+// renames by default while `git log -p` does, and measuring a renamed file
+// on one side and a deletion plus an addition on the other gives the same
+// change two identities - a false negative about rewritten work.
 func commitPatchIdentity(ctx context.Context, dir, commit string) (string, bool) {
 	if strings.TrimSpace(commit) == "" {
 		return "", false
 	}
-	diff, err := git.Run(ctx, dir, "diff-tree", "-p", "--root", "--no-commit-id", "--no-ext-diff", "--no-textconv", commit)
+	diff, err := git.Run(ctx, dir, "diff-tree", "-p", "-M", "--root", "--no-commit-id", "--no-ext-diff", "--no-textconv", commit)
 	if err != nil || strings.TrimSpace(diff) == "" {
 		return "", false
 	}
