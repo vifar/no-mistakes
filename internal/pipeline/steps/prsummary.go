@@ -1689,36 +1689,32 @@ func escapePipelineFoldMarkers(s string) string {
 // the body QUOTED. A fixture, an example, a review finding quoted whole - none
 // of them is this work's attribution, and the label says so.
 //
-// A consumer that scans the pull request body for attribution - the merge
-// bar, a reviewer - reads a raw "Co-Authored-By:" line as a claim of AI
-// attribution, and it reads it that way even inside a code fence, because it
-// scans the raw text. So a co-author the body QUOTES - a test fixture, an
-// example - is rendered as a labelled field instead. The name and the address
-// stay: they are the evidence.
-// The key can also sit inside a line - a backtick-wrapped quote, or a
-// quoted string in embedded evidence - and the consumer scans the raw text
-// wherever it is, so the key is rewritten wherever it is.
+// The key can also sit inside a line - a backtick-wrapped quote, or a quoted
+// string in embedded evidence - and a consumer scans the raw text wherever it
+// is, so the key is rewritten wherever it is.
 var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)`)
 
-// renderQuotedAttributionAsLabelledFields renders a QUOTED co-author as a
-// labelled field rather than as a raw trailer line.
+// renderCoAuthorAsLabelledField renders a co-author as a labelled field
+// rather than as a raw trailer line.
 //
 // This is the PUBLISHED text's rule, and it is deliberately not the
-// classifier's: the classifier decides whether a line is an AI attribution, and
-// it is precise - a person whose name happens to contain a tool's name is a
-// person, and that attribution stays whole. The published text is read by
-// consumers that cannot make that distinction: one that scans the body for
-// attribution reads a raw "Co-Authored-By:" line as a claim, and it reads it
-// that way even inside a code fence, because it scans the raw text.
+// classifier's rule. The classifier decides whether a line IS an AI
+// attribution, and it is precise: a person whose name happens to contain a
+// tool's name is a person, and that attribution stays whole, name and address
+// and all.
 //
-// So a co-author the body QUOTES - a test fixture, an example, a captured
-// artifact - is rendered in a form no consumer reads as a claim, with the name
-// and the address still there because they are the evidence. The labelled
-// field says what it is: a quote.
+// The published text is read by consumers that cannot make that distinction.
+// One that scans the pull request body for attribution reads a raw
+// "Co-Authored-By:" line as a claim of AI attribution, and it reads it that
+// way even inside a code fence, because it scans the raw text. So a co-author
+// the body carries is rendered in a form no such consumer reads as a claim,
+// with the name and the address still there, because they are the evidence.
 //
-// The body's OWN attribution is not touched: the intent, the narrative and the
-// risk line are the PR's own words, and they keep their attribution verbatim.
-func renderQuotedAttributionAsLabelledFields(s string) string {
+// The rule is the merge bar's owner's: the bar's rule does not change, and a
+// published body never carries a raw co-author trailer line. It is a
+// publication policy, and it is deliberately narrow - it renders the KEY and
+// nothing else, so the attribution itself survives the rendering.
+func renderCoAuthorAsLabelledField(s string) string {
 	return publishedCoAuthorKey.ReplaceAllString(s, "co-author (quoted)${1}")
 }
 

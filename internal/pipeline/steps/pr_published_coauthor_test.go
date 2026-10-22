@@ -33,17 +33,23 @@ func TestPublishedBodyRendersAQuotedCoAuthorAsALabelledField(t *testing.T) {
 	}
 }
 
-// The body's OWN attribution is not touched.
+// The body's OWN attribution is rendered too.
 //
-// The intent, the narrative and the risk line are the PR's own words. A
-// human attribution in them is legitimate attribution, and it stays whole -
-// key, name and address - because the reader is the one who judges it.
-func TestPublishedBodyKeepsItsOwnAttributionVerbatim(t *testing.T) {
+// The published body carries no raw co-author trailer line, wherever the
+// co-author came from: the body quotes a fixture, or it carries its own
+// attribution. A consumer that scans the body for attribution reads a raw
+// "Co-Authored-By:" line as a claim, and it reads it that way wherever the
+// line is. The name and the address survive the rendering; only the key is
+// rendered.
+func TestPublishedBodyRendersItsOwnAttributionAsALabelledField(t *testing.T) {
 	body := "## What Changed\n\nPreserve the selected command environment.\nCo-Authored-By: Claude Smith <code@example.com>\n"
 	risk := "Low: Recorded risk\n"
 	got := publishedBody(body, risk, "", scm.ProviderGitHub)
-	if !strings.Contains(got, "Co-Authored-By: Claude Smith <code@example.com>") {
-		t.Fatalf("the body's own attribution was rewritten: %q", got)
+	if strings.Contains(got, "Co-Authored-By:") {
+		t.Fatalf("the published body carries a raw co-author trailer: %q", got)
+	}
+	if !strings.Contains(got, "co-author (quoted): Claude Smith <code@example.com>") {
+		t.Fatalf("the body's own attribution lost its name or address: %q", got)
 	}
 }
 

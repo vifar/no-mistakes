@@ -836,6 +836,7 @@ func buildPRBodyFull(body, riskLine, testingMD, pipelineMD string, sctx *pipelin
 	// Neutralized for the same reason as in prependIntentSection: intent is
 	// agent-extracted text placed ahead of the pipeline section.
 	cleaned := neutralizeAttestationMarkers(provider, publicPRIntent(sctx))
+	cleaned = renderCoAuthorAsLabelledField(cleaned)
 	if cleaned == "" {
 		return sections
 	}
@@ -889,13 +890,11 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 // section and the Pipeline section all reach the reader through it, and a
 // consumer that scans the body for attribution scans all of them.
 func appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
-	// The pipeline's evidence sections render a QUOTED co-author as a
-	// labelled field. The body's own prose - the intent, the narrative,
-	// the risk line - keeps its attribution verbatim, because that is the
-	// PR's own attribution and it is the reader's to judge.
-	testingMD = renderQuotedAttributionAsLabelledFields(testingMD)
-	pipelineMD = renderQuotedAttributionAsLabelledFields(pipelineMD)
-	return appendGeneratedSectionsToCleanBodyWithinLimitRaw(body, riskLine, testingMD, pipelineMD, maxBytes, provider)
+	// The published body renders a co-author as a labelled field, so no
+	// consumer that scans the body for attribution reads a quoted
+	// fixture's trailer as a claim. The name and the address survive the
+	// rendering; only the key is rendered.
+	return renderCoAuthorAsLabelledField(appendGeneratedSectionsToCleanBodyWithinLimitRaw(body, riskLine, testingMD, pipelineMD, maxBytes, provider))
 }
 
 func appendGeneratedSectionsToCleanBodyWithinLimitRaw(body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
@@ -1636,7 +1635,7 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 	// Intent is agent-extracted text that lands ahead of the pipeline section,
 	// so it can shadow the real attestation the same way the Testing section
 	// can. See appendGeneratedSectionsToCleanBodyWithinLimit.
-	cleaned := neutralizeAttestationMarkers(resolvedProviderForBody(sctx), publicPRIntent(sctx))
+	cleaned := renderCoAuthorAsLabelledField(neutralizeAttestationMarkers(resolvedProviderForBody(sctx), publicPRIntent(sctx)))
 	if cleaned == "" {
 		return body
 	}

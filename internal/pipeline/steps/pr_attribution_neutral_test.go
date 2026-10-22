@@ -82,6 +82,11 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 // Unlike the per-component checks, this crosses the final body assembly
 // boundary: a filter that protects only summaries would leave the narrative
 // and intent attribution intact and fail here.
+//
+// The published body renders a co-author's trailer KEY as a labelled field, so
+// a consumer that scans the body for attribution cannot read a quoted
+// fixture's trailer as a claim of AI attribution. The name and the address
+// are the evidence, and they survive the rendering byte for byte.
 func TestPRBodyNeutralizesAttributionAcrossGeneratedSections(t *testing.T) {
 	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 		t.Run(string(provider), func(t *testing.T) {
@@ -139,8 +144,13 @@ func TestPRBodyNeutralizesAttributionAcrossGeneratedSections(t *testing.T) {
 				}
 			}
 			for _, human := range humans {
-				if !strings.Contains(decoded, human) {
+				// The key is rendered; the name and the address stay.
+				name := strings.TrimSpace(human[strings.Index(human, ":")+1:])
+				if !strings.Contains(decoded, "co-author (quoted): "+name) {
 					t.Fatalf("complete generated body lost human attribution %q:\n%s", human, body)
+				}
+				if strings.Contains(decoded, human) {
+					t.Fatalf("complete generated body carried a raw co-author trailer %q:\n%s", human, body)
 				}
 			}
 			for _, section := range []string{"## Intent", "## What Changed", "## Risk Assessment", "## Testing", "## Pipeline"} {
