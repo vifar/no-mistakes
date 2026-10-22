@@ -1,11 +1,14 @@
 package branchsync
 
 import (
+	"bytes"
+	"context"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	gitpkg "github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -25,14 +28,25 @@ import (
 // commit identities. The pipeline's later fix rounds also rewrote the same
 // file, so the two histories are genuinely not interchangeable and the
 // containment proof does not hold.
-func newRewrittenHeadRecoverFixture(t *testing.T) *recoverFixture {
+//
+// It returns the fixture and the commit that carries the same patch identity
+// as the local head's own change. That commit is read straight from the
+// fixture's own history, so it is an INDEPENDENT oracle: the expectation
+// never comes from repeating the production identity calculation, which
+// would let one shared mistake satisfy both the expectation and the code
+// under test.
+func newRewrittenHeadRecoverFixture(t *testing.T) (*recoverFixture, string) {
 	t.Helper()
+	var replay string
 	f := newRebasedRecoverFixtureWithPipelineWork(t, types.RunCancelled, func(t *testing.T, pipelineDir string) {
+		// The pipeline's history at this point is the rewrite of the
+		// operator's own commit: the same change under a new identity.
+		replay = mustRun(t, pipelineDir, "rev-parse", "HEAD")
 		mustWrite(t, filepath.Join(pipelineDir, "feature.txt"), "feature one\nfeature two guarded\n")
 		mustRun(t, pipelineDir, "commit", "-am", "no-mistakes(review): guard the second line")
 	})
 	fetchPreservedHead(t, f)
-	return f
+	return f, replay
 }
 
 // newDroppedWorkRecoverFixture models the false positive the codebase's own
@@ -40,16 +54,119 @@ func newRewrittenHeadRecoverFixture(t *testing.T) *recoverFixture {
 // but its history still holds a commit with the same patch identity, so a
 // containment claim built on patch identities would wrongly say the work is
 // there.
-func newDroppedWorkRecoverFixture(t *testing.T) *recoverFixture {
+//
+// It returns the fixture and the commit that carries the matching identity,
+// read straight from the fixture's own history.
+func newDroppedWorkRecoverFixture(t *testing.T) (*recoverFixture, string) {
 	t.Helper()
+	var replay string
 	f := newRebasedRecoverFixtureWithPipelineWork(t, types.RunCancelled, func(t *testing.T, pipelineDir string) {
+		replay = mustRun(t, pipelineDir, "rev-parse", "HEAD")
 		mustWrite(t, filepath.Join(pipelineDir, "feature.txt"), "feature one\n")
 		mustRun(t, pipelineDir, "commit", "-am", "no-mistakes(review): drop the operator change")
 		mustWrite(t, filepath.Join(pipelineDir, "feature.txt"), "feature one\npipeline later change\n")
 		mustRun(t, pipelineDir, "commit", "-am", "no-mistakes(lint): later fix")
 	})
 	fetchPreservedHead(t, f)
-	return f
+	return f, replay
+}
+
+// The repeated block below is written three times. A change to the fourth
+// line of one block and a change to the fourth line of another block produce
+// the same diff content, because Git's stable patch identity hashes the
+// changed lines together with their context, and the context windows around
+// the two blocks are identical.
+const (
+	collisionRepeated      = "a\nb\nc\nd\na\nb\nc\nd\na\nb\nc\nd\n"
+	collisionFirstChanged  = "a\nb\nc\nX\na\nb\nc\nd\na\nb\nc\nd\n"
+	collisionSecondChanged = "a\nb\nc\nd\na\nb\nc\nX\na\nb\nc\nd\n"
+)
+
+// newLocationCollisionRecoverFixture models the false positive in its
+// sharpest form: the preserved head's history holds a commit whose stable
+// patch identity EQUALS the local head's, because the pipeline changed a
+// DIFFERENT identical block, so the identity cannot tell the two apart.
+//
+// The preserved head does NOT carry the operator's work: the block the
+// operator changed is untouched there. A containment claim built on patch
+// identities would adopt it, and the operator's unlanded work would be lost
+// with it.
+//
+// It returns the fixture and the commit that carries the colliding identity,
+// read straight from the fixture's own history.
+func newLocationCollisionRecoverFixture(t *testing.T) (*recoverFixture, string) {
+	t.Helper()
+	ctx := context.Background()
+	root := t.TempDir()
+	remote := filepath.Join(root, "upstream.git")
+	mustRun(t, root, "init", "--bare", remote)
+
+	local := filepath.Join(root, "operator")
+	mustRun(t, root, "init", "-b", "main", local)
+	configureIdentity(t, local)
+	mustWrite(t, filepath.Join(local, "file.txt"), collisionRepeated)
+	mustRun(t, local, "add", "file.txt")
+	mustRun(t, local, "commit", "-m", "base")
+	base := mustRun(t, local, "rev-parse", "HEAD")
+
+	// The operator changes the fourth line of the FIRST block.
+	mustRun(t, local, "checkout", "-b", "feature/recover")
+	mustWrite(t, filepath.Join(local, "file.txt"), collisionFirstChanged)
+	mustRun(t, local, "commit", "-am", "operator: change the first block")
+	submitted := mustRun(t, local, "rev-parse", "HEAD")
+
+	// The target advances, and the pipeline's branch no longer carries the
+	// operator's commit at all.
+	mustRun(t, local, "checkout", "main")
+	mustWrite(t, filepath.Join(local, "upstream.txt"), "upstream advance\n")
+	mustRun(t, local, "add", "upstream.txt")
+	mustRun(t, local, "commit", "-m", "upstream advance")
+	mustRun(t, local, "checkout", "feature/recover")
+
+	gate := filepath.Join(root, "gate.git")
+	mustRun(t, root, "init", "--bare", gate)
+	mustRun(t, local, "push", gate, "refs/heads/main:refs/heads/main", "refs/heads/feature/recover:refs/heads/feature/recover")
+
+	pipeline := filepath.Join(root, "pipeline")
+	mustRun(t, root, "-c", "core.autocrlf=false", "clone", gate, pipeline)
+	configureIdentity(t, pipeline)
+	mustRun(t, pipeline, "checkout", "feature/recover")
+	mustRun(t, pipeline, "reset", "--hard", "origin/main")
+	// The pipeline changes the fourth line of the SECOND block: the same
+	// shape of edit, in a different identical block.
+	mustWrite(t, filepath.Join(pipeline, "file.txt"), collisionSecondChanged)
+	mustRun(t, pipeline, "commit", "-am", "no-mistakes(review): change the second block")
+	preserved := mustRun(t, pipeline, "rev-parse", "HEAD")
+	mustRun(t, pipeline, "push", "--force", "origin", "HEAD:refs/heads/feature/recover")
+
+	database, err := db.Open(filepath.Join(root, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo(local, remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature/recover", submitted, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunHeadSHA(run.ID, preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatusWithVerifiedHead(run.ID, types.RunCancelled, preserved); err != nil {
+		t.Fatal(err)
+	}
+	run, _ = database.GetRun(run.ID)
+	f := &recoverFixture{
+		t: t, ctx: ctx, db: database, repo: repo, run: run,
+		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate},
+		local:   local, gate: gate, remote: remote,
+		base: base, submitted: submitted, preserved: preserved,
+	}
+	fetchPreservedHead(t, f)
+	return f, preserved
 }
 
 // fetchPreservedHead brings the preserved head into the operator worktree, the
@@ -59,30 +176,34 @@ func fetchPreservedHead(t *testing.T, f *recoverFixture) {
 	mustRun(t, f.local, "fetch", "--no-tags", f.gate, "+refs/heads/feature/recover:refs/no-mistakes/test/preserved")
 }
 
-// rewrittenHeadPatchMatch returns the commit in the preserved head that
-// carries the same patch identity as the local head's own change, and the
-// patch identity both commits share.
-func rewrittenHeadPatchMatch(t *testing.T, f *recoverFixture) (string, string) {
+// shellPatchID measures a commit's stable patch identity with Git directly,
+// the way the issue's own measurement did.
+//
+// It deliberately does not use the production helper. The test's expectation
+// must not be produced by the same calculation as the code under test, or a
+// shared mistake would satisfy both and the test would prove nothing. Git is
+// invoked without a shell, so the commit is never interpolated into a
+// command line.
+func shellPatchID(t *testing.T, dir, commit string) string {
 	t.Helper()
-	localIdentity, ok := commitPatchIdentity(f.ctx, f.local, f.submitted)
-	if !ok {
-		t.Fatal("the local head has no patch identity to compare")
-	}
-	stream, err := gitpkg.Run(f.ctx, f.local, "log", "--format=commit %H", "-p", "--no-merges", "--no-ext-diff", f.preserved, "^"+f.submitted)
+	show := exec.Command("git", "show", commit)
+	show.Dir = dir
+	diff, err := show.Output()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("git show %s: %v", commit, err)
 	}
-	identities, err := gitpkg.StablePatchIdentities(f.ctx, f.local, stream)
+	patchID := exec.Command("git", "patch-id", "--stable")
+	patchID.Dir = dir
+	patchID.Stdin = bytes.NewReader(diff)
+	out, err := patchID.Output()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("git patch-id --stable: %v", err)
 	}
-	for _, identity := range identities {
-		if identity.PatchID == localIdentity && identity.Commit != f.submitted {
-			return identity.Commit, localIdentity
-		}
+	fields := strings.Fields(string(out))
+	if len(fields) == 0 {
+		t.Fatalf("git patch-id --stable returned no identity for %s", commit)
 	}
-	t.Fatalf("no commit in the preserved head carries the local head's patch identity %s", localIdentity)
-	return "", ""
+	return fields[0]
 }
 
 // TestRecoverDivergedRefusalNamesComparedHeadsAndTests proves the refusal
@@ -95,7 +216,7 @@ func rewrittenHeadPatchMatch(t *testing.T, f *recoverFixture) (string, string) {
 func TestRecoverDivergedRefusalNamesComparedHeadsAndTests(t *testing.T) {
 	t.Parallel()
 
-	f := newRewrittenHeadRecoverFixture(t)
+	f, _ := newRewrittenHeadRecoverFixture(t)
 	refused := f.service.Recover(f.ctx, false)
 	if refused.Recovered || refused.Changed || refused.Safety != "blocked_recover_diverged" {
 		t.Fatalf("recover diverged = %#v", refused)
@@ -120,7 +241,7 @@ func TestRecoverDivergedRefusalNamesComparedHeadsAndTests(t *testing.T) {
 func TestRecoverDivergedRefusalStatesWhichTestsRan(t *testing.T) {
 	t.Parallel()
 
-	f := newRewrittenHeadRecoverFixture(t)
+	f, _ := newRewrittenHeadRecoverFixture(t)
 	refused := f.service.Recover(f.ctx, false)
 	if refused.Safety != "blocked_recover_diverged" {
 		t.Fatalf("recover diverged = %#v", refused)
@@ -145,7 +266,7 @@ func TestRecoverDivergedRefusalStatesWhichTestsRan(t *testing.T) {
 func TestRecoverDivergedRefusalKeepsTheContainmentProof(t *testing.T) {
 	t.Parallel()
 
-	diverged := newRewrittenHeadRecoverFixture(t)
+	diverged, _ := newRewrittenHeadRecoverFixture(t)
 	if preservedContainsLocalWork(diverged.ctx, diverged.local, diverged.submitted, diverged.preserved) {
 		t.Fatal("the containment proof held for a pair whose histories are not interchangeable")
 	}
@@ -181,8 +302,14 @@ func TestRecoverDivergedRefusalKeepsTheContainmentProof(t *testing.T) {
 func TestRecoverDivergedRefusalReportsPatchIdentityAsDiagnosticOnly(t *testing.T) {
 	t.Parallel()
 
-	f := newRewrittenHeadRecoverFixture(t)
-	match, _ := rewrittenHeadPatchMatch(t, f)
+	f, match := newRewrittenHeadRecoverFixture(t)
+	// The fixture's own history is the oracle: Git says these two commits
+	// carry the same stable patch identity, measured without the production
+	// helper.
+	localIdentity := shellPatchID(t, f.local, f.submitted)
+	if got := shellPatchID(t, f.local, match); got != localIdentity {
+		t.Fatalf("the fixture's replay %s does not share the local head's patch identity %s (got %s)", match, localIdentity, got)
+	}
 	short := mustRun(t, f.local, "rev-parse", "--short", match)
 
 	refused := f.service.Recover(f.ctx, false)
@@ -227,14 +354,19 @@ func TestRecoverDivergedRefusalReportsPatchIdentityAsDiagnosticOnly(t *testing.T
 func TestRecoverDivergedRefusalStillRefusesSameShapedEditElsewhere(t *testing.T) {
 	t.Parallel()
 
-	f := newDroppedWorkRecoverFixture(t)
+	f, match := newDroppedWorkRecoverFixture(t)
 	if preservedContainsLocalWork(f.ctx, f.local, f.submitted, f.preserved) {
 		t.Fatal("the containment proof held for a preserved head that dropped the operator's change")
 	}
 	// The false positive is live: the preserved history holds a commit with
 	// the same patch identity, so a patch-identity containment claim would
-	// wrongly say the operator's work is in there.
-	match, _ := rewrittenHeadPatchMatch(t, f)
+	// wrongly say the operator's work is in there. The identity is measured
+	// with Git directly, so the expectation never comes from the production
+	// calculation it is checking.
+	localIdentity := shellPatchID(t, f.local, f.submitted)
+	if got := shellPatchID(t, f.local, match); got != localIdentity {
+		t.Fatalf("the fixture's replay %s does not share the local head's patch identity %s (got %s)", match, localIdentity, got)
+	}
 	short := mustRun(t, f.local, "rev-parse", "--short", match)
 
 	refused := f.service.Recover(f.ctx, false)
@@ -258,13 +390,88 @@ func TestRecoverDivergedRefusalStillRefusesSameShapedEditElsewhere(t *testing.T)
 	}
 }
 
+// firstRepeatedBlock returns the first four lines of a repeated-block file,
+// which is the block the operator changed in the location collision fixture.
+func firstRepeatedBlock(content string) string {
+	lines := strings.SplitN(content, "\n", 5)
+	if len(lines) < 5 {
+		return content
+	}
+	return strings.Join(lines[:4], "\n")
+}
+
+// TestRecoverDivergedRefusalStillRefusesLocationCollision proves the false
+// positive the codebase warns about, in the form the warning actually names:
+// "a same-shaped edit to a different identical block".
+//
+// The preserved head's history holds a commit whose stable patch identity
+// EQUALS the local head's, because the pipeline changed a different identical
+// block in the same file. The preserved head does NOT carry the operator's
+// work, so a containment claim built on patch identities would adopt it and
+// the operator's unlanded code would be lost with it.
+//
+// The refusal must stand, the branch must not move, the gate lane must not
+// move, and custody must not be stamped.
+func TestRecoverDivergedRefusalStillRefusesLocationCollision(t *testing.T) {
+	t.Parallel()
+
+	f, match := newLocationCollisionRecoverFixture(t)
+
+	// The collision is real, measured with Git directly: the two commits
+	// carry the same stable patch identity even though they changed
+	// different blocks.
+	localIdentity := shellPatchID(t, f.local, f.submitted)
+	if got := shellPatchID(t, f.local, match); got != localIdentity {
+		t.Fatalf("the colliding commit %s does not share the local head's patch identity %s (got %s)", match, localIdentity, got)
+	}
+
+	// The operator's work is NOT in the preserved head: the block the
+	// operator changed is untouched there.
+	preservedContent := mustRun(t, f.local, "show", f.preserved+":file.txt")
+	if strings.Contains(firstRepeatedBlock(preservedContent), "X") {
+		t.Fatalf("the preserved head carries the operator's change, so the false positive is not live:\n%s", preservedContent)
+	}
+	localContent := mustRun(t, f.local, "show", f.submitted+":file.txt")
+	if !strings.Contains(firstRepeatedBlock(localContent), "X") {
+		t.Fatalf("the local head does not carry the operator's change:\n%s", localContent)
+	}
+
+	if preservedContainsLocalWork(f.ctx, f.local, f.submitted, f.preserved) {
+		t.Fatal("the containment proof held for a preserved head that does not carry the operator's work")
+	}
+
+	refused := f.service.Recover(f.ctx, false)
+	if refused.Recovered || refused.Changed || refused.Safety != "blocked_recover_diverged" {
+		t.Fatalf("recover diverged = %#v", refused)
+	}
+	short := mustRun(t, f.local, "rev-parse", "--short", match)
+	if !strings.Contains(refused.Error, short) {
+		t.Fatalf("refusal does not report the colliding commit %s: %q", short, refused.Error)
+	}
+	if !strings.Contains(refused.Error, "not a containment proof") {
+		t.Fatalf("refusal does not mark the patch identity as a diagnostic: %q", refused.Error)
+	}
+	if !strings.Contains(refused.Error, "not one of the tests that decided this") {
+		t.Fatalf("refusal does not say the patch identity did not decide this: %q", refused.Error)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatalf("refused recovery moved the branch to %s, want %s", got, f.submitted)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.preserved {
+		t.Fatalf("refused recovery moved the gate lane to %s, want %s", got, f.preserved)
+	}
+	if f.custodyReturned() {
+		t.Fatal("refused recovery stamped custody")
+	}
+}
+
 // TestRecoverDivergedRefusalNamesConflictPaths proves the refusal names the
 // paths whose content conflicted, so the operator knows where the histories
 // disagree.
 func TestRecoverDivergedRefusalNamesConflictPaths(t *testing.T) {
 	t.Parallel()
 
-	f := newRewrittenHeadRecoverFixture(t)
+	f, _ := newRewrittenHeadRecoverFixture(t)
 	refused := f.service.Recover(f.ctx, false)
 	if refused.Safety != "blocked_recover_diverged" {
 		t.Fatalf("recover diverged = %#v", refused)
@@ -280,7 +487,7 @@ func TestRecoverDivergedRefusalNamesConflictPaths(t *testing.T) {
 func TestRecoverDivergedRefusalSaysDivergenceIsNotLostWork(t *testing.T) {
 	t.Parallel()
 
-	f := newRewrittenHeadRecoverFixture(t)
+	f, _ := newRewrittenHeadRecoverFixture(t)
 	refused := f.service.Recover(f.ctx, false)
 	if !strings.Contains(refused.Error, "not that the local work was lost") {
 		t.Fatalf("refusal does not separate divergence from lost work: %q", refused.Error)
@@ -292,7 +499,7 @@ func TestRecoverDivergedRefusalSaysDivergenceIsNotLostWork(t *testing.T) {
 func TestRecoverDivergedRefusalNamesComparedHeadsInNextAction(t *testing.T) {
 	t.Parallel()
 
-	f := newRewrittenHeadRecoverFixture(t)
+	f, _ := newRewrittenHeadRecoverFixture(t)
 	refused := f.service.Recover(f.ctx, false)
 	if refused.NextAction == nil || refused.NextAction.Code != "inspect_and_reconcile_manually" {
 		t.Fatalf("refusal next action = %#v", refused.NextAction)
@@ -381,5 +588,11 @@ func TestRecoverNonDivergedPathsAreUnchanged(t *testing.T) {
 		if got := mustRun(t, ahead.local, "rev-parse", "HEAD"); got != localHead {
 			t.Fatalf("HEAD = %s, want the untouched local head %s", got, localHead)
 		}
+	})
+
+	t.Run("released", func(t *testing.T) {
+		t.Parallel()
+		released := newUnmovedRecoverFixture(t, types.RunCancelled)
+		assertReleasedNoOpRecover(t, released, false, released.submitted)
 	})
 }

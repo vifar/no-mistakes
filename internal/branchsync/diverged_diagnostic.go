@@ -64,19 +64,50 @@ type divergenceDiagnostic struct {
 	// ConflictPaths names the paths whose content conflicted in the
 	// three-way merge, when the merge conflicted.
 	ConflictPaths []string
-	// PatchIdentityMatch names a commit in the other head's history that
-	// carries the same patch identity as the local head's own change. It is
-	// a DIAGNOSTIC ONLY: it is never a containment claim and never enables
-	// an adoption path.
-	PatchIdentityMatch string
-	// PatchIdentityChecked reports whether the patch identity comparison
-	// could be made at all. It is false when the local head has no own
-	// change to measure.
-	PatchIdentityChecked bool
-	// PatchIdentityBounded reports that the search covered only the most
-	// recent commits the other head adds, so a match further back was not
-	// looked for.
-	PatchIdentityBounded bool
+	// PatchIdentity carries the read-only patch identity evidence.
+	PatchIdentity patchIdentityEvidence
+}
+
+// patchIdentityStatus reports what the patch identity diagnostic could
+// establish.
+type patchIdentityStatus int
+
+const (
+	// patchIdentityNotChecked means the comparison could not be made at
+	// all: the local head has no own change to measure, so nothing is
+	// reported about it.
+	patchIdentityNotChecked patchIdentityStatus = iota
+	// patchIdentityIncomplete means the search did not finish. It never
+	// licenses a NEGATIVE claim, because "we did not look" is not "there is
+	// nothing there". A refusal that says "no commit carries this" when
+	// the search was cut short tells the operator something untrue, and
+	// this whole change exists to make refusals tell the truth.
+	patchIdentityIncomplete
+	// patchIdentityNoMatch means the search finished and found no commit
+	// carrying the same patch identity.
+	patchIdentityNoMatch
+	// patchIdentityMatch means the search found a commit that carries the
+	// same patch identity as the local head's own change.
+	patchIdentityMatch
+)
+
+// patchIdentityEvidence is the read-only patch identity finding behind one
+// diverged refusal.
+//
+// It is a DIAGNOSTIC ONLY. It is never a containment claim and never enables
+// an adoption path.
+type patchIdentityEvidence struct {
+	// Status reports what the search established.
+	Status patchIdentityStatus
+	// Match names the commit that carries the same patch identity as the
+	// local head's own change. It is set only when Status is
+	// patchIdentityMatch.
+	Match string
+	// Bounded reports that the search covered only the most recent commits
+	// the other head adds, so a match further back was not looked for. It
+	// is meaningful only with patchIdentityNoMatch, where it turns the
+	// negative into a bounded one.
+	Bounded bool
 }
 
 // divergenceDescription renders the operator-facing explanation of a diverged
@@ -108,12 +139,14 @@ func (d divergenceDiagnostic) divergenceDescription() string {
 		fmt.Fprintf(&b, "; the three-way merge conflicts in %s", strings.Join(d.ConflictPaths, ", "))
 	}
 	switch {
-	case d.PatchIdentityMatch != "":
-		fmt.Fprintf(&b, "; a commit in the %s carries the same patch identity as the local head's own change (%s), the same patch under a different commit identity - that is a diagnostic for the operator and not a containment proof, so it was not one of the tests that decided this and nothing was adopted", preservedLabel, d.PatchIdentityMatch)
-	case d.PatchIdentityChecked && d.PatchIdentityBounded:
+	case d.PatchIdentity.Status == patchIdentityMatch:
+		fmt.Fprintf(&b, "; a commit in the %s carries the same patch identity as the local head's own change (%s), the same patch under a different commit identity - that is a diagnostic for the operator and not a containment proof, so it was not one of the tests that decided this and nothing was adopted", preservedLabel, d.PatchIdentity.Match)
+	case d.PatchIdentity.Status == patchIdentityNoMatch && d.PatchIdentity.Bounded:
 		fmt.Fprintf(&b, "; no commit in the most recent %d commits the %s adds carries the same patch identity as the local head's own change, and the search was bounded, so a match further back was not looked for - that is a diagnostic, not a containment proof, and it was not one of the tests that decided this", divergencePatchScanLimit, preservedLabel)
-	case d.PatchIdentityChecked:
+	case d.PatchIdentity.Status == patchIdentityNoMatch:
 		fmt.Fprintf(&b, "; no commit in the %s carries the same patch identity as the local head's own change - that is a diagnostic, not a containment proof, and it was not one of the tests that decided this", preservedLabel)
+	case d.PatchIdentity.Status == patchIdentityIncomplete:
+		fmt.Fprintf(&b, "; the search for a commit carrying the same patch identity in the %s did not finish, so this reports no match and claims none - that is a diagnostic, not a containment proof, and it was not one of the tests that decided this", preservedLabel)
 	}
 	b.WriteString("; divergence here means the two heads are not interchangeable, not that the local work was lost")
 	return b.String()
@@ -139,7 +172,7 @@ func collectDivergenceDiagnostic(ctx context.Context, dir, local, preserved, pre
 		diagnostic.MergeProofHeld = proof.held
 		diagnostic.ConflictPaths = proof.conflictPaths
 	}
-	diagnostic.PatchIdentityMatch, diagnostic.PatchIdentityChecked, diagnostic.PatchIdentityBounded = patchIdentityDiagnostic(ctx, dir, local, preserved)
+	diagnostic.PatchIdentity = patchIdentityDiagnostic(ctx, dir, local, preserved)
 	return diagnostic
 }
 
@@ -209,13 +242,15 @@ func isObjectID(s string) bool {
 // commit that carries it can even have been reverted later. That is exactly
 // why this must not decide anything.
 //
-// The second result reports whether the comparison could be made at all, and
-// the third reports that the search was bounded. The empty commit means no
-// match was found.
-func patchIdentityDiagnostic(ctx context.Context, dir, local, preserved string) (string, bool, bool) {
+// The status says what the search established. A search that did not finish
+// reports patchIdentityIncomplete, never a negative: "the search did not
+// look" is not "there is nothing there", and a refusal that confuses the two
+// misleads the operator in the same way this issue is about.
+func patchIdentityDiagnostic(ctx context.Context, dir, local, preserved string) patchIdentityEvidence {
+	evidence := patchIdentityEvidence{Status: patchIdentityNotChecked}
 	localIdentity, ok := commitPatchIdentity(ctx, dir, local)
 	if !ok {
-		return "", false, false
+		return evidence
 	}
 	// The change may be in the preserved head's history under a different
 	// commit identity, which is the case a rewritten commit makes. The
@@ -224,27 +259,35 @@ func patchIdentityDiagnostic(ctx context.Context, dir, local, preserved string) 
 	stream, err := git.Run(ctx, dir, "log", "--format=commit %H", "-p", "--no-merges", "--no-ext-diff",
 		"--max-count="+strconv.Itoa(divergencePatchScanLimit), preserved, "^"+local)
 	if err != nil {
-		return "", true, false
+		evidence.Status = patchIdentityIncomplete
+		return evidence
 	}
 	identities, err := git.StablePatchIdentities(ctx, dir, stream)
 	if err != nil {
-		return "", true, false
+		evidence.Status = patchIdentityIncomplete
+		return evidence
 	}
 	for _, identity := range identities {
 		if identity.PatchID != localIdentity || identity.Commit == "" || identity.Commit == local {
 			continue
 		}
-		return shortCommit(ctx, dir, identity.Commit), true, false
+		evidence.Match = shortCommit(ctx, dir, identity.Commit)
+		evidence.Status = patchIdentityMatch
+		return evidence
 	}
 	count, err := git.Run(ctx, dir, "rev-list", "--no-merges", "--count", preserved, "^"+local)
 	if err != nil {
-		return "", true, false
+		evidence.Status = patchIdentityIncomplete
+		return evidence
 	}
 	bounded, err := strconv.Atoi(strings.TrimSpace(count))
 	if err != nil {
-		return "", true, false
+		evidence.Status = patchIdentityIncomplete
+		return evidence
 	}
-	return "", true, bounded > divergencePatchScanLimit
+	evidence.Status = patchIdentityNoMatch
+	evidence.Bounded = bounded > divergencePatchScanLimit
+	return evidence
 }
 
 // shortCommit returns the abbreviated form of a commit, falling back to the
