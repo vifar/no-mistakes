@@ -60,6 +60,9 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 				"  - " + tc.line,
 				"Generated with **" + "Codex**",
 				"Co-Authored-By: **" + "Codex** <bot@example.invalid>",
+				"Generated with Codex<br>",
+				"<p>Summary</p><p>Generated with Codex</p>",
+				"<p>Summary</p><p>Co-Authored-By: Codex <bot@example.invalid></p>",
 			} {
 				body := "## Testing\n\n```text\n" + line + "\n```\n"
 				got := neutralizeAttestationMarkers(scm.ProviderGitHub, body)
@@ -78,6 +81,9 @@ func TestNeutralizeAIAttributionKeepsAHumanTrailer(t *testing.T) {
 		"Co-Authored-By: A Person <person@example.com>",
 		"Co-Authored-By: Claude Smith <human@example.com>",
 		"Co-Authored-By: `Claude Smith` <human@example.com>",
+		// The underscore is in the MAILBOX, so the markup removal must
+		// not turn a person's address into the AI's.
+		"Co-Authored-By: Claude <no_reply@anthropic.com>",
 		"Co-Authored-By: ``Claude Smith`` <human@example.com>",
 		"Co-Authored-By: Claude Smith <code@example.com>",
 		"Co-Authored-By: Claude <human@example.com>",

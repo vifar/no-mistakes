@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1704,11 +1705,38 @@ func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 func neutralizeAIAttribution(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		if git.IsAIAttributionTrailer(normalizeRenderedText(html.UnescapeString(line))) {
+		if lineCarriesAIAttribution(line) {
 			lines[i] = "<no-mistakes: AI attribution line neutralized>"
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// renderedBlockTag matches the HTML tags that separate rendered blocks, so a
+// rendered line can carry more than one item of text.
+//
+// The tag name has to be followed by a real tag boundary - whitespace, the
+// closing angle, or a slash - so a MAILBOX that happens to start with a tag
+// name is not mistaken for a tag: "<code@example.com>" is an address, and
+// splitting on it would take the attribution's address away.
+var renderedBlockTag = regexp.MustCompile(`(?i)</?(?:br|p|div|span|code|pre|li|ul|ol|em|strong|b|i|h[1-6])(?:\s[^>]*)?/?>`)
+
+// lineCarriesAIAttribution reports whether a rendered line carries an
+// attribution a reader would take for THIS work.
+//
+// The line is split at the block boundaries FIRST, because a rendered line can
+// hold more than one item of text: "<p>Summary</p><p>Generated with
+// Codex</p>" carries the attribution in its second paragraph, and a footer
+// ending with "Generated with Codex<br>" carries it before the break. Each
+// part is then judged on its own, with the markup it wears removed.
+func lineCarriesAIAttribution(line string) bool {
+	text := html.UnescapeString(line)
+	for _, segment := range renderedBlockTag.Split(text, -1) {
+		if git.IsAIAttributionTrailer(normalizeRenderedText(segment)) {
+			return true
+		}
+	}
+	return false
 }
 
 // listItemMarker splits a list item's marker from its text.
