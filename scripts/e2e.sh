@@ -123,7 +123,7 @@ place_shards() {
     }
     {
       name = $0
-      if (name == "TestUserJourney" || name == "TestTargetAdvanceTerminalMergeLiveJourney" || name == "TestRetainedTargetContinuityLiveJourney" || name == "TestTargetAdvancePublishedGuardsLiveJourney") { next }
+      if (name == "TestUserJourney" || name == "TestTargetAdvanceTerminalMergeLiveJourney" || name == "TestRetainedTargetContinuityLiveJourney" || name == "TestTargetAdvancePublishedGuardsLiveJourney" || name == "TestCIReceiptRecoveryJourneys") { next }
       c = (name in cost) ? cost[name] : fallback + 0
       printf "%d\t%s\n", c, name
     }' | sort -rn -k1,1 -k2,2 | cut -f2-)"
@@ -313,13 +313,13 @@ if [[ "$#" -eq 0 ]]; then
   go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" ./internal/pipeline/steps/... &
   steps_pid=$!
 
-  # The terminal-merge, retained-target, and published-guard journeys share
-  # their own worker, balancing these long journeys against the shards.
+  # The terminal-merge, retained-target, published-guard, and receipt-recovery
+  # journeys share their own worker, balancing them against the shards.
   #
   # This worker can overlap the shards, so shard_count reserves one daemon
   # slot for it.
   go test -tags=e2e -count=1 -timeout "${remaining_seconds}s" \
-    -run '^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$' ./internal/e2e/... &
+    -run '^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney|TestCIReceiptRecoveryJourneys)$' ./internal/e2e/... &
   terminal_pid=$!
 
   # Everything else is split across shards. Each shard runs its own go test
@@ -382,7 +382,7 @@ if [[ "$#" -eq 0 ]]; then
     shard_pattern="$(printf '%s\n' "${shard_tests[$shard_index]}" | paste -sd'|' -)"
     go test -tags=e2e -count=1 -timeout "${shard_seconds}s" \
       -run "^(${shard_pattern})$" \
-      -skip '^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney)$' \
+      -skip '^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney|TestTargetAdvancePublishedGuardsLiveJourney|TestCIReceiptRecoveryJourneys)$' \
       ./internal/e2e/... &
     shard_pids+=("$!")
     shard_statuses+=(0)
