@@ -12,6 +12,20 @@ import (
 
 // processWasCancelled reports whether a process exit is the exit of a
 // subprocess THIS command's context stopped.
+//
+// ConfigureShellCommand replaces the standard library's kill with a
+// process-group SIGTERM followed by asynchronous SIGKILL escalation after
+// the grace period. A cooperative child can exit from SIGTERM; a child
+// that survives it can exit from SIGKILL. Both signals can therefore be
+// the context's doing.
+//
+// Any other signal is the child's own. A child that SEGFAULTed or ABORTed
+// kept its own outcome, and the cancellation did not cause it, so the exit
+// is not the cancellation's and must not be marked as one. That is why the
+// allow-list is exactly the two stop signals and not "any signalled exit".
+//
+// An exit that is not signalled at all is not the context's either: a child
+// that exited 1 on its own kept its own outcome.
 func processWasCancelled(err *exec.ExitError) bool {
 	if err == nil {
 		return false
