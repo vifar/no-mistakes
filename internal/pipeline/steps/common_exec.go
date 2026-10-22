@@ -86,26 +86,15 @@ func executableCandidatesForOS(goos, name string, env []string) []string {
 	return execpath.CandidatesForOS(goos, name, env)
 }
 
+// findInCustomPath resolves the program in the environment's PATH, with the
+// SHARED resolver, so this lookup and the git package's lookup cannot pick
+// different programs.
 func findInCustomPath(workDir string, env []string, name string) string {
-	customPath, ok := execpath.Value(env, "PATH")
-	if !ok {
+	path, _, found := execpath.Resolve(env, name, workDir)
+	if !found {
 		return ""
 	}
-	for _, dir := range filepath.SplitList(customPath) {
-		if dir == "" {
-			continue
-		}
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(workDir, dir)
-		}
-		for _, candidateName := range executableCandidates(name, env) {
-			candidate := filepath.Join(dir, candidateName)
-			if fi, err := os.Stat(candidate); err == nil && pathCandidateUsable(runtime.GOOS, candidate, fi) {
-				return candidate
-			}
-		}
-	}
-	return ""
+	return path
 }
 
 func pathCandidateUsable(goos, path string, fi os.FileInfo) bool {

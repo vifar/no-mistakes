@@ -101,7 +101,10 @@ func UsableForOS(goos, path string, fi os.FileInfo) bool {
 // The third result says whether a program was found. When the environment
 // named a PATH and it holds no such program, the caller is told so rather
 // than handed a different binary.
-func Resolve(env []string, name string) (path string, hasPath bool, found bool) {
+//
+// A relative PATH entry is resolved against baseDir, because that is the
+// directory the command runs in and the directory the child will see.
+func Resolve(env []string, name string, baseDir string) (path string, hasPath bool, found bool) {
 	customPath, ok := Value(env, "PATH")
 	if !ok {
 		return "", false, false
@@ -110,6 +113,9 @@ func Resolve(env []string, name string) (path string, hasPath bool, found bool) 
 	for _, dir := range filepath.SplitList(customPath) {
 		if dir == "" {
 			continue
+		}
+		if !filepath.IsAbs(dir) {
+			dir = filepath.Join(baseDir, dir)
 		}
 		for _, candidateName := range candidates {
 			candidate := filepath.Join(dir, candidateName)
