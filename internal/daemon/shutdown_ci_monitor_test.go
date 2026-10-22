@@ -172,8 +172,11 @@ func TestShutdown_CIMonitorRunSurvivesRestartAsInterrupted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if agent.Status != types.RunFailed || stringValue(agent.Error) != pipeline.ErrDaemonShutdown.Error() {
-		t.Errorf("mid-step run after stop = %s (%q), want failed with %q", agent.Status, stringValue(agent.Error), pipeline.ErrDaemonShutdown)
+	// A planned stop records the run as cancelled under the planned shutdown's
+	// own reason. A raw shutdown such as SIGTERM records it as failed with
+	// "daemon shutting down" instead; both are documented in concepts/daemon.
+	if agent.Status != types.RunCancelled || stringValue(agent.Error) != "cancelled: planned daemon shutdown" {
+		t.Errorf("mid-step run after stop = %s (%q), want cancelled with the planned shutdown reason", agent.Status, stringValue(agent.Error))
 	}
 
 	// The next start records the CI-monitor run as interrupted and resumes the

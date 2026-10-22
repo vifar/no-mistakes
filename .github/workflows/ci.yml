@@ -48,7 +48,12 @@ jobs:
   test:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, X64, king-server, no-mistakes]
-    timeout-minutes: 45
+    # The sharded race suite's makespan is about 27 minutes (one measured long
+    # pole per shard, the rest of the packages spread over the shards), and
+    # the runner is a shared VM whose other jobs add contention. The bound
+    # leaves room for that without hiding a hung test: a package that hangs
+    # is killed by the suite's own per-package timeout and reported.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
         with:
@@ -62,7 +67,12 @@ jobs:
           # hang until the job timeout (see guides/fork-ci.md).
           cache: false
       - name: Full Linux race suite
-        run: go test -race ./... -p 2 -timeout 25m
+        # The suite is split across parallel shards (scripts/race.sh), so the
+        # job costs the time of its slowest shard rather than the sum of
+        # every package's race time. Run as one process, the suite outgrew
+        # the job's bound and was killed with internal/pipeline/steps and
+        # fifteen more packages never started.
+        run: bash scripts/race.sh
       - name: Build Linux CLI
         run: go build -o bin/no-mistakes ./cmd/no-mistakes
       - name: Cross-compile desktop CLI targets

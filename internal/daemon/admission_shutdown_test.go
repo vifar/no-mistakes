@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -206,11 +205,7 @@ func TestControlledShutdown_PersistenceFailureCannotReopenRawAdmission(t *testin
 		t.Fatal(err)
 	}
 	defer d.Close()
-	control, err := sql.Open("sqlite", p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer control.Close()
+	control := openControlDB(t, p.DB())
 	if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER fail_preparation BEFORE INSERT ON controlled_shutdown_runs WHEN NEW.reason='cancelled: planned daemon shutdown' BEGIN SELECT %s(); END`, function)); err != nil {
 		t.Fatal(err)
 	}

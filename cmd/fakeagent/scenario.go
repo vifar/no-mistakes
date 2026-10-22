@@ -111,6 +111,10 @@ func loadScenario(path string) (*Scenario, error) {
 // low risk, and for the test step a populated tested array plus the
 // live-validation contract (one passing scenario and a go verdict) the step
 // now requires of every evidence turn.
+//
+// The verification outcome belongs here too: the review fixer must report one
+// for its changes to be committed, and the catch-all action serves that turn
+// whenever a scenario does not script it explicitly.
 func defaultScenario() *Scenario {
 	return &Scenario{
 		Actions: []Action{{
@@ -118,6 +122,7 @@ func defaultScenario() *Scenario {
 			Structured: map[string]any{
 				"findings":        []any{},
 				"summary":         "no issues found",
+				"verification":    "passed",
 				"risk_level":      "low",
 				"risk_rationale":  "no risks detected in the diff",
 				"risk_scope":      "source-or-external",

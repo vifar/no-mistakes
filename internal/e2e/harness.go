@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,8 +24,34 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/e2edaemon"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+// openControlDB opens a second connection to the harness's database, with the
+// same pragmas the production connection uses.
+//
+// The control connection is how a journey reaches past the daemon to make the
+// storage misbehave - a trigger that refuses one run's terminal write, a
+// table the daemon cannot read. Those statements take a schema lock, and the
+// daemon's own connection holds it whenever a statement is in flight. A
+// control connection WITHOUT the busy timeout fails that lock immediately
+// with SQLITE_BUSY, so the journey's fault injection is really a race with
+// the daemon's next statement, and the journey fails for a reason that has
+// nothing to do with the behaviour it is testing.
+//
+// The production connection waits for the lock (see internal/db.Open), so the
+// control connection waits the same way. The journeys then fail for the
+// reason they are about.
+func openControlDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	control, err := sql.Open("sqlite", fmt.Sprintf("%s?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(%d)", path, sqlitewrite.BusyTimeout.Milliseconds()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { control.Close() })
+	return control
+}
 
 // Harness wires together the temp filesystem state needed to run the real
 // no-mistakes binary against a fake agent. Each test gets its own Harness;
@@ -322,7 +349,24 @@ func (h *Harness) RunInDir(dir string, args ...string) (string, error) {
 // RunInDirWithEnv invokes the no-mistakes binary in dir with env overrides.
 func (h *Harness) RunInDirWithEnv(dir string, env map[string]string, args ...string) (string, error) {
 	h.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	return h.RunInDirWithEnvTimeout(dir, env, harnessCommandTimeout, args...)
+}
+
+// harnessCommandTimeout is the budget for one harness-invoked command. It is
+// generous enough for the slowest ordinary command on a loaded runner.
+const harnessCommandTimeout = 60 * time.Second
+
+// RunInDirWithEnvTimeout invokes the no-mistakes binary in dir with env
+// overrides and an explicit budget.
+//
+// A command that runs a whole agent replay needs a budget of its own: the
+// generic one is sized for an ordinary command, and a replay that outlasts it
+// on a loaded runner is killed with a signal that reads like a product
+// failure. The budget belongs to the command, not to the product, so a test
+// that drives a long replay asks for the time it needs.
+func (h *Harness) RunInDirWithEnvTimeout(dir string, env map[string]string, timeout time.Duration, args ...string) (string, error) {
+	h.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.NMBin, args...)
 	cmd.Dir = dir

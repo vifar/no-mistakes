@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"os"
 	"strings"
@@ -101,11 +100,7 @@ func testExecutorWriterLock(t *testing.T, operation string) {
 			}
 			step := &contentionStep{shutdownBlockingStep: newShutdownBlockingStep(stepName)}
 			step.execute = func(sctx *StepContext) (*StepOutcome, error) {
-				holder, err := sql.Open("sqlite", p.DB())
-				if err != nil {
-					return nil, err
-				}
-				defer holder.Close()
+				holder := openControlDB(t, p.DB())
 				holder.SetMaxOpenConns(1)
 				tx, err := holder.Begin()
 				if err != nil {

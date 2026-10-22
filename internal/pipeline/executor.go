@@ -122,6 +122,11 @@ type Executor struct {
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
 	onPRMerged            func(context.Context, string)
+	// See SetOnWorkloadDone for the workload boundary contract.
+	onWorkloadDone func()
+	// workloadDone records that the hook already ran, so a run that settles
+	// through more than one path reports the workload boundary only once.
+	workloadDone atomic.Bool
 }
 
 // ActiveAgentPID returns the current agent's PID without accessing the database.
@@ -209,6 +214,32 @@ func (e *Executor) SetOnPRMerged(fn func(context.Context, string)) {
 		return
 	}
 	e.onPRMerged = fn
+}
+
+// SetOnWorkloadDone registers a hook invoked once the run's pipeline work is
+// decided, before failure persistence or completion readback.
+//
+// The two are different moments. The work is over as soon as the run has
+// decided its outcome; recording or confirming it can still wait on storage
+// that is slow or unhealthy, and a caller that must not be held hostage by
+// the recording waits for this hook rather than for the run to be fully
+// settled. The hook runs at most once per executor.
+func (e *Executor) SetOnWorkloadDone(fn func()) {
+	if e == nil {
+		return
+	}
+	e.onWorkloadDone = fn
+}
+
+// reportWorkloadDone invokes the hook described by SetOnWorkloadDone at most once.
+func (e *Executor) reportWorkloadDone() {
+	if e.onWorkloadDone == nil {
+		return
+	}
+	if !e.workloadDone.CompareAndSwap(false, true) {
+		return
+	}
+	e.onWorkloadDone()
 }
 
 // SetForgeContext configures the immutable provider context used by every
@@ -3117,25 +3148,38 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	}
 	explicitCancellation := false
 	var controlled *ControlledShutdownCause
+	// cancelledByOperator records that the run's OWN cancellation cause is the
+	// operator's abort or the supersession. The run's status is decided by
+	// that cause, never by comparing the error TEXT: a step that was stopped
+	// mid-flight can produce a message that happens to read like a
+	// cancellation reason, and matching the text would mark an independent
+	// failure as a cancellation.
+	cancelledByOperator := false
 	for _, ctx := range ctxs {
 		if infrastructure {
 			break
 		}
-		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled && CancellationOnly(err, cause) {
-			errMsg = cause.Error()
-			explicitCancellation = cause.Error() == types.RunCancelReasonAbortedByUser
-			if planned, ok := cause.(*ControlledShutdownCause); ok && planned.Instance != "" && planned.Instance == e.runtimeInstance {
-				matches, matchErr := e.db.ControlledShutdownMatches(run.ID, planned.Instance, planned.Lifecycle, planned.Error())
-				if matchErr == nil && matches {
-					explicitCancellation = true
-					controlled = planned
-				}
-			}
-			break
+		cause := context.Cause(ctx)
+		if cause == nil || cause == context.Canceled {
+			continue
 		}
+		if !CancellationAttributable(err, cause) {
+			continue
+		}
+		errMsg = cause.Error()
+		explicitCancellation = cause.Error() == types.RunCancelReasonAbortedByUser
+		cancelledByOperator = explicitCancellation || cause.Error() == types.RunCancelReasonSuperseded
+		if planned, ok := cause.(*ControlledShutdownCause); ok && planned.Instance != "" && planned.Instance == e.runtimeInstance {
+			matches, matchErr := e.db.ControlledShutdownMatches(run.ID, planned.Instance, planned.Lifecycle, planned.Error())
+			if matchErr == nil && matches {
+				explicitCancellation = true
+				controlled = planned
+			}
+		}
+		break
 	}
 	runStatus := types.RunFailed
-	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded || controlled != nil {
+	if cancelledByOperator || controlled != nil {
 		runStatus = types.RunCancelled
 	}
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)
@@ -3162,7 +3206,13 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		}
 		if revoked {
 			for _, ctx := range ctxs {
-				if CancellationOnly(executionErr, context.Cause(ctx)) {
+				// The same provenance-aware classification as the initial
+				// selection: a command that this context cancelled is
+				// cancelled, and a command that failed on its own keeps its
+				// own outcome even when the cancellation was observed
+				// afterwards.
+				cause := context.Cause(ctx)
+				if cause != nil && CancellationAttributable(executionErr, cause) {
 					errMsg = db.RawShutdownReason
 					runStatus = types.RunFailed
 					explicitCancellation = false
@@ -3198,12 +3248,31 @@ func (e *Executor) FailRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if dbErr != nil {
 		slog.Warn("retrying terminal outcome settlement", "run", run.ID, "error", dbErr)
 		err = errors.Join(err, dbErr)
+		// The run's work is over: it has decided its outcome. The write
+		// above recorded the cancellation's attribution with it, and the
+		// RETRY below is the part that can still wait on storage - the
+		// store may refuse the terminal write indefinitely.
+		//
+		// The boundary is reported HERE, before the retry: a caller that
+		// waits for the run to stop must not be held by a store that
+		// cannot record the outcome, and the run's capacity slot must be
+		// released then too. The CUSTODY is separate: the run keeps its
+		// worktree and its place in the ownership table until the outcome
+		// is durable.
+		e.reportWorkloadDone()
+		// The write is awaited here because the run's custody depends on
+		// it: the outcome is either durable or the run keeps its custody
+		// for the next start's recovery.
 		dbErr = SettleTerminalWrite(e.db, writeTerminal)
 	}
 	if dbErr != nil {
 		slog.Error("failed to update run error status", "run", run.ID, "error", dbErr)
 		return errors.Join(err, dbErr)
 	}
+	// The write succeeded, so the outcome - including the cancellation's
+	// attribution - is durable. The boundary is reported here for the
+	// path that never needed a retry.
+	e.reportWorkloadDone()
 	durable, readErr := ReadSettledRun(e.db, run.ID)
 	if readErr != nil {
 		return errors.Join(err, readErr)
@@ -3252,6 +3321,12 @@ func (e *Executor) completeRun(ctx context.Context, run *db.Run, repo *db.Repo) 
 	if err != nil {
 		return err
 	}
+	// The run's work is over: it has decided to complete. Report the boundary
+	// BEFORE the readback below, which can still be waiting on storage to
+	// confirm the outcome. A caller waiting for the run to stop must not be
+	// held by a readback that waits on storage; the custody - the outcome
+	// being durable - is settled separately.
+	e.reportWorkloadDone()
 	durable, err := ReadSettledRun(e.db, run.ID)
 	if err != nil {
 		return err

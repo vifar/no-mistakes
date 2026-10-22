@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
@@ -34,6 +35,59 @@ func (e *CommandError) Error() string {
 }
 
 func (e *CommandError) Unwrap() error { return e.Err }
+
+// refuseStops makes the package's own stop REFUSED. It is a test hook: the
+// refusal is what a stop of an already-gone process group looks like, and
+// the provenance has to be recorded on that path too. The hook exists so the
+// production recording path is exercised, rather than a test that builds the
+// marker by hand.
+var refuseStops atomic.Bool
+
+// errRefusedStop is the refusal a stopped command reports.
+var errRefusedStop = errors.New("operation not permitted")
+
+// CancelledExitError is the exit of a subprocess that THIS command's context
+// stopped.
+//
+// The provenance is recorded at the execution boundary, where it is known: the
+// context stops its own child, and only that stop is recorded. Observing the
+// context afterwards would not prove it - a child can die of SIGSEGV on its
+// own and then race a shutdown that happened to observe the context a moment
+// later.
+//
+// A caller that must know whether a failure is the cancellation reads this
+// marker, never the shape of the error.
+//
+// The exit is not always an *exec.ExitError. When the context's stop is
+// REFUSED - the process group is already gone, or the platform refuses the
+// kill - the standard library reports the refusal ("exec: canceling Cmd: ...")
+// instead of the child's exit status, and there is no exit status to carry.
+// The refusal is still the context's doing, and the failure it leaves is the
+// interruption, not an independent one, so the marker carries the refusal
+// itself.
+type CancelledExitError struct {
+	*exec.ExitError
+	// Refused is the refusal the context's stop returned, when the command
+	// produced no exit status of its own.
+	Refused error
+}
+
+func (e *CancelledExitError) Unwrap() error {
+	if e.ExitError != nil {
+		return e.ExitError
+	}
+	return e.Refused
+}
+
+func (e *CancelledExitError) Error() string {
+	if e.ExitError != nil {
+		return e.ExitError.Error()
+	}
+	if e.Refused != nil {
+		return e.Refused.Error()
+	}
+	return "command was cancelled"
+}
 
 // IsZeroSHA returns true if the SHA is the null/zero ref that git uses for
 // new or deleted branches (40 zeros).
@@ -134,8 +188,74 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	shellenv.ConfigureShellCommand(cmd)
+	// The context stops its own child, and only that stop proves the exit was
+	// the cancellation's doing. Observing the context AFTER the command
+	// returned would not: a child can die of a signal on its own and then
+	// race a shutdown that happened to observe the context a moment later.
+	//
+	// The cancel hook is INVOKED by the context and by nothing else, so its
+	// invocation is the provenance. The kill it performs can still be
+	// refused - the process group may already be gone, or the platform may
+	// refuse it - and a refused kill does not make the command's failure
+	// independent, because the context is what interrupted it.
+	var cancelled atomic.Bool
+	// refusal records that the stop was REFUSED. The refusal is the
+	// standard library's own report, and the shell package's cleanup can
+	// replace it with the child's exit status - so the refusal is recorded
+	// HERE, in the hook that saw it, and not read back from the error.
+	var refusal atomic.Pointer[error]
+	cancelCommand := cmd.Cancel
+	cmd.Cancel = func() error {
+		cancelled.Store(true)
+		if refuseStops.Load() {
+			// The stop is refused, exactly as a kill of an
+			// already-gone process group is refused. The refusal
+			// is what the standard library reports when the
+			// process is already done, and it is the shape of
+			// this failure: the context interrupted the command,
+			// and the stop could not reach the child.
+			//
+			// The context still interrupted the command, so the
+			// refusal is still the cancellation's doing.
+			recorded := errRefusedStop
+			refusal.Store(&recorded)
+			return errRefusedStop
+		}
+		return cancelCommand()
+	}
 	out, err := shellenv.OutputShellCommand(cmd)
 	if err != nil {
+		if cancelled.Load() {
+			switch exit := err.(type) {
+			case *exec.ExitError:
+				// The child produced an exit status. It is the
+				// cancellation's doing only if the stop reached it.
+				//
+				// A REFUSED stop is the context's doing even when the
+				// child also produced an exit status: the refusal
+				// means the context could not stop the child, and
+				// the shell package's cleanup then killed it. The
+				// refusal is the provenance, and the exit is the
+				// cleanup's.
+				if recorded := refusal.Load(); recorded != nil {
+					err = &CancelledExitError{ExitError: exit, Refused: *recorded}
+				} else if processWasCancelled(exit) {
+					err = &CancelledExitError{ExitError: exit}
+				}
+			default:
+				// The stop may have been REFUSED, so the standard
+				// library reports the refusal instead of an exit
+				// status. The refusal is still the context's doing:
+				// the context is what interrupted the command, and a
+				// refused kill does not make the failure independent.
+				//
+				// Only THAT refusal is the cancellation's. Any other
+				// error is the command's own.
+				if isCancelRefusal(err) {
+					err = &CancelledExitError{Refused: err}
+				}
+			}
+		}
 		if ctx.Err() != nil {
 			err = errors.Join(err, ctx.Err())
 		}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -30,6 +31,38 @@ func TestE2EWrapperTerminalMergeJourneyHasIndependentWorker(t *testing.T) {
 	}
 }
 
+// The shared budget is wall time, so two seconds spent in the step worker
+// must leave the later shards at least two seconds less than the terminal
+// worker. The oracle is elapsed time in an external child, not the wrapper's
+// budget calculation; reusing the pre-wait allowance would fail this check.
+func TestE2EWrapperChargesStepWorkerTimeToShardBudget(t *testing.T) {
+	result := runE2EWrapper(t, "slow-steps", "")
+	if result.status != 0 {
+		t.Fatalf("wrapper failed: %s", result.output)
+	}
+	timeout := func(call string) time.Duration {
+		t.Helper()
+		fields := strings.Fields(call)
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "-timeout" {
+				duration, err := time.ParseDuration(fields[i+1])
+				if err != nil {
+					t.Fatal(err)
+				}
+				return duration
+			}
+		}
+		t.Fatalf("worker has no timeout: %s", call)
+		return 0
+	}
+	terminal := timeout(callContaining(t, result.calls, "-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$"))
+	shard := timeout(callContaining(t, result.calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$"))
+	if shard <= 0 || terminal-shard < 2*time.Second {
+		t.Fatalf("terminal allowance=%s shard allowance=%s; step-worker time was not charged", terminal, shard)
+	}
+	t.Logf("RESULT terminal allowance=%s; after two-second step worker, shard allowance=%s", terminal, shard)
+}
+
 // Regression at f5fcfcb2: CI's terminal worker passed in1013.254s while
 // the remainder exhausted2255s. The added nine-case table took923.27s in
 // measured local validation, so place it beside the terminal table.
@@ -48,8 +81,13 @@ func TestE2EWrapperDefaultPartitionsJourneyAndRunsRemainder(t *testing.T) {
 		t.Fatalf("wrapper status = %d, output: %s", result.status, result.output)
 	}
 	calls := result.calls
-	if len(calls) != 5 { // two matrix processes, terminal journey, remainder, cleanup
-		t.Fatalf("go calls = %q, want two matrix processes, terminal journey, remainder, and cleanup", calls)
+	// Two matrix processes, two discovery calls, the terminal journey, the
+	// pipeline-step worker, one shard per remaining daemon slot, and the
+	// cleanup. The shard count is bounded by what the daemon cap leaves -
+	// the terminal worker takes one slot - and by the runner's own capacity,
+	// so this fixture's cap of 8 yields the maximum of four shards.
+	if len(calls) != 11 {
+		t.Fatalf("go calls = %q, want matrix, discovery, terminal journey, step tests, four shards, and cleanup", calls)
 	}
 	assertBothMatrixCallsFinishedBeforeCleanup(t, result.events)
 	first := callContaining(t, calls, "-run ^TestUserJourney$/(claude|codex)$")
@@ -63,10 +101,149 @@ func TestE2EWrapperDefaultPartitionsJourneyAndRunsRemainder(t *testing.T) {
 	if !strings.Contains(first, "-timeout 2400s") || !strings.Contains(second, "-timeout 2400s") || !strings.Contains(first, "./internal/e2e/...") || !strings.Contains(second, "./internal/e2e/...") {
 		t.Errorf("matrix invocations must each receive the full shared upper-bound timeout: %q", calls[:2])
 	}
-	remaining := callContaining(t, calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ ./internal/e2e/... ./internal/pipeline/steps/...")
+	remaining := callContaining(t, calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ ./internal/e2e/...")
 	if !strings.Contains(remaining, "-timeout ") {
 		t.Errorf("remaining-suite timeout missing: %q", remaining)
 	}
+	// The suite contract is that every discovered test runs exactly once,
+	// including tests that exist only in a steps package. Evaluate the actual
+	// child selectors against the discovery inventory, independently of the
+	// wrapper's placement algorithm.
+	for _, name := range strings.Fields(wrapperDiscoveredTests) {
+		selected := 0
+		for _, call := range calls {
+			fields := strings.Fields(call)
+			if len(fields) == 0 || fields[0] != "test" || strings.Contains(call, " -list ") {
+				continue
+			}
+			run, skip := ".*", "a^"
+			for i := 0; i+1 < len(fields); i++ {
+				if fields[i] == "-run" {
+					run = fields[i+1]
+				}
+				if fields[i] == "-skip" {
+					skip = fields[i+1]
+				}
+			}
+			// The step-test worker runs the step tests WHOLE: it names no
+			// -run selector, because it is not a selection - it is the
+			// step-test package. A journey is never run by it, so a
+			// journey is not counted against it.
+			if run == ".*" && !strings.Contains(call, "./internal/e2e/...") {
+				if name == "TestStepOnly" {
+					selected++
+				}
+				continue
+			}
+			// Matrix selectors address subtests; the parent is their owner.
+			run = strings.SplitN(run, "/", 2)[0]
+			skip = strings.SplitN(skip, "/", 2)[0]
+			if regexp.MustCompile(run).MatchString(name) && !regexp.MustCompile(skip).MatchString(name) {
+				selected++
+			}
+		}
+		if name != "TestUserJourney" && selected != 1 {
+			t.Errorf("discovered test %s selected %d times, want exactly once", name, selected)
+		}
+	}
+}
+
+// The shards are balanced by MEASURED TIME. A count-based split leaves one
+// shard as the suite's long pole while the rest idle, and the suite then
+// costs the sum of its shards instead of the time of its slowest one. The
+// two shards must be within a small fraction of each other.
+func TestE2EWrapperBalancesShardsByMeasuredTime(t *testing.T) {
+	result := runE2EWrapperWithCap(t, "", "", "08")
+	if result.status != 0 {
+		t.Fatalf("wrapper status = %d, output: %s", result.status, result.output)
+	}
+	costs := e2eJourneyCosts(t)
+	loads := []int{}
+	for _, call := range result.calls {
+		fields := strings.Fields(call)
+		if len(fields) == 0 || fields[0] != "test" {
+			continue
+		}
+		run, skip := "", ""
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "-run" {
+				run = fields[i+1]
+			}
+			if fields[i] == "-skip" {
+				skip = fields[i+1]
+			}
+		}
+		if run == "" || skip == "" {
+			// A matrix invocation, not a shard.
+			continue
+		}
+		pattern := regexp.MustCompile(strings.Trim(run, "^$"))
+		skipPattern := regexp.MustCompile(strings.Trim(skip, "^$"))
+		load := 0
+		for name, cost := range costs {
+			if pattern.MatchString(name) && !skipPattern.MatchString(name) {
+				load += cost
+			}
+		}
+		if load > 0 {
+			loads = append(loads, load)
+		}
+	}
+	if len(loads) < 2 {
+		t.Fatalf("shards = %v, want at least two shards to compare", loads)
+	}
+	low, high := loads[0], loads[0]
+	for _, load := range loads[1:] {
+		if load < low {
+			low = load
+		}
+		if load > high {
+			high = load
+		}
+	}
+	// The spread is bounded: a shard may not carry more than a quarter more
+	// than the lightest one, or the suite is paying for the imbalance.
+	if high > low+low/4 {
+		t.Errorf("shard loads = %v, want the spread within a quarter of the lightest shard", loads)
+	}
+}
+
+// e2eJourneyCosts reads the suite's measured journey costs.
+func e2eJourneyCosts(t *testing.T) map[string]int {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "scripts", "e2e-journey-costs.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	costs := map[string]int{}
+	inList := false
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "journey_seconds=(") {
+			inList = true
+			continue
+		}
+		if inList && line == ")" {
+			inList = false
+			continue
+		}
+		if !inList {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue
+		}
+		seconds, err := strconv.Atoi(fields[0])
+		if err != nil {
+			t.Fatalf("journey cost %q is not a number: %v", fields[0], err)
+		}
+		costs[fields[1]] = seconds
+	}
+	if len(costs) == 0 {
+		t.Fatal("the suite read no measured journey costs")
+	}
+	return costs
 }
 
 func TestE2EWrapperWaitsForBothMatrixProcessesAndPropagatesFailure(t *testing.T) {
@@ -88,8 +265,32 @@ func TestE2EWrapperPropagatesTerminalJourneyFailure(t *testing.T) {
 	if result.status != 19 {
 		t.Fatalf("wrapper status = %d, want terminal failure 19; output: %s", result.status, result.output)
 	}
-	if len(result.calls) != 5 || result.events[len(result.events)-1] != "cleanup" {
+	// The default fixture's daemon cap is 2: the terminal worker takes one
+	// slot, so exactly one shard runs beside it. The calls are the two
+	// matrix processes, the two discovery calls, the terminal worker, the
+	// step-test worker, the shard, and the cleanup.
+	if len(result.calls) != 8 || result.events[len(result.events)-1] != "cleanup" {
 		t.Fatalf("both remaining workers must finish before cleanup: calls=%q events=%q", result.calls, result.events)
+	}
+}
+
+func TestE2EWrapperDiscoveryFailureStartsNoWorkers(t *testing.T) {
+	result := runE2EWrapper(t, "discovery", "")
+	if result.status != 1 {
+		t.Fatalf("wrapper status = %d, want failed discovery to reject the suite: %s", result.status, result.output)
+	}
+	if len(result.calls) != 4 || result.events[len(result.events)-1] != "cleanup" {
+		t.Fatalf("discovery failure launched workers or skipped cleanup: calls=%q events=%q", result.calls, result.events)
+	}
+}
+
+func TestE2EWrapperShardFailureWaitsForWorkersAndFailsTheSuite(t *testing.T) {
+	result := runE2EWrapper(t, "shard", "")
+	if result.status != 29 {
+		t.Fatalf("wrapper status = %d, want shard failure 29: %s", result.status, result.output)
+	}
+	if len(result.calls) != 8 || result.events[len(result.events)-1] != "cleanup" {
+		t.Fatalf("shard failure lost workers or cleanup: calls=%q events=%q", result.calls, result.events)
 	}
 }
 
@@ -195,7 +396,8 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 	fakeGo := filepath.Join(binDir, "go")
 	goScript := "#!/bin/sh\n"
 	goScript += "case \" $* \" in *' run ./internal/e2edaemon/reapmain.go '*) printf 'cleanup\\n' >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0 ;; esac\n"
-	goScript += "case \"$*\" in *' -skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ ./internal/e2e/... '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=remaining ;; *' -run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=terminal ;; *' -run ^TestUserJourney$/(claude|codex)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=claude-codex ;; *' -run ^TestUserJourney$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=complement ;; *) exit 0 ;; esac\n"
+	goScript += wrapperDiscoveryScript
+	goScript += "case \"$*\" in *' -skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ ./internal/e2e/...'*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=remaining ;; *'./internal/pipeline/steps/...'*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; printf 'step-tests-done\\n' >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0 ;; *' -run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = remaining ] || exit 0; selector=terminal ;; *' -run ^TestUserJourney$/(claude|codex)$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=claude-codex ;; *' -run ^TestUserJourney$ '*) [ \"$NM_E2E_FAKE_GO_STAGE\" = matrix ] || exit 0; selector=complement ;; *) exit 0 ;; esac\n"
 	goScript += "export NM_E2E_FAKE_PARENT_PID=$$\n"
 	goScript += "\"$NM_E2E_FAKE_CHILD\" \"$selector\" &\nchild_pid=$!\n"
 	goScript += "trap 'wait \"$child_pid\" 2>/dev/null || true; printf \"parent-end:%s\\n\" \"$selector\" >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0' TERM INT\n"
@@ -250,6 +452,14 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 	go func() {
 		reader := bufio.NewReader(ready)
 		wantLines := 4
+		if stage == "remaining" {
+			// The terminal worker and the shard that runs beside it. The
+			// fixture's daemon cap is 2, and the terminal worker takes one
+			// slot, so exactly one shard runs beside it. The step-test
+			// worker takes no daemon slot and is awaited BEFORE the
+			// shards start, so it has already finished by then.
+			wantLines = 4
+		}
 		lines := make([]string, 0, wantLines)
 		for len(lines) < wantLines {
 			line, readErr := reader.ReadString('\n')
@@ -267,6 +477,9 @@ func runE2EWrapperSignalCase(t *testing.T, stage string, signal syscall.Signal, 
 		t.Fatalf("timed out waiting for both fake jobs and children to report readiness: %v", readyCtx.Err())
 	}
 	wantJobs := 2
+	if stage == "remaining" {
+		wantJobs = 2
+	}
 	if len(readyLines) != wantJobs*2 {
 		t.Fatalf("ready lines = %q, want %d parent and child readiness reports", readyLines, wantJobs)
 	}
@@ -363,6 +576,17 @@ type e2eWrapperResult struct {
 	events []string
 }
 
+const wrapperDiscoveredTests = "TestUserJourney TestTargetAdvanceTerminalMergeLiveJourney TestRetainedTargetContinuityLiveJourney TestAttachCommitStatusJourney TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary TestEvalJourney TestStepOnly TestCustomGateStructuredFindingsJourney TestCIScopeAutoDiscovery TestDocumentJourneyUnsafeAndStrictRestart TestOmitIntentJourney TestCertificationContentionProductionJourney"
+
+// These are external go-list responses, not substitutes for the wrapper.
+// Listing a steps-only name catches silently excluding an entire package.
+//
+// The inventory carries the MEASURED journeys as well as the small ones, so
+// the shard placement is exercised against a representative distribution:
+// a split that only balances a handful of equal-cost tests proves nothing
+// about a bucket where one journey costs more than the rest together.
+const wrapperDiscoveryScript = "case \" $* \" in *' -list '*) if [ \"${NM_E2E_FAKE_GO_FAIL_MATRIX:-}\" = discovery ]; then exit 23; fi; case \"$*\" in *'./internal/pipeline/steps/...'*) printf 'TestStepOnly\\n' ;; *) printf '%s\\n' 'TestUserJourney' 'TestTargetAdvanceTerminalMergeLiveJourney' 'TestRetainedTargetContinuityLiveJourney' 'TestAttachCommitStatusJourney' 'TestTargetAdvanceAcceptedGapComparisonOutageLiveJourney' 'TestCIReplayOptionCannotBypassMovedComparisonOnRealBinary' 'TestEvalJourney' 'TestCustomGateStructuredFindingsJourney' 'TestCIScopeAutoDiscovery' 'TestDocumentJourneyUnsafeAndStrictRestart' 'TestOmitIntentJourney' 'TestCertificationContentionProductionJourney' ;; esac; exit 0 ;; esac\n"
+
 func runE2EWrapper(t *testing.T, failOnMatrix, explicit string) e2eWrapperResult {
 	t.Helper()
 	return runE2EWrapperWithCap(t, failOnMatrix, explicit, "2")
@@ -380,8 +604,10 @@ func runE2EWrapperWithCap(t *testing.T, failOnMatrix, explicit, cap string) e2eW
 	fakeGo := filepath.Join(binDir, "go")
 	contents := "#!/bin/sh\nprintf '%s\\n' \"$*\" >>\"$NM_E2E_FAKE_GO_LOG\"\n"
 	contents += "case \" $* \" in *' run ./internal/e2edaemon/reapmain.go '*) printf 'cleanup\\n' >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0 ;; esac\n"
+	contents += wrapperDiscoveryScript
 	contents += "printf 'begin:%s\\n' \"$*\" >>\"$NM_E2E_FAKE_GO_EVENTS\"\nstatus=0\n"
-	contents += "case \"$NM_E2E_FAKE_GO_FAIL_MATRIX:$*\" in first:*\"-run ^TestUserJourney$/(claude|codex)$\"*) status=17 ;; terminal:*\"-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$\"*) status=19 ;; esac\n"
+	contents += "case \"$NM_E2E_FAKE_GO_FAIL_MATRIX:$*\" in slow-steps:*'./internal/pipeline/steps/...'*) sleep 2 ;; esac\n"
+	contents += "case \"$NM_E2E_FAKE_GO_FAIL_MATRIX:$*\" in first:*\"-run ^TestUserJourney$/(claude|codex)$\"*) status=17 ;; terminal:*\"-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$\"*) status=19 ;; shard:*\"-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$\"*) status=29 ;; esac\n"
 	contents += "printf 'end:%s:%s\\n' \"$*\" \"$status\" >>\"$NM_E2E_FAKE_GO_EVENTS\"\nexit \"$status\"\n"
 	if err := os.WriteFile(fakeGo, []byte(contents), 0o755); err != nil {
 		t.Fatal(err)

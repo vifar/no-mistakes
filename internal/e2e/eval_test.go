@@ -84,7 +84,11 @@ func TestEvalJourney(t *testing.T) {
 	}
 	t.Logf("eval sets output:\n%s", out)
 
-	out, err = h.Run("eval", "run", "--cases", "all", "--candidate", "claude,model=claude-opus-4-7,effort=high", "--repeats", "1")
+	// The replay runs a whole agent pass over the captured case, so it needs
+	// a budget of its own: the generic command budget is sized for an ordinary
+	// command, and on a loaded runner the replay outlasts it and is killed
+	// with a signal that reads like a product failure.
+	out, err = h.RunInDirWithEnvTimeout(h.WorkDir, nil, 5*time.Minute, "eval", "run", "--cases", "all", "--candidate", "claude,model=claude-opus-4-7,effort=high", "--repeats", "1")
 	if err != nil {
 		report, reportErr := h.Run("eval", "report")
 		t.Fatalf("eval run: %v\n%s\neval report after failure (%v):\n%s", err, out, reportErr, report)

@@ -23,6 +23,14 @@ func (*remoteObservationError) Error() string {
 
 func (e *remoteObservationError) Unwrap() error { return e.cause }
 
+// AddsMeaning reports that this error says more than the cause it wraps: the
+// remote observation did not produce a result. That is a failure in its own
+// right, even when the cause is a command the cancellation stopped, so the
+// pipeline records this run's own outcome rather than the cancellation's.
+//
+// The interface lives in the pipeline package, which owns the attribution.
+func (*remoteObservationError) AddsMeaning() bool { return true }
+
 func RemoteHead(ctx context.Context, dir, remote, branch string) (string, error) {
 	out, err := git.Run(ctx, dir, "ls-remote", "--exit-code", remote, "refs/heads/"+branch)
 	if err != nil {

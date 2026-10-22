@@ -346,7 +346,7 @@ func (m *RunManager) startQueuedRun(runID string, slot *runSlot) (func(), bool) 
 		return slot.Release, true
 	}
 	runCtx, cancel := context.WithCancelCause(context.Background())
-	handle := &runHandle{cancel: cancel, runCtx: runCtx, done: make(chan struct{})}
+	handle := &runHandle{cancel: cancel, runCtx: runCtx, done: make(chan struct{}), workloadDone: make(chan struct{})}
 	m.runs[runID].state = ownershipClaimed
 	m.runs[runID].handle = handle
 	m.wg.Add(1)
@@ -362,14 +362,43 @@ func (m *RunManager) startQueuedRun(runID string, slot *runSlot) (func(), bool) 
 // everything from its row. Setup failures use failRunSetup to preserve a prior
 // cancellation cause; there is no caller left to return them to.
 func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHandle) {
+	// setupErr is the failure that ends the launch. It is settled in the
+	// deferred block, AFTER the workload boundary and the slot release, so a
+	// settlement that waits on storage never holds the run's capacity.
+	var setupErr error
 	defer func() {
 		// launchRun transfers the handle to the run goroutine once the
 		// executor exists; any earlier exit must unregister it here.
+		//
+		// The queued run's workload never started, so it is already over -
+		// but ONLY while this still owns the handle. Once launchRun has
+		// handed the handle to the pipeline goroutine, that goroutine owns the
+		// workload signal, and reporting it here too would close the channel a
+		// second time.
+		if !handle.consumed {
+			// Report the boundary BEFORE the settlement below, which can
+			// still be waiting on storage to record the terminal outcome. A
+			// caller waiting for the run to stop must not be held by that
+			// wait.
+			//
+			// Report the boundary and free the slot BEFORE the settlement
+			// below, which can still be waiting on storage to record the
+			// terminal outcome. A later run must not be held behind a
+			// settlement that waits on storage.
+			//
+			// The CUSTODY is the run's handle and its worktree, not the
+			// slot: both are retained until the outcome is durable.
+			handle.reportWorkloadStopped()
+			slot.Release()
+		}
 		if r := recover(); r != nil {
 			slog.Error("panic launching queued run", "run_id", runID, "panic", r)
-			m.failRunSetup(handle.runCtx, runID, false, fmt.Errorf("internal panic: %v", r))
+			setupErr = fmt.Errorf("internal panic: %v", r)
 		}
 		if !handle.consumed {
+			if setupErr != nil {
+				m.failRunSetup(handle.runCtx, runID, false, setupErr)
+			}
 			if !m.terminalRunSettled(runID) {
 				return
 			}
@@ -380,12 +409,10 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 			m.mu.Unlock()
 			handle.cancel(nil)
 			close(handle.done)
-			// Once consumed, the run goroutine owns the slot and frees it.
-			slot.Release()
 		}
 	}()
 	if cause := context.Cause(handle.runCtx); cause != nil {
-		m.failRunSetup(handle.runCtx, runID, false, cause)
+		setupErr = cause
 		return
 	}
 	run, err := m.db.GetRun(runID)
@@ -394,12 +421,12 @@ func (m *RunManager) launchQueuedRun(runID string, slot *runSlot, handle *runHan
 		if err == nil {
 			err = fmt.Errorf("run is missing")
 		}
-		m.failRunSetup(handle.runCtx, runID, false, fmt.Errorf("queued run is unreadable: %w", err))
+		setupErr = fmt.Errorf("queued run is unreadable: %w", err)
 		return
 	}
 	fail := func(err error) {
 		slog.Error("queued run cannot start", "run_id", runID, "error", err)
-		m.failRunSetup(handle.runCtx, runID, false, err)
+		setupErr = err
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil || repo == nil {
@@ -446,6 +473,11 @@ func (m *RunManager) failRunSetup(ctx context.Context, runID string, started boo
 			}
 		}
 		m.mu.Unlock()
+		// A setup failure is the SETUP's own outcome. The cancellation is
+		// the reason only when the setup error IS the cancellation: a
+		// worktree operation that was interrupted reports the operation's
+		// own failure - the signal it died of - and that failure keeps
+		// its own outcome.
 		cancelled := pipeline.CancellationOnly(setupErr, cause)
 		if cancelled {
 			status, message = types.RunCancelled, cause.Error()
@@ -701,7 +733,13 @@ func (m *RunManager) cancelManagedRun(runID, reason string, events ...*types.Run
 		owned.handle.cancel(&pipeline.RunCancelCause{Reason: reason, Event: event})
 		logEvent()
 	}
-	done := owned.handle.done
+	// The workload signal is what a caller waits for: the run's work is over
+	// once it stops, whatever became of its outcome. A handle that carries no
+	// workload signal falls back to the custody signal.
+	done := owned.handle.workloadDone
+	if done == nil {
+		done = owned.handle.done
+	}
 	m.mu.Unlock()
 	return done, nil
 }
@@ -1050,6 +1088,28 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 	if hasRebaseCoreStep(plan.steps) {
 		executor.SetPRContextGuard(steps.GuardPRContext)
 	}
+	workloadDone := make(chan struct{})
+	workloadOnce := sync.Once{}
+	// reportWorkload runs the slot-release/signal transition exactly once,
+	// whether the run decided its outcome inside Resume or the resume itself
+	// returned.
+	//
+	// A recovered run is NOT marked finishing here. A recovered run that is
+	// parked again - at a gate, or monitoring CI - must keep its ownership
+	// and its recoverability, so the state transition stays where it was:
+	// after Resume returns.
+	reportWorkload := func() {
+		workloadOnce.Do(func() {
+			slot.Release()
+			close(workloadDone)
+		})
+	}
+	executor.SetOnWorkloadDone(func() {
+		// The recovered run's work is decided. Free the slot and tell a
+		// waiting caller that the run stopped, so it is never held hostage to
+		// storage that cannot record the outcome yet.
+		reportWorkload()
+	})
 	// Registration inspects step implementations before the background panic
 	// handler owns this run. Convert a panic here into the same durable failure
 	// path as a registration error instead of crashing daemon recovery.
@@ -1075,7 +1135,7 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		_ = plan.agent.Close()
 		return
 	}
-	m.runs[plan.run.ID] = &managedRun{run: plan.run, state: ownershipRecoveringGate, handle: &runHandle{runCtx: runCtx, cancel: cancel, done: done}, executor: executor}
+	m.runs[plan.run.ID] = &managedRun{run: plan.run, state: ownershipRecoveringGate, handle: &runHandle{runCtx: runCtx, cancel: cancel, done: done, workloadDone: workloadDone}, executor: executor}
 	m.wg.Add(1)
 	m.mu.Unlock()
 
@@ -1086,6 +1146,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		defer slot.Release()
 		defer func() {
 			if recovered := recover(); recovered != nil {
+				// A panic is the recovered run's work ending, so the workload
+				// boundary is reported here too.
+				reportWorkload()
 				errMsg := fmt.Sprintf("internal panic: %v", recovered)
 				if err := pipeline.RecordRunFailure(context.Background(), m.db, plan.run.ID, errMsg, nil, runCtx); err != nil {
 					slog.Error("failed to update recovered run after panic", "run_id", plan.run.ID, "error", err)
@@ -1135,11 +1198,15 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		if resumeErr == nil {
 			resumeErr = executor.Resume(runCtx, plan.run, plan.repo, plan.workDir)
 		}
-		// Mark finishing before releasing: Release dispatches queued runs
-		// synchronously, and a push landing in that window must not treat
+		// The recovered run's work is over UNLESS it parked again for the next
+		// start, in which case the run is still live and still holds its
+		// slot. Report the workload boundary after the parking check, so a
+		// run that is left for recovery is not reported as stopped.
+		//
+		// Mark finishing before the parking check: Release dispatches queued
+		// runs synchronously, and a push landing in that window must not treat
 		// this already-decided run as a claimed one to cancel and wait on.
 		m.markFinishing(plan.run.ID)
-		slot.Release()
 		if pipeline.LeftForRecoveryAtShutdown(resumeErr) {
 			parkedAtShutdown = true
 			slog.Info("recovered run left for recovery after daemon restart", "run_id", plan.run.ID, "reason", resumeErr)
@@ -1157,6 +1224,11 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 				slog.Error("recovered pipeline failed", "run_id", plan.run.ID, "error", err)
 			}
 		}
+		// The recovered run really did stop. Report that to a caller waiting
+		// for the run to stop, so it is never held hostage by storage that
+		// cannot record the terminal outcome yet. The hook already reported it
+		// when the run decided its outcome inside Resume.
+		reportWorkload()
 		fields := telemetry.Fields{
 			"action":      "finished",
 			"trigger":     "recovery",
@@ -2522,11 +2594,34 @@ type queueSpec struct {
 // runHandle is the cancel/done pair registered for a run before its launch
 // setup runs. A queued run's handle is registered when the queue drain picks
 // it, so an abort that arrives during setup still reaches the run.
+//
+// done and workloadDone are two different signals. done means the run's
+// custody is settled: its terminal outcome is durable, or it was deliberately
+// left for the next start's recovery. workloadDone means the run's WORKLOAD
+// has stopped, whatever became of its outcome. Supersession waits for
+// workloadDone so storage cannot hold up a replacement workload. Planned
+// shutdown still waits for custody settlement before acknowledging.
 type runHandle struct {
-	cancel   context.CancelCauseFunc
-	runCtx   context.Context
-	done     chan struct{}
-	consumed bool
+	cancel context.CancelCauseFunc
+	runCtx context.Context
+	done   chan struct{}
+	// workloadDone is closed when the run's workload stops, even when its
+	// terminal outcome could not be written.
+	workloadDone chan struct{}
+	consumed     bool
+}
+
+// reportWorkloadStopped closes the run's workload signal. A handle that
+// carries no signal - one a test built by hand - is already reported.
+func (h *runHandle) reportWorkloadStopped() {
+	if h == nil || h.workloadDone == nil {
+		return
+	}
+	select {
+	case <-h.workloadDone:
+	default:
+		close(h.workloadDone)
+	}
 }
 
 // admitRun decides a new run's admission and, when it does not fit, queues it.
@@ -2569,12 +2664,16 @@ func (m *RunManager) admitRun(run *db.Run, spec queueSpec) (*runSlot, error) {
 func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, globalCfg *config.GlobalConfig, trigger string, skipSteps []types.StepName, slot *runSlot, handle *runHandle) (runID string, err error) {
 	if handle == nil {
 		runCtx, cancel := context.WithCancelCause(context.Background())
-		handle = &runHandle{runCtx: runCtx, cancel: cancel, done: make(chan struct{})}
+		handle = &runHandle{runCtx: runCtx, cancel: cancel, done: make(chan struct{}), workloadDone: make(chan struct{})}
 		m.mu.Lock()
 		m.runs[run.ID] = &managedRun{run: run, state: ownershipClaimed, handle: handle}
 		m.mu.Unlock()
 		defer func() {
 			if !handle.consumed {
+				// The run's workload never started, so it is already over.
+				// Report that before the custody bookkeeping, which can still
+				// be waiting on storage to record the terminal outcome.
+				handle.reportWorkloadStopped()
 				if !m.terminalRunSettled(run.ID) {
 					return
 				}
@@ -2612,6 +2711,22 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 			if r := recover(); r != nil {
 				err = fmt.Errorf("internal panic: %v", r)
 			}
+			// The run's workload never started, so it is already over. Report
+			// the boundary BEFORE the settlement below, which can still be
+			// waiting on storage to record the terminal outcome. A caller
+			// waiting for the run to stop must not be held by that wait.
+			//
+			// Report the boundary and free the slot BEFORE the settlement
+			// below, which can still be waiting on storage to record the
+			// terminal outcome. A later run must not be held behind a
+			// settlement that waits on storage.
+			//
+			// The CUSTODY is the run's handle and its worktree, not the
+			// slot: both are retained until the outcome is durable, so an
+			// unresolved setup failure is still recoverable and still owns
+			// its worktree.
+			handle.reportWorkloadStopped()
+			slot.Release()
 			if err != nil {
 				err = errors.Join(err, m.failRunSetup(setupCtx, run.ID, started, err))
 			}
@@ -2621,7 +2736,6 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 			if cleanupWorktree != nil {
 				cleanupWorktree()
 			}
-			slot.Release()
 		}
 	}()
 
@@ -2792,6 +2906,19 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		executor.SetPRContextGuard(steps.GuardPRContext)
 	}
 	executor.SetSkippedSteps(skipSteps)
+	workloadOnce := sync.Once{}
+	executor.SetOnWorkloadDone(func() {
+		// The run's work is decided. Mark it finishing first, so an abort or
+		// supersession leaves its decided outcome alone, then free the slot
+		// and tell a waiting caller that the run stopped. Doing it here
+		// rather than after Execute returns keeps neither the slot nor the
+		// caller hostage by storage that cannot record the outcome yet.
+		workloadOnce.Do(func() {
+			m.markFinishing(run.ID)
+			slot.Release()
+			close(handle.workloadDone)
+		})
+	})
 	executor.SetOnPRMerged(func(_ context.Context, runID string) {
 		m.wg.Add(1)
 		go func() {
@@ -2855,6 +2982,38 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				}
 				addRunPerformanceSummary(m.db, run.ID, fields)
 				telemetry.Track("run", fields)
+				// A panic is the run's work ending, so the workload boundary
+				// is reported BEFORE the outcome is recorded. The record
+				// below is a SETTLED write, and a store that refuses it
+				// makes the record wait indefinitely - so a caller that
+				// waits for the run to stop, and the run's capacity slot,
+				// must not be held by that wait.
+				//
+				// The CUSTODY is separate: the run keeps its worktree and
+				// its place in the ownership table until the outcome is
+				// durable.
+				//
+				// The cancellation's attribution is recorded FIRST, with a
+				// direct write. It is part of the outcome the run decided,
+				// and a caller that reads the run the moment the boundary
+				// fires must find it. The direct write does not wait on
+				// the store's health: the SETTLED write below does, and a
+				// store that refuses it must not hold the boundary.
+				if err := pipeline.RecordCancellationAttribution(m.db, run.ID, runCtx); err != nil {
+					slog.Error("failed to record cancellation attribution after panic", "run_id", run.ID, "error", err)
+				}
+				workloadOnce.Do(func() {
+					// The SLOT is released and the waiter is signalled
+					// here: the panic ended the run's work, and the
+					// record below can wait on storage.
+					//
+					// The state transition waits for the record: a
+					// cancellation that arrives while the run is
+					// still deciding is still the run's own, and
+					// its attribution must be recorded.
+					slot.Release()
+					close(handle.workloadDone)
+				})
 				verifiedHead, verified := preserveRunHead(m.db, wtDir, run)
 				var dbErr error
 				if verified {
@@ -2867,6 +3026,7 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 				} else if err := executor.ReportSettledRunFailure(context.Background(), run, repo); err != nil {
 					slog.Error("terminal notification failed", "run_id", run.ID, "error", err)
 				}
+				m.markFinishing(run.ID)
 			} else if run.Status == types.RunFailed || run.Status == types.RunCancelled {
 				executor.ReportPublishedHeadFailure(context.Background(), run, repo)
 			}
@@ -2895,7 +3055,12 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 		}()
 
 		err := executor.Execute(runCtx, run, repo, wtDir)
-		// The pipeline's own work is over. Mark the run finishing first, so
+		// The pipeline's own work is over. Report that to a caller waiting for
+		// the run to stop, so it is never held hostage by storage that cannot
+		// record the terminal outcome yet. The hook already reported it when
+		// the run decided its outcome inside Execute.
+		workloadOnce.Do(handle.reportWorkloadStopped)
+		// Mark the run finishing first, so
 		// abort and supersede leave its decided outcome alone even while
 		// Release synchronously dispatches queued runs, then free the slot
 		// before the eval collection below, which is local bookkeeping and

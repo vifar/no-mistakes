@@ -128,6 +128,10 @@ func runGhStatefulPRStub(args []string) int {
 				break
 			}
 		}
+		// The forge answers the endpoints the check-scope code reads. With no
+		// forge file it is an empty forge, which answers the protection
+		// endpoint the way GitHub does for an unprotected branch - Not Found -
+		// and the check-scope code reads that as "no classic protection".
 		answers := forge
 		if answers == nil {
 			answers = &ghForge{}

@@ -3,7 +3,6 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"log/slog"
 	"strings"
 	"testing"
@@ -103,11 +102,7 @@ func TestRunStartURLRefreshFailuresWarnSafelyAndContinueWithOldRegistration(t *t
 			name: "database write failure",
 			setup: func(t *testing.T, p *paths.Paths, _ *db.DB, repo *db.Repo) {
 				gitCmd(t, repo.WorkingPath, "remote", "add", "origin", "https://example.com/owner/project.git")
-				raw, err := sql.Open("sqlite", p.DB())
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer raw.Close()
+				raw := openControlDB(t, p.DB())
 				if _, err := raw.Exec(`CREATE TRIGGER reject_run_start_repo_url_update BEFORE UPDATE OF upstream_url, fork_url ON repos BEGIN SELECT RAISE(FAIL, 'injected URL write failure'); END`); err != nil {
 					t.Fatal(err)
 				}

@@ -262,6 +262,17 @@ func TestTestStep_VerdictPolicy(t *testing.T) {
 			wantScenarioCount: 1,
 		},
 		{
+			name: "no-surface preserves an independent error",
+			output: `{"findings":[{"id":"independent-error","severity":"error","action":"auto-fix","description":"Required workflow job is missing"}],
+				"summary":"","tested":["inspected workflow jobs"],"testing_summary":"CI workflow has no running product to drive","artifacts":[],
+				"scenarios":[{"name":"CI job executes","result":"untested","live":false,"evidence":"","reason":"CI-only change"}],
+				"verdict":"no-surface"}`,
+			wantApproval:      true,
+			wantDescription:   "Required workflow job is missing",
+			wantAction:        types.ActionAutoFix,
+			wantScenarioCount: 1,
+		},
+		{
 			name: "no-surface parks as ask-user",
 			output: `{"findings":[],"summary":"","tested":["inspected .github/workflows/ci.yml"],"testing_summary":"CI workflow has no running product to drive","artifacts":[],
 				"scenarios":[{"name":"Windows git-heavy shard runs the git-backed packages","result":"untested","live":false,"evidence":"","reason":"CI workflow YAML has no running product no-mistakes can drive"}],

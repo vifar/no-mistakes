@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -36,11 +35,7 @@ func TestExecutor_FixResponseRefusedWhenTheDecisionWriteFails(t *testing.T) {
 	// A second connection to the same file faults only decision writes: history
 	// reads and the step lifecycle keep working, which is what isolates the
 	// write from everything else the response path does.
-	raw, err := sql.Open("sqlite", p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
+	raw := openControlDB(t, p.DB())
 	if _, err := raw.Exec(`CREATE TRIGGER deny_decision BEFORE UPDATE OF selected_finding_ids ON step_rounds BEGIN SELECT RAISE(FAIL, 'injected decision write failure'); END;`); err != nil {
 		t.Fatal(err)
 	}

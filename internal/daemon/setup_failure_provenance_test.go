@@ -213,8 +213,15 @@ CREATE TRIGGER fail_queue_terminal BEFORE UPDATE OF status ON saved_queue_runs W
 	mgr.mu.Lock()
 	owned := mgr.runs[run.ID]
 	mgr.mu.Unlock()
-	if owned == nil || owned.handle != handle || mgr.sched.stats().Active != 1 {
+	if owned == nil || owned.handle != handle {
 		t.Fatal("read failure relinquished custody")
+	}
+	if mgr.sched.stats().Active != 0 {
+		// The slot is not the custody: it is freed as soon as the workload
+		// stops, so a later run is not held behind a settlement that waits
+		// on storage. The run's handle is the custody, and it is asserted
+		// above.
+		t.Fatal("read failure kept the slot")
 	}
 	select {
 	case <-handle.done:

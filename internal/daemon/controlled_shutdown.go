@@ -136,8 +136,28 @@ func (m *RunManager) prepareControlledShutdown(ctx context.Context, expected ipc
 		if err != nil {
 			return nil, fmt.Errorf("planned shutdown has unsettled runs: %v", err)
 		}
+		// Only a run THIS daemon owns can be unsettled BY THIS SHUTDOWN. A row
+		// that is merely present in the database - seeded by a caller, left by a
+		// previous instance, or written by another tool - was never cancelled or
+		// awaited here, so refusing to stop for it would leave the daemon
+		// unstoppable while it settles nothing.
+		m.mu.Lock()
+		owned := make(map[string]bool, len(m.runs)+len(preparation.ids)+len(left))
+		for id := range m.runs {
+			owned[id] = true
+		}
+		m.mu.Unlock()
+		for _, id := range preparation.ids {
+			owned[id] = true
+		}
+		for id := range left {
+			owned[id] = true
+		}
 		for _, run := range active {
-			if run.Status != types.RunQueued && !left[run.ID] {
+			if run.Status == types.RunQueued || !owned[run.ID] {
+				continue
+			}
+			if !left[run.ID] {
 				return nil, fmt.Errorf("planned shutdown has unsettled run %s", run.ID)
 			}
 		}

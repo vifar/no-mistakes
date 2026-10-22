@@ -190,11 +190,7 @@ func TestCertifiedWatcherProductionLifecycle(t *testing.T) {
 				t.Fatalf("status HTTP receipts = %v, want pending then success", before)
 			}
 			if strings.HasPrefix(action, "raw-stop") {
-				control, err := sql.Open("sqlite", paths.WithRoot(h.NMHome).DB())
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer control.Close()
+				control := openControlDB(t, paths.WithRoot(h.NMHome).DB())
 				if action == "raw-stop-storage-recovery" {
 					if _, err := control.Exec(`CREATE TRIGGER block_raw_fence BEFORE INSERT ON controlled_shutdown_runs BEGIN SELECT RAISE(FAIL,'temporary raw fence storage outage'); END`); err != nil {
 						t.Fatal(err)

@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
@@ -243,10 +242,7 @@ func TestRecoverOnStartup_ReplacesPublishedSuccessWithFailure(t *testing.T) {
 						}
 					}
 					if scenario == "CI raw rollback crash" {
-						control, err := sql.Open("sqlite", p.DB())
-						if err != nil {
-							t.Fatal(err)
-						}
+						control := openControlDB(t, p.DB())
 						if _, err := control.Exec(`CREATE TRIGGER crash_raw BEFORE INSERT ON controlled_shutdown_runs BEGIN SELECT RAISE(ABORT,'raw write rolled back'); END`); err != nil {
 							t.Fatal(err)
 						}
@@ -724,11 +720,7 @@ func TestRecoveredFailure_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				control, err := sql.Open("sqlite", p.DB())
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer control.Close()
+				control := openControlDB(t, p.DB())
 				if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER recovered_raw BEFORE INSERT ON controlled_shutdown_runs WHEN NEW.reason='daemon shutting down' BEGIN SELECT %s(); END`, function)); err != nil {
 					t.Fatal(err)
 				}

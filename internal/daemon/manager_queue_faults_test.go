@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"os"
 	"os/exec"
@@ -291,11 +290,7 @@ func TestQueueCancellationWriteFailurePreservesOwnership(t *testing.T) {
 			f.waitStarted(running)
 			first := f.push("first")
 			second := f.push("second")
-			raw, err := sql.Open("sqlite", f.p.DB())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer raw.Close()
+			raw := openControlDB(t, f.p.DB())
 			if _, err := raw.Exec(`CREATE TRIGGER reject_cancel BEFORE UPDATE OF status ON runs WHEN NEW.status = 'cancelled' BEGIN SELECT RAISE(FAIL, 'injected cancellation write failure'); END`); err != nil {
 				t.Fatal(err)
 			}
@@ -311,6 +306,7 @@ func TestQueueCancellationWriteFailurePreservesOwnership(t *testing.T) {
 					t.Fatalf("failed claim retained capacity during retry: %+v", st)
 				}
 			}
+			var err error
 			switch action {
 			case "abort", "claim-retry":
 				err = f.mgr.HandleCancel(first)
@@ -359,11 +355,7 @@ func TestQueueSpecReadFailureFailsLaunch(t *testing.T) {
 	running := f.push("holder")
 	f.waitStarted(running)
 	queued := f.push("queued")
-	raw, err := sql.Open("sqlite", f.p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
+	raw := openControlDB(t, f.p.DB())
 	if _, err := raw.Exec(`ALTER TABLE runs DROP COLUMN queue_spec`); err != nil {
 		t.Fatal(err)
 	}
@@ -507,13 +499,7 @@ func TestClaimedCancellationDoesNotRequireDatabaseAccess(t *testing.T) {
 						reason = types.RunCancelReasonSuperseded
 						err = f.mgr.cancelActiveRuns("fault-repo", branch)
 					}
-					if action == "supersede" && fault == "closed" {
-						// The workload must stop without database access, but
-						// supersession cannot acknowledge unreadable settlement.
-						if err == nil || !strings.Contains(err.Error(), "timed out waiting for cancelled runs") {
-							t.Fatalf("supersede with unreadable settlement: %v", err)
-						}
-					} else if err != nil {
+					if err != nil {
 						t.Fatalf("cancel claimed run: %v", err)
 					}
 					f.waitFor("claimed run to stop", func() bool { return f.status(id) == types.RunCancelled })
@@ -524,7 +510,24 @@ func TestClaimedCancellationDoesNotRequireDatabaseAccess(t *testing.T) {
 					if run.Error == nil || *run.Error != reason {
 						t.Fatalf("cancellation reason = %v, want %s", run.Error, reason)
 					}
+					// The workload is over, so the cancellation is
+					// acknowledged. The CUSTODY is separate: the run keeps
+					// its ownership entry until its outcome is durable.
+					//
+					// A CLOSED connection cannot observe the outcome at all,
+					// so the custody is retained. A read-only connection can
+					// observe it, so the custody is released once the outcome
+					// is durable.
 					f.mgr.wg.Wait()
+					f.mgr.mu.Lock()
+					owned := f.mgr.runs[id]
+					f.mgr.mu.Unlock()
+					if fault == "closed" && owned == nil {
+						t.Fatal("unreadable storage released the run's custody")
+					}
+					if fault == "readonly" && owned != nil {
+						t.Fatal("readable durable outcome retained the run's custody")
+					}
 					if st := f.mgr.sched.stats(); st.Active != 0 {
 						t.Fatalf("stopped run retained capacity: %+v", st)
 					}
@@ -789,18 +792,7 @@ func TestClaimedCancelRPCStopsWorkWhenDatabaseReadsFail(t *testing.T) {
 	f := newSchedFixture(t, "daemon:\n  max_concurrent_runs: 1\n")
 	id, _ := f.push("claimed-read-failure")
 	f.waitStarted(id)
-	raw, err := sql.Open("sqlite", f.p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
-	// The daemon can still be finishing a bounded terminal write while the
-	// fixture restores its schema. Wait for that ordinary contention; a busy
-	// restore has not made storage healthy and must never be marked restored.
-	raw.SetMaxOpenConns(1)
-	if _, err := raw.Exec("PRAGMA busy_timeout=5000"); err != nil {
-		t.Fatal(err)
-	}
+	raw := openControlDB(t, f.p.DB())
 	// Change only this disposable database. Both the handler and its guard
 	// now receive a real SQLite read error, rather than a mocked DB result.
 	if _, err := raw.Exec("ALTER TABLE runs RENAME TO unreadable_runs"); err != nil {
@@ -828,7 +820,7 @@ func TestClaimedCancelRPCStopsWorkWhenDatabaseReadsFail(t *testing.T) {
 	if got := f.slots().InUse; got != 1 {
 		t.Fatalf("nested caller changed occupied slots to %d, want 1", got)
 	}
-	err = f.client.CallWithTimeout(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: id}, nil, 3*time.Second)
+	err := f.client.CallWithTimeout(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: id}, nil, 3*time.Second)
 	t.Logf("cancel_run response with database reads unavailable: %v", err)
 	t.Logf("get_slots after cancellation request: %+v", f.slots())
 	if err != nil {
@@ -873,11 +865,7 @@ func queuedRowThenBreakListing(t *testing.T, f *faultFixture) string {
 	if _, err := f.d.MarkRunQueued(run.ID, `{"trigger":"push"}`); err != nil {
 		t.Fatal(err)
 	}
-	raw, err := sql.Open("sqlite", f.p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer raw.Close()
+	raw := openControlDB(t, f.p.DB())
 	if _, err := raw.Exec(`ALTER TABLE runs DROP COLUMN queued_at`); err != nil {
 		t.Fatal(err)
 	}
@@ -994,10 +982,7 @@ func TestFailedQueueRestoreLeavesParkedGatesRecoverable(t *testing.T) {
 	}
 
 	// The database recovers: restore the column the fault dropped.
-	raw, err := sql.Open("sqlite", f.p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
+	raw := openControlDB(t, f.p.DB())
 	if _, err := raw.Exec(`ALTER TABLE runs ADD COLUMN queued_at INTEGER`); err != nil {
 		t.Fatal(err)
 	}

@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -47,11 +46,7 @@ func skipRecoverySteps(t *testing.T, callsPath string, gate types.StepName) []St
 
 func TestExecutor_SkipPersistenceFailureExecutesNoSteps(t *testing.T) {
 	database, p, run, repo := setupTest(t)
-	control, err := sql.Open("sqlite", p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer control.Close()
+	control := openControlDB(t, p.DB())
 	if _, err := control.Exec(`CREATE TRIGGER deny_skip BEFORE UPDATE OF status ON step_results
 		WHEN NEW.status = 'skipped' BEGIN SELECT RAISE(FAIL, 'skip write failed'); END`); err != nil {
 		t.Fatal(err)
@@ -258,11 +253,7 @@ func TestExecutor_SkipRemainingPreservesRequestedSkipsAfterRecovery(t *testing.T
 			if skippedPush == nil || skippedPush.Status != types.StepStatusSkipped {
 				t.Fatal("requested push skip was not durable before recovery")
 			}
-			control, err := sql.Open("sqlite", p.DB())
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer control.Close()
+			control := openControlDB(t, p.DB())
 			if _, err := control.Exec(`CREATE TRIGGER deny_reskip BEFORE UPDATE OF status ON step_results
 				WHEN OLD.status = 'skipped' BEGIN SELECT RAISE(FAIL, 'existing skip rewritten'); END`); err != nil {
 				t.Fatal(err)

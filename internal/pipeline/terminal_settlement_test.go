@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"context"
-	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -171,11 +170,7 @@ func TestTerminalSettlement_RawStorageRecoveryFencesCapturedBatch(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer d.Close()
-	control, err := sql.Open("sqlite", p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer control.Close()
+	control := openControlDB(t, p.DB())
 	if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER raw_storage BEFORE INSERT ON controlled_shutdown_runs WHEN NEW.reason='daemon shutting down' BEGIN SELECT %s(); END`, function)); err != nil {
 		t.Fatal(err)
 	}
@@ -263,11 +258,7 @@ func TestTerminalSettlement_TerminalStorageRecoversWithoutNudge(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	control, err := sql.Open("sqlite", p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer control.Close()
+	control := openControlDB(t, p.DB())
 	if _, err := control.Exec(fmt.Sprintf("CREATE TRIGGER terminal_storage BEFORE UPDATE OF status ON runs WHEN NEW.status='failed' BEGIN SELECT %s(); END", function)); err != nil {
 		t.Fatal(err)
 	}
@@ -350,11 +341,7 @@ func TestTerminalSettlement_CommittedReadbackRecoversWithoutRewriting(t *testing
 		t.Fatal(err)
 	}
 	defer d.Close()
-	control, err := sql.Open("sqlite", p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer control.Close()
+	control := openControlDB(t, p.DB())
 	if _, err := control.Exec("ALTER TABLE runs RENAME TO settled_runs"); err != nil {
 		t.Fatal(err)
 	}
@@ -438,11 +425,7 @@ func TestTerminalSettlement_ClosedOwnerFailsBehindRawStorageFault(t *testing.T) 
 	}
 	defer rawDB.Close()
 	defer healthy.Store(true)
-	control, err := sql.Open("sqlite", p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer control.Close()
+	control := openControlDB(t, p.DB())
 	if _, err := control.Exec(fmt.Sprintf(`CREATE TRIGGER closed_owner_raw BEFORE INSERT ON controlled_shutdown_runs BEGIN SELECT %s(); END`, function)); err != nil {
 		t.Fatal(err)
 	}
