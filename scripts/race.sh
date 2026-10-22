@@ -130,7 +130,12 @@ while (( shard_index < shard_count )); do
     continue
   fi
   # shellcheck disable=SC2086
-  go test -race -count=1 -timeout "${package_timeout_seconds}s" $packages &
+  # Each shard runs at most two test binaries at a time. The shards run
+  # concurrently, so the suite as a whole stays inside the runner's cores
+  # instead of oversubscribing them: three shards at the machine's full
+  # parallelism would run far more test binaries than there are cores, and
+  # every one of them would be slower.
+  go test -race -count=1 -p 2 -timeout "${package_timeout_seconds}s" $packages &
   shard_pids+=("$!")
   shard_statuses+=(0)
   shard_index=$((shard_index + 1))
