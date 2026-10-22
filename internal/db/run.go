@@ -90,7 +90,10 @@ type Run struct {
 	LaunchReceiptClaimedAt     *int64
 	// PRBaseBranch is a per-run override for the integration/PR target branch.
 	// It is set by the operator (axi run --base-branch) and takes precedence
-	// over pr.base_branch in repo config for this run only.
+	// over pr.base_branch in repo config for this run only. A run that
+	// continues a lineage inherits the branch's recorded base branch instead
+	// of resolving the repository default again, so the record is also how a
+	// successor run learns which base the lineage is on.
 	PRBaseBranch *string
 	// PRBaseBranchRequested records a fresh --base-branch request on this run.
 	// An inherited PRBaseBranch does not set it. The guarded retarget path

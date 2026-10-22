@@ -2534,6 +2534,34 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("invalid_pr_base_branch")
 		return "", err
 	}
+	// A run that continues an existing lineage inherits the lineage's base
+	// branch. The caller's own --base-branch always wins for that run; without
+	// one, the branch's established base branch is carried forward onto the
+	// successor's own record instead of being dropped and resolved from the
+	// repository default.
+	//
+	// The inherited value carries no retarget authority: the one-time request
+	// belongs to the run that asked for it. A strict shipping run is excluded
+	// because it persists its own pinned target at launch and resolves its
+	// base from that pin; it neither inherits nor records a lineage base
+	// branch, so its comparison identity is exactly what it always was.
+	if storedPRBaseBranch == "" && !prBaseBranchRequested && shippingPin == nil {
+		lineageBase, err := m.lineagePRBaseBranch(repo.ID, branch)
+		if err != nil {
+			trackStartFailure("read_lineage_pr_base_branch")
+			return "", fmt.Errorf("read lineage PR base branch: %w", err)
+		}
+		if lineageBase != "" {
+			// A recorded base branch that cannot be carried is refused
+			// visibly instead of being replaced by the repository default.
+			normalized, err := normalizeRunPRBaseBranch(lineageBase)
+			if err != nil {
+				trackStartFailure("invalid_lineage_pr_base_branch")
+				return "", fmt.Errorf("lineage PR base branch %q cannot be inherited: %w", lineageBase, err)
+			}
+			storedPRBaseBranch = normalized
+		}
+	}
 	// The caller-side omit decision is the OR of the explicit per-run request
 	// and the operator's global tighten-only default. It is stamped here, at
 	// creation, and can only reduce publication: the repository's trusted

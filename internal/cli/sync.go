@@ -600,6 +600,9 @@ func branchSyncField(state branchsync.State) toON.Field {
 		{Key: "pushed_at", Value: state.Pipeline.PushedAt},
 		{Key: "push_generation", Value: state.Pipeline.PushGeneration},
 	}
+	if state.Pipeline.PRBaseBranch != "" {
+		pipeline = append(pipeline, toON.Field{Key: "pr_base_branch", Value: state.Pipeline.PRBaseBranch})
+	}
 	target := toON.NewObject(
 		toON.Field{Key: "kind", Value: state.Target.Kind},
 		toON.Field{Key: "remote", Value: state.Target.Remote},

@@ -85,3 +85,18 @@ func TestConflictingActiveRunPRBaseBranch_RefusesWhenActiveRunHasNoOverride(t *t
 		t.Fatalf("error = %v, want it to name the active run", err)
 	}
 }
+
+// Reattaching to an active run keeps that run's base branch: the reattach
+// reuses the run, so the run's own record carries the base forward untouched.
+func TestReattachKeepsTheActiveRunsBaseBranch(t *testing.T) {
+	t.Parallel()
+	stored := "develop"
+	run := &ipc.RunInfo{ID: "run-1", PRBaseBranch: &stored}
+	// Omitting --base-branch reattaches and keeps the stored target.
+	if err := conflictingActiveRunPRBaseBranch(run, ""); err != nil {
+		t.Fatalf("reattach without --base-branch must keep the run's base branch: %v", err)
+	}
+	if got := *run.PRBaseBranch; got != "develop" {
+		t.Fatalf("active run base branch = %q, want develop", got)
+	}
+}

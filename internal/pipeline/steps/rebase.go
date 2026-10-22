@@ -260,7 +260,13 @@ func forcePushRebaseTargets(branch, defaultBranch string) []string {
 
 // effectivePRBaseBranch resolves the integration and change-scoping base for
 // pipeline steps. Strict runs use their persisted target. For ordinary runs,
-// per-run overrides win over repo config, then the repository default applies.
+// the run's own recorded base branch wins over repo config, then the
+// repository default applies.
+//
+// The recorded base branch is the run's own PRBaseBranch, whether the
+// operator requested it for this run or the run inherited it from the
+// lineage it continues. A run that carries the value resolves it from that
+// record, never from a fallback.
 func effectivePRBaseBranch(sctx *pipeline.StepContext) string {
 	// Strict runs persist their effective target at launch; later config cannot
 	// change comparison identity while the native pipeline owns the run.
@@ -274,9 +280,27 @@ func effectivePRBaseBranch(sctx *pipeline.StepContext) string {
 		defaultBranch = strings.TrimSpace(sctx.Config.PR.BaseBranch)
 	}
 	if defaultBranch == "" {
-		defaultBranch = "main"
+		defaultBranch = fallbackPRBaseBranch
+		recordPRBaseBranchFallback(sctx, defaultBranch)
 	}
 	return defaultBranch
+}
+
+// fallbackPRBaseBranch is the last-resort base branch for a repository whose
+// own default branch could not be determined. It is a guess about the forge's
+// naming, not a known branch, so reaching it is recorded rather than applied
+// silently.
+const fallbackPRBaseBranch = "main"
+
+// recordPRBaseBranchFallback records that the base branch was guessed rather
+// than resolved. Reaching the literal means the run recorded no base branch
+// AND the repository default branch was unknown, so the run's own log says so
+// instead of the guess passing for a deliberate target.
+func recordPRBaseBranchFallback(sctx *pipeline.StepContext, fallback string) {
+	if sctx == nil || sctx.Log == nil {
+		return
+	}
+	sctx.Log(fmt.Sprintf("warning: no PR base branch was recorded for this run and the repository default branch is unknown; falling back to %q", fallback))
 }
 
 // detectBundledLocalDefaultCommits returns a blocking finding when the gated

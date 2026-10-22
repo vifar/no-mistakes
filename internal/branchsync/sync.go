@@ -104,6 +104,15 @@ type PipelineState struct {
 	PushedHead     string
 	PushedAt       int64
 	PushGeneration int64
+	// PRBaseBranch is the base branch the branch's lineage is on: the
+	// per-run base branch the lineage recorded, whether the operator
+	// requested it for that run or a later run of the same lineage inherited
+	// it. It is the base the successor run will target, so an operator
+	// reading a recovery handoff sees the review's subject instead of
+	// guessing it from the repository default. Empty when the lineage
+	// recorded none, in which case the repository's own default branch is
+	// the target.
+	PRBaseBranch string
 }
 
 type TargetState struct {
@@ -122,6 +131,19 @@ type RemoteState struct {
 type NextAction struct {
 	Code    string
 	Command string
+}
+
+// lineagePRBaseBranch returns the base branch the run's lineage recorded, or
+// "" when the run recorded none.
+//
+// Only the per-run override is a lineage base branch. A strict shipping run
+// persists its own pinned target at launch and resolves its base from that
+// pin, so the pin is not reported as a lineage base branch.
+func lineagePRBaseBranch(run *db.Run) string {
+	if run == nil || run.PRBaseBranch == nil {
+		return ""
+	}
+	return strings.TrimSpace(*run.PRBaseBranch)
 }
 
 // RecoveryEvidence describes the exact preservation proof behind a recovery
@@ -2098,6 +2120,7 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 	state.Pipeline = PipelineState{
 		RunID: run.ID, Status: string(run.Status), SubmittedHead: ptr(run.SubmittedHeadSHA), CurrentHead: run.HeadSHA,
 		PushedHead: ptr(run.LastPushedSHA), PushedAt: value(run.LastPushedAt), PushGeneration: value(run.PushGeneration),
+		PRBaseBranch: lineagePRBaseBranch(run),
 	}
 	state.PRState = normalizePRState(run.PRState)
 	if run.Shipping != nil && run.Shipping.Mode == types.ShippingImmutableSource {
