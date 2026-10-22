@@ -117,6 +117,10 @@ func Resolve(env []string, name string, baseDir string) (path string, hasPath bo
 		if !filepath.IsAbs(dir) {
 			dir = filepath.Join(baseDir, dir)
 		}
+		dir, err := filepath.Abs(dir)
+		if err != nil {
+			continue
+		}
 		for _, candidateName := range candidates {
 			candidate := filepath.Join(dir, candidateName)
 			if fi, err := os.Stat(candidate); err == nil && Usable(candidate, fi) {

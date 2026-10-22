@@ -94,3 +94,34 @@ func TestResolveFindsTheProgram(t *testing.T) {
 		t.Fatal("a file without the executable bit was resolved")
 	}
 }
+
+func TestResolveReturnsAbsolutePaths(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	name := "git"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	for _, tc := range []struct {
+		name, baseDir, path, directory string
+	}{
+		{"current", ".", ".", "."},
+		{"empty", "", ".", "."},
+		{"relative", "repo", "bin", filepath.Join("repo", "bin")},
+		{"absolute", root, "bin", "bin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.MkdirAll(tc.directory, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			want := filepath.Join(root, tc.directory, name)
+			if err := os.WriteFile(want, []byte("fixture"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			got, hasPath, found := Resolve([]string{"PATH=" + tc.path}, "git", tc.baseDir)
+			if !hasPath || !found || got != want {
+				t.Fatalf("resolve = %q, hasPath=%v, found=%v; want %q", got, hasPath, found, want)
+			}
+		})
+	}
+}
