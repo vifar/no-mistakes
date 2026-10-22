@@ -345,6 +345,25 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 			return pipeline.PRContextDecision{}, err
 		}
 	}
+	// A completed REBASE also moves HEAD in the same window, and it REWRITES
+	// the head rather than extending it: the same logical changes land on a
+	// new base, so the new head is not a descendant of the one the receipt
+	// names. The proof above cannot apply - it is an ancestry proof, and it
+	// requires the recorded commit edges a fix round leaves behind.
+	//
+	// The proof here is the run's OWN record: the Rebase step completed, and
+	// the head it produced is the run's head. The PR identity, the target and
+	// the source must be unchanged, so only the head the run itself rewrote is
+	// accepted, and the receipt follows it instead of the run refusing its
+	// own rebase as an unexplained comparison change.
+	if targetChanged && eligible && previous.LocalHeadSHA != candidate.LocalHeadSHA &&
+		sctx.PRContextAfterStep && step == types.StepRebase && sctx.PRContextRebaseCompleted &&
+		sameRewindIdentity(previous, candidate) && candidate.LocalHeadSHA == sctx.Run.HeadSHA {
+		previous, err = attributeRebasedHead(sctx, previous, candidate)
+		if err != nil {
+			return pipeline.PRContextDecision{}, err
+		}
+	}
 	if targetChanged && !(freshRetarget && previous.TargetBranch != candidate.TargetBranch) && eligible {
 		_, bindErr := classifyTargetAdvance(sctx, step, selection, previous, candidate, observedSource)
 		if bindErr != nil {
@@ -382,6 +401,21 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 		}
 		if step == types.StepPush && previous.LocalHeadSHA == localHead &&
 			candidate.ForgeHeadSHA == localHead {
+			forward = true
+		}
+		// A completed Rebase REWRITES the head: the same logical changes
+		// land on a new base, so the new head is not a descendant of the one
+		// it replaces. The ancestry proof above therefore cannot apply to a
+		// rebase, and without a path of its own the run refuses ITS OWN
+		// rebase as an unexplained comparison change - and a fresh run would
+		// rebase again and die the same way.
+		//
+		// The proof here is the run's own record, not the commit graph: the
+		// Rebase step completed, and the head it produced is the run's head.
+		// The PR identity, the target, and the source must be unchanged, so
+		// only the head the run itself rewrote is accepted.
+		if step == types.StepRebase && sctx.PRContextRebaseCompleted &&
+			previous.LocalHeadSHA != localHead && sameRewindIdentity(previous, candidate) {
 			forward = true
 		}
 	}

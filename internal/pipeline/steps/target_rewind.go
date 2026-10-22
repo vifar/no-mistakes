@@ -145,6 +145,42 @@ func attributeTargetAdvanceHead(c *pipeline.StepContext, previous *db.PRContext,
 	return c.DB.GetRunPRContext(c.Run.ID)
 }
 
+// attributeRebasedHead attributes a head move to the run's own completed
+// Rebase step.
+//
+// A rebase REWRITES the head: the same logical changes land on a new base, so
+// the new head is not a descendant of the one it replaces and the recorded
+// commit edges of a fix round do not exist. The proof is therefore the run's
+// own durable record rather than the commit graph:
+//
+//   - the Rebase step completed (the caller proves it), and
+//   - the head it produced is the run's recorded head, and
+//   - the PR identity, the target and the source are unchanged, so only the
+//     head the run itself rewrote is accepted.
+//
+// The receipt then follows the rebased head, so the run's own rebase is not
+// refused as an unexplained comparison change - which would otherwise strand
+// every run on a branch that is behind its target.
+func attributeRebasedHead(c *pipeline.StepContext, previous *db.PRContext, candidate db.PRContextCandidate) (*db.PRContext, error) {
+	if c == nil || c.Run == nil {
+		return nil, fmt.Errorf("rebased head attribution requires a run")
+	}
+	if candidate.LocalHeadSHA == "" || candidate.LocalHeadSHA != c.Run.HeadSHA {
+		return nil, fmt.Errorf("rebased head is not the run's own head")
+	}
+	// The comparison is recomputed against the rebased head, so the receipt's
+	// merge base and diff digest describe the head the run actually carries.
+	own, err := prComparisonAtTarget(c, previous.TargetBranch, previous.TargetSHA, candidate.LocalHeadSHA)
+	if err != nil {
+		return nil, err
+	}
+	own.PRURL, own.SourceRepo, own.SourceBranch, own.ForgeHeadSHA = previous.PRURL, previous.SourceRepo, previous.SourceBranch, previous.ForgeHeadSHA
+	if _, err := c.DB.AdvanceRunPRContext(c.Run.ID, own); err != nil {
+		return nil, err
+	}
+	return c.DB.GetRunPRContext(c.Run.ID)
+}
+
 func classifyTargetAdvance(c *pipeline.StepContext, step types.StepName, selection pipeline.PRTargetSelection, previous *db.PRContext, candidate db.PRContextCandidate, source *string) (db.PRContextBindResult, error) {
 	refusal := func(cause error) (db.PRContextBindResult, error) {
 		return db.PRContextBindResult{}, fmt.Errorf("PR comparison changed after rebase; start a new run for the current target and head: %w", cause)
