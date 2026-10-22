@@ -315,3 +315,56 @@ func TestContextGitHelpersUseTheSuppliedEnvironment(t *testing.T) {
 		}
 	}
 }
+
+func TestFindMainRepoRootUsesCommandDirectoryPATH(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix forwarding script")
+	}
+	realGit, err := testgit.RealGit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, layout := range []string{"regular", "core worktree", "toplevel fallback"} {
+		t.Run(layout, func(t *testing.T) {
+			repo := initTestRepo(t)
+			if layout != "regular" {
+				metadata := filepath.Join(t.TempDir(), "metadata")
+				if err := os.Rename(filepath.Join(repo, ".git"), metadata); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(repo, ".git"), []byte("gitdir: "+metadata+"\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				if layout == "core worktree" {
+					run(t, repo, "git", "config", "core.worktree", repo)
+				}
+			}
+			bin := filepath.Join(repo, "bin")
+			if err := os.Mkdir(bin, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ENV_GIT_LOG\"\nexec \"$ENV_REAL_GIT\" \"$@\"\n"
+			if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			log := filepath.Join(t.TempDir(), "calls")
+			t.Setenv("ENV_GIT_LOG", log)
+			t.Setenv("ENV_REAL_GIT", realGit)
+			t.Chdir(t.TempDir())
+			t.Setenv("PATH", "bin"+string(os.PathListSeparator)+os.Getenv("PATH"))
+			got, err := FindMainRepoRoot(repo)
+			want, resolveErr := filepath.EvalSymlinks(repo)
+			if err != nil || resolveErr != nil || got != want {
+				t.Fatalf("main root = %q, %v; want %q (%v)", got, err, want, resolveErr)
+			}
+			calls, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatalf("command-directory Git was not used: %v", err)
+			}
+			wantCalls := map[string]int{"regular": 1, "core worktree": 2, "toplevel fallback": 3}[layout]
+			if strings.Count(string(calls), "\n") != wantCalls {
+				t.Fatalf("discovery did not consistently use command-directory Git: %q", calls)
+			}
+		})
+	}
+}

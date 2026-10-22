@@ -611,9 +611,7 @@ func FindMainRepoRoot(path string) (string, error) {
 	}
 
 	// Resolve the git common dir.
-	commonDirCmd := exec.Command("git", "rev-parse", "--git-common-dir")
-	commonDirCmd.Dir = abs
-	winproc.Harden(commonDirCmd)
+	commonDirCmd := gitCommand(context.Background(), abs, nil, "rev-parse", "--git-common-dir")
 	commonDirOut, err := commonDirCmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s", abs)
@@ -634,8 +632,7 @@ func FindMainRepoRoot(path string) (string, error) {
 	// itself for its core.worktree, which git writes when it absorbs a
 	// submodule's git dir. The value is typically relative (e.g.
 	// "../../../sub"); resolve it against the common dir.
-	worktreeCmd := exec.Command("git", "--git-dir", commonDir, "config", "--get", "core.worktree")
-	winproc.Harden(worktreeCmd)
+	worktreeCmd := gitCommand(context.Background(), abs, nil, "--git-dir", commonDir, "config", "--get", "core.worktree")
 	if worktreeOut, err := worktreeCmd.Output(); err == nil {
 		worktree := strings.TrimSpace(string(worktreeOut))
 		if worktree != "" {
@@ -648,9 +645,7 @@ func FindMainRepoRoot(path string) (string, error) {
 
 	// Branch 3: exotic GIT_DIR without a usable core.worktree. Defer to
 	// `git rev-parse --show-toplevel` from the original path.
-	topCmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	topCmd.Dir = abs
-	winproc.Harden(topCmd)
+	topCmd := gitCommand(context.Background(), abs, nil, "rev-parse", "--show-toplevel")
 	topOut, err := topCmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s", abs)

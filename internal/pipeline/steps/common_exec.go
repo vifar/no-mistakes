@@ -124,22 +124,25 @@ func stepCmd(sctx *pipeline.StepContext, name string, args ...string) *exec.Cmd 
 }
 
 func stepCmdContext(sctx *pipeline.StepContext, ctx context.Context, name string, args ...string) *exec.Cmd {
+	env := stepEnvironment(sctx)
+	lookupEnv := env
+	if lookupEnv == nil {
+		lookupEnv = os.Environ()
+	}
 	resolved := name
 	missingFromPath := false
-	if len(sctx.Env) > 0 && !hasExecutablePathSeparator(name) {
-		if candidate := findInCustomPath(sctx.WorkDir, sctx.Env, name); candidate != "" {
+	if !hasExecutablePathSeparator(name) {
+		if candidate := findInCustomPath(sctx.WorkDir, lookupEnv, name); candidate != "" {
 			resolved = candidate
-		} else if _, ok := envValue(sctx.Env, "PATH"); ok {
-			resolved = missingFromCustomPath(sctx.Env, name)
+		} else if _, ok := execpath.Value(lookupEnv, "PATH"); ok {
+			resolved = missingFromCustomPath(lookupEnv, name)
 			missingFromPath = true
 		}
 	}
 	cmd := exec.CommandContext(ctx, resolved, args...)
 	cmd.Dir = sctx.WorkDir
 	winproc.Harden(cmd)
-	if env := stepEnvironment(sctx); env != nil {
-		cmd.Env = env
-	}
+	cmd.Env = env
 	if missingFromPath {
 		cmd.Err = &exec.Error{Name: name, Err: exec.ErrNotFound}
 	}
@@ -259,16 +262,13 @@ func stepExecutableAvailable(sctx *pipeline.StepContext, name string) bool {
 		fi, err := os.Stat(candidate)
 		return err == nil && pathCandidateUsable(runtime.GOOS, candidate, fi)
 	}
-	if len(sctx.Env) == 0 {
-		_, err := exec.LookPath(name)
-		return err == nil
+	env := stepEnvironment(sctx)
+	if env == nil {
+		env = os.Environ()
 	}
-	if candidate := findInCustomPath(sctx.WorkDir, sctx.Env, name); candidate != "" {
-		return true
-	}
-	_, ok := envValue(sctx.Env, "PATH")
-	if ok {
-		return false
+	_, hasPath, found := execpath.Resolve(env, name, sctx.WorkDir)
+	if hasPath {
+		return found
 	}
 	_, err := exec.LookPath(name)
 	return err == nil
