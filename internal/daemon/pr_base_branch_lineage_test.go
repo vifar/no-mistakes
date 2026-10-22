@@ -528,3 +528,62 @@ func TestReplacementLineageIgnoresStrictAndEmptyRecords(t *testing.T) {
 		})
 	}
 }
+
+// Issue #153: the selected legacy run has no base of its own. The public
+// rerun handler must use the older ordinary lineage record, then let a fresh
+// request move the lineage without granting later successors retarget authority.
+func TestLegacyRerunAndReplacementKeepTheLatestRequestedBase(t *testing.T) {
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+	repo, head := lineageRepo(t, p, d, "legacy-rerun-latest-base")
+	for _, base := range []string{"develop", ""} {
+		run, err := d.InsertRunWithIntent(repo.ID, "epic/feature", head, head, nil, base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := d.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runs, err := d.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := runs[0]
+	if legacy.PRBaseBranch != nil {
+		t.Fatal("selected legacy record must have no base")
+	}
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var rerun ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{
+		RepoID: repo.ID, Branch: "epic/feature", PreviousRunID: legacy.ID,
+	}, &rerun); err != nil {
+		t.Fatal(err)
+	}
+	continued := waitForRunTerminalState(t, d, rerun.RunID)
+	if continued.PRBaseBranch == nil || *continued.PRBaseBranch != "develop" || continued.PRBaseBranchRequested {
+		t.Fatalf("legacy rerun: base=%v requested=%v", continued.PRBaseBranch, continued.PRBaseBranchRequested)
+	}
+	t.Logf("persisted legacy rerun: selected_base=null successor_base=%q retarget_requested=%v", *continued.PRBaseBranch, continued.PRBaseBranchRequested)
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/release/1.x")
+	for i, requested := range []string{"release/1.x", ""} {
+		next := advanceLineage(t, repo, []string{"fresh-base.txt", "inherited-base.txt"}[i])
+		var result ipc.PushReceivedResult
+		if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{
+			Gate: p.RepoDir(repo.ID), Ref: "refs/heads/epic/feature", Old: head, New: next, PRBaseBranch: requested,
+		}, &result); err != nil {
+			t.Fatal(err)
+		}
+		run := waitForRunTerminalState(t, d, result.RunID)
+		if run.PRBaseBranch == nil || *run.PRBaseBranch != "release/1.x" || run.PRBaseBranchRequested != (requested != "") {
+			t.Fatalf("successor after request %q: base=%v requested=%v", requested, run.PRBaseBranch, run.PRBaseBranchRequested)
+		}
+		t.Logf("persisted successor: caller_base=%q recorded_base=%q retarget_requested=%v", requested, *run.PRBaseBranch, run.PRBaseBranchRequested)
+		head = next
+	}
+}
