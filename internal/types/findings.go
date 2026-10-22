@@ -750,6 +750,19 @@ func NoSurfaceTestFinding(scenarios []TestScenario) Finding {
 	}
 }
 
+// IsNoSurfaceTestAcknowledgment reports whether a no-surface Test step can be
+// released by the human's acknowledgement.
+//
+// The canonical acknowledgement must be present. Beside it, another finding
+// that ASKS - an ask-user at warning severity - is the SAME question: the
+// agent raising "proceed without live validation?" in its own words, which
+// the canonical finding already asks. It does not make the step harder to
+// release, and the acknowledgement releases it.
+//
+// A finding that REPORTS - an error, or an auto-fixable defect - is a
+// different thing entirely. It is preserved, and it is not acknowledgeable:
+// the fix round has to repair it first. A no-surface verdict says there is
+// nothing to drive live, not that there is nothing wrong.
 func IsNoSurfaceTestAcknowledgment(findings Findings) bool {
 	if findings.Verdict != TestVerdictNoSurface || !NoLiveExercisableScenarios(findings.Scenarios) || findings.UnvalidatedSinceSHA != "" {
 		return false
@@ -760,7 +773,7 @@ func IsNoSurfaceTestAcknowledgment(findings Findings) bool {
 		}
 	}
 	want := NoSurfaceTestFinding(findings.Scenarios)
-	count := 0
+	canonical := 0
 	for _, item := range findings.Items {
 		if item.ID == FindingIDTestAgentTimeout || item.ID == FindingIDTestAgentUnvalidatedWork || item.Category == FindingCategoryTestCommand {
 			return false
@@ -768,11 +781,20 @@ func IsNoSurfaceTestAcknowledgment(findings Findings) bool {
 		if item.ActionOrDefault() == ActionNoOp {
 			continue
 		}
-		item.ID = ""
-		if item != want {
-			return false
+		probe := item
+		probe.ID = ""
+		if probe == want {
+			canonical++
+			continue
 		}
-		count++
+		if item.ActionOrDefault() == ActionAskUser && item.Severity == FindingSeverityWarning {
+			// The same question, asked again. The acknowledgement
+			// answers it.
+			continue
+		}
+		// A real finding. It is preserved, and the step waits for the
+		// fix round to repair it.
+		return false
 	}
-	return count == 1
+	return canonical == 1
 }

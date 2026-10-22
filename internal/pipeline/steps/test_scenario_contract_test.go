@@ -558,9 +558,13 @@ const noSurfaceWithDuplicateAcknowledgementFindingsJSON = `{
   "verdict": "no-surface"
 }`
 
-// TestTestStep_NoSurfaceAcknowledgementIsReleasable proves the step carries
-// the ONE acknowledgement the strict path can release, even when the agent
-// raised the same question in a finding of its own.
+// TestTestStep_NoSurfaceAcknowledgementIsReleasable proves the step is
+// releasable even when the agent raised the same question in a finding of
+// its own: the acknowledgement answers both.
+//
+// A finding that REPORTS is a different thing. It is preserved, and the step
+// waits for the fix round to repair it - a no-surface verdict says there is
+// nothing to drive live, not that there is nothing wrong.
 func TestTestStep_NoSurfaceAcknowledgementIsReleasable(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, _ := setupGitRepo(t)
