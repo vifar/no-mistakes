@@ -47,6 +47,11 @@ var refuseStops atomic.Bool
 // errRefusedStop is the refusal a stopped command reports.
 var errRefusedStop = errors.New("operation not permitted")
 
+// cancelRefusalPrefix is the standard library's report of a REFUSED stop. It
+// wraps the refusal the cancel hook returned, so the text is the only way to
+// recognise it: the wrapper type is unexported.
+const cancelRefusalPrefix = "exec: canceling Cmd"
+
 // CancelledExitError is the exit of a subprocess that THIS command's context
 // stopped.
 //
