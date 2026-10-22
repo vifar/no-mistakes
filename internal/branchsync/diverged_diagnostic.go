@@ -265,7 +265,13 @@ func patchIdentityDiagnostic(ctx context.Context, dir, local, preserved string) 
 	// rename, the other as a deletion plus an addition - and the same change
 	// gets two different identities. That is a false negative about
 	// rewritten work, which is the one thing this diagnostic must not do.
-	stream, err := git.Run(ctx, dir, "log", "--format=commit %H", "-p", "-M", "--no-merges", "--no-ext-diff",
+	//
+	// Text conversion is refused EXPLICITLY for the same reason. `log -p`
+	// applies a configured textconv filter by default while the local
+	// measurement does not, so a file with such a filter would be measured
+	// as its displayed content on one side and as its stored content on the
+	// other - two identities for one change, and another false negative.
+	stream, err := git.Run(ctx, dir, "log", "--format=commit %H", "-p", "-M", "--no-textconv", "--no-merges", "--no-ext-diff",
 		"--max-count="+strconv.Itoa(divergencePatchScanLimit), preserved, "^"+local)
 	if err != nil {
 		evidence.Status = patchIdentityIncomplete
@@ -322,6 +328,11 @@ func shortCommit(ctx context.Context, dir, commit string) string {
 // renames by default while `git log -p` does, and measuring a renamed file
 // on one side and a deletion plus an addition on the other gives the same
 // change two identities - a false negative about rewritten work.
+//
+// Text conversion is refused EXPLICITLY, for the same reason. `git log -p`
+// applies a configured textconv filter by default, so without this the
+// search side would measure a file as its displayed content while this side
+// measures its stored content.
 func commitPatchIdentity(ctx context.Context, dir, commit string) (string, bool) {
 	if strings.TrimSpace(commit) == "" {
 		return "", false

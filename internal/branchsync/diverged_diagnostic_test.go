@@ -3,6 +3,7 @@ package branchsync
 import (
 	"bytes"
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -226,6 +227,99 @@ func newRenameRecoverFixture(t *testing.T) (*recoverFixture, string) {
 	// does not hold.
 	mustWrite(t, filepath.Join(pipeline, "renamed.txt"), "base\nchanged by the pipeline\n")
 	mustRun(t, pipeline, "commit", "-am", "no-mistakes(review): change the renamed file")
+	preserved := mustRun(t, pipeline, "rev-parse", "HEAD")
+	mustRun(t, pipeline, "push", "--force", "origin", "HEAD:refs/heads/feature/recover")
+
+	database, err := db.Open(filepath.Join(root, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo(local, remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature/recover", submitted, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunHeadSHA(run.ID, preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatusWithVerifiedHead(run.ID, types.RunCancelled, preserved); err != nil {
+		t.Fatal(err)
+	}
+	run, _ = database.GetRun(run.ID)
+	f := &recoverFixture{
+		t: t, ctx: ctx, db: database, repo: repo, run: run,
+		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate},
+		local:   local, gate: gate, remote: remote,
+		base: base, submitted: submitted, preserved: preserved,
+	}
+	fetchPreservedHead(t, f)
+	return f, replay
+}
+
+// newTextconvRecoverFixture models a rewritten commit whose file has a
+// configured textconv filter, which is the second way the two sides of the
+// patch identity comparison used to disagree.
+//
+// Git applies textconv filters by default for `log -p` and not for
+// `diff-tree`, so a file with such a filter was measured as its DISPLAYED
+// content on the search side and as its STORED content on the local side.
+// The same change then got two different identities, and the diagnostic
+// reported no match for work that was provably in the preserved head.
+//
+// It returns the fixture and the commit that carries the replayed change,
+// read straight from the fixture's own history.
+func newTextconvRecoverFixture(t *testing.T) (*recoverFixture, string) {
+	t.Helper()
+	ctx := context.Background()
+	root := t.TempDir()
+	remote := filepath.Join(root, "upstream.git")
+	mustRun(t, root, "init", "--bare", remote)
+
+	// The filter rewrites the file's content, so a measured identity
+	// differs from the stored one.
+	converter := filepath.Join(root, "conv.sh")
+	mustWrite(t, converter, "#!/bin/sh\ncat \"$1\"\necho FILTERED\n")
+	if err := os.Chmod(converter, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	local := filepath.Join(root, "operator")
+	mustRun(t, root, "init", "-b", "main", local)
+	configureIdentity(t, local)
+	mustRun(t, local, "config", "diff.conv.textconv", converter)
+	mustWrite(t, filepath.Join(local, ".gitattributes"), "file.txt diff=conv\n")
+	mustWrite(t, filepath.Join(local, "file.txt"), "stored\n")
+	mustRun(t, local, "add", ".gitattributes", "file.txt")
+	mustRun(t, local, "commit", "-m", "base")
+	base := mustRun(t, local, "rev-parse", "HEAD")
+
+	mustRun(t, local, "checkout", "-b", "feature/recover")
+	mustWrite(t, filepath.Join(local, "file.txt"), "changed\n")
+	mustRun(t, local, "commit", "-am", "operator: change the file")
+	submitted := mustRun(t, local, "rev-parse", "HEAD")
+
+	mustRun(t, local, "checkout", "main")
+	mustWrite(t, filepath.Join(local, "upstream.txt"), "upstream advance\n")
+	mustRun(t, local, "add", "upstream.txt")
+	mustRun(t, local, "commit", "-m", "upstream advance")
+	mustRun(t, local, "checkout", "feature/recover")
+
+	gate := filepath.Join(root, "gate.git")
+	mustRun(t, root, "init", "--bare", gate)
+	mustRun(t, local, "push", gate, "refs/heads/main:refs/heads/main", "refs/heads/feature/recover:refs/heads/feature/recover")
+
+	pipeline := filepath.Join(root, "pipeline")
+	mustRun(t, root, "-c", "core.autocrlf=false", "clone", gate, pipeline)
+	configureIdentity(t, pipeline)
+	mustRun(t, pipeline, "checkout", "feature/recover")
+	mustRun(t, pipeline, "rebase", "origin/main")
+	replay := mustRun(t, pipeline, "rev-parse", "HEAD")
+	mustWrite(t, filepath.Join(pipeline, "file.txt"), "changed\nchanged by the pipeline\n")
+	mustRun(t, pipeline, "commit", "-am", "no-mistakes(review): change the file again")
 	preserved := mustRun(t, pipeline, "rev-parse", "HEAD")
 	mustRun(t, pipeline, "push", "--force", "origin", "HEAD:refs/heads/feature/recover")
 
@@ -590,6 +684,42 @@ func TestRecoverDivergedRefusalFindsRenamedReplay(t *testing.T) {
 	}
 	if strings.Contains(refused.Error, "no commit in the preserved pipeline head carries the same patch identity") {
 		t.Fatalf("refusal reports a false negative about a replayed rename: %q", refused.Error)
+	}
+}
+
+// TestRecoverDivergedRefusalFindsTextconvReplay proves the diagnostic does not
+// report a false negative about rewritten work when the file carries a
+// configured textconv filter.
+//
+// Git applies textconv filters by default for `log -p` and not for
+// `diff-tree`, so the same change was measured as its displayed content on
+// one side and as its stored content on the other, and the replayed change in
+// the preserved head was not recognised.
+func TestRecoverDivergedRefusalFindsTextconvReplay(t *testing.T) {
+	t.Parallel()
+
+	f, replay := newTextconvRecoverFixture(t)
+	if preservedContainsLocalWork(f.ctx, f.local, f.submitted, f.preserved) {
+		t.Fatal("the containment proof held for a pair whose histories are not interchangeable")
+	}
+
+	// The replayed change carries the local head's change, measured with
+	// Git directly and without a textconv filter.
+	localIdentity := shellPatchID(t, f.local, f.submitted)
+	if got := shellPatchID(t, f.local, replay); got != localIdentity {
+		t.Fatalf("the fixture's replay %s does not share the local head's patch identity %s (got %s)", replay, localIdentity, got)
+	}
+
+	refused := f.service.Recover(f.ctx, false)
+	if refused.Recovered || refused.Changed || refused.Safety != "blocked_recover_diverged" {
+		t.Fatalf("recover diverged = %#v", refused)
+	}
+	short := mustRun(t, f.local, "rev-parse", "--short", replay)
+	if !strings.Contains(refused.Error, short) {
+		t.Fatalf("refusal does not name the commit that carries the replayed change %s: %q", short, refused.Error)
+	}
+	if strings.Contains(refused.Error, "no commit in the preserved pipeline head carries the same patch identity") {
+		t.Fatalf("refusal reports a false negative about a replayed change: %q", refused.Error)
 	}
 }
 
