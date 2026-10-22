@@ -1799,6 +1799,35 @@ func listItemMarker(text string) (string, string, bool) {
 	return "", "", false
 }
 
+var renderedGeneratedAttribution = regexp.MustCompile(`(?i)^((?:🤖[ \t]*)?generated[ \t]+with[ \t]+)(.+)$`)
+
+func unwrapAttributionMarkup(text string, emphasis bool) (string, bool) {
+	text = strings.TrimSpace(text)
+	for {
+		if strings.HasPrefix(text, "`") {
+			width := len(text) - len(strings.TrimLeft(text, "`"))
+			endWidth := len(text) - len(strings.TrimRight(text, "`"))
+			if width == endWidth && len(text) > 2*width {
+				return strings.TrimSpace(text[width : len(text)-width]), true
+			}
+		}
+		if !emphasis {
+			return text, false
+		}
+		unwrapped := false
+		for _, marker := range []string{"**", "__", "~~", "*", "_"} {
+			if len(text) > 2*len(marker) && strings.HasPrefix(text, marker) && strings.HasSuffix(text, marker) {
+				text = strings.TrimSpace(text[len(marker) : len(text)-len(marker)])
+				unwrapped = true
+				break
+			}
+		}
+		if !unwrapped {
+			return text, false
+		}
+	}
+}
+
 func normalizeRenderedText(text string) string {
 	mailbox := ""
 	for offset := 0; offset < len(text); {
@@ -1820,6 +1849,7 @@ func normalizeRenderedText(text string) string {
 		}
 		offset = end
 	}
+	literalCode := false
 	for {
 		before := text
 		text = strings.TrimSpace(text)
@@ -1828,26 +1858,33 @@ func normalizeRenderedText(text string) string {
 		}
 		if strings.HasPrefix(text, "<code>") && strings.HasSuffix(text, "</code>") {
 			text = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(text, "<code>"), "</code>"))
+			literalCode = true
 		}
 		if _, rest, ok := listItemMarker(text); ok {
 			text = strings.TrimSpace(rest)
 		}
-		text = strings.TrimSpace(text)
-		text = strings.ReplaceAll(text, "`", "")
-		text = strings.TrimSpace(text)
-		switch {
-		case len(text) >= 4 && strings.HasPrefix(text, "**") && strings.HasSuffix(text, "**"):
-			text = strings.TrimSpace(text[2 : len(text)-2])
-		case len(text) >= 2 && strings.HasPrefix(text, "*") && strings.HasSuffix(text, "*"):
-			text = strings.TrimSpace(text[1 : len(text)-1])
-		case len(text) >= 2 && strings.HasPrefix(text, "_") && strings.HasSuffix(text, "_"):
-			text = strings.TrimSpace(text[1 : len(text)-1])
+		if strings.HasPrefix(text, "`") {
+			width := len(text) - len(strings.TrimLeft(text, "`"))
+			endWidth := len(text) - len(strings.TrimRight(text, "`"))
+			if endWidth >= width && len(text) > 2*width {
+				text = strings.TrimSpace(text[width : len(text)-width])
+				literalCode = true
+			}
 		}
+		var code bool
+		text, code = unwrapAttributionMarkup(text, !literalCode)
+		literalCode = literalCode || code
 		if text == before {
 			break
 		}
 	}
-	text = strings.NewReplacer("**", "", "*", "", "_", "", "~", "").Replace(text)
+	if match := renderedGeneratedAttribution.FindStringSubmatch(text); match != nil {
+		value, _ := unwrapAttributionMarkup(match[2], !literalCode)
+		text = match[1] + value
+	} else if key, value, ok := strings.Cut(text, ":"); ok {
+		value, _ = unwrapAttributionMarkup(value, !literalCode)
+		text = key + ": " + value
+	}
 	if mailbox != "" {
 		text = strings.TrimSpace(text) + " " + mailbox
 	}

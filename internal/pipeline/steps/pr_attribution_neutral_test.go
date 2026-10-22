@@ -171,6 +171,17 @@ func TestPRBodyNeutralizesAttributionAcrossGeneratedSections(t *testing.T) {
 func TestNeutralizeAIAttributionKeepsAHumanTrailer(t *testing.T) {
 	for _, line := range []string{
 		"Co-Authored-By: A Person <person@example.com>",
+		"Co-Authored-By: Open_Code <person@example.com>",
+		"Co-Authored-By: Open*Code <person@example.com>",
+		"Co-Authored-By: Open~Code <person@example.com>",
+		"Co-Authored-By: Open`Code <person@example.com>",
+		"Co-Authored-By: `Open_Code` <person@example.com>",
+		"Co-Authored-By: `_OpenCode_` <person@example.com>",
+		"Co-Authored-By: `**OpenCode**` <person@example.com>",
+		"Co-Authored-By: ``Open`Code`` <person@example.com>",
+		"Assisted-by: Open_Code <person@example.com>",
+		"Generated with Open_Code",
+		"Generated with `_OpenCode_`",
 		"Co-Authored-By: Claude Smith <human@example.com>",
 		"Co-Authored-By: `Claude Smith` <human@example.com>",
 		// The underscore is in the MAILBOX, so the markup removal must
@@ -246,12 +257,13 @@ func TestPRSummaryFiltersAttributionBeforeRendering(t *testing.T) {
 	}
 	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 		for _, source := range []string{"tested", "tested multiline", "tested code span", "summary", "artifact text", "artifact description", "artifact label", "artifact file", "scenario", "finding", "risk", "error"} {
-			for _, human := range []bool{false, true} {
+			for _, identity := range []string{"", "Claude <no_reply@anthropic.com>", "Open_Code <person@example.com>", "Open`Code <person@example.com>", "`_OpenCode_` <person@example.com>"} {
+				human := identity != ""
 				for _, wrapper := range []string{"", "`", "``"} {
-					t.Run(string(provider)+"/"+source+"/"+wrapper+"/"+map[bool]string{false: "AI", true: "human"}[human], func(t *testing.T) {
+					t.Run(string(provider)+"/"+source+"/"+wrapper+"/"+map[bool]string{false: "AI", true: identity}[human], func(t *testing.T) {
 						line := "Co-Authored-By: Codex <code@example.com>"
 						if human {
-							line = "Co-Authored-By: Claude <no_reply@anthropic.com>"
+							line = "Co-Authored-By: " + identity
 						}
 						line = wrapper + line + wrapper
 						findings := types.Findings{}
@@ -320,7 +332,7 @@ func TestPRSummaryFiltersAttributionBeforeRendering(t *testing.T) {
 								// consumer that scans the body for
 								// attribution reads the quote as a claim.
 								published := html.UnescapeString(output)
-								if !strings.Contains(published, "Claude <no_reply@anthropic.com>") {
+								if !strings.Contains(published, identity) {
 									t.Fatalf("human attribution lost from published summary:\n%s", output)
 								}
 								if strings.Contains(published, "Co-Authored-By:") {
