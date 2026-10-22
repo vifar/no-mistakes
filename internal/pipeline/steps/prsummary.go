@@ -1736,7 +1736,7 @@ var renderedBlockTag = regexp.MustCompile(`(?i)</?(?:br|p|div|span|code|pre|li|u
 func lineCarriesAIAttribution(line string) bool {
 	text := html.UnescapeString(line)
 	for _, segment := range renderedBlockTag.Split(text, -1) {
-		if git.IsAIAttributionTrailer(normalizeRenderedText(segment)) {
+		if git.IsAIAttributionTrailer(normalizeRenderedSegment(segment)) {
 			return true
 		}
 	}
@@ -1789,7 +1789,35 @@ func normalizeRenderedText(text string) string {
 			break
 		}
 	}
-	return strings.NewReplacer("**", "", "*", "", "_", "", "~", "").Replace(text)
+	return strings.NewReplacer("**", "", "*", "", "_", "", "~", "", "`", "").Replace(text)
+}
+
+// normalizeRenderedSegment normalizes one part of a rendered line.
+//
+// The MAILBOX is left exactly as it is. The markup removal must not turn a
+// person's address into an AI's: "no_reply@anthropic.com" is a person's
+// address, and without its underscore it is the AI's - so a trailer that
+// names a person would be read as one that names an AI.
+//
+// The markup around the identity is still removed, wherever it sits: the
+// backtick in "Generated with `Codex`" is markup, and the emphasis in
+// "Co-Authored-By: **Codex**" is too.
+func normalizeRenderedSegment(segment string) string {
+	at := strings.LastIndex(segment, "<")
+	if at < 0 {
+		return normalizeRenderedText(segment)
+	}
+	end := strings.Index(segment[at:], ">")
+	if end < 0 {
+		return normalizeRenderedText(segment)
+	}
+	head := normalizeRenderedText(segment[:at])
+	address := segment[at : at+end+1]
+	tail := normalizeRenderedText(segment[at+end+1:])
+	if head != "" {
+		head += " "
+	}
+	return head + address + tail
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {
