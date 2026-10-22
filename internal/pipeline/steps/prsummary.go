@@ -10,6 +10,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1726,7 +1727,7 @@ func renderQuotedAttributionAsLabelledFields(s string) string {
 func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 	s = strings.NewReplacer(acceptedGapsStart, "<!-- no-mistakes:accepted\\-gaps:start -->", acceptedGapsEnd, "<!-- no-mistakes:accepted\\-gaps:end -->").Replace(s)
 	escaped := escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
-	return closingGrammarFor(provider).neutralize(renderQuotedAttributionAsLabelledFields(neutralizeAIAttribution(escaped)))
+	return closingGrammarFor(provider).neutralize(neutralizeAIAttribution(escaped))
 }
 
 // neutralizeAIAttribution replaces recognized AI attribution lines with a notice.

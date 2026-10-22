@@ -18,7 +18,7 @@ import (
 // are the evidence, and they stay.
 func TestPublishedBodyRendersAQuotedCoAuthorAsALabelledField(t *testing.T) {
 	body := "## Testing\n\n```text\nCo-Authored-By: Claude Smith <code@example.com>\n```\n"
-	got := neutralizeAttestationMarkers(scm.ProviderGitHub, body)
+	got := publishedBody(body, scm.ProviderGitHub)
 	if strings.Contains(got, "Co-Authored-By:") {
 		t.Fatalf("the published body carries a raw co-author trailer: %q", got)
 	}
@@ -34,7 +34,7 @@ func TestPublishedBodyRendersAQuotedCoAuthorAsALabelledField(t *testing.T) {
 // published text does not carry it either.
 func TestPublishedBodyDropsTheRobotEmojiFromAQuotedFooter(t *testing.T) {
 	body := "## Testing\n\n```text\n\U0001F916 Generated with A Person <person@example.com>\n```\n"
-	got := neutralizeAttestationMarkers(scm.ProviderGitHub, body)
+	got := publishedBody(body, scm.ProviderGitHub)
 	if strings.Contains(got, "\U0001F916") {
 		t.Fatalf("the published body carries the robot emoji: %q", got)
 	}
@@ -47,11 +47,17 @@ func TestPublishedBodyDropsTheRobotEmojiFromAQuotedFooter(t *testing.T) {
 // neutralization notice, so the body claims nothing at all.
 func TestPublishedBodyStillBreaksAnAIAttribution(t *testing.T) {
 	body := "## Testing\n\n```text\nCo-Authored-By: Codex <bot@example.invalid>\n```\n"
-	got := neutralizeAttestationMarkers(scm.ProviderGitHub, body)
+	got := publishedBody(body, scm.ProviderGitHub)
 	if strings.Contains(got, "Codex") {
 		t.Fatalf("the published body still carries the AI's name: %q", got)
 	}
 	if !strings.Contains(got, "no-mistakes: AI attribution line neutralized") {
 		t.Fatalf("the published body does not say the line was neutralized: %q", got)
 	}
+}
+
+// publishedBody assembles the body the way the pipeline publishes it, so the
+// test measures the text a consumer of the pull request reads.
+func publishedBody(body string, provider scm.Provider) string {
+	return appendGeneratedSectionsToCleanBodyWithinLimit(body, "", "", "", 64*1024, provider)
 }

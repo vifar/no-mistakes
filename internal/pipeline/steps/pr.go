@@ -881,7 +881,18 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 // still shipped three live foreign markers ahead of the real one. Fencing is no
 // defense either - verify.py reads raw text, so a marker inside a ```text block
 // counts exactly the same.
+// appendGeneratedSectionsToCleanBodyWithinLimit assembles the published body
+// and renders a quoted co-author as a labelled field.
+//
+// The rendering is HERE, at the assembly, because this is the one place every
+// published section passes through: the prose, the risk line, the Testing
+// section and the Pipeline section all reach the reader through it, and a
+// consumer that scans the body for attribution scans all of them.
 func appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
+	return renderQuotedAttributionAsLabelledFields(appendGeneratedSectionsToCleanBodyWithinLimitRaw(body, riskLine, testingMD, pipelineMD, maxBytes, provider))
+}
+
+func appendGeneratedSectionsToCleanBodyWithinLimitRaw(body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
 	body = neutralizeAttestationMarkers(provider, body)
 	riskLine = neutralizeAttestationMarkers(provider, riskLine)
 	testingMD = neutralizeAttestationMarkers(provider, testingMD)
