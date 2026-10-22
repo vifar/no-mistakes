@@ -124,19 +124,16 @@ whose newer commit supersedes its older one and makes the older run's result
 worthless. A push to the trunk is a distinct commit that has to be verified, so
 a later push to the trunk does NOT cancel the run in flight.
 
-This matters because the e2e job needs up to 90 minutes and the trunk takes a
-push every few minutes. With the trunk cancelling itself, every run on `main`
-was cancelled before its e2e job could report: the trunk's e2e never had a
-result to be red or green. The trade is runner time: every trunk run remains
-eligible for execution, including runs waiting for an available runner. A verification that never
-completes is not a verification.
+Every trunk run remains eligible for execution, including runs waiting for an
+available runner. This costs runner time but lets each commit finish verification
+even when later pushes arrive before its jobs complete.
 
 The concurrency group includes the event type and uses the PR number for pull
 requests or the unique run ID for pushes and manual dispatches. This keeps PRs
 apart from each other and gives every non-PR run its own group. Disabling
 `cancel-in-progress` alone would still let a newer pending run replace an older
 one in the same group. `workflow_trunk_concurrency_test.go` evaluates the groups
-and cancellation policy against representative events, including three successive
+and cancellation policy against representative events, including successive
 trunk pushes.
 
 ## Runner ownership and recovery

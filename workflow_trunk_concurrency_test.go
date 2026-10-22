@@ -101,9 +101,9 @@ func TestTrunkWorkflowsDoNotCancelTheTrunk(t *testing.T) {
 		t.Run(name+"/group", func(t *testing.T) {
 			pushA := workflowConditionContext{EventName: "push", RunID: "1", Ref: "refs/heads/main"}
 			pushB := workflowConditionContext{EventName: "push", RunID: "2", Ref: "refs/heads/main"}
-			prA := workflowConditionContext{EventName: "pull_request", PRNumber: "138"}
-			prA2 := workflowConditionContext{EventName: "pull_request", PRNumber: "138"}
-			prB := workflowConditionContext{EventName: "pull_request", PRNumber: "139"}
+			prA := workflowConditionContext{EventName: "pull_request", PRNumber: "138", RunID: "3"}
+			prA2 := workflowConditionContext{EventName: "pull_request", PRNumber: "138", RunID: "4"}
+			prB := workflowConditionContext{EventName: "pull_request", PRNumber: "139", RunID: "5"}
 			if got, other := workflowGroupValue(group.Concurrency.Group, pushA), workflowGroupValue(group.Concurrency.Group, pushB); got == other {
 				t.Errorf("%s workflow: two pushes to the trunk share the group %q, so one can cancel the other", name, got)
 			}
