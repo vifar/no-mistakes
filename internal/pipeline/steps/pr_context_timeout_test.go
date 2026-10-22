@@ -106,6 +106,7 @@ func TestIssue100PostReviewAuthTimeoutContinuesTheSameRun(t *testing.T) {
 	if err := app.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
+	enrollExecutorGate(t, app, sc.Repo.ID)
 	ex := pipeline.NewExecutor(sc.DB, app, sc.Config, sc.Agent, []pipeline.Step{review, testStep}, nil)
 	var logs []string
 	ex.SetPRContextGuard(func(c *pipeline.StepContext, step types.StepName) (pipeline.PRContextDecision, error) {
