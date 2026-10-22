@@ -156,10 +156,20 @@ $name"
 
 # Default args match the historical Makefile e2e target; callers may override.
 if [[ "$#" -eq 0 ]]; then
-  # The default suite has one shared 2400s budget, including the journey
-  # matrix. Each worker has its own process-wide test environment, while
-  # daemon slots remain shared.
-  budget_seconds=2400
+  # The default suite has one shared budget, including the journey matrix.
+  # Each worker has its own process-wide test environment, while daemon slots
+  # remain shared.
+  #
+  # The budget is 3600 seconds because the shards are balanced by MEASURED
+  # cost, and a measurement is not a guarantee: the runner's own costs for a
+  # journey differ from the measurement, so the heaviest shard can carry
+  # appreciably more than its measured share. At 2400 seconds the heaviest
+  # shard was cut off mid-journey, and the suite reported a failure that
+  # was really a budget that no longer fitted the work.
+  #
+  # The e2e job's wall has to exceed this budget, because the suite's
+  # phases are sequential: the matrix, the step tests, and then the shards.
+  budget_seconds=3600
   # The remaining bucket is split across parallel shards, each with its own
   # go test process. A single process for the whole bucket outgrew the
   # budget: its slowest journeys plus everything queued behind them exceeded

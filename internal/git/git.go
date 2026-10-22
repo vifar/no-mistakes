@@ -237,6 +237,7 @@ func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEn
 	// standard library's own report, and the shell package's cleanup can
 	// replace it with the child's exit status - so the refusal is recorded
 	// HERE, in the hook that saw it, and not read back from the error.
+	//
 	var refusal atomic.Pointer[error]
 	cancelCommand := cmd.Cancel
 	cmd.Cancel = func() error {
@@ -263,7 +264,8 @@ func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEn
 			switch exit := err.(type) {
 			case *exec.ExitError:
 				// The child produced an exit status. It is the
-				// cancellation's doing only if the stop reached it.
+				// cancellation's doing only if the context's stop
+				// REACHED it.
 				//
 				// A REFUSED stop is the context's doing even when the
 				// child also produced an exit status: the refusal
@@ -271,6 +273,13 @@ func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEn
 				// the shell package's cleanup then killed it. The
 				// refusal is the provenance, and the exit is the
 				// cleanup's.
+				//
+				// A child that had ALREADY gone when the context
+				// reached it was stopped by something else - the
+				// shell package's group termination, most often -
+				// and its exit is its own. The kill the context
+				// attempted found no process to kill, so the
+				// provenance says so.
 				if recorded := refusal.Load(); recorded != nil {
 					err = &CancelledExitError{ExitError: exit, Refused: *recorded}
 				} else if processWasCancelled(exit) {
