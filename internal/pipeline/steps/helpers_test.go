@@ -17,6 +17,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
@@ -497,6 +499,27 @@ func recordReviewApproval(t *testing.T, sctx *pipeline.StepContext, headSHA stri
 	}
 	approved := headSHA
 	sctx.Run.ReviewApprovedHeadSHA = &approved
+}
+
+// enrollExecutorGate creates and enrolls the gate the executor's shared-config
+// guard protects. Every fixture that drives a step through the executor must
+// offer a real gate: the guard refuses a missing gate or a missing
+// shared-config baseline before the step runs, and that refusal is the
+// production behavior the shared-config protection adds. The enrollment
+// mirrors the production one - an isolated bare gate, its hooks isolated, and
+// its shared configuration recorded as the baseline.
+func enrollExecutorGate(t *testing.T, app *paths.Paths, repoID string) {
+	t.Helper()
+	gate := app.RepoDir(repoID)
+	if err := git.InitBare(context.Background(), gate); err != nil {
+		t.Fatalf("init gate %s: %v", gate, err)
+	}
+	if err := git.IsolateHooksPath(context.Background(), gate); err != nil {
+		t.Fatalf("isolate gate hooks %s: %v", gate, err)
+	}
+	if err := git.RecordSharedConfigBaseline(context.Background(), gate); err != nil {
+		t.Fatalf("record shared config baseline %s: %v", gate, err)
+	}
 }
 
 func newTestContextWithDBRecords(t *testing.T, ag agent.Agent, workDir, baseSHA, headSHA string, cmds config.Commands) *pipeline.StepContext {

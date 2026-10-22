@@ -10,8 +10,12 @@ import (
 )
 
 func TestStatusReportsOrphanWithoutAnyRunOrNotification(t *testing.T) {
-	repoDir, p, database, repo := setupAxiQueryRepo(t)
-	run(t, repoDir, "git", "clone", "--bare", repoDir, p.RepoDir(repo.ID))
+	// The shared fixture now enrolls the gate itself: it clones the working
+	// repository into the gate path, isolates the gate's hooks and records the
+	// shared-config baseline. This test must not clone over that gate again.
+	// The enrolled gate already carries refs/heads/main at the working
+	// repository's HEAD, which is the orphaned ref this test reports.
+	repoDir, _, database, repo := setupAxiQueryRepo(t)
 	head, err := git.Run(t.Context(), repoDir, "rev-parse", "HEAD")
 	if err != nil {
 		t.Fatal(err)

@@ -102,6 +102,7 @@ func TestCommitStatus_OrdinaryFailureSerializesPausedSuccess(t *testing.T) {
 	if err := app.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
+	enrollExecutorGate(t, app, sc.Repo.ID)
 	executor := pipeline.NewExecutor(sc.DB, app, sc.Config, sc.Agent, []pipeline.Step{&PushStep{}, ci}, func(event ipc.Event) {
 		if event.Type == ipc.EventStepCompleted && event.StepName != nil && *event.StepName == types.StepCI && event.Status != nil && *event.Status == string(types.StepStatusFailed) {
 			close(stepFailed)
@@ -209,6 +210,7 @@ func TestCommitStatus_TerminalPreparationFailureIsDurable(t *testing.T) {
 				t.Fatal(err)
 			}
 			var terminalEvent string
+			enrollExecutorGate(t, app, sc.Repo.ID)
 			executor := pipeline.NewExecutor(sc.DB, app, sc.Config, sc.Agent, []pipeline.Step{&PushStep{}, ci}, func(event ipc.Event) {
 				if event.Type == ipc.EventRunCompleted && event.Status != nil {
 					terminalEvent = *event.Status
@@ -278,7 +280,9 @@ func TestCommitStatus_ObservationIsNonterminalAndExecutorCompletionSerializesPau
 				defer finishStep()
 				completionDone := make(chan error, 1)
 				completionRun := *sc.Run
-				executor := pipeline.NewExecutor(sc.DB, paths.WithRoot(t.TempDir()), sc.Config, sc.Agent,
+				app := paths.WithRoot(t.TempDir())
+				enrollExecutorGate(t, app, sc.Repo.ID)
+				executor := pipeline.NewExecutor(sc.DB, app, sc.Config, sc.Agent,
 					[]pipeline.Step{&terminalCompletionBarrier{entered: stepEntered, release: stepRelease}}, nil)
 				go func() { completionDone <- executor.Execute(context.Background(), &completionRun, sc.Repo, sc.WorkDir) }()
 				select {
@@ -423,6 +427,7 @@ func TestCommitStatus_LockDeadlineDoesNotBypassPausedSuccess(t *testing.T) {
 	if err := app.EnsureDirs(); err != nil {
 		t.Fatal(err)
 	}
+	enrollExecutorGate(t, app, sc.Repo.ID)
 	executor := pipeline.NewExecutor(sc.DB, app, sc.Config, sc.Agent, []pipeline.Step{&PushStep{}, ci}, func(event ipc.Event) {
 		if event.Type == ipc.EventRunCompleted {
 			terminal <- struct{}{}

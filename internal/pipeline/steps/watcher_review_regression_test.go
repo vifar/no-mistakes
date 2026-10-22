@@ -153,6 +153,7 @@ func TestWatcherStrictProofRequiresExecutedPass(t *testing.T) {
 				if err := app.EnsureDirs(); err != nil {
 					t.Fatal(err)
 				}
+				enrollExecutorGate(t, app, sc.Repo.ID)
 				executor := pipeline.NewExecutor(sc.DB, app, sc.Config, sc.Agent, steps, func(e ipc.Event) {
 					if e.Type == ipc.EventStepCompleted && e.StepName != nil && *e.StepName == gated && e.Status != nil && *e.Status == string(types.StepStatusAwaitingApproval) {
 						gateReady <- struct{}{}
@@ -384,6 +385,7 @@ func TestWatcherTargetRefReadCancellation(t *testing.T) {
 			if err := app.EnsureDirs(); err != nil {
 				t.Fatal(err)
 			}
+			enrollExecutorGate(t, app, sc.Repo.ID)
 			executor := pipeline.NewExecutor(sc.DB, app, sc.Config, sc.Agent, []pipeline.Step{&watcherReporterStep{}, wrapper}, nil)
 			executor.SetForgeContext(&forgecontext.Context{Provider: scm.ProviderGitHub, Host: "github.com"})
 			done := make(chan error, 1)

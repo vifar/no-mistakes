@@ -160,6 +160,7 @@ func TestDocumentConvergenceExecutorJourney(t *testing.T) {
 		t.Fatal(err)
 	}
 	completed := false
+	enrollExecutorGate(t, p, sc.Repo.ID)
 	executor := pipeline.NewExecutor(sc.DB, p, sc.Config, ag, steps, func(event ipc.Event) {
 		if event.Type == ipc.EventRunCompleted && event.Status != nil && *event.Status == string(types.RunCompleted) {
 			completed = true

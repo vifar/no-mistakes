@@ -813,6 +813,7 @@ func TestPipeline_GitHubCommitStatuses(t *testing.T) {
 				t.Fatal(err)
 			}
 			gateReady := make(chan struct{}, 1)
+			enrollExecutorGate(t, appPaths, sctx.Repo.ID)
 			exec := pipeline.NewExecutor(sctx.DB, appPaths, sctx.Config, sctx.Agent, steps, func(event ipc.Event) {
 				if event.Type == ipc.EventStepCompleted && event.StepName != nil && *event.StepName == types.StepTest && event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
 					gateReady <- struct{}{}

@@ -88,6 +88,7 @@ func TestCIStepLiveRetargetWithNoClaimsWithholdsReadiness(t *testing.T) {
 	review := contractSequenceStep{types.StepReview, func(c *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 		return &pipeline.StepOutcome{Findings: `{"findings":[],"summary":"clean"}`, ReviewApprovedHeadSHA: c.Run.HeadSHA}, nil
 	}}
+	enrollExecutorGate(t, p, c.Repo.ID)
 	ex := pipeline.NewExecutor(c.DB, p, c.Config, c.Agent, []pipeline.Step{review, ci}, func(e ipc.Event) {
 		if e.CIReady != nil && *e.CIReady {
 			readyEvent = true
