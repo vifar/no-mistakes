@@ -249,10 +249,12 @@ Run the pipeline and decide on its findings as they come up:
       This does not grant approval authority; escalate ask-user findings as before.
       Without a reason, Test approval remains effective; an approval past a failing command, `no-go`, or `inconclusive` verdict is reported as an exception with no operator reason supplied.
     - `--accept-gap <finding-id,...> --reason "<who approved, where, when>" --covered-by "<covering tests>"` (with `--step test --action approve`)
-      is the owner-approved way past a strict-shipping Test gate parked on an `inconclusive` verdict
+      is the owner-approved way past a Test gate parked on an `inconclusive` verdict
       whose unreachable scenarios are covered only by mocked tests. Use it only when the owner has approved
       that exact gap; the reason must name who approved and where. Every actionable finding must be named, and
       `no-go`, failing test commands, and Test-agent timeouts are never accepted. It is recorded and shown on the PR.
+      It works on any run, and on a repository that declares `no_ci` it is the only way to finish a run whose
+      local Test verdict is inconclusive; a plain `--reason` exception leaves the status pending instead.
     - `--add-finding '<json>'` (with `--action fix`) folds a finding you
       spotted yourself - one the pipeline did not surface - into the fix round,
       as a JSON finding object. Use it for a problem you noticed that is not in

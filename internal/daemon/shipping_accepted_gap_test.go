@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -37,6 +38,12 @@ func TestAcceptedGapApprovalManagerAndExecutor(t *testing.T) {
 				run, err := database.InsertRunWithShipping(repo.ID, "feature", head, head, nil, "", "", "", "main", false, nil, shipping)
 				if err != nil {
 					t.Fatal(err)
+				}
+				if !strict {
+					// A plain run completes against the PR comparison, so the
+					// fixture binds one the way the pipeline does.
+					target := gitOutput(t, repo.WorkingPath, "rev-parse", "--abbrev-ref", "HEAD")
+					testgit.BindRunComparison(t, database, run, repo.WorkingPath, target, "https://github.com/test/repo/pull/1", "test/repo", "feature")
 				}
 				raw := inconclusiveGapEvidence
 				step := &noSurfaceApprovalStep{findings: raw}
@@ -137,19 +144,17 @@ func TestAcceptedGapApprovalManagerAndExecutor(t *testing.T) {
 						return err
 					})
 				} else {
-					refused("non-strict accept-gap", func() error {
-						_, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, gaps, managerGateSnapshot(t, manager, run.ID, types.StepTest))
+					// A plain run admits the same owner-approved gap: the eligibility
+					// rule is the same on every run (issue #158). The refusals that
+					// still hold are the rule's own.
+					refused("unknown finding", func() error {
+						_, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, &db.AcceptedGaps{FindingIDs: []string{"missing"}, Reason: reason, CoveredBy: coveredBy}, managerGateSnapshot(t, manager, run.ID, types.StepTest))
 						return err
 					})
-					refused("executor non-strict accept-gap", func() error {
-						_, err := executor.RespondWithAcceptedGaps(types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, gaps, gateSnapshot(executor))
+					refused("gap on a fix action", func() error {
+						_, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionFix, []string{"test-verdict"}, nil, nil, nil, reason, gaps, managerGateSnapshot(t, manager, run.ID, types.StepTest))
 						return err
 					})
-					if err := executor.Respond(types.StepTest, types.ActionAbort, nil, nil); err != nil {
-						t.Fatal(err)
-					}
-					<-done
-					return
 				}
 
 				if _, err := manager.HandleRespondWithAcceptedGaps(run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, gaps, managerGateSnapshot(t, manager, run.ID, types.StepTest)); err != nil {

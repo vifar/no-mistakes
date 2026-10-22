@@ -47,7 +47,7 @@ type AcceptedGapFinding struct {
 	Description string `json:"description"`
 }
 
-// AcceptedGaps is the owner-approved exception that lets a strict Test step
+// AcceptedGaps is the owner-approved exception that lets a Test step
 // complete past an inconclusive live-validation verdict. A request carries
 // only FindingIDs, Reason and CoveredBy; RecordAcceptedGaps fills the rest.
 // Reason and CoveredBy are stored verbatim.
@@ -65,15 +65,21 @@ type AcceptedGaps struct {
 // the strict receipt all call it, so the four cannot drift. It returns "" when
 // gaps may be accepted for this step, otherwise the reason it may not.
 //
-// Only a strict run takes a gap; a non-strict run records its Test exception
-// with --reason instead. Only an inconclusive verdict's test-verdict finding
-// is acceptable, and every actionable finding on the step must be named, so a
-// gap can never hide a failed scenario, a failing configured command, or a
-// Test-agent budget cut.
+// A gap is admitted on every run, strict or not. It is the owner-approved,
+// audited way past a Test step parked on an inconclusive verdict, and a
+// repository that declares no_ci has no external check to fall back on: there,
+// the local Test verdict is the only validation there is, so refusing the
+// mechanism leaves such a run with no way to finish. Only an inconclusive
+// verdict's test-verdict finding is acceptable, and every actionable finding
+// on the step must be named, so a gap can never hide a failed scenario, a
+// failing configured command, or a Test-agent budget cut.
+//
+// strict selects the wording of the three refusals that come from strict
+// shipping's own admission rules. The rule itself is the same on every run, so
+// the four callers cannot drift apart, and strict shipping's own behaviour
+// (its admission requirements, its ci_ready receipt rules and its required
+// observed rollup) is untouched by the wording.
 func (s *StepResult) AcceptedGapRefusal(strict bool, gaps AcceptedGaps) string {
-	if !strict {
-		return "--accept-gap applies only to strict shipping runs; use --reason for a Test exception"
-	}
 	if s.StepName != types.StepTest {
 		return "an accepted gap applies only to the Test step"
 	}
@@ -93,13 +99,22 @@ func (s *StepResult) AcceptedGapRefusal(strict bool, gaps AcceptedGaps) string {
 		return refusal
 	}
 	if s.ExitCode != nil && *s.ExitCode != 0 {
-		return "strict shipping forbids passing command overrides"
+		if strict {
+			return "strict shipping forbids passing command overrides"
+		}
+		return "a Test step with a non-zero exit code cannot be accepted as a gap"
 	}
 	if s.OverrideReason != nil || s.SkipReason != nil {
-		return "strict shipping forbids recorded overrides or skips"
+		if strict {
+			return "strict shipping forbids recorded overrides or skips"
+		}
+		return "a Test step with a recorded override or skip cannot be accepted as a gap"
 	}
 	if s.ApprovalReason != nil {
-		return "strict shipping forbids Test exceptions beyond an accepted gap"
+		if strict {
+			return "strict shipping forbids Test exceptions beyond an accepted gap"
+		}
+		return "a Test step with a recorded Test exception cannot be accepted as a gap"
 	}
 	if s.FindingsJSON == nil {
 		return "the parked Test step has no findings to accept"

@@ -26,10 +26,10 @@ import (
 // Run the real CLI/daemon, replacing only the external agent and forge. No
 // execution proof, accepted gap, or certificate is manufactured in the DB.
 func TestAcceptedTestGapCommitStatusJourney(t *testing.T) {
-	for _, name := range []string{"accepted", "recovered", "ordinary-approval", "command-override", "clean"} {
+	for _, name := range []string{"accepted", "recovered", "ordinary-approval", "command-override", "clean", "non-strict-gap"} {
 		t.Run(name, func(t *testing.T) {
-			accepted := name == "accepted" || name == "recovered"
-			strict := accepted || name == "clean"
+			accepted := name == "accepted" || name == "recovered" || name == "non-strict-gap"
+			strict := name == "accepted" || name == "recovered" || name == "clean"
 			scenario := certifiedWatcherScenario(t)
 			if name != "clean" {
 				scenario = acceptedTestGapScenario(t)
@@ -114,7 +114,7 @@ func TestAcceptedTestGapCommitStatusJourney(t *testing.T) {
 			}
 			defer database.Close()
 			wantState, wantDescription := "failure", "no-mistakes pipeline failed or cancelled"
-			if strict {
+			if strict || name == "non-strict-gap" {
 				wantState, wantDescription = "success", "no-mistakes validation passed"
 			}
 			if accepted {
@@ -150,6 +150,9 @@ func TestAcceptedTestGapCommitStatusJourney(t *testing.T) {
 			if !strict {
 				if publication.StrictCertificate != nil {
 					t.Fatal("ordinary approval/override earned a certificate")
+				}
+				if name == "non-strict-gap" {
+					assertNonStrictAcceptedGapJourneyAudit(t, j, runID, reason, coveredBy)
 				}
 				return
 			}
@@ -323,4 +326,45 @@ func assertAcceptedGapJourneyAudit(t *testing.T, j *scopeJourney, runID, branch,
 		t.Fatalf("published attestation lost gap audit: %s", body)
 	}
 	t.Logf("published gap attestation: %s", rawAttestation)
+}
+
+// A plain run has no strict receipt, so its audit is read from the run's own
+// records: the durable gap on the Test step and the status document that
+// names it.
+func assertNonStrictAcceptedGapJourneyAudit(t *testing.T, j *scopeJourney, runID, reason, coveredBy string) {
+	t.Helper()
+	out, err := j.h.Run("axi", "status", "--json")
+	if err != nil {
+		t.Fatalf("inspect accepted gap: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, reason) || !strings.Contains(out, coveredBy) {
+		t.Fatalf("run status lost gap audit: %s", out)
+	}
+	database, err := db.OpenReadOnly(paths.WithRoot(j.h.NMHome).DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	rows, err := database.GetStepsByRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range rows {
+		if row.StepName != types.StepTest {
+			continue
+		}
+		gaps, err := row.RecordedAcceptedGaps()
+		if err != nil || gaps == nil {
+			t.Fatalf("the Test step lost the recorded gap: %+v, %v", row, err)
+		}
+		if gaps.Reason != reason || gaps.CoveredBy != coveredBy || !reflect.DeepEqual(gaps.FindingIDs, []string{"test-verdict"}) {
+			t.Fatalf("recorded gap = %+v", gaps)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("the run holds no Test step")
+	}
+	t.Logf("non-strict recorded gap audit: reason=%q covered_by=%q", reason, coveredBy)
 }
