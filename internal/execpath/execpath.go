@@ -117,9 +117,17 @@ func Resolve(env []string, name string, baseDir string) (path string, hasPath bo
 			continue
 		}
 		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(baseDir, dir)
+			base := baseDir
+			if base == "" {
+				base = "."
+			}
+			dir = base + string(filepath.Separator) + dir
 		}
-		dir, err := filepath.Abs(dir)
+		dir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			continue
+		}
+		dir, err = filepath.Abs(dir)
 		if err != nil {
 			continue
 		}

@@ -1,8 +1,11 @@
 package steps
 
 import (
+	"html"
 	"strings"
 	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
 // The pull request body is generated, but the evidence it embeds is not: a
@@ -19,20 +22,23 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 	}{
 		{"co-authored trailer", "Co-Authored-By: Codex <bot@example.invalid>"},
 		{"co-authored trailer with a name", "Co-Authored-By: Claude <noreply@anthropic.com>"},
-		{"generated with", "Generated with [Claude Code]"},
+		{"generated with", "Generated with [Claude Code](https://claude.ai/code)"},
 		{"generated with plain", "Generated with Claude Code"},
+		{"generated with codex", "Generated with Codex"},
+		{"model trailer", "Co-Authored-By: gpt-5.5 <model@example.com>"},
+		{"assisted trailer", "Assisted-by: OpenCode"},
+		{"claude session", "Claude-Session: session-id"},
+		{"codex session", "Codex-Session: session-id"},
 		{"robot emoji", "\U0001F916 Generated with Codex"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := neutralizeAIAttribution(tc.line)
-			if strings.Contains(got, "Codex") || strings.Contains(got, "Claude") ||
-				strings.Contains(got, "Anthropic") || strings.Contains(got, "OpenAI") ||
-				strings.Contains(got, "ChatGPT") || strings.Contains(got, "Grok") ||
-				strings.Contains(got, "Copilot") {
-				t.Fatalf("the line still names an AI: %q", got)
-			}
-			if !strings.Contains(got, "neutralized") {
-				t.Fatalf("the line was not marked as neutralized: %q", got)
+			for _, line := range []string{tc.line, html.EscapeString(tc.line)} {
+				body := "## Testing\n\n```text\n" + line + "\n```\n"
+				got := neutralizeAttestationMarkers(scm.ProviderGitHub, body)
+				want := "## Testing\n\n```text\n<no-mistakes: AI attribution line neutralized>\n```\n"
+				if got != want {
+					t.Fatalf("published text = %q, want %q", got, want)
+				}
 			}
 		})
 	}
@@ -40,9 +46,18 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 
 // A trailer that names a PERSON is legitimate attribution and stays.
 func TestNeutralizeAIAttributionKeepsAHumanTrailer(t *testing.T) {
-	line := "Co-Authored-By: A Person <person@example.com>"
-	if got := neutralizeAIAttribution(line); got != line {
-		t.Fatalf("a human trailer was changed: %q", got)
+	for _, line := range []string{
+		"Co-Authored-By: A Person <person@example.com>",
+		"Co-Authored-By: Claude Smith <human@example.com>",
+		"Co-Authored-By: Claude <human@example.com>",
+		"Assisted-by: Claude Smith <human@example.com>",
+		"We tested fixtures generated with Codex.",
+	} {
+		for _, text := range []string{line, html.EscapeString(line)} {
+			if got := neutralizeAttestationMarkers(scm.ProviderGitHub, text); got != text {
+				t.Fatalf("human attribution or prose was changed: %q", got)
+			}
+		}
 	}
 }
 

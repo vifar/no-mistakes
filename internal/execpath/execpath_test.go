@@ -78,11 +78,19 @@ func TestResolveFindsTheProgram(t *testing.T) {
 	if err := os.WriteFile(fake, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	want, err := os.Stat(fake)
+	if err != nil {
+		t.Fatal(err)
+	}
 	path, hasPath, found := Resolve([]string{"PATH=" + dir}, "git", dir)
 	if !hasPath || !found {
 		t.Fatalf("resolve = %q, hasPath=%v, found=%v", path, hasPath, found)
 	}
-	if path != fake {
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(info, want) {
 		t.Fatalf("resolved %q, want %q", path, fake)
 	}
 	// A program that is not executable is not a program the platform runs.
@@ -118,9 +126,73 @@ func TestResolveReturnsAbsolutePaths(t *testing.T) {
 			if err := os.WriteFile(want, []byte("fixture"), 0o755); err != nil {
 				t.Fatal(err)
 			}
+			wantInfo, err := os.Stat(want)
+			if err != nil {
+				t.Fatal(err)
+			}
 			got, hasPath, found := Resolve([]string{"PATH=" + tc.path}, "git", tc.baseDir)
-			if !hasPath || !found || got != want {
+			if !hasPath || !found || !filepath.IsAbs(got) {
 				t.Fatalf("resolve = %q, hasPath=%v, found=%v; want %q", got, hasPath, found, want)
+			}
+			gotInfo, err := os.Stat(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(gotInfo, wantInfo) {
+				t.Fatalf("resolved %q, want the file at %q", got, want)
+			}
+		})
+	}
+}
+
+func TestResolvePreservesSymlinkParentTraversal(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	for _, dir := range []string{"actual/repo", "actual/bin", "bin", "work"} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(root, "actual", "repo"), "link"); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		t.Fatal(err)
+	}
+	name := "git"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	for _, dir := range []string{"actual/bin", "bin"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("fixture"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.Stat(filepath.Join("actual", "bin", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, baseDir, path string
+	}{
+		{"symlink workdir", filepath.Join(root, "link"), "../bin"},
+		{"relative symlink workdir", "link", "../bin"},
+		{"relative path", root, "link/../bin"},
+		{"absolute path", root, root + "/link/../bin"},
+		{"relative workdir parent", "link/../repo", "../bin"},
+		{"unrelated workdir", filepath.Join(root, "work"), root + "/link/../bin"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, hasPath, found := Resolve([]string{"PATH=" + tc.path}, "git", tc.baseDir)
+			if !hasPath || !found || !filepath.IsAbs(got) {
+				t.Fatalf("resolve = %q, hasPath=%v, found=%v", got, hasPath, found)
+			}
+			info, err := os.Stat(got)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !os.SameFile(info, want) {
+				t.Fatalf("resolved %q instead of actual/bin/%s", got, name)
 			}
 		})
 	}
