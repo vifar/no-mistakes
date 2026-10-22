@@ -891,7 +891,7 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 		fetchCtx, cancel := context.WithTimeout(ctx, recoveredConfigFetchTimeout)
 		defer cancel()
 		if sha, err := fetchRecoveredDefaultBranchSHA(fetchCtx, workDir, repo); err != nil {
-			slog.Warn("failed to fetch default branch while recovering run; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
+			return nil, err
 		} else {
 			trustedSHA = sha
 		}
@@ -2787,7 +2787,8 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
 		if sha, err := fetchTrustedDefaultBranchSHA(ctx, wtDir, repo); err != nil {
-			slog.Warn("failed to fetch trusted default branch", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
+			trackStartFailure("trusted_config_unreadable")
+			return "", err
 		} else {
 			trustedSHA = sha
 		}

@@ -5,6 +5,7 @@ package git
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,31 @@ import (
 	"testing"
 	"time"
 )
+
+func TestProcessWasCancelledAcceptsOnlyTerminationSignals(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"term", "kill -TERM $$", true},
+		{"kill", "kill -KILL $$", true},
+		{"segfault", "kill -SEGV $$", false},
+		{"user signal", "kill -USR1 $$", false},
+		{"exit", "exit 1", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := exec.Command("sh", "-c", fmt.Sprintf("ulimit -c 0; %s", tc.body)).Run()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Fatalf("expected subprocess exit, got %v", err)
+			}
+			if got := processWasCancelled(exit); got != tc.want {
+				t.Fatalf("processWasCancelled(%v) = %v, want %v", err, got, tc.want)
+			}
+		})
+	}
+}
 
 func TestRun_TrimsOutputWithLifecycleAwareRunner(t *testing.T) {
 	installFakeGit(t, `printf '  normal output  \n'`)

@@ -109,8 +109,8 @@ func TestQueuedSetupAbortCancelsStalledFetchAndReleasesSlot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.Status.Active() {
-		t.Fatalf("cancelled setup left an active run: %+v", stored)
+	if stored.Status != types.RunCancelled || stored.Error == nil || *stored.Error != types.RunCancelReasonAbortedByUser {
+		t.Fatalf("cancelled fetch outcome = %+v, want cancelled with abort reason", stored)
 	}
 }
 
