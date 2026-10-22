@@ -117,6 +117,25 @@ are administrative changes; editing the JSON file alone does not apply them.
 
 See [GitHub's workflow execution controls](https://docs.github.com/en/actions/how-tos/administer/control-workflow-execution).
 
+### The trunk is verified; a superseded pull request is not
+
+The `ci` and `nix` workflows cancel an in-flight run only for a PULL REQUEST,
+whose newer commit supersedes its older one and makes the older run's result
+worthless. A push to the trunk is a distinct commit that has to be verified, so
+a later push to the trunk does NOT cancel the run in flight.
+
+This matters because the e2e job needs up to 90 minutes and the trunk takes a
+push every few minutes. With the trunk cancelling itself, every run on `main`
+was cancelled before its e2e job could report: the trunk's e2e never had a
+result to be red or green. The trade is runner time - a busy trunk queues its
+runs - and the trade is worth it, because a verification that never completes
+is not a verification.
+
+The concurrency group keeps a pull request's run apart from the trunk's, so the
+two never cancel each other. `workflow_trunk_concurrency_test.go` evaluates the
+expression, so a workflow that cancels the trunk fails the guard whether it says
+so with a literal or with a condition that happens to be true for a push.
+
 ## Runner ownership and recovery
 
 The runner runs as a dedicated unprivileged account with a private home
