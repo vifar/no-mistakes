@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-func presentPRCoauthors(text string) string {
+func presentPRCoauthors(text string, configuredTrailers ...string) string {
 	lines := strings.Split(text, "\n")
 	decoded := make([]string, len(lines))
 	for i, line := range lines {
@@ -14,7 +14,7 @@ func presentPRCoauthors(text string) string {
 	}
 	var kept []string
 	for start := 0; start < len(lines); {
-		end, unfolded, entry, ai := reviewAttributionEntry(decoded, start, nil)
+		end, unfolded, entry, ai := reviewAttributionEntry(decoded, start, configuredTrailers)
 		if !ai {
 			key, value, _ := strings.Cut(unfolded, ":")
 			if entry && strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") {

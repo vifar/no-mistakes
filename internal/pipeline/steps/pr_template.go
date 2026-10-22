@@ -196,6 +196,10 @@ func templateStructureLines(text string) []string {
 }
 
 func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provider) (string, error) {
+	configuredTrailers, err := configuredPRDisplayTrailers(sctx)
+	if err != nil {
+		return "", fmt.Errorf("prepare PR attribution filtering: %w", err)
+	}
 	pipelineMD, risk, testing := s.buildPipelineSectionFor(sctx, provider, true)
 	if strings.Count(pipelineMD, pipelineAttestationCommentPrefix) != 1 {
 		return "", fmt.Errorf("cannot publish template narrative without recorded pipeline evidence and attestation")
@@ -210,5 +214,5 @@ func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provid
 		// rendered before the body it becomes is budgeted.
 		parts = append(parts, renderCoAuthorAsLabelledField(evidence))
 	}
-	return strings.Join(parts, "\n\n"), nil
+	return presentPRCoauthors(strings.Join(parts, "\n\n"), configuredTrailers...), nil
 }

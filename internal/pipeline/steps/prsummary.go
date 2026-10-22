@@ -129,6 +129,8 @@ func BuildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 
 type pipelineAttestationPolicy struct {
 	AllowTestCommandOverride string
+	ConfiguredTrailers       []string
+	acceptedGapSteps         []*db.StepResult
 }
 
 // buildPipelineSummaryFor renders the Pipeline section and the risk line.
@@ -145,6 +147,7 @@ func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 }
 
 func buildPipelineSummaryForRaw(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy, configuredTrailers ...string) (string, string) {
+	policy.ConfiguredTrailers = configuredTrailers
 	if len(steps) == 0 {
 		return "", ""
 	}
@@ -182,7 +185,7 @@ func buildPipelineSummaryForRaw(steps []*db.StepResult, rounds map[string][]*db.
 		b.WriteString(buildPipelineAttestationWithPolicy(steps, rounds, headSHA, policy))
 		b.WriteString("\n\n")
 	}
-	if gapBlock := buildAcceptedGapsBlock(steps, provider); gapBlock != "" {
+	if gapBlock := buildAcceptedGapsBlock(steps, provider, configuredTrailers...); gapBlock != "" {
 		// Neutralized like every detail block: the reason and covering tests
 		// are operator text and must not mint a second attestation marker.
 		b.WriteString(gapBlock)
@@ -234,7 +237,7 @@ func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.Step
 				attestation.AllowTestCommandOverride = strings.TrimSpace(policy.AllowTestCommandOverride)
 			}
 		}
-		item.AcceptedGaps = attestedAcceptedGaps(sr)
+		item.AcceptedGaps = attestedAcceptedGaps(sr, policy.ConfiguredTrailers...)
 		attestation.Steps = append(attestation.Steps, item)
 	}
 	// A custom gate shares its anchor's order, so the tie-break decides where
@@ -367,6 +370,11 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 			for _, previous := range attestation.Steps {
 				if previous.Step == rebound.Steps[i].Step {
 					rebound.Steps[i].AcceptedGaps = previous.AcceptedGaps
+					for _, recorded := range policy.acceptedGapSteps {
+						if recorded.StepName == previous.Step {
+							rebound.Steps[i].AcceptedGaps = attestedAcceptedGaps(recorded, policy.ConfiguredTrailers...)
+						}
+					}
 				}
 			}
 		}
@@ -1627,8 +1635,8 @@ func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Fi
 		if sr.StepName == types.StepReview {
 			// Filter the raw display copy before escaping. Recorded findings
 			// remain intact for the audit trail and review decisions.
-			f.File = presentPRCoauthors(stripReviewAIAttribution(f.File, configuredTrailers))
-			f.Description = presentPRCoauthors(stripReviewAIAttribution(f.Description, configuredTrailers))
+			f.File = presentPRCoauthors(stripReviewAIAttribution(f.File, configuredTrailers), configuredTrailers...)
+			f.Description = presentPRCoauthors(stripReviewAIAttribution(f.Description, configuredTrailers), configuredTrailers...)
 		}
 		emoji := severityEmoji(f.Severity)
 		loc := ""
