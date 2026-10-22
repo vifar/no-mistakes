@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1709,7 +1710,7 @@ func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 func neutralizeAIAttribution(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		if git.IsAIAttributionTrailer(normalizeRenderedText(html.UnescapeString(line))) {
+		if lineCarriesAIAttribution(line) {
 			lines[i] = "<no-mistakes: AI attribution line neutralized>"
 		}
 	}
@@ -1734,52 +1735,57 @@ func listItemMarker(text string) (string, string, bool) {
 	return "", "", false
 }
 
-// normalizeRenderedText normalizes a rendered line so the complete-line
-// classifier sees the text a reader sees.
+// renderedBlockTag matches the HTML tags that separate rendered blocks, so a
+// rendered line can carry more than one item of text.
+var renderedBlockTag = regexp.MustCompile(`(?i)</?(?:br|p|div|span|code|pre|li|ul|ol|em|strong|b|i|h[1-6])\b[^>]*>`)
+
+// renderedMarkup matches the emphasis and code markers.
+var renderedMarkup = regexp.MustCompile("[`*_~]")
+
+// lineCarriesAIAttribution reports whether a rendered line carries an
+// attribution a reader would take for THIS work.
 //
-// A detail is rendered as a backtick-wrapped bullet, as Markdown emphasis, or
-// inside an HTML <code> element, and the wrappers combine. The classifier is
-// a COMPLETE-LINE classifier: it decides about a whole line, so a line that
-// still wears a wrapper is a line it rejects, and the attribution survives
-// publication.
-//
-// Only the wrappers are removed, and only from the outside: the text under
-// them is what the classifier has to judge, and a trailer that names a PERSON
-// is still a trailer that names a person.
-func normalizeRenderedText(text string) string {
-	for {
-		before := text
-		text = strings.TrimSpace(text)
-		// A blockquote marker, possibly repeated.
-		for strings.HasPrefix(text, ">") {
-			text = strings.TrimSpace(strings.TrimPrefix(text, ">"))
-		}
-		if strings.HasPrefix(text, "<code>") && strings.HasSuffix(text, "</code>") {
-			text = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(text, "<code>"), "</code>"))
-		}
-		// A list item's marker.
-		if _, rest, ok := listItemMarker(text); ok {
-			text = strings.TrimSpace(rest)
-		}
-		text = strings.TrimSpace(text)
-		text = strings.Trim(text, "`")
-		text = strings.TrimSpace(text)
-		switch {
-		case len(text) >= 4 && strings.HasPrefix(text, "**") && strings.HasSuffix(text, "**"):
-			text = strings.TrimSpace(text[2 : len(text)-2])
-		case len(text) >= 2 && strings.HasPrefix(text, "*") && strings.HasSuffix(text, "*"):
-			text = strings.TrimSpace(text[1 : len(text)-1])
-		case len(text) >= 2 && strings.HasPrefix(text, "_") && strings.HasSuffix(text, "_"):
-			text = strings.TrimSpace(text[1 : len(text)-1])
-		}
-		if text == before {
-			break
+// The line is split at the block boundaries FIRST, because a rendered line
+// can hold more than one item of text: "<p>Summary</p><p>Generated with
+// Codex</p>" carries the attribution in its second paragraph, and a footer
+// ending with "Generated with Codex<br>" carries it before the break.
+func lineCarriesAIAttribution(line string) bool {
+	text := html.UnescapeString(line)
+	for _, segment := range renderedBlockTag.Split(text, -1) {
+		if git.IsAIAttributionTrailer(normalizeRenderedSegment(segment)) {
+			return true
 		}
 	}
-	// The emphasis can be INSIDE the text, as in "Generated with **Codex**".
-	// The markers are the wrapper's, so they go; the words under them are
-	// the text, and they stay.
-	return strings.NewReplacer("**", "", "*", "", "_", "", "~", "").Replace(text)
+	return false
+}
+
+// normalizeRenderedSegment strips the wrappers and the markup a rendered
+// segment wears around its text, so the complete-line classifier sees the
+// text a reader sees.
+//
+// The wrappers are a code span, Markdown emphasis, a list item, a blockquote,
+// and the emphasis can be INSIDE the text, as in "Generated with **Codex**".
+// The classifier decides about a whole line, so a line that still wears a
+// wrapper is a line it rejects, and the attribution survives publication.
+//
+// Only the wrappers and the markup are removed, and the text is not
+// otherwise changed: the text under them is what the classifier has to
+// judge, and a trailer that names a PERSON still names a person.
+func normalizeRenderedSegment(segment string) string {
+	for {
+		before := segment
+		segment = strings.TrimSpace(segment)
+		for strings.HasPrefix(segment, ">") {
+			segment = strings.TrimSpace(strings.TrimPrefix(segment, ">"))
+		}
+		if _, rest, ok := listItemMarker(segment); ok {
+			segment = strings.TrimSpace(rest)
+		}
+		segment = strings.TrimSpace(renderedMarkup.ReplaceAllString(segment, ""))
+		if segment == before {
+			return segment
+		}
+	}
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {
