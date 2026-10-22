@@ -591,33 +591,54 @@ func ReviewBotCommentChecks(checks []Check, excluded ...Check) []Check {
 	return green
 }
 
+// ReadReadinessReviewBotComments applies the recorded comment policy to
+// provider-supported bots. Pending checkless reviews hold readiness, but never
+// hide unresolved findings from any eligible bot, including the pending bot.
 func ReadReadinessReviewBotComments(ctx context.Context, host Host, pr *PR, policy CheckScopePolicy, checks []Check, excluded ...Check) ([]ReviewComment, error) {
-	if policy.ReviewBotComments != "always" {
+	if policy.ReviewBotComments != "always" || !host.Capabilities().ReviewComments {
 		return nil, nil
 	}
-	candidates := ReviewBotCommentChecks(checks, excluded...)
-	if len(candidates) == 0 || !host.Capabilities().ReviewComments {
+	var candidates []Check
+	for _, check := range ReviewBotCommentChecks(checks, excluded...) {
+		bot, _ := ReviewBotForApp(check.App)
+		if len(bot.logins(host.Provider())) > 0 {
+			candidates = append(candidates, check)
+		}
+	}
+	if len(candidates) == 0 {
 		return nil, nil
 	}
 	reader, ok := host.(ReviewCommentsHost)
 	if !ok {
 		return nil, ErrUnsupported
 	}
+	allowed := map[string]bool{}
+	pendingBot := ""
+	for _, check := range candidates {
+		bot, _ := ReviewBotForApp(check.App)
+		if signals, ok := host.(ReviewBotPendingHost); ok && bot.CompletionFromReview {
+			pending, err := signals.ReviewBotPending(ctx, pr, bot)
+			if err != nil {
+				return nil, err
+			}
+			if pending {
+				pendingBot = bot.AppSlug
+			}
+		}
+		allowed[bot.AppSlug] = true
+	}
 	comments, err := reader.GetReviewComments(ctx, pr)
 	if err != nil {
 		return nil, err
-	}
-	allowed := map[string]bool{}
-	for _, check := range candidates {
-		if bot, ok := ReviewBotForApp(check.App); ok {
-			allowed[bot.AppSlug] = true
-		}
 	}
 	var unresolved []ReviewComment
 	for _, comment := range comments {
 		if bot, ok := ReviewBotForLogin(host.Provider(), comment.Author); ok && allowed[bot.AppSlug] {
 			unresolved = append(unresolved, comment)
 		}
+	}
+	if len(unresolved) == 0 && pendingBot != "" {
+		return nil, fmt.Errorf("%w: %s", ErrReviewBotPending, pendingBot)
 	}
 	return unresolved, nil
 }

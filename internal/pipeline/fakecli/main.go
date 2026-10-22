@@ -82,6 +82,32 @@ func handleFakeCLI(mode string) {
 		return
 	}
 
+	if strings.Contains(strings.Join(args, " "), "/reviews") && strings.Contains(strings.Join(args, " "), "--slurp") {
+		raw := os.Getenv("FAKE_CLI_PR_REVIEWS")
+		if raw == "" {
+			raw = "[[]]"
+		}
+		fmt.Println(raw)
+		os.Exit(0)
+	}
+	if strings.Contains(strings.Join(args, " "), "/reactions") && strings.Contains(strings.Join(args, " "), "--slurp") {
+		raw := os.Getenv("FAKE_CLI_PR_REACTIONS")
+		if raw == "" {
+			raw = "[[]]"
+		}
+		fmt.Println(raw)
+		os.Exit(0)
+	}
+
+	if strings.Contains(strings.Join(args, " "), "/issues/") && strings.Contains(strings.Join(args, " "), "/comments") && strings.Contains(strings.Join(args, " "), "--slurp") {
+		raw := os.Getenv("FAKE_CLI_PR_SUMMARIES")
+		if raw == "" {
+			raw = "[[]]"
+		}
+		fmt.Println(raw)
+		os.Exit(0)
+	}
+
 	switch mode {
 	case "raw-shutdown-process-loss":
 		d, err := db.Open(os.Getenv("FAKE_CLI_DB_PATH"))
@@ -1493,15 +1519,17 @@ func printFakeCommitChecks(raw string, args []string) {
 }
 
 // printFakeReviewThreads renders FAKE_CLI_REVIEW_COMMENTS - a JSON array of
-// {author, path, line, body} - as the reviewThreads GraphQL response the
-// GitHub backend's GetReviewComments parses, one unresolved thread per
-// comment. An empty or invalid value renders a pull request with no threads.
+// {author, path, line, body, resolved} - as the reviewThreads GraphQL response
+// the GitHub backend's GetReviewComments parses, one thread per comment.
+// Threads default to unresolved when resolved is omitted. An empty value
+// renders no threads; invalid JSON fails the command.
 func printFakeReviewThreads(raw string) {
 	var comments []struct {
-		Author string `json:"author"`
-		Path   string `json:"path"`
-		Line   int    `json:"line"`
-		Body   string `json:"body"`
+		Author   string `json:"author"`
+		Resolved bool   `json:"resolved"`
+		Path     string `json:"path"`
+		Line     int    `json:"line"`
+		Body     string `json:"body"`
 	}
 	if raw != "" {
 		if err := json.Unmarshal([]byte(raw), &comments); err != nil {
@@ -1512,7 +1540,7 @@ func printFakeReviewThreads(raw string) {
 	threads := make([]map[string]any, 0, len(comments))
 	for i, comment := range comments {
 		threads = append(threads, map[string]any{
-			"isResolved": false,
+			"isResolved": comment.Resolved,
 			"comments": map[string]any{
 				"nodes": []map[string]any{{
 					"databaseId": i + 1,

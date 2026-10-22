@@ -31,7 +31,12 @@ type ghForge struct {
 	// attempt, answering actions/runs/<id>/attempts/<n>/jobs.
 	AttemptJobs map[string][]int64 `json:"attempt_jobs,omitempty"`
 	// ReviewThreads are the PR's review threads.
-	ReviewThreads []ghForgeThread `json:"review_threads,omitempty"`
+	ReviewThreads   []ghForgeThread              `json:"review_threads,omitempty"`
+	Reviews         []json.RawMessage            `json:"reviews,omitempty"`
+	ReviewPushes    []json.RawMessage            `json:"review_pushes,omitempty"`
+	ReviewSummaries []json.RawMessage            `json:"review_summaries,omitempty"`
+	ReviewReactions map[string][]json.RawMessage `json:"review_reactions,omitempty"`
+	ReviewError     *ghForgeEndpoint             `json:"review_error,omitempty"`
 	// Mergeable and MergeStateStatus are the PR's mergeability; empty means
 	// MERGEABLE and CLEAN. CONFLICTING makes the CI step raise a merge-conflict
 	// finding, and BEHIND (with ci.rebase_behind) a behind-base one.
@@ -186,6 +191,38 @@ func (f *ghForge) rest(repo, endpoint string, args []string) (out string, errTex
 		return fmt.Sprintf("gh: %s (HTTP %d)", message, status)
 	}
 	switch {
+	case path == "activity":
+		rows := f.ReviewPushes
+		if rows == nil {
+			rows = []json.RawMessage{}
+		}
+		data, _ := json.Marshal([]any{rows})
+		return string(data), "", true
+	case strings.HasPrefix(path, "issues/comments/") && strings.HasSuffix(path, "/reactions"):
+		parts := strings.Split(path, "/")
+		rows := f.ReviewReactions[parts[2]]
+		if rows == nil {
+			rows = []json.RawMessage{}
+		}
+		data, _ := json.Marshal([]any{rows})
+		return string(data), "", true
+	case strings.HasPrefix(path, "pulls/") && strings.HasSuffix(path, "/reviews"):
+		if f.ReviewError != nil {
+			return "", httpError(f.ReviewError.Status, f.ReviewError.Message), true
+		}
+		rows := f.Reviews
+		if rows == nil {
+			rows = []json.RawMessage{}
+		}
+		data, _ := json.Marshal([]any{rows})
+		return string(data), "", true
+	case strings.HasPrefix(path, "issues/") && strings.HasSuffix(path, "/comments"):
+		rows := f.ReviewSummaries
+		if rows == nil {
+			rows = []json.RawMessage{}
+		}
+		data, _ := json.Marshal([]any{rows})
+		return string(data), "", true
 	case strings.HasPrefix(path, "branches/") && strings.HasSuffix(path, "/protection/required_status_checks"):
 		if f.Protection == nil {
 			return "", httpError(404, "Branch not protected"), true

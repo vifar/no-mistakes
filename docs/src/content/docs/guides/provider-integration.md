@@ -90,7 +90,7 @@ If one daemon serves repositories that require non-overlapping accounts, give ea
 - PR creation and update on pushes
 - CI check polling with exponential backoff (30s → 60s → 120s) under the [shared CI monitoring rules](/no-mistakes/reference/pipeline-steps/#ci)
 - Failed job log fetching (`gh run view --log-failed`) for the CI auto-fix step
-- Greptile review-thread comments surfaced under the [CI review-bot policy](/no-mistakes/reference/repo-config/#cireview_bot_comments); the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns finding handling and repair-prompt safety
+- Greptile and Codex review-thread comments surfaced under the [CI review-bot policy](/no-mistakes/reference/repo-config/#cireview_bot_comments); the [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns finding handling and repair-prompt safety
 - PR mergeability polling, and agent-driven resolution when the provider reports an actual merge conflict
 
 ### GitHub fork contributions

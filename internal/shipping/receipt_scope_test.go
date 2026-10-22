@@ -267,8 +267,10 @@ func TestCIReadyReceiptVerifiesRecordedReviewBotComments(t *testing.T) {
 		{name: "absent bot with unresolved comments", absent: true, unresolved: true, policy: "always", reads: 1},
 		{name: "cancelled informational bot with unresolved comments", bucket: scm.CheckBucketCancel, unresolved: true, policy: "always", reads: 1},
 		{name: "unreadable comments", bucket: scm.CheckBucketFail, unreadable: true, policy: "always", reads: 1},
-		{name: "external bot", bucket: scm.CheckBucketFail, external: true, unresolved: true, policy: "always", ready: true},
-		{name: "absent external bot", absent: true, external: true, unresolved: true, policy: "always", ready: true},
+		// Excluding Greptile does not silence the absent Codex candidate: its
+		// comments still need one read under always.
+		{name: "external bot", bucket: scm.CheckBucketFail, external: true, unresolved: true, policy: "always", ready: true, reads: 1},
+		{name: "absent external bot", absent: true, external: true, unresolved: true, policy: "always", ready: true, reads: 1},
 		{name: "recorded on_failure", bucket: scm.CheckBucketFail, unresolved: true, policy: "on_failure", ready: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

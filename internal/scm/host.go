@@ -318,13 +318,13 @@ func (c Check) DisplayName() string {
 // Failing reports whether the check is in a failed bucket.
 func (c Check) Failing() bool { return c.Bucket == CheckBucketFail }
 
-// ReviewBot describes a third-party review bot whose pull request check is an
-// opinion about the change rather than a job verdict on it. The CI step routes
+// ReviewBot describes a third-party review bot. When it publishes a PR check,
+// that check is an opinion rather than a job verdict. The CI step routes
 // such a check's failure to a human decision carrying the bot's unresolved
 // review comments, instead of spending an auto-fix round on it, and the
 // GitHub backend collects only these bots' review-thread comments.
 type ReviewBot struct {
-	// AppSlug is the provider app slug the bot publishes its check under.
+	// AppSlug is the provider application identity, including bots without checks.
 	AppSlug string
 	// Logins are the account logins the bot posts review comments as.
 	Logins       []string
@@ -333,12 +333,16 @@ type ReviewBot struct {
 	// configured exclusion of that check applies to the bot even before it
 	// registers one.
 	CheckNames []string
+	// CompletionFromReview means the bot publishes PR reviews/summaries rather
+	// than a check run. Read its current-head signal before readiness under always.
+	CompletionFromReview bool
 }
 
 // ReviewBots is the registry of supported review bots. Both halves of the
 // integration - check identity and comment authorship - read it, so adding a
-// bot is one entry here.
+// bot is one entry here; checkless bots also opt into completion reads.
 var ReviewBots = []ReviewBot{
+	{AppSlug: "chatgpt-codex-connector", Logins: []string{"chatgpt-codex-connector[bot]", "chatgpt-codex-connector"}, CheckNames: []string{"Codex Review"}, CompletionFromReview: true},
 	{AppSlug: "greptile-apps", Logins: []string{"greptile-apps[bot]", "greptile-apps"}, GitLabLogins: []string{"greptileai"}, CheckNames: []string{"Greptile Review"}},
 }
 
@@ -359,9 +363,9 @@ func ReviewBotForCheck(check Check) (ReviewBot, bool) {
 	return ReviewBot{}, false
 }
 
-// ReviewBotForApp returns the registered review bot that publishes checks
-// under slug. An empty slug never matches: a provider that reported no app
-// identity has not identified a bot.
+// ReviewBotForApp returns the registered review bot identified by the app
+// slug, whether or not it publishes checks. An empty slug never matches:
+// a provider that reported no app identity has not identified a bot.
 func ReviewBotForApp(slug string) (ReviewBot, bool) {
 	slug = strings.ToLower(strings.TrimSpace(slug))
 	if slug == "" {
@@ -383,13 +387,7 @@ func ReviewBotForLogin(provider Provider, login string) (ReviewBot, bool) {
 		return ReviewBot{}, false
 	}
 	for _, bot := range ReviewBots {
-		var logins []string
-		switch provider {
-		case ProviderGitHub:
-			logins = bot.Logins
-		case ProviderGitLab:
-			logins = bot.GitLabLogins
-		}
+		logins := bot.logins(provider)
 		for _, known := range logins {
 			if strings.EqualFold(known, login) {
 				return bot, true
@@ -397,6 +395,17 @@ func ReviewBotForLogin(provider Provider, login string) (ReviewBot, bool) {
 		}
 	}
 	return ReviewBot{}, false
+}
+
+func (bot ReviewBot) logins(provider Provider) []string {
+	switch provider {
+	case ProviderGitHub:
+		return bot.Logins
+	case ProviderGitLab:
+		return bot.GitLabLogins
+	default:
+		return nil
+	}
 }
 
 // IsReviewBotLogin reports whether login belongs to a registered review bot.
@@ -479,6 +488,17 @@ type ReviewComment struct {
 	Body      string
 	CreatedAt time.Time
 	URL       string
+}
+
+// ErrReviewBotPending means a registered bot has unfinished review activity.
+// It is a readiness wait, not a comment-read failure or a fix finding.
+var ErrReviewBotPending = errors.New("review bot review is pending")
+
+// ReviewBotPendingHost reads completion for bots without check runs. No observed
+// participation means absent, not pending. Old-head PENDING reviews alone do not
+// hold a new head; acknowledged requests need their own settlement evidence.
+type ReviewBotPendingHost interface {
+	ReviewBotPending(context.Context, *PR, ReviewBot) (bool, error)
 }
 
 // ReviewCommentsHost is an optional interface for SCM hosts that support fetching
