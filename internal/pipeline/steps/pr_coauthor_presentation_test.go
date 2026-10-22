@@ -156,6 +156,7 @@ func TestPRHumanCoauthorPresentation_ClassificationAndSourcePreservation(t *test
 	t.Parallel()
 	for _, human := range []string{
 		humanCoauthorFixture,
+		"Co-Authored-By: Claude <claude@example.com>",
 		`Co-Authored-By: "Claude Smith" <claude@example.com>`,
 		"Co-Authored-By: private:writer <human@example.com>",
 		"Co-Authored-By: Anthropic Engineer <person@example.com>",

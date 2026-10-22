@@ -3,23 +3,17 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 )
-
-// Strip even quoted attribution before normalizing summary whitespace: once
-// flattened into a subject, a trailer can no longer be removed line by line.
-const reviewAIIdentity = `(?:claude(?: code)?|codex|chatgpt|openai|anthropic|(?:github )?copilot|gemini|grok|pi|omp|opencode|antigravity|rovodev|cursor|devin|acp(?::[^\s<>]+)?|no-mistakes|(?:gpt|gemini|grok)-[0-9][a-z0-9._-]*|o[1-9](?:-[a-z0-9._-]+)?|claude-(?:sonnet|opus|haiku)[a-z0-9._-]*)`
-
-var reviewAIAttribution = regexp.MustCompile(`(?i)^[\s>"'\x60*-]*(?:generated\s+with\b|assisted-by\s*:|` + reviewAIIdentity + `-session\s*:|co-authored-by\s*:\s*["'\x60]?(?:no-mistakes(?:\s|:|$)|` + reviewAIIdentity + `(?:\[bot\])?(?:["'\x60]?\s*<|:|[\s>"'\x60]*$)))`)
 
 func stripReviewAIAttribution(text string, configuredTrailers []string) string {
 	var kept []string
 	for _, line := range strings.Split(text, "\n") {
-		attribution := reviewAIAttribution.MatchString(line)
 		unquoted := strings.TrimRight(strings.TrimLeft(line, " \t\r>\"'`*-"), " \t\r\"'`")
+		attribution := git.IsAIAttributionTrailer(line) || git.IsAIAttributionTrailer(unquoted)
 		for _, trailer := range configuredTrailers {
 			if strings.EqualFold(unquoted, strings.TrimRight(trailer, " \t\r\"'`")) {
 				attribution = true

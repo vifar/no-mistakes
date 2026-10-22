@@ -10,7 +10,7 @@ import (
 
 var attributionTrailerKey = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*[ \t]*:`)
 var generatedAttribution = regexp.MustCompile(`(?i)^(?:🤖[ \t]*)?generated[ \t]+with[ \t]+(.+)$`)
-var modelAttributionIdentity = regexp.MustCompile(`^(?:gpt-[0-9][a-z0-9.-]*|o[134](?:-[a-z0-9.-]+)?|claude-(?:opus|sonnet|haiku)-[a-z0-9.-]+|gemini-[0-9][a-z0-9.-]*)$`)
+var modelAttributionIdentity = regexp.MustCompile(`^(?:gpt-[0-9][a-z0-9.-]*|o[134](?:-[a-z0-9.-]+)?|claude-(?:opus|sonnet|haiku)-[a-z0-9.-]+|gemini-[0-9][a-z0-9.-]*|grok-[0-9][a-z0-9.-]*)$`)
 
 var attributionLink = regexp.MustCompile(`^\[([^]]+)\]\(https?://[^)]+\)$`)
 
@@ -27,13 +27,14 @@ func IsAIAttributionTrailer(line string) bool {
 		}
 		return aiAttributionIdentity(name)
 	}
+	if identity, _, ok := strings.Cut(strings.ToLower(line), "-session:"); ok && aiAttributionIdentity(identity) {
+		return true
+	}
 	key, value, ok := strings.Cut(line, ":")
 	if !ok {
 		return false
 	}
 	switch strings.ToLower(strings.TrimSpace(key)) {
-	case "claude-session", "codex-session":
-		return true
 	case "co-authored-by":
 		address, err := attributionAddress(value)
 		if err != nil {

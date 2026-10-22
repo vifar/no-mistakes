@@ -127,11 +127,12 @@ func TestPRReviewConfiguredTrailersAreRemovedFromRecordedFindingDisplays(t *test
 func TestBuildPipelineSummary_ReviewAttributionDoesNotLeakFromRoundFindings(t *testing.T) {
 	t.Parallel()
 	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
-	const human = "Co-Authored-By: Claude Smith <claude@example.com>"
+	const human = "Co-Authored-By: Claude <claude@example.com>"
+	const recorder = "Generated with the repository recorder"
 	input, err := json.Marshal(Findings{Items: []Finding{{
 		ID: "r1", Severity: "warning",
 		File:        "feature.go\nCodex-Session: disposable",
-		Description: "Guard unsafe value\nCo-Authored-By: gpt-5.5 <model@example.com>\n> Generated with Codex\nAssisted-by: acp:cursor:model\n" + disclosure + "\n" + human,
+		Description: "Guard unsafe value\nCo-Authored-By: gpt-5.5 <model@example.com>\n> Generated with Codex\nAssisted-by: acp:cursor:model\n🤖 Generated with [Claude Code](https://claude.ai/code)\n" + recorder + "\n\n" + disclosure + "\n" + human,
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -150,12 +151,12 @@ func TestBuildPipelineSummary_ReviewAttributionDoesNotLeakFromRoundFindings(t *t
 		for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 			t.Run(string(provider), func(t *testing.T) {
 				markdown, _ := BuildPipelineSummaryFor([]*db.StepResult{step}, rounds, testPipelineHeadSHA, provider)
-				for _, forbidden := range []string{"Co-Authored-By: gpt-5.5", "Codex-Session: disposable", "Generated with Codex", "Assisted-by: acp:cursor:model"} {
+				for _, forbidden := range []string{"Co-Authored-By: gpt-5.5", "Codex-Session: disposable", "Generated with Codex", "Assisted-by: acp:cursor:model", "🤖 Generated with [Claude Code]"} {
 					if strings.Contains(markdown, forbidden) {
 						t.Errorf("Review findings reintroduced attribution %q:\n%s", forbidden, markdown)
 					}
 				}
-				if !strings.Contains(markdown, disclosure) || !strings.Contains(markdown, "Co-Authored-By: Claude Smith") {
+				if !strings.Contains(markdown, disclosure) || !strings.Contains(markdown, "Co-Authored-By: Claude") || !strings.Contains(markdown, recorder+"\n\n"+disclosure) {
 					t.Errorf("disclosure or human co-author lost:\n%s", markdown)
 				}
 				if *step.FindingsJSON != final || *rounds["review"][0].FindingsJSON != initial {

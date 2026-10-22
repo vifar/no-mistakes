@@ -199,13 +199,16 @@ func TestReviewFixCommitR2ConfiguredAttribution(t *testing.T) {
 
 func TestReviewFixCommitR1DisclosureAndHumanAttribution(t *testing.T) {
 	t.Parallel()
-	assertUnconfiguredReviewAttributionFiltered(t, "Generated with Codex\n> Co-Authored-By: Claude <noreply@anthropic.com>\nAssisted-by: pi:local\nCodex-Session: abc")
+	assertUnconfiguredReviewAttributionFiltered(t, "🤖 Generated with [Claude Code](https://claude.ai/code)\nGenerated with Codex\n> Co-Authored-By: Claude <noreply@anthropic.com>\nAssisted-by: pi:local\nCodex-Session: abc")
 }
 
 func TestReviewFixCommitR1QuotedDisplayNames(t *testing.T) {
 	t.Parallel()
+	t.Run("Claude tool mailbox", func(t *testing.T) {
+		assertUnconfiguredReviewAttributionFiltered(t, `Co-Authored-By: "Claude" <noreply@anthropic.com>`)
+	})
 	for _, identity := range []string{
-		"Claude", "Claude Code", "Codex", "ChatGPT", "OpenAI", "Anthropic", "Copilot", "GitHub Copilot",
+		"Claude Code", "Codex", "ChatGPT", "OpenAI", "Anthropic", "Copilot", "GitHub Copilot",
 		"Gemini", "Grok", "pi", "omp", "OpenCode", "Antigravity", "RovoDev", "Cursor", "Devin",
 		"acp:cursor", "acp:cursor:model", "acp:custom-target", "no-mistakes", "no-mistakes codex",
 		"gpt-5.5", "o3", "gemini-2.5-pro", "grok-4", "claude-opus-4-6",
@@ -229,7 +232,11 @@ func TestReviewFixCommitR3UnconfiguredAIIdentities(t *testing.T) {
 		"cursor", "devin", "antigravity", "acp:cursor", "acp:devin", "acp:custom-target",
 	} {
 		t.Run(identity, func(t *testing.T) {
-			noise := "Co-Authored-By: " + identity + " <model@example.com>\n" +
+			mailbox := "model@example.com"
+			if identity == "claude" {
+				mailbox = "noreply@anthropic.com"
+			}
+			noise := "Co-Authored-By: " + identity + " <" + mailbox + ">\n" +
 				"Assisted-by: " + identity + ":model\n" +
 				"> " + identity + "-Session: abc"
 			assertUnconfiguredReviewAttributionFiltered(t, noise)
@@ -242,7 +249,9 @@ func assertUnconfiguredReviewAttributionFiltered(t *testing.T, attribution strin
 	const human = "Co-Authored-By: Claude Smith <claude@example.com>"
 	const quotedHuman = `Co-Authored-By: "Claude Smith" <claude@example.com>`
 	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
-	const cleanSummary = "guard unsafe value\n\n" + disclosure + "\n\n" + human + "\n" + quotedHuman
+	const personalClaude = "Co-Authored-By: Claude <claude@example.com>"
+	const recorder = "Generated with the repository recorder"
+	const cleanSummary = "guard unsafe value\n\n" + disclosure + "\n\n" + human + "\n" + quotedHuman + "\n" + personalClaude + "\n" + recorder
 	dir, base, head := setupGitRepo(t)
 	output, err := json.Marshal(map[string]string{"summary": cleanSummary + "\n" + attribution, "verification": "passed"})
 	if err != nil {
@@ -259,6 +268,7 @@ func assertUnconfiguredReviewAttributionFiltered(t *testing.T, attribution strin
 	findings, err := json.Marshal(Findings{Items: []Finding{
 		{File: "receipt.go\n" + attribution, Description: disclosure + "\n" + human + "\n" + quotedHuman + "\n" + attribution},
 		{File: quotedHuman, Description: disclosure},
+		{File: personalClaude, Description: recorder},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -272,11 +282,11 @@ func assertUnconfiguredReviewAttributionFiltered(t *testing.T, attribution strin
 	if summary != cleanSummary {
 		t.Errorf("returned summary = %q, want %q", summary, cleanSummary)
 	}
-	wantSubject := "no-mistakes(review): guard unsafe value " + disclosure + " " + human + " " + quotedHuman
+	wantSubject := "no-mistakes(review): guard unsafe value " + disclosure + " " + human + " " + quotedHuman + " " + personalClaude + " " + recorder
 	if subject := lastCommitMessage(t, dir); subject != wantSubject {
 		t.Errorf("subject = %q, want %q", subject, wantSubject)
 	}
-	wantBody := cleanSummary + "\n\nRound findings:\n- receipt.go: " + disclosure + " " + human + " " + quotedHuman + "\n- " + quotedHuman + ": " + disclosure
+	wantBody := cleanSummary + "\n\nRound findings:\n- receipt.go: " + disclosure + " " + human + " " + quotedHuman + "\n- " + quotedHuman + ": " + disclosure + "\n- " + personalClaude + ": " + recorder
 	if body := gitCmd(t, dir, "show", "-s", "--format=%b"); body != wantBody {
 		t.Errorf("body = %q, want %q", body, wantBody)
 	}
