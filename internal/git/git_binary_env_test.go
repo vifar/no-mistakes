@@ -62,3 +62,12 @@ func TestRunWithEnvRefusesAnEnvironmentWithoutGit(t *testing.T) {
 		t.Fatalf("the refusal does not name the binary: %v", err)
 	}
 }
+
+// An environment that names an EMPTY PATH names no program at all, and the
+// child receives that empty PATH, so the process's binary must not be used.
+func TestRunWithEnvRefusesAnEmptyPath(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := RunWithEnv(context.Background(), dir, []string{"PATH="}, "version"); err == nil {
+		t.Fatal("an empty PATH ran the process's git")
+	}
+}
