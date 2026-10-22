@@ -298,6 +298,7 @@ func testRepairOutcomeExecutor(t *testing.T, capture bool, description string, c
 		data, _ := json.Marshal(findings)
 		return &agent.Result{Output: data}, nil
 	}}
+	enrollExecutorGate(t, p, c.Repo.ID)
 	executor := pipeline.NewExecutor(c.DB, p, c.Config, c.Agent, []pipeline.Step{&ReviewStep{}}, nil)
 	executor.SetPRContextGuard(GuardPRContext)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)

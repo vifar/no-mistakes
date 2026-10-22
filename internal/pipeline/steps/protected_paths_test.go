@@ -132,7 +132,9 @@ func TestCIStep_ProtectedPathRetryUsesPersistedRepair(t *testing.T) {
 			}}
 			parked := make(chan struct{}, 1)
 			gates := 0
-			executor := pipeline.NewExecutor(f.sctx.DB, paths.WithRoot(t.TempDir()), f.sctx.Config, ag, steps, func(event ipc.Event) {
+			app := paths.WithRoot(t.TempDir())
+			enrollExecutorGate(t, app, f.sctx.Repo.ID)
+			executor := pipeline.NewExecutor(f.sctx.DB, app, f.sctx.Config, ag, steps, func(event ipc.Event) {
 				if event.Type == ipc.EventStepCompleted && event.Status != nil && (*event.Status == string(types.StepStatusAwaitingApproval) || *event.Status == string(types.StepStatusFixReview)) {
 					gates++
 					if gates == 1 {

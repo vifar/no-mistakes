@@ -207,6 +207,7 @@ func TestImmutablePromotionMergeSettlesExecutorWithoutSourceMutation(t *testing.
 		t.Fatal(err)
 	}
 	var completed *ipc.Event
+	enrollExecutorGate(t, p, sctx.Repo.ID)
 	executor := pipeline.NewExecutor(sctx.DB, p, sctx.Config, sctx.Agent, []pipeline.Step{wrapper}, func(e ipc.Event) {
 		if e.Type == ipc.EventRunCompleted {
 			copy := e

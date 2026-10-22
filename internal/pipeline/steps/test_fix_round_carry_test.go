@@ -259,7 +259,9 @@ func testDeferredAskUserFindingParksUntilAHumanDecidesIt(t *testing.T, severity,
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	parked := make(chan string, 2)
-	executor := pipeline.NewExecutor(sctx.DB, paths.WithRoot(t.TempDir()), sctx.Config, ag, []pipeline.Step{&TestStep{}}, func(event ipc.Event) {
+	app := paths.WithRoot(t.TempDir())
+	enrollExecutorGate(t, app, sctx.Repo.ID)
+	executor := pipeline.NewExecutor(sctx.DB, app, sctx.Config, ag, []pipeline.Step{&TestStep{}}, func(event ipc.Event) {
 		if event.Type == ipc.EventStepCompleted && event.Status != nil && (*event.Status == string(types.StepStatusAwaitingApproval) || *event.Status == string(types.StepStatusFixReview)) && event.Findings != nil {
 			parked <- *event.Findings
 		}
