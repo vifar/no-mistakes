@@ -276,6 +276,7 @@ Drive each scenario:
 - If any required check is still running, has an unknown result, or lacks evidence, do not report "go". Use "no-go" for a known failure or unsafe change, and "inconclusive" when completion or evidence cannot be established. Record the outstanding check and the missing result.
 - Return a "verdict": "go" when every scenario you could drive passed and nothing untested puts the intent in doubt, "no-go" when a scenario failed or the change is not safe to ship, "inconclusive" when the change has a live-exercisable product surface but too little could be driven live to judge, "no-surface" when this change has no runtime product surface no-mistakes can drive live (a CI-workflow-only change, a docs-only change, a pure non-runtime refactor, or anything else with no live-exercisable scenario).
 - A "no-go" verdict parks this step for a decision. A "no-surface" verdict parks for a human to decide whether to proceed without live validation; mark every scenario untested with a reason naming why there is no live-validatable surface, never mark those as pass, and never use no-surface to skip live validation of a change that does have a product surface you could have driven. Untested scenarios are listed on the pull request and do not park by themselves, so an honest "untested" after exhausting your workarounds costs nothing and a guessed "pass" costs everything.
+- A "no-surface" verdict carries NO findings of your own: return an empty findings array. The pipeline asks the "proceed without live validation?" question itself, and a finding of your own that asks the same question makes the step impossible to release - the step parks on two questions where one would do, and the strict path can release neither.
 - A single scenario you could not drive live is reported as an untested scenario with its reason, NOT as a finding. Report a finding only when the step as a whole cannot demonstrate the user intent.
 
 Evidence:
@@ -337,6 +338,7 @@ Rules:
 		findings.Summary = strings.TrimSpace(strings.Join([]string{baselineSummary, findings.Summary}, "\n"))
 	}
 
+	findings = noSurfaceAcknowledgementOnly(findings)
 	findings.Items = append(findings.Items, verdictFindings(findings)...)
 	ownerResults, err := resolveTestReviewSupport(sctx, testCmd, testCommandExit, testCommandHead, testCommandObservedAt)
 	if err != nil {
@@ -550,6 +552,34 @@ func verdictFindings(findings Findings) []Finding {
 	default:
 		return nil
 	}
+}
+
+// noSurfaceAcknowledgementOnly reduces a no-surface verdict's findings to the
+// canonical acknowledgement.
+//
+// A "no-surface" verdict means the change has nothing no-mistakes can drive
+// live, so there is no defect to report: the only question is whether to
+// proceed without live validation, and the pipeline asks exactly that
+// question. An agent that ALSO asks it in a finding of its own makes the
+// step carry two questions where one would do - and the strict path can
+// release neither, because the canonical acknowledgement is only
+// acknowledgeable on its own.
+//
+// So the agent's own findings are dropped for this verdict. A finding that
+// reports a real failure is not dropped: the verdict would not be
+// no-surface, and a failing test command or a Test-agent timeout is refused
+// here outright rather than silently discarded.
+func noSurfaceAcknowledgementOnly(findings Findings) Findings {
+	if findings.Verdict != types.TestVerdictNoSurface {
+		return findings
+	}
+	for _, item := range findings.Items {
+		if item.ID == types.FindingIDTestAgentTimeout || item.ID == types.FindingIDTestAgentUnvalidatedWork || item.Category == types.FindingCategoryTestCommand {
+			return findings
+		}
+	}
+	findings.Items = nil
+	return findings
 }
 
 func failedScenarioSuffix(scenarios []types.TestScenario) string {
