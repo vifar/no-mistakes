@@ -104,6 +104,8 @@ func UsableForOS(goos, path string, fi os.FileInfo) bool {
 //
 // A relative PATH entry is resolved against baseDir, because that is the
 // directory the command runs in and the directory the child will see.
+// A found path is absolute so os/exec cannot search the process's PATH again
+// or interpret the path relative to the command's directory a second time.
 func Resolve(env []string, name string, baseDir string) (path string, hasPath bool, found bool) {
 	customPath, ok := Value(env, "PATH")
 	if !ok {
