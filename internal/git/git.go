@@ -571,9 +571,7 @@ func FindGitRoot(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	cmd.Dir = abs
-	winproc.Harden(cmd)
+	cmd := gitCommand(context.Background(), abs, nil, "rev-parse", "--show-toplevel")
 	out, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("not a git repository: %s", abs)

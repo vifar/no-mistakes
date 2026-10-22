@@ -15,6 +15,65 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
+// Repository discovery follows the documented command-directory PATH contract.
+// A real repository supplies the expected root independently of the resolver;
+// resolving relative entries from the caller's directory must not pass.
+func TestFindGitRootUsesCommandDirectoryPATH(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix symlink fixture and empty PATH entry semantics")
+	}
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	realGit, err = filepath.Abs(realGit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := initTestRepo(t)
+	want, err := filepath.EvalSymlinks(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(repo, "bin")
+	sub := filepath.Join(repo, "sub")
+	for _, dir := range []string{bin, sub} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(realGit, filepath.Join(bin, "git")); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(t.TempDir())
+	for _, tc := range []struct {
+		name, dir, path string
+		wantError       bool
+	}{
+		{"absolute", sub, bin, false},
+		{"relative", sub, filepath.Join("..", "bin"), false},
+		{"relative child", repo, "bin", false},
+		{"current directory", bin, ".", false},
+		{"empty entry", bin, string(os.PathListSeparator) + sub, false},
+		{"empty PATH", sub, "", true},
+		{"missing Git", sub, sub, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("PATH", tc.path)
+			got, err := FindGitRoot(tc.dir)
+			if tc.wantError {
+				if err == nil {
+					t.Fatalf("discovery used a Git outside PATH: %q", got)
+				}
+				return
+			}
+			if err != nil || got != want {
+				t.Fatalf("FindGitRoot(%q) = %q, %v; want %q", tc.dir, got, err, want)
+			}
+		})
+	}
+}
+
 // A command that is handed an environment uses THAT environment, for the
 // binary as well as for the child.
 //
