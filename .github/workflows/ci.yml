@@ -18,16 +18,8 @@ permissions:
 
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
-  # A pull request's newer commit SUPERSEDES its older one, so the older
-  # run's result is worthless and the runner time is better spent on the new
-  # head.
-  #
-  # The TRUNK is different. Every push to it is a DISTINCT commit that has to
-  # be verified, and cancelling the in-flight run means the trunk is never
-  # verified at all. A push to main lands every few minutes and the e2e job
-  # needs up to 90 minutes, so every main run so far was cancelled before its
-  # e2e job could report: the trunk's e2e never had a result to be red or
-  # green.
+  # Keep non-PR groups unique: cancel-in-progress: false alone still allows
+  # pending-run replacement. Policy: docs/src/content/docs/guides/fork-ci.md.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:

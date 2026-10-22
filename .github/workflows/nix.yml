@@ -25,11 +25,7 @@ permissions:
 
 concurrency:
   group: nix-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
-  # A pull request's newer commit supersedes its older one, so the older run's
-  # result is worthless. The TRUNK is different: every push to it is a
-  # distinct commit that has to be verified, and cancelling the in-flight run
-  # means the trunk's build is never verified. See the CI workflow for the
-  # same reasoning.
+  # Concurrency policy: docs/src/content/docs/guides/fork-ci.md.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
