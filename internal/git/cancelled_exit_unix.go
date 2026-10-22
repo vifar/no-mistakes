@@ -12,6 +12,21 @@ import (
 
 // processWasCancelled reports whether a process exit is the exit of a
 // subprocess THIS command's context stopped.
+//
+// A stop reaches the child as SIGKILL: that is what the standard library's
+// own kill does. The shell package terminates the child's whole PROCESS
+// GROUP when the command returns, and it sends SIGTERM first, escalating to
+// SIGKILL if the group has not gone within the grace period. Which of the
+// two arrives is a consequence of that race, and it says nothing about WHO
+// stopped the work - so both are the context's doing.
+//
+// Any other signal is the child's own. A child that SEGFAULTed or ABORTed
+// kept its own outcome, and the cancellation did not cause it, so the exit
+// is not the cancellation's and must not be marked as one. That is why the
+// allow-list is exactly the two stop signals and not "any signalled exit".
+//
+// An exit that is not signalled at all is not the context's either: a child
+// that exited 1 on its own kept its own outcome.
 func processWasCancelled(err *exec.ExitError) bool {
 	if err == nil {
 		return false
