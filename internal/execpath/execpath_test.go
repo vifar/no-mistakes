@@ -2,8 +2,10 @@ package execpath
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -245,44 +247,58 @@ func TestResolveEmptyEntriesUseWorkDirInPathOrder(t *testing.T) {
 	}
 }
 
-// An execute bit that belongs to somebody else is not an execute bit for us.
-// A file of ours with mode 0641 carries the OTHER user's execute bit, and
-// launching it fails with "permission denied", so the resolver has to skip it
-// and keep looking.
-func TestResolveSkipsAFileTheCurrentUserCannotRun(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the executable contract differs on Windows")
+func TestResolveSkipsCandidatesTheOwnerCannotExecute(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires Unix execute permissions and an unprivileged owner")
 	}
-	first := t.TempDir()
-	second := t.TempDir()
-	blocked := filepath.Join(first, "git")
-	if err := os.WriteFile(blocked, []byte("x"), 0o641); err != nil {
+	root := t.TempDir()
+	t.Chdir(root)
+	for _, dir := range []string{"denied", "usable"} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "git"), []byte("#!/bin/sh\nprintf 'usable'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	denied := filepath.Join(root, "denied", "git")
+	if err := os.Chmod(denied, 0o641); err != nil {
 		t.Fatal(err)
 	}
-	usable := filepath.Join(second, "git")
-	if err := os.WriteFile(usable, []byte("x"), 0o755); err != nil {
-		t.Fatal(err)
+	if err := exec.Command(denied).Run(); !os.IsPermission(err) {
+		t.Fatalf("executing the owner-inaccessible fixture = %v, want permission denied", err)
 	}
-	// The mode says "somebody may run this"; the access check says whether
-	// WE may. The owner of the first file cannot run it.
-	if err := os.Chmod(blocked, 0o641); err != nil {
-		t.Fatal(err)
-	}
-	path, _, found := Resolve([]string{"PATH=" + first + string(os.PathListSeparator) + second}, "git", second)
-	if !found {
-		t.Fatal("the resolver found no git at all")
-	}
-	// The paths are compared by identity: a temporary directory is reached
-	// through a symlink on some systems, and the FILE is what matters.
-	resolvedInfo, err := os.Stat(path)
+	info, err := os.Stat(denied)
 	if err != nil {
 		t.Fatal(err)
 	}
-	usableInfo, err := os.Stat(usable)
+	for _, path := range []string{denied, filepath.Join("denied", "git")} {
+		if Usable(path, info) {
+			t.Fatalf("owner-inaccessible candidate %q reported usable", path)
+		}
+	}
+	if path, hasPath, found := Resolve([]string{"PATH=" + filepath.Dir(denied)}, "git", root); !hasPath || found {
+		t.Fatalf("inaccessible-only lookup = %q, hasPath=%v, found=%v", path, hasPath, found)
+	}
+	env := []string{"PATH=" + strings.Join([]string{filepath.Dir(denied), filepath.Join(root, "usable")}, string(os.PathListSeparator))}
+	path, hasPath, found := Resolve(env, "git", root)
+	if !hasPath || !found {
+		t.Fatalf("resolve = %q, hasPath=%v, found=%v", path, hasPath, found)
+	}
+	got, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !os.SameFile(resolvedInfo, usableInfo) {
-		t.Fatalf("resolved %q, want the candidate this user may run (%q)", path, usable)
+	want, err := os.Stat(filepath.Join(root, "usable", "git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(got, want) {
+		t.Fatalf("resolved %q instead of the usable candidate", path)
+	}
+	cmd := exec.Command(path)
+	cmd.Env = env
+	if out, err := cmd.Output(); err != nil || string(out) != "usable" {
+		t.Fatalf("resolved executable output = %q, err=%v; want usable", out, err)
 	}
 }
