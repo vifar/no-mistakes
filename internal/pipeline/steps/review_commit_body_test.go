@@ -357,7 +357,8 @@ func TestReviewAttributionEntriesPreserveUnchangedText(t *testing.T) {
 			t.Errorf("text changed: %q, want %q", got, text)
 		}
 	}
-	if got := stripReviewAIAttribution("Build-Agent: private\n identifier\n\nKeep rationale", []string{"Build-Agent: private identifier"}); got != "Keep rationale" {
-		t.Errorf("configured folded entry survived: %q", got)
+	text := "Build-Agent: private\n identifier\n\nKeep rationale"
+	if got := stripReviewAIAttribution(text, []string{"Build-Agent: private identifier"}); got != text {
+		t.Errorf("complete non-address entry absorbed a following line: %q", got)
 	}
 }

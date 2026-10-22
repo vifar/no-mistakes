@@ -74,7 +74,7 @@ func TestPRHumanCoauthorPresentation_RefreshAndBudgets(t *testing.T) {
 				sctx := &pipeline.StepContext{Config: &config.Config{}, UserIntent: "Keep:\n" + humanCoauthorFixture}
 				sctx.Config.PR.Appendix = mode
 				narrative := "## What Changed\n\nKeep:\n" + humanCoauthorFixture + "\n\n" + humanCoauthorDisclosure
-				evidence := "## Testing\n\n```text\nCo-Authored-By: Claude Smith &lt;claude@example.com&gt;\n```"
+				evidence := "## Testing\n\n```text\n" + html.EscapeString(presentPRCoauthors(humanCoauthorFixture)) + "\n```"
 				pipelineMD := compliantPipelineBody(t, testPipelineHeadSHA)
 				for _, body := range []string{
 					assembleDraftPRBody(sctx, narrative, "Low risk", evidence, pipelineMD, 0, provider),
@@ -107,7 +107,7 @@ func TestPRHumanCoauthorPresentation_OwnedAndRestamp(t *testing.T) {
 	t.Parallel()
 	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 		t.Run(string(provider), func(t *testing.T) {
-			appendix := compliantPipelineBody(t, testPipelineHeadSHA) + "\n\n```text\n" + humanCoauthorFixture + "\n```\n\n" + humanCoauthorDisclosure
+			appendix := compliantPipelineBody(t, testPipelineHeadSHA) + "\n\n```text\n" + presentPRCoauthors(humanCoauthorFixture) + "\n```\n\n" + humanCoauthorDisclosure
 			content, err := composeOwnedPRContent(prOwnedBody{before: "author text"}, "fix: repair", appendix, 0)
 			if err != nil {
 				t.Fatal(err)

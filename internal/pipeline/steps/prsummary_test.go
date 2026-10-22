@@ -1240,3 +1240,59 @@ func TestBuildPRTestingSummary_SeparatesDetailsFromAdjacentAttachments(t *testin
 		})
 	}
 }
+
+func TestBuildTestingSummaryFiltersRawEvidenceBeforeRendering(t *testing.T) {
+	t.Parallel()
+	const configured = "Build-Agent: private-identifier"
+	const ai = "Co-Authored-By: Codex <ai@example.com>"
+	const human = "Co-Authored-By: Claude Smith\n <claude@example.com>"
+	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
+	const sample = configured + "\n" + ai + "\n" + human + "\n\n" + disclosure
+	root := t.TempDir()
+	path := filepath.Join(root, "capture.txt")
+	capture := "File output\n" + sample
+	if err := os.WriteFile(path, []byte(capture), 0600); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(Findings{TestingSummary: "Captured output:\n" + sample,
+		Tested:    []string{"Tested detail\n" + sample},
+		Artifacts: []types.TestArtifact{{Kind: "command-output", Label: "Capture", Path: path, Content: "Artifact caption\n" + sample}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(payload)
+	steps := []*db.StepResult{{ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &raw}}
+	rounds := map[string][]*db.StepRound{"test": {{Round: 1, FindingsJSON: &raw}}}
+	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+		for _, compact := range []bool{false, true} {
+			opts := testingSummaryOptions{flavor: prBodyFlavorFor(provider), repoRoot: root, evidenceRoot: root, compactArtifacts: compact,
+				includeTestedDetails: true, configuredTrailers: []string{configured}}
+			body := buildTestingSummary(steps, rounds, opts)
+			decoded := html.UnescapeString(body)
+			for _, forbidden := range []string{"private-identifier", "ai@example.com", "Co-Authored-By:"} {
+				if strings.Contains(decoded, forbidden) {
+					t.Errorf("%s compact=%t retained %q: %s", provider, compact, forbidden, body)
+				}
+			}
+			for _, kept := range []string{"Captured output:", "Tested detail", "Artifact caption", "File output", "preserved human co-author: Claude Smith", "claude@example.com", disclosure} {
+				if strings.Count(decoded, kept) == 0 {
+					t.Errorf("%s compact=%t lost %q: %s", provider, compact, kept, body)
+				}
+			}
+			if strings.Count(decoded, "preserved human co-author:") != 4 {
+				t.Errorf("%s compact=%t did not present all four raw evidence copies: %s", provider, compact, body)
+			}
+		}
+		body := buildPRTestingSummary(steps, rounds, "", "", root, root, nil, provider, nil, configured)
+		if strings.Contains(body, "private-identifier") || strings.Contains(body, "ai@example.com") {
+			t.Errorf("PR evidence retains attribution: %s", body)
+		}
+	}
+	if raw != string(payload) || *rounds["test"][0].FindingsJSON != string(payload) {
+		t.Fatal("raw recorded evidence changed")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != capture {
+		t.Fatal("raw captured output changed")
+	}
+}

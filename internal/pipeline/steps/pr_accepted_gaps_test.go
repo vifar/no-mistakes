@@ -509,7 +509,7 @@ func TestAcceptedGapConfiguredHomePathsFilteredBeforeRedaction(t *testing.T) {
 			if provider == scm.ProviderBitbucket {
 				ownedMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, nil, testPipelineHeadSHA, policy) + "\n```"
 			}
-			owned, err := composeOwnedPRContent(prOwnedBody{before: "Author text"}, "repair", ownedMD, 0, trailers...)
+			owned, err := composeOwnedPRContent(prOwnedBody{before: "Author text"}, "repair", ownedMD, 0)
 			if err != nil {
 				t.Fatal(err)
 			}

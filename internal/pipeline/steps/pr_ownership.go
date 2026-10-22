@@ -94,11 +94,10 @@ func wrapPRAppendix(appendix string) string {
 // publication fails. That includes suffix text/closing lines added after the
 // generated block. Model-authored copies of ownership markers in evidence are
 // escaped before the actual delimiters are inserted, like foreign attestations.
-func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit int, configuredTrailers ...string) (prContent, error) {
+func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit int) (prContent, error) {
 	before := redactPRContent(prContent{Body: parts.before}).Body
 	after := redactPRContent(prContent{Body: parts.after}).Body
 	appendix = escapePRAppendixMarkers(appendix)
-	appendix = presentPRCoauthors(appendix, configuredTrailers...)
 	appendix = redactPRContent(prContent{Body: appendix}).Body
 	if !parts.managed && before != "" {
 		before += "\n\n"
@@ -125,10 +124,6 @@ func validateOwnedPRBudget(body string, bodyLimit int) error {
 // pre-write edits are merged from their latest version (bounded); a write error
 // or post-write divergence fails without replaying a potentially applied write.
 func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initial scm.PRContent, title, emptyNarrative, appendix string, bodyLimit int, beforeWrite func() error) error {
-	configuredTrailers, err := configuredPRDisplayTrailers(sctx)
-	if err != nil {
-		return fmt.Errorf("prepare PR attribution filtering: %w", err)
-	}
 	reader, ok := host.(scm.PRContentReader)
 	if !ok {
 		return fmt.Errorf("provider cannot read PR content; author-safe template updates are unsupported")
@@ -145,7 +140,7 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		// The author text around the appendix is kept verbatim, so only
 		// references it does not already close are added.
 		authorText := parts.before + "\n" + parts.after
-		content, err := composeOwnedPRContent(parts, title, appendIssuesSection(appendix, issuesSection(sctx, authorText)), bodyLimit, configuredTrailers...)
+		content, err := composeOwnedPRContent(parts, title, appendIssuesSection(appendix, issuesSection(sctx, authorText)), bodyLimit)
 		if err != nil {
 			return err
 		}
@@ -206,7 +201,6 @@ func rebindOwnedPRAttestation(body, head string, steps []*db.StepResult, policy 
 			rebound = true
 		}
 		if rebound {
-			updated = presentPRCoauthors(updated, configuredTrailers...)
 			if len(updated) > maxPullRequestBodyBytes {
 				return "", false, fmt.Errorf("restamped PR body exceeds the publication budget")
 			}
@@ -230,7 +224,7 @@ func rebindOwnedPRAttestation(body, head string, steps []*db.StepResult, policy 
 	// Restamps reach UpdatePR without the draft path's redaction. The generated
 	// appendix is ours, so route it through the same publication redaction before
 	// the integrity guard is recomputed; author text outside it is untouched.
-	appendix = safepath.RedactText(presentPRCoauthors(appendix, configuredTrailers...))
+	appendix = safepath.RedactText(appendix)
 	updated := parts.before + wrapPRAppendix(appendix) + parts.after
 	if len(updated) > maxPullRequestBodyBytes {
 		return "", false, fmt.Errorf("restamped PR body exceeds the publication budget")

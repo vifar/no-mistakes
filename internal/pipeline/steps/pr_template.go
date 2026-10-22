@@ -206,7 +206,7 @@ func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provid
 	}
 	parts := []string{}
 	if intent := publicPRIntent(sctx); intent != "" {
-		parts = append(parts, "## Intent\n\n"+neutralizeAttestationMarkers(provider, intent))
+		parts = append(parts, "## Intent\n\n"+neutralizeAttestationMarkers(provider, presentPRCoauthors(intent, configuredTrailers...)))
 	}
 	if evidence := appendixEvidence(appendixMode(sctx), prBodyFlavorFor(provider), risk, testing, pipelineMD, provider); evidence != "" {
 		// The appendix's evidence is published text like any other: a
@@ -214,5 +214,5 @@ func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provid
 		// rendered before the body it becomes is budgeted.
 		parts = append(parts, renderCoAuthorAsLabelledField(evidence))
 	}
-	return presentPRCoauthors(strings.Join(parts, "\n\n"), configuredTrailers...), nil
+	return strings.Join(parts, "\n\n"), nil
 }

@@ -57,11 +57,10 @@ func reviewAttributionAddressComplete(line string) bool {
 	if !ok {
 		return false
 	}
-	i := strings.LastIndex(value, "<")
-	if i < 0 {
-		return false
+	if i := strings.LastIndex(value, "<"); i >= 0 {
+		value = value[i:]
 	}
-	_, err := mail.ParseAddress(strings.TrimSpace(value[i:]))
+	_, err := mail.ParseAddress(strings.TrimSpace(value))
 	return err == nil
 }
 
@@ -81,16 +80,27 @@ func reviewAttributionEntry(lines []string, start int, configuredTrailers []stri
 	if !reviewAttributionStart(unfolded, configuredTrailers) {
 		return end, unfolded, false, false
 	}
-	for end < len(lines) && !reviewAttributionAddressComplete(unfolded) && !reviewConfiguredAttributionMatches(unfolded, configuredTrailers) {
+	key, value, hasKey := strings.Cut(unfolded, ":")
+	addressForm := false
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "co-authored-by", "assisted-by", "signed-off-by", "reviewed-by", "co-committed-by":
+		addressForm = hasKey && strings.TrimSpace(value) != "" && !strings.ContainsAny(value, "<>@") && !reviewAttributionAddressComplete(unfolded)
+	}
+	if strings.EqualFold(strings.TrimSpace(key), "Assisted-by") && strings.Contains(value, ":") {
+		addressForm = false
+	}
+	if end < len(lines) && !reviewConfiguredAttributionMatches(unfolded, configuredTrailers) {
 		next, continuation := reviewAttributionLine(lines[end])
-		if next == "" || !continuation || reviewTrailerKey.MatchString(next) || reviewGeneratedWith.MatchString(next) {
-			break
+		_, addressErr := mail.ParseAddress(next)
+		emptyGenerated := reviewGeneratedWith.MatchString(unfolded) && strings.HasSuffix(strings.ToLower(unfolded), "with")
+		if continuation && next != "" && !reviewTrailerKey.MatchString(next) &&
+			((addressForm && addressErr == nil) || (emptyGenerated && git.IsAIAttributionTrailer(unfolded+" "+next))) {
+			unfolded += " " + next
+			end++
 		}
-		unfolded += " " + next
-		end++
 	}
 	ai = git.IsAIAttributionTrailer(unfolded) || reviewConfiguredAttributionMatches(unfolded, configuredTrailers)
-	_, value, hasKey := strings.Cut(unfolded, ":")
+	_, value, hasKey = strings.Cut(unfolded, ":")
 	entry = ai || (hasKey && strings.TrimSpace(value) != "" && !reviewGeneratedWith.MatchString(unfolded))
 	return end, unfolded, entry, ai
 }

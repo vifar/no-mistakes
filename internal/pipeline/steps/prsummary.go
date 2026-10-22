@@ -92,6 +92,7 @@ type testingArtifactRenderState struct {
 }
 
 type testingSummaryOptions struct {
+	configuredTrailers   []string
 	flavor               prBodyFlavor
 	githubBlobBase       string
 	githubRawBase        string
@@ -408,7 +409,7 @@ func BuildTestingSummaryForPRWithProvider(steps []*db.StepResult, rounds map[str
 	return buildPRTestingSummary(steps, rounds, upstreamURL, ref, repoRoot, evidenceRoot, links, provider, nil)
 }
 
-func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider, attachments map[string]string) string {
+func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider, attachments map[string]string, configuredTrailers ...string) string {
 	opts := testingSummaryOptionsForGitHub(upstreamURL, ref)
 	opts.flavor = prBodyFlavorFor(provider)
 	opts.compactArtifacts = true
@@ -418,6 +419,7 @@ func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepR
 	opts.evidenceRoot = evidenceRoot
 	opts.evidence = links
 	opts.attachments = attachments
+	opts.configuredTrailers = configuredTrailers
 	return buildTestingSummary(steps, rounds, opts)
 }
 
@@ -443,8 +445,8 @@ func buildTestingSummaryRaw(steps []*db.StepResult, rounds map[string][]*db.Step
 			return ""
 		}
 
-		testingSummary := collectTestingSummary(sr, stepRounds)
-		tested := collectTestingDetails(sr, stepRounds)
+		testingSummary := collectTestingSummary(sr, stepRounds, opts.configuredTrailers...)
+		tested := collectTestingDetails(sr, stepRounds, opts.configuredTrailers...)
 		artifacts := collectTestingArtifacts(sr, stepRounds, opts)
 		scenarios := collectTestingScenarios(sr, stepRounds)
 		liveValidation := renderLiveValidationLine(scenarios, collectTestingVerdict(sr, stepRounds))
@@ -600,19 +602,19 @@ func cleanGitHubRepoPath(repo string) string {
 	return url.PathEscape(parts[0]) + "/" + url.PathEscape(parts[1])
 }
 
-func collectTestingSummary(sr *db.StepResult, rounds []*db.StepRound) string {
-	if summary := testingSummaryFromFindings(sr.FindingsJSON); summary != "" {
+func collectTestingSummary(sr *db.StepResult, rounds []*db.StepRound, configuredTrailers ...string) string {
+	if summary := testingSummaryFromFindings(sr.FindingsJSON, configuredTrailers...); summary != "" {
 		return summary
 	}
 	for i := len(rounds) - 1; i >= 0; i-- {
-		if summary := testingSummaryFromFindings(rounds[i].FindingsJSON); summary != "" {
+		if summary := testingSummaryFromFindings(rounds[i].FindingsJSON, configuredTrailers...); summary != "" {
 			return summary
 		}
 	}
 	return ""
 }
 
-func testingSummaryFromFindings(raw *string) string {
+func testingSummaryFromFindings(raw *string, configuredTrailers ...string) string {
 	if raw == nil || strings.TrimSpace(*raw) == "" {
 		return ""
 	}
@@ -620,14 +622,14 @@ func testingSummaryFromFindings(raw *string) string {
 	if err != nil {
 		return ""
 	}
-	return sanitizePromptMultilineText(findings.TestingSummary)
+	return sanitizePromptMultilineText(presentPRCoauthors(findings.TestingSummary, configuredTrailers...))
 }
 
-func collectTestingDetails(sr *db.StepResult, rounds []*db.StepRound) []string {
+func collectTestingDetails(sr *db.StepResult, rounds []*db.StepRound, configuredTrailers ...string) []string {
 	seen := map[string]bool{}
 	var details []string
 	for _, raw := range testingEvidenceFindingsJSON(sr, rounds) {
-		details = appendTestingDetails(details, seen, raw)
+		details = appendTestingDetails(details, seen, raw, configuredTrailers...)
 	}
 	return details
 }
@@ -677,7 +679,7 @@ func appendTestingArtifacts(artifacts []types.TestArtifact, seen map[string]bool
 		artifact.Kind = strings.ToLower(sanitizePromptText(artifact.Kind))
 		artifact.Path = sanitizeArtifactPath(artifact.Path, opts)
 		artifact.URL = sanitizeArtifactURL(artifact.URL)
-		artifact.Content = sanitizePromptMultilineText(artifact.Content)
+		artifact.Content = sanitizePromptMultilineText(presentPRCoauthors(artifact.Content, opts.configuredTrailers...))
 		key := artifact.Kind + "\x00" + artifact.Label + "\x00" + artifact.Path + "\x00" + artifact.URL + "\x00" + artifact.Content
 		if artifact.Label == "" || seen[key] {
 			continue
@@ -691,7 +693,7 @@ func appendTestingArtifacts(artifacts []types.TestArtifact, seen map[string]bool
 	return artifacts
 }
 
-func appendTestingDetails(details []string, seen map[string]bool, raw *string) []string {
+func appendTestingDetails(details []string, seen map[string]bool, raw *string, configuredTrailers ...string) []string {
 	if raw == nil || strings.TrimSpace(*raw) == "" {
 		return details
 	}
@@ -700,7 +702,7 @@ func appendTestingDetails(details []string, seen map[string]bool, raw *string) [
 		return details
 	}
 	for _, detail := range findings.Tested {
-		clean := sanitizePromptText(neutralizeAIAttribution(detail))
+		clean := sanitizePromptText(presentPRCoauthors(neutralizeAIAttribution(detail), configuredTrailers...))
 		if clean == "" || seen[clean] {
 			continue
 		}
@@ -894,7 +896,7 @@ func embeddedArtifactText(artifact types.TestArtifact, opts testingSummaryOption
 	if err != nil {
 		return "", false
 	}
-	text = strings.TrimRight(text, "\n")
+	text = strings.TrimRight(presentPRCoauthors(text, opts.configuredTrailers...), "\n")
 	if text == "" {
 		return "", false
 	}

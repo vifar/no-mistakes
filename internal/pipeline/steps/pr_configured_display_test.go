@@ -124,7 +124,7 @@ func TestPRConfiguredAttributionEveryDisplay(t *testing.T) {
 					if provider == scm.ProviderBitbucket && !templated {
 						ownedMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, nil, sctx.Run.HeadSHA, pipelineAttestationPolicy{ConfiguredTrailers: trailers}) + "\n```"
 					}
-					owned, err := composeOwnedPRContent(prOwnedBody{before: "Author text"}, "repair", ownedMD+"\n\nOwned marker\n"+sample, 0, trailers...)
+					owned, err := composeOwnedPRContent(prOwnedBody{before: "Author text"}, "repair", ownedMD+"\n\nOwned marker\n"+presentPRCoauthors(sample, trailers...), 0)
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -133,7 +133,7 @@ func TestPRConfiguredAttributionEveryDisplay(t *testing.T) {
 					legacyMD, _ := buildPipelineSummaryFor(steps, nil, sctx.Run.HeadSHA, scm.ProviderGitHub, pipelineAttestationPolicy{})
 					for _, ownedBody := range []bool{false, true} {
 						for _, keepSteps := range []bool{false, true} {
-							old := legacyMD + "\n\nRestamp marker\n" + sample
+							old := legacyMD + "\n\nRestamp marker\n" + presentPRCoauthors(sample, trailers...)
 							if ownedBody {
 								old = "Author prefix\n\n" + wrapPRAppendix(old) + "\nAuthor suffix"
 							}
