@@ -77,6 +77,14 @@ func handleFakeCLI(mode string) {
 			f.Close()
 		}
 	}
+	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
+		if marker := os.Getenv("FAKE_CLI_AUTH_TIMEOUT_MARKER"); marker != "" {
+			if err := os.Remove(marker); err == nil {
+				fmt.Fprintln(os.Stderr, "Timeout trying to log in to github.com account test (keyring)")
+				os.Exit(1)
+			}
+		}
+	}
 	logFakeCLIStdinBody(args, logFile)
 	if forwardCommitStatus(args) {
 		return
@@ -109,6 +117,11 @@ func handleFakeCLI(mode string) {
 	}
 
 	switch mode {
+	case "pr-context-read":
+		fmt.Fprint(os.Stdout, os.Getenv("FAKE_CLI_STDOUT"))
+		fmt.Fprint(os.Stderr, os.Getenv("FAKE_CLI_STDERR"))
+		code, _ := strconv.Atoi(os.Getenv("FAKE_CLI_EXIT_CODE"))
+		os.Exit(code)
 	case "raw-shutdown-process-loss":
 		d, err := db.Open(os.Getenv("FAKE_CLI_DB_PATH"))
 		if err != nil {
@@ -934,6 +947,7 @@ func fakeCIGHHandler(args []string) {
 	joined := strings.Join(args, " ")
 
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
+
 		if authErr := os.Getenv("FAKE_CLI_AUTH_ERR"); authErr != "" {
 			fmt.Fprintln(os.Stderr, authErr)
 			os.Exit(1)

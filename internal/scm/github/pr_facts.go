@@ -92,7 +92,7 @@ func (h *Host) prFactsAPI(ctx context.Context, args ...string) ([]byte, error) {
 	command = append(command, args...)
 	out, err := h.cmd(ctx, "gh", command...).CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("gh api pull request facts: %s: %w", strings.TrimSpace(string(out)), err)
+		return nil, prReadError(ctx, "gh api pull request facts", strings.TrimSpace(string(out)), err)
 	}
 	return out, nil
 }
@@ -186,9 +186,9 @@ func (h *Host) GetPRFacts(ctx context.Context, pr *scm.PR) (scm.PRFacts, error) 
 	if h.host != "" {
 		args = append(args, "--hostname", h.host)
 	}
-	out, err := h.cmd(ctx, "gh", args...).Output()
+	out, detail, err := stdoutOnly(h.cmd(ctx, "gh", args...))
 	if err != nil {
-		return scm.PRFacts{}, fmt.Errorf("read exact GitHub PR facts: %w", err)
+		return scm.PRFacts{}, prReadError(ctx, "read exact GitHub PR facts", detail, err)
 	}
 	type ref struct {
 		Ref  string `json:"ref"`
