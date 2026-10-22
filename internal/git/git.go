@@ -205,25 +205,9 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	return out, nil
 }
 
-// runInDirWithEnvAndInputRawCaptured runs a git command and keeps its stdout
-// even when the command fails, so a caller can read a result git reports on
-// stdout and signals through the exit code. The plain raw runner drops stdout
-// on failure, because most callers treat a failed command as no output at all.
-// gitBinaryForEnv resolves the git binary from the PATH in the environment
-// the command is GIVEN.
-//
-// exec.CommandContext resolves a bare name against the PROCESS's PATH, so an
-// environment that carries its own PATH is honoured for the child's
-// environment and IGNORED for the binary lookup. That is the wrong way round:
-// the environment the caller chose is the environment the command has to run
-// in, and a step's contract is that every git command it runs uses the step's
-// environment.
-//
-// An environment with no PATH of its own leaves the process's PATH in charge,
-// which is what every caller that does not choose one expects. An environment
-// that names an EMPTY PATH names no program at all, and an environment whose
-// PATH holds no git is refused rather than quietly answered with a different
-// binary.
+// gitBinaryForEnv uses execpath.Resolve so binary lookup sees the same
+// environment as the child. Passing a bare name to exec.CommandContext would
+// resolve it against the process's PATH before the child's environment is set.
 func gitBinaryForEnv(workDir string, env []string) (string, bool) {
 	path, hasPath, found := execpath.Resolve(env, "git", workDir)
 	if !hasPath {
@@ -235,6 +219,10 @@ func gitBinaryForEnv(workDir string, env []string) (string, bool) {
 	return path, true
 }
 
+// runInDirWithEnvAndInputRawCaptured runs a git command and keeps its stdout
+// even when the command fails, so a caller can read a result git reports on
+// stdout and signals through the exit code. The plain raw runner drops stdout
+// on failure, because most callers treat a failed command as no output at all.
 func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEnv []string, input string, args ...string) ([]byte, error) {
 	env := append(nonInteractiveEnvForContext(ctx, dir), extraEnv...)
 	binary, found := gitBinaryForEnv(dir, env)
