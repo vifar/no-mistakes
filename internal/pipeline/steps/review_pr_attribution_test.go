@@ -3,6 +3,7 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"strings"
 	"testing"
 
@@ -33,7 +34,7 @@ func TestPRReviewConfiguredTrailersAreRemovedFromRecordedFindingDisplays(t *test
 							sctx.Config.Commit.Trailers = trailers
 						}
 						finding := Finding{ID: "r1", Severity: "warning", File: "feature.go", Description: "Guard unsafe value"}
-						text := "\n> Build-Agent: private-identifier\nCo-Authored-By: private:writer <opaque@example.com>\nBuild-Identity: acp:private:writer / opaque-model\n\n" + disclosure + "\n\n" + human + "\n" + prose + "\nBuild-Agent: unconfigured-human"
+						text := "\n> Build-Agent: private-identifier\nCo-Authored-By: private:writer <opaque@example.com>\nCo-Authored-By: private:writer\n <opaque@example.com>\nBuild-Identity: acp:private:writer / opaque-model\n\n" + disclosure + "\n\n" + human + "\n" + prose + "\nBuild-Agent: unconfigured-human"
 						if field == "File" {
 							finding.File += text
 						} else {
@@ -76,7 +77,7 @@ func TestPRReviewConfiguredTrailersAreRemovedFromRecordedFindingDisplays(t *test
 							}
 						}
 						markdown, _, _ := (&PRStep{}).buildPipelineSection(sctx, provider)
-						for _, forbidden := range []string{"&gt; Build-Agent: private-identifier", "> Build-Agent: private-identifier", "Co-Authored-By: private:writer", "Build-Identity: acp:private:writer / opaque-model"} {
+						for _, forbidden := range []string{"&gt; Build-Agent: private-identifier", "> Build-Agent: private-identifier", "Co-Authored-By: private:writer", "Build-Identity: acp:private:writer / opaque-model", "opaque@example.com"} {
 							if strings.Contains(markdown, forbidden) {
 								t.Errorf("configured trailer reached published finding: %q", forbidden)
 							}
@@ -129,10 +130,11 @@ func TestBuildPipelineSummary_ReviewAttributionDoesNotLeakFromRoundFindings(t *t
 	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
 	const human = "Co-Authored-By: Claude <claude@example.com>"
 	const recorder = "Generated with the repository recorder"
+	const foldedHuman = "Co-Authored-By: Claude\n <claude@example.com>"
 	input, err := json.Marshal(Findings{Items: []Finding{{
 		ID: "r1", Severity: "warning",
-		File:        "feature.go\nCodex-Session: disposable",
-		Description: "Guard unsafe value\nCo-Authored-By: gpt-5.5 <model@example.com>\n> Generated with Codex\nAssisted-by: acp:cursor:model\n🤖 Generated with [Claude Code](https://claude.ai/code)\n" + recorder + "\n\n" + disclosure + "\n" + human,
+		File:        "feature.go\nCodex-Session: disposable\nCo-Authored-By: Claude\n <noreply@anthropic.com>",
+		Description: "Guard unsafe value\nCo-Authored-By: Claude\n <noreply@anthropic.com>\nCo-Authored-By: gpt-5.5 <model@example.com>\n> Generated with Codex\nAssisted-by: acp:cursor:model\n🤖 Generated with [Claude Code](https://claude.ai/code)\n" + recorder + "\n\n" + disclosure + "\n" + human + "\n" + foldedHuman,
 	}}})
 	if err != nil {
 		t.Fatal(err)
@@ -151,12 +153,12 @@ func TestBuildPipelineSummary_ReviewAttributionDoesNotLeakFromRoundFindings(t *t
 		for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 			t.Run(string(provider), func(t *testing.T) {
 				markdown, _ := BuildPipelineSummaryFor([]*db.StepResult{step}, rounds, testPipelineHeadSHA, provider)
-				for _, forbidden := range []string{"Co-Authored-By: gpt-5.5", "Codex-Session: disposable", "Generated with Codex", "Assisted-by: acp:cursor:model", "🤖 Generated with [Claude Code]"} {
+				for _, forbidden := range []string{"Co-Authored-By: gpt-5.5", "Codex-Session: disposable", "Generated with Codex", "Assisted-by: acp:cursor:model", "🤖 Generated with [Claude Code]", "noreply@anthropic.com"} {
 					if strings.Contains(markdown, forbidden) {
 						t.Errorf("Review findings reintroduced attribution %q:\n%s", forbidden, markdown)
 					}
 				}
-				if !strings.Contains(markdown, disclosure) || !strings.Contains(markdown, "Co-Authored-By: Claude") || !strings.Contains(markdown, recorder+"\n\n"+disclosure) {
+				if !strings.Contains(html.UnescapeString(markdown), foldedHuman) || !strings.Contains(markdown, disclosure) || !strings.Contains(markdown, "Co-Authored-By: Claude") || !strings.Contains(markdown, recorder+"\n\n"+disclosure) {
 					t.Errorf("disclosure or human co-author lost:\n%s", markdown)
 				}
 				if *step.FindingsJSON != final || *rounds["review"][0].FindingsJSON != initial {

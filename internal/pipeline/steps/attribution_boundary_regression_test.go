@@ -274,7 +274,11 @@ func TestAttributionBoundaryPersistedReviewOutcome(t *testing.T) {
 				t.Fatal(err)
 			}
 			md, _ := BuildPipelineSummary([]*db.StepResult{sr}, map[string][]*db.StepRound{sr.ID: rounds}, sctx.Run.HeadSHA)
-			if !strings.Contains(md, "auto-fixed") || !strings.Contains(md, "🔧 Fix applied.") || strings.Contains(md, "result not reported") {
+			outcome := "1 issue found → auto-fixed"
+			if step == types.StepReview {
+				outcome = "1 issue found → Fix applied"
+			}
+			if !strings.Contains(md, outcome) || !strings.Contains(md, "🔧 Fix applied.") || strings.Contains(md, "result not reported") {
 				t.Fatalf("persisted fix rendering:\n%s", md)
 			}
 		})

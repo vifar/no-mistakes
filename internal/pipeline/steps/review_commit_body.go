@@ -3,17 +3,31 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 )
 
+var reviewTrailerKey = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]*[ \t]*:`)
+
 func stripReviewAIAttribution(text string, configuredTrailers []string) string {
 	var kept []string
-	for _, line := range strings.Split(text, "\n") {
-		unquoted := strings.TrimRight(strings.TrimLeft(line, " \t\r>\"'`*-"), " \t\r\"'`")
-		attribution := git.IsAIAttributionTrailer(line) || git.IsAIAttributionTrailer(unquoted)
+	lines := strings.Split(text, "\n")
+	for start := 0; start < len(lines); {
+		end := start + 1
+		entry := lines[start]
+		unquoted := strings.TrimRight(strings.TrimLeft(entry, " \t\r>\"'`*-"), " \t\r\"'`")
+		if reviewTrailerKey.MatchString(unquoted) || git.IsAIAttributionTrailer(unquoted) {
+			for end < len(lines) && strings.TrimSpace(lines[end]) != "" && (strings.HasPrefix(lines[end], " ") || strings.HasPrefix(lines[end], "\t")) {
+				entry += " " + strings.TrimSpace(lines[end])
+				unquoted += " " + strings.TrimSpace(lines[end])
+				end++
+			}
+		}
+		unquoted = strings.TrimRight(unquoted, " \t\r\"'`")
+		attribution := git.IsAIAttributionTrailer(entry) || git.IsAIAttributionTrailer(unquoted)
 		for _, trailer := range configuredTrailers {
 			if strings.EqualFold(unquoted, strings.TrimRight(trailer, " \t\r\"'`")) {
 				attribution = true
@@ -21,8 +35,9 @@ func stripReviewAIAttribution(text string, configuredTrailers []string) string {
 			}
 		}
 		if !attribution {
-			kept = append(kept, line)
+			kept = append(kept, lines[start:end]...)
 		}
+		start = end
 	}
 	return strings.TrimSpace(strings.Join(kept, "\n"))
 }

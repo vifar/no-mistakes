@@ -187,3 +187,20 @@ func TestPRHumanCoauthorPresentation_ClassificationAndSourcePreservation(t *test
 		t.Errorf("ordinary prose changed: %q", got)
 	}
 }
+
+func TestPRHumanCoauthorPresentation_FoldedEntries(t *testing.T) {
+	t.Parallel()
+	for _, address := range []string{"<claude@example.com>", "&lt;claude@example.com&gt;"} {
+		input := "Co-Authored-By: Claude\n " + address + "\n\n" + humanCoauthorDisclosure
+		want := "preserved human co-author: Claude\n " + address + "\n\n" + humanCoauthorDisclosure
+		if got := presentPRCoauthors(input); got != want {
+			t.Errorf("human evidence = %q, want %q", got, want)
+		}
+	}
+	for _, address := range []string{"<noreply@anthropic.com>", "&lt;noreply@anthropic.com&gt;"} {
+		input := "Co-Authored-By: Claude\n " + address + "\n\n" + humanCoauthorDisclosure
+		if got := presentPRCoauthors(input); got != "\n\n"+humanCoauthorDisclosure {
+			t.Errorf("folded AI evidence survived: %q", got)
+		}
+	}
+}

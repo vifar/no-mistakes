@@ -202,6 +202,19 @@ func TestReviewFixCommitR1DisclosureAndHumanAttribution(t *testing.T) {
 	assertUnconfiguredReviewAttributionFiltered(t, "🤖 Generated with [Claude Code](https://claude.ai/code)\nGenerated with Codex\n> Co-Authored-By: Claude <noreply@anthropic.com>\nAssisted-by: pi:local\nCodex-Session: abc")
 }
 
+func TestReviewFixCommitFoldedAttribution(t *testing.T) {
+	t.Parallel()
+	for _, entry := range []string{
+		"Co-Authored-By: Claude\n <noreply@anthropic.com>",
+		"Co-Authored-By: gpt-5.5\n\t<model@example.com>",
+		"> \"Co-Authored-By: Claude\n <noreply@anthropic.com>\"",
+	} {
+		t.Run(entry, func(t *testing.T) {
+			assertUnconfiguredReviewAttributionFiltered(t, entry)
+		})
+	}
+}
+
 func TestReviewFixCommitR1QuotedDisplayNames(t *testing.T) {
 	t.Parallel()
 	t.Run("Claude tool mailbox", func(t *testing.T) {
@@ -250,8 +263,9 @@ func assertUnconfiguredReviewAttributionFiltered(t *testing.T, attribution strin
 	const quotedHuman = `Co-Authored-By: "Claude Smith" <claude@example.com>`
 	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
 	const personalClaude = "Co-Authored-By: Claude <claude@example.com>"
+	const foldedHuman = "Co-Authored-By: Claude\n <claude@example.com>"
 	const recorder = "Generated with the repository recorder"
-	const cleanSummary = "guard unsafe value\n\n" + disclosure + "\n\n" + human + "\n" + quotedHuman + "\n" + personalClaude + "\n" + recorder
+	const cleanSummary = "guard unsafe value\n\n" + disclosure + "\n\n" + human + "\n" + quotedHuman + "\n" + personalClaude + "\n" + foldedHuman + "\n" + recorder
 	dir, base, head := setupGitRepo(t)
 	output, err := json.Marshal(map[string]string{"summary": cleanSummary + "\n" + attribution, "verification": "passed"})
 	if err != nil {
@@ -268,7 +282,7 @@ func assertUnconfiguredReviewAttributionFiltered(t *testing.T, attribution strin
 	findings, err := json.Marshal(Findings{Items: []Finding{
 		{File: "receipt.go\n" + attribution, Description: disclosure + "\n" + human + "\n" + quotedHuman + "\n" + attribution},
 		{File: quotedHuman, Description: disclosure},
-		{File: personalClaude, Description: recorder},
+		{File: foldedHuman, Description: recorder},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -282,7 +296,7 @@ func assertUnconfiguredReviewAttributionFiltered(t *testing.T, attribution strin
 	if summary != cleanSummary {
 		t.Errorf("returned summary = %q, want %q", summary, cleanSummary)
 	}
-	wantSubject := "no-mistakes(review): guard unsafe value " + disclosure + " " + human + " " + quotedHuman + " " + personalClaude + " " + recorder
+	wantSubject := "no-mistakes(review): guard unsafe value " + disclosure + " " + human + " " + quotedHuman + " " + personalClaude + " Co-Authored-By: Claude <claude@example.com> " + recorder
 	if subject := lastCommitMessage(t, dir); subject != wantSubject {
 		t.Errorf("subject = %q, want %q", subject, wantSubject)
 	}
@@ -325,5 +339,22 @@ func TestOtherFixCommitBodiesUnchanged(t *testing.T) {
 				t.Fatalf("%s body changed: %q", step, body)
 			}
 		})
+	}
+}
+
+func TestReviewAttributionEntriesPreserveUnchangedText(t *testing.T) {
+	t.Parallel()
+	for _, text := range []string{
+		"Co-Authored-By: Claude\n <claude@example.com>",
+		"Co-Authored-By: Claude Smith\n\t<claude@example.com>",
+		"Disclosure: fixtures were generated with the repository recorder.\n  Keep this continuation.\n\nKeep this paragraph.",
+		"Ordinary prose\n  with indentation.\n\nGenerated with the repository recorder",
+	} {
+		if got := stripReviewAIAttribution(text, nil); got != text {
+			t.Errorf("text changed: %q, want %q", got, text)
+		}
+	}
+	if got := stripReviewAIAttribution("Build-Agent: private\n identifier\n\nKeep rationale", []string{"Build-Agent: private identifier"}); got != "Keep rationale" {
+		t.Errorf("configured folded entry survived: %q", got)
 	}
 }
