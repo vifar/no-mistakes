@@ -887,11 +887,23 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 		return nil, fmt.Errorf("load repo config: %w", err)
 	}
 	var trustedSHA string
+	var trustedFetchErr error
 	if repo.DefaultBranch != "" {
 		fetchCtx, cancel := context.WithTimeout(ctx, recoveredConfigFetchTimeout)
 		defer cancel()
 		if sha, err := fetchRecoveredDefaultBranchSHA(fetchCtx, workDir, repo); err != nil {
-			return nil, err
+			// A fetch this run's own cancellation stopped is the
+			// cancellation's, and the error says so.
+			if pipeline.CancellationAttributable(err, context.Cause(fetchCtx)) {
+				return nil, err
+			}
+			// Any OTHER failure falls through to the fail-closed read
+			// below, which refuses with the POLICY's own diagnostic.
+			// The raw fetch error is not the refusal, and the refusal
+			// is the contract: the run must not start without knowing
+			// whether the repo relies on the boundary.
+			trustedFetchErr = err
+			slog.Warn("failed to fetch default branch while recovering run; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
 		} else {
 			trustedSHA = sha
 		}
@@ -899,6 +911,9 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	// SECURITY: a trusted-config fetch failure must abort, not silently disable
 	// the disable_project_settings opt-out (see assertGateTrustedConfigReadable).
 	if err := assertGateTrustedConfigReadable(ctx, workDir, repo.DefaultBranch, trustedSHA); err != nil {
+		if trustedFetchErr != nil {
+			return nil, fmt.Errorf("%w (the trusted default branch could not be fetched: %v)", err, trustedFetchErr)
+		}
 		return nil, err
 	}
 	trustedRepoCfg := loadTrustedRepoConfig(ctx, workDir, trustedSHA, run.ID)
@@ -2785,10 +2800,21 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	}
 	// Pin a freshly fetched trusted commit independently of shared tracking refs.
 	var trustedSHA string
+	var trustedFetchErr error
 	if repo.DefaultBranch != "" {
 		if sha, err := fetchTrustedDefaultBranchSHA(ctx, wtDir, repo); err != nil {
-			trackStartFailure("trusted_config_unreadable")
-			return "", err
+			// A fetch this run's own cancellation stopped is the
+			// cancellation's, and the error says so.
+			if pipeline.CancellationAttributable(err, context.Cause(ctx)) {
+				trackStartFailure("trusted_config_unreadable")
+				return "", err
+			}
+			// Any OTHER failure falls through to the fail-closed read
+			// below, which refuses with the POLICY's own diagnostic.
+			// The raw fetch error is not the refusal, and the refusal is
+			// the contract.
+			trustedFetchErr = err
+			slog.Warn("failed to fetch default branch", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
 		} else {
 			trustedSHA = sha
 		}
@@ -2817,6 +2843,9 @@ func (m *RunManager) launchRun(ctx context.Context, repo *db.Repo, run *db.Run, 
 	// the disable_project_settings opt-out (see assertGateTrustedConfigReadable).
 	if err := assertGateTrustedConfigReadable(ctx, wtDir, repo.DefaultBranch, trustedSHA); err != nil {
 		trackStartFailure("trusted_config_unreadable")
+		if trustedFetchErr != nil {
+			return "", fmt.Errorf("%w (the trusted default branch could not be fetched: %v)", err, trustedFetchErr)
+		}
 		return "", err
 	}
 	trustedRepoCfg := loadTrustedRepoConfig(ctx, wtDir, trustedSHA, run.ID)
