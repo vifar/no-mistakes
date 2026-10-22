@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
@@ -294,6 +295,16 @@ func liveParkedGateFixture(t *testing.T) (*RunManager, *paths.Paths, string, *pi
 	}
 	run, err := database.InsertRun(repo.ID, "refs/heads/feature", "head-1", "base-1")
 	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := git.InitBare(context.Background(), p.RepoDir(repo.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.IsolateHooksPath(context.Background(), p.RepoDir(repo.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := git.RecordSharedConfigBaseline(context.Background(), p.RepoDir(repo.ID)); err != nil {
 		t.Fatal(err)
 	}
 

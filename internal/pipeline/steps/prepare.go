@@ -45,6 +45,10 @@ func ensurePrepared(sctx *pipeline.StepContext, logStep types.StepName) error {
 			return fmt.Errorf("read preparation marker: %w", err)
 		}
 
+		if err := git.RegisterWorktreeSubmodules(sctx.Ctx, sctx.WorkDir); err != nil {
+			return fmt.Errorf("worktree submodule registration: %w", err)
+		}
+
 		snapshot, err := snapshotPreparationState(sctx.Ctx, sctx.WorkDir, sctx.GateDir)
 		if err != nil {
 			return err
