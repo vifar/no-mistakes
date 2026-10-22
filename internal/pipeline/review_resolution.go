@@ -131,8 +131,11 @@ func deletedAnchorNotRelocated(sctx *StepContext, item types.Finding, comparison
 		return false
 	}
 	if len(removed) == 0 {
-		touched, err := git.Run(sctx.Ctx, sctx.WorkDir, "--literal-pathspecs", "log", "--format=%H", "--no-patch", "--diff-merges=first-parent", comparison.MergeBaseSHA+".."+comparison.HeadSHA, "--", item.File)
-		return err == nil && strings.TrimSpace(touched) == ""
+		touched, err := anchorHistoryCommits(sctx, item, comparison)
+		if err != nil {
+			return false
+		}
+		return len(touched) == 0
 	}
 	for _, commit := range removed {
 		changes, err := git.RunRaw(sctx.Ctx, sctx.WorkDir, "show", "--diff-merges=first-parent", "--name-status", "-z", "--find-renames", "--find-copies", "--no-ext-diff", "--no-textconv", "--format=", commit)
@@ -151,8 +154,29 @@ func deletedAnchorNotRelocated(sctx *StepContext, item types.Finding, comparison
 // The pathspec is literal: a finding may name a path that reads as pathspec
 // magic, and a magic pathspec would silently match a different set of files
 // than the anchor the finding is about.
+//
+// --full-history turns git's path-history simplification off. Without it a
+// merge commit whose anchor state matches one of its parents is pruned, and
+// the traversal follows that parent alone, which can hide both the removal
+// and the branch that added the anchor. --diff-merges=first-parent gives a
+// merge commit its first-parent diff, so a removal a merge performed is
+// visible, and --no-patch keeps the output a list of SHAs and nothing else.
 func anchorRemovalCommits(sctx *StepContext, item types.Finding, comparison *db.ReviewComparison) ([]string, error) {
-	out, err := git.Run(sctx.Ctx, sctx.WorkDir, "--literal-pathspecs", "log", "--format=%H", "--no-patch", "--diff-filter=D", "--diff-merges=first-parent", comparison.MergeBaseSHA+".."+comparison.HeadSHA, "--", item.File)
+	out, err := git.Run(sctx.Ctx, sctx.WorkDir, "--literal-pathspecs", "log", "--format=%H", "--no-patch", "--full-history", "--diff-filter=D", "--diff-merges=first-parent", comparison.MergeBaseSHA+".."+comparison.HeadSHA, "--", item.File)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(out), nil
+}
+
+// anchorHistoryCommits lists every branch commit that touched the anchor file.
+//
+// It is the search that tells an anchor the branch never tracked from one whose
+// removal the diff machinery omitted, so it may not hide a commit either: the
+// same --full-history that keeps a pruned merge visible keeps the branch that
+// added the anchor visible.
+func anchorHistoryCommits(sctx *StepContext, item types.Finding, comparison *db.ReviewComparison) ([]string, error) {
+	out, err := git.Run(sctx.Ctx, sctx.WorkDir, "--literal-pathspecs", "log", "--format=%H", "--no-patch", "--full-history", "--diff-merges=first-parent", comparison.MergeBaseSHA+".."+comparison.HeadSHA, "--", item.File)
 	if err != nil {
 		return nil, err
 	}

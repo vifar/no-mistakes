@@ -28,6 +28,10 @@ type deletedAnchorShape struct {
 	// selectedWhilePresent: the operator selected the finding at a head where
 	// the anchor file was still there.
 	selectedWhilePresent bool
+	// siblingMerge: the removal happens in a merge whose side branch was cut
+	// from the target, so the merge matches its second parent for the anchor
+	// path. That is the shape git's path-history simplification prunes.
+	siblingMerge bool
 }
 
 // deletedAnchorFixture reproduces the shape of issue #170.
@@ -62,9 +66,14 @@ func deletedAnchorFixture(t *testing.T, shape deletedAnchorShape) (*StepContext,
 		t.Fatal(err)
 	}
 	// The branch adds the file the reviewer will report on, and changes a file
-	// of its own so the delivered change still has reviewable content.
+	// of its own so the delivered change still has reviewable content. The
+	// sibling-merge shape leaves that other change out, so the merge that
+	// removes the anchor ends up with the very tree of its second parent and
+	// git prunes it under the default path-history simplification.
 	write("duplicate-suite.go", "duplicate suite\n")
-	write("kept.go", "target\nchanged\n")
+	if !shape.siblingMerge {
+		write("kept.go", "target\nchanged\n")
+	}
 	execGit(t, dir, "add", ".")
 	execGit(t, dir, "commit", "-m", "add the duplicate suite")
 	added, err := git.HeadSHA(context.Background(), dir)
@@ -85,8 +94,22 @@ func deletedAnchorFixture(t *testing.T, shape deletedAnchorShape) (*StepContext,
 		execGit(t, dir, "commit", "--allow-empty", "-m", "main branch")
 		execGit(t, dir, "merge", "--no-ff", "--no-commit", "anchor-side")
 	}
+	if shape.siblingMerge {
+		// The sibling branch is cut from the target, so it never carried the
+		// anchor. The merge that removes the anchor therefore matches its
+		// second parent for that path, which is the shape git's path-history
+		// simplification prunes away: the search has to see the merge anyway.
+		execGit(t, dir, "checkout", "-b", "anchor-side", target)
+		if shape.replacement {
+			write("moved-suite.go", "rewritten implementation at another anchor\n")
+			execGit(t, dir, "add", ".")
+		}
+		execGit(t, dir, "commit", "--allow-empty", "-m", "sibling branch")
+		execGit(t, dir, "checkout", "-")
+		execGit(t, dir, "merge", "--no-ff", "--no-commit", "anchor-side")
+	}
 	execGit(t, dir, "--literal-pathspecs", "rm", "--", "duplicate-suite.go")
-	if shape.replacement && !shape.merge {
+	if shape.replacement && !shape.merge && !shape.siblingMerge {
 		write("moved-suite.go", "rewritten implementation at another anchor\n")
 		execGit(t, dir, "add", ".")
 	}
@@ -97,6 +120,12 @@ func deletedAnchorFixture(t *testing.T, shape deletedAnchorShape) (*StepContext,
 	}
 	reviewed := []string{"kept.go"}
 	reviewable := []string{"kept.go"}
+	if shape.siblingMerge {
+		// The merge ended with the sibling's tree, so the delivered change is
+		// the sibling's path and nothing else.
+		reviewed = nil
+		reviewable = nil
+	}
 	if shape.replacement {
 		reviewed = append(reviewed, "moved-suite.go")
 		reviewable = append(reviewable, "moved-suite.go")
@@ -334,5 +363,46 @@ func TestStrictReviewResolutionDeletedAnchorMerge(t *testing.T) {
 				t.Fatalf("merge removal resolution = %q, want %q", got, want)
 			}
 		})
+	}
+}
+
+// The same merge, with its side branch cut from the target instead of from the
+// commit that added the anchor. The side branch never carried the anchor, so
+// the merge that removes it matches its second parent for that path, and git's
+// default path-history simplification prunes exactly that merge and follows
+// only the second parent. The history search has to see the merge anyway: it
+// removed the anchor and carried a replacement with it, so the finding keeps
+// blocking.
+func TestStrictReviewResolutionDeletedAnchorSiblingMergeKeepsReplacedCode(t *testing.T) {
+	sctx, outcome := deletedAnchorFixture(t, deletedAnchorShape{siblingMerge: true, replacement: true})
+	parents, err := git.Run(sctx.Ctx, sctx.WorkDir, "rev-list", "--parents", "-n", "1", sctx.Run.HeadSHA)
+	if err != nil || len(strings.Fields(parents)) != 3 {
+		t.Fatalf("fixture head must have two parents: %q, %v", parents, err)
+	}
+	got, _ := resolveReviewCarry(sctx, deletedAnchorFinding, []string{"review-1"}, outcome, `{"findings":[]}`)
+	if got != deletedAnchorFinding {
+		t.Fatalf("a merge that carried a replacement with the removal was treated as removed: %s", got)
+	}
+}
+
+// The history search may not hide the branch that added the anchor.
+//
+// With the default path-history simplification the merge that removed the
+// anchor matches its second parent for that path, so git prunes the merge and
+// follows that parent alone: the branch that added the anchor leaves the
+// search with it, and the proof would read the empty result as "the branch
+// never tracked the anchor" and clear the finding.
+func TestAnchorHistoryCommitsKeepsTheBranchThatAddedTheAnchor(t *testing.T) {
+	sctx, _ := deletedAnchorFixture(t, deletedAnchorShape{siblingMerge: true, replacement: true})
+	comparison, err := sctx.DB.GetReviewComparison(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	touched, err := anchorHistoryCommits(sctx, types.Finding{ID: "review-1", File: "duplicate-suite.go"}, comparison)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(touched) < 2 {
+		t.Fatalf("the history search lost the branch that added the anchor: %v", touched)
 	}
 }
