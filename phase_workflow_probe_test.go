@@ -35,7 +35,11 @@ func TestPhaseHeavyJobBudgets(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if e = os.WriteFile(filepath.Join(os.Getenv("PHASE_EVIDENCE"), "workflow-semantics.json"), data, 0600); e != nil {
+	evidenceDir := os.Getenv("PHASE_EVIDENCE")
+	if evidenceDir == "" {
+		evidenceDir = t.TempDir()
+	}
+	if e = os.WriteFile(filepath.Join(evidenceDir, "workflow-semantics.json"), data, 0600); e != nil {
 		t.Fatal(e)
 	}
 	t.Logf("Actions semantic configuration: race job=90 minutes; e2e job=90 minutes; GOMAXPROCS=8")
