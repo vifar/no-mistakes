@@ -114,7 +114,7 @@ func (e *Executor) refreshReviewTestSupport(ctx context.Context, run *db.Run, re
 		e.emitLogChunk(run, repo, types.StepTest, message+"\n")
 	}
 	sctx := &StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: workDir, GateDir: e.paths.RepoDir(repo.ID), Config: e.config, ForgeContext: e.forge, DB: e.db, PRTarget: e.prTarget, PRContext: receipt, StepResultID: owner.ID, Log: write, LogChunk: write, LogFile: writeFile, Shared: e.shared}
-	outcome, err := refresher.RefreshReviewSupport(sctx)
+	outcome, err := executeWithConfigProtection(types.StepTest, sctx, refresher.RefreshReviewSupport)
 	if err != nil {
 		return fmt.Errorf("refresh final Test support: %w", err)
 	}

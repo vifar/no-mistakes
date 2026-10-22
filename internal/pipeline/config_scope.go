@@ -7,22 +7,23 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // executeWithConfigProtection bounds every execution and fix round, including
 // preparation and agent children. Check runs even after a step error or cancel,
 // before any Git discovery in the following step can obscure the writer.
-func executeWithConfigProtection(step Step, sctx *StepContext) (out *StepOutcome, err error) {
+func executeWithConfigProtection(name types.StepName, sctx *StepContext, execute func(*StepContext) (*StepOutcome, error)) (out *StepOutcome, err error) {
 	guard, err := git.ProtectSharedConfig(sctx.Ctx, sctx.GateDir)
 	if err != nil {
-		return nil, fmt.Errorf("%s shared config preflight: %w", step.Name(), err)
+		return nil, fmt.Errorf("%s shared config preflight: %w", name, err)
 	}
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(sctx.Ctx), 10*time.Second)
 		defer cancel()
 		if configErr := errors.Join(guard.Check(ctx), guard.Close()); configErr != nil {
-			err = errors.Join(err, fmt.Errorf("%s shared config boundary: %w", step.Name(), configErr))
+			err = errors.Join(err, fmt.Errorf("%s shared config boundary: %w", name, configErr))
 		}
 	}()
-	return step.Execute(sctx)
+	return execute(sctx)
 }

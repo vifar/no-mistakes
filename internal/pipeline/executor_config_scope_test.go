@@ -86,7 +86,7 @@ func TestIssue131MissingGateFailsPreflightBeforeStep(t *testing.T) {
 				executed = true
 				return &StepOutcome{}, nil
 			}}
-			_, err := executeWithConfigProtection(step, &StepContext{Ctx: context.Background(), GateDir: gate})
+			_, err := executeWithConfigProtection(step.Name(), &StepContext{Ctx: context.Background(), GateDir: gate}, step.Execute)
 			if err == nil || !strings.Contains(err.Error(), "review shared config preflight") || !strings.Contains(err.Error(), gate) {
 				t.Fatalf("expected named preflight failure for missing gate enrollment, got %v", err)
 			}
@@ -125,7 +125,7 @@ func TestIssue131GuardDoesNotRegisterSubmodulesBeforePreparation(t *testing.T) {
 			}
 			return &StepOutcome{}, nil
 		}}
-		if _, err := executeWithConfigProtection(step, &StepContext{Ctx: ctx, GateDir: gate, WorkDir: workDir}); err != nil {
+		if _, err := executeWithConfigProtection(step.Name(), &StepContext{Ctx: ctx, GateDir: gate, WorkDir: workDir}, step.Execute); err != nil {
 			t.Fatal(err)
 		}
 	}
