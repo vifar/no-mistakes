@@ -11,6 +11,7 @@ package execpath
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -86,7 +87,12 @@ func UsableForOS(goos, path string, fi os.FileInfo) bool {
 	if goos == "windows" {
 		return filepath.Ext(path) != ""
 	}
-	return fi.Mode().Perm()&0o111 != 0
+	candidate, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	_, err = exec.LookPath(candidate)
+	return err == nil
 }
 
 // Resolve returns the program named name in the environment's PATH.

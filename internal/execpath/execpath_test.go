@@ -2,8 +2,10 @@ package execpath
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -242,5 +244,61 @@ func TestResolveEmptyEntriesUseWorkDirInPathOrder(t *testing.T) {
 				t.Fatalf("PATH=%q workdir=%q resolved %q, want %s/%s", tc.path, baseDir, got, tc.directory, name)
 			}
 		}
+	}
+}
+
+func TestResolveSkipsCandidatesTheOwnerCannotExecute(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires Unix execute permissions and an unprivileged owner")
+	}
+	root := t.TempDir()
+	t.Chdir(root)
+	for _, dir := range []string{"denied", "usable"} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "git"), []byte("#!/bin/sh\nprintf 'usable'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	denied := filepath.Join(root, "denied", "git")
+	if err := os.Chmod(denied, 0o641); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command(denied).Run(); !os.IsPermission(err) {
+		t.Fatalf("executing the owner-inaccessible fixture = %v, want permission denied", err)
+	}
+	info, err := os.Stat(denied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{denied, filepath.Join("denied", "git")} {
+		if Usable(path, info) {
+			t.Fatalf("owner-inaccessible candidate %q reported usable", path)
+		}
+	}
+	if path, hasPath, found := Resolve([]string{"PATH=" + filepath.Dir(denied)}, "git", root); !hasPath || found {
+		t.Fatalf("inaccessible-only lookup = %q, hasPath=%v, found=%v", path, hasPath, found)
+	}
+	env := []string{"PATH=" + strings.Join([]string{filepath.Dir(denied), filepath.Join(root, "usable")}, string(os.PathListSeparator))}
+	path, hasPath, found := Resolve(env, "git", root)
+	if !hasPath || !found {
+		t.Fatalf("resolve = %q, hasPath=%v, found=%v", path, hasPath, found)
+	}
+	got, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Stat(filepath.Join(root, "usable", "git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(got, want) {
+		t.Fatalf("resolved %q instead of the usable candidate", path)
+	}
+	cmd := exec.Command(path)
+	cmd.Env = env
+	if out, err := cmd.Output(); err != nil || string(out) != "usable" {
+		t.Fatalf("resolved executable output = %q, err=%v; want usable", out, err)
 	}
 }
