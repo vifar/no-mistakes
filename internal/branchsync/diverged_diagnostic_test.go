@@ -353,6 +353,77 @@ func newTextconvRecoverFixture(t *testing.T) (*recoverFixture, string) {
 	return f, replay
 }
 
+// newUnrelatedHistoryRecoverFixture models a refusal where the three-way
+// merge proof was NEVER ATTEMPTED: the two heads have no common ancestor, so
+// the merge base cannot be found and the merge never runs.
+//
+// A refusal that reported the merge proof as "does not hold" here would be
+// reporting a result for a test that never ran.
+func newUnrelatedHistoryRecoverFixture(t *testing.T) *recoverFixture {
+	t.Helper()
+	ctx := context.Background()
+	root := t.TempDir()
+	remote := filepath.Join(root, "upstream.git")
+	mustRun(t, root, "init", "--bare", remote)
+
+	local := filepath.Join(root, "operator")
+	mustRun(t, root, "init", "-b", "main", local)
+	configureIdentity(t, local)
+	mustWrite(t, filepath.Join(local, "file.txt"), "base\n")
+	mustRun(t, local, "add", "file.txt")
+	mustRun(t, local, "commit", "-m", "base")
+	base := mustRun(t, local, "rev-parse", "HEAD")
+
+	mustRun(t, local, "checkout", "-b", "feature/recover")
+	mustWrite(t, filepath.Join(local, "file.txt"), "operator work\n")
+	mustRun(t, local, "commit", "-am", "operator: change the file")
+	submitted := mustRun(t, local, "rev-parse", "HEAD")
+
+	gate := filepath.Join(root, "gate.git")
+	mustRun(t, root, "init", "--bare", gate)
+	mustRun(t, local, "push", gate, "refs/heads/main:refs/heads/main", "refs/heads/feature/recover:refs/heads/feature/recover")
+
+	// The preserved head shares no ancestor with the local head.
+	pipeline := filepath.Join(root, "pipeline")
+	mustRun(t, root, "-c", "core.autocrlf=false", "clone", gate, pipeline)
+	configureIdentity(t, pipeline)
+	mustRun(t, pipeline, "checkout", "--orphan", "pipeline/orphan")
+	mustWrite(t, filepath.Join(pipeline, "other.txt"), "unrelated history\n")
+	mustRun(t, pipeline, "add", "other.txt")
+	mustRun(t, pipeline, "commit", "-m", "no-mistakes(review): an unrelated history")
+	preserved := mustRun(t, pipeline, "rev-parse", "HEAD")
+	mustRun(t, pipeline, "push", "--force", "origin", "HEAD:refs/heads/feature/recover")
+
+	database, err := db.Open(filepath.Join(root, "state.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo(local, remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature/recover", submitted, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunHeadSHA(run.ID, preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatusWithVerifiedHead(run.ID, types.RunCancelled, preserved); err != nil {
+		t.Fatal(err)
+	}
+	run, _ = database.GetRun(run.ID)
+	f := &recoverFixture{
+		t: t, ctx: ctx, db: database, repo: repo, run: run,
+		service: &Service{DB: database, Repo: repo, WorkDir: local, GateDir: gate},
+		local:   local, gate: gate, remote: remote,
+		base: base, submitted: submitted, preserved: preserved,
+	}
+	fetchPreservedHead(t, f)
+	return f
+}
+
 // fetchPreservedHead brings the preserved head into the operator worktree, the
 // way recovery does before it compares the two heads.
 func fetchPreservedHead(t *testing.T, f *recoverFixture) {
@@ -720,6 +791,48 @@ func TestRecoverDivergedRefusalFindsTextconvReplay(t *testing.T) {
 	}
 	if strings.Contains(refused.Error, "no commit in the preserved pipeline head carries the same patch identity") {
 		t.Fatalf("refusal reports a false negative about a replayed change: %q", refused.Error)
+	}
+}
+
+// TestRecoverDivergedRefusalClaimsNoResultForAnUnattemptedProof proves the
+// refusal does not report a RESULT for a check that never ran.
+//
+// The two heads have no common ancestor, so the merge base cannot be found
+// and the three-way merge proof is never attempted. Saying the proof "does
+// not hold" would tell the operator that something was tested and failed,
+// when nothing was tested at all.
+func TestRecoverDivergedRefusalClaimsNoResultForAnUnattemptedProof(t *testing.T) {
+	t.Parallel()
+
+	f := newUnrelatedHistoryRecoverFixture(t)
+	refused := f.service.Recover(f.ctx, false)
+	if refused.Recovered || refused.Changed || refused.Safety != "blocked_recover_diverged" {
+		t.Fatalf("recover diverged = %#v", refused)
+	}
+	if !strings.Contains(refused.Error, "the three-way merge proof could not be determined") {
+		t.Fatalf("refusal does not say the merge proof was never attempted: %q", refused.Error)
+	}
+	if strings.Contains(refused.Error, "the three-way merge proof does not hold") {
+		t.Fatalf("refusal reports a result for a proof that never ran: %q", refused.Error)
+	}
+	// The refusal may not say both tests ran when one of them did not.
+	if strings.Contains(refused.Error, "the only tests it ran were") {
+		t.Fatalf("refusal says both tests ran when the merge proof was never attempted: %q", refused.Error)
+	}
+	if !strings.Contains(refused.Error, "the only tests it used were") {
+		t.Fatalf("refusal does not name the tests it used: %q", refused.Error)
+	}
+	// Ancestry DID run and did not hold: that is a result, and it is
+	// reported as one.
+	if !strings.Contains(refused.Error, "ancestry does not hold") {
+		t.Fatalf("refusal does not report the ancestry result: %q", refused.Error)
+	}
+	// The refusal still refuses, and nothing moved.
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatalf("refused recovery moved the branch to %s, want %s", got, f.submitted)
+	}
+	if f.custodyReturned() {
+		t.Fatal("refused recovery stamped custody")
 	}
 }
 

@@ -55,17 +55,56 @@ type divergenceDiagnostic struct {
 	PreservedLabel string
 	// MergeBase is the common ancestor the three-way merge proof used.
 	MergeBase string
-	// AncestryHeld reports whether the local head is an ancestor of the
-	// other head.
-	AncestryHeld bool
-	// MergeProofHeld reports whether the executable three-way merge proof
-	// showed the other head carries every local change.
-	MergeProofHeld bool
+	// Ancestry reports what the Git ancestry check established.
+	Ancestry checkOutcome
+	// MergeProof reports what the executable three-way merge proof
+	// established.
+	MergeProof checkOutcome
 	// ConflictPaths names the paths whose content conflicted in the
 	// three-way merge, when the merge conflicted.
 	ConflictPaths []string
 	// PatchIdentity carries the read-only patch identity evidence.
 	PatchIdentity patchIdentityEvidence
+}
+
+// checkOutcome reports what one diagnostic check established.
+//
+// The difference matters: a check that ran and did not hold is a RESULT, and
+// a check that never ran, failed, or was interrupted establishes NOTHING. A
+// refusal that turns the second into the first tells the operator that
+// something was proven when nothing was, which is the same defect this whole
+// change is about.
+type checkOutcome int
+
+const (
+	// checkUndetermined means the check established no result: it was never
+	// reached, it failed, or it was interrupted.
+	checkUndetermined checkOutcome = iota
+	// checkPassed means the check ran and its condition held.
+	checkPassed
+	// checkFailed means the check ran and its condition did not hold.
+	checkFailed
+)
+
+// ancestryOutcome reports what the Git ancestry check established.
+//
+// Git answers 0 for "yes" and 1 for "no", and anything above 1 is a failure
+// that established nothing - a cancelled context among them. Only the first
+// two are results.
+func ancestryOutcome(ctx context.Context, dir, ancestor, descendant string) checkOutcome {
+	if strings.TrimSpace(ancestor) == "" || strings.TrimSpace(descendant) == "" {
+		return checkUndetermined
+	}
+	_, err := git.Run(ctx, dir, "merge-base", "--is-ancestor", ancestor, descendant)
+	if err == nil {
+		return checkPassed
+	}
+	if code, ok := git.ExitCode(err); ok && code == 1 {
+		// Git answered "no". The command ran, and the answer is a
+		// definitive negative.
+		return checkFailed
+	}
+	return checkUndetermined
 }
 
 // patchIdentityStatus reports what the patch identity diagnostic could
@@ -124,16 +163,28 @@ func (d divergenceDiagnostic) divergenceDescription() string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "the refusal compared the local head %s with the %s %s", d.LocalHead, preservedLabel, d.PreservedHead)
-	b.WriteString("; the only tests it ran were Git ancestry (git merge-base --is-ancestor) and the executable three-way merge proof (git merge-tree --write-tree --merge-base)")
-	if d.AncestryHeld {
-		b.WriteString("; ancestry holds, the local head is an ancestor of the other head")
+	if d.Ancestry == checkUndetermined || d.MergeProof == checkUndetermined {
+		// One of the two checks established nothing, so this refusal may
+		// not say both of them ran.
+		b.WriteString("; the only tests it used were Git ancestry (git merge-base --is-ancestor) and the executable three-way merge proof (git merge-tree --write-tree --merge-base)")
 	} else {
-		b.WriteString("; ancestry does not hold, the local head is not an ancestor of the other head")
+		b.WriteString("; the only tests it ran were Git ancestry (git merge-base --is-ancestor) and the executable three-way merge proof (git merge-tree --write-tree --merge-base)")
 	}
-	if d.MergeProofHeld {
+	switch d.Ancestry {
+	case checkPassed:
+		b.WriteString("; ancestry holds, the local head is an ancestor of the other head")
+	case checkFailed:
+		b.WriteString("; ancestry does not hold, the local head is not an ancestor of the other head")
+	default:
+		b.WriteString("; ancestry could not be determined, so this refusal claims no result for it")
+	}
+	switch d.MergeProof {
+	case checkPassed:
 		b.WriteString("; the three-way merge proof holds, the other head carries every local change")
-	} else {
+	case checkFailed:
 		b.WriteString("; the three-way merge proof does not hold, the other head is not proven to carry every local change")
+	default:
+		b.WriteString("; the three-way merge proof could not be determined, so this refusal claims no result for it")
 	}
 	if len(d.ConflictPaths) > 0 {
 		fmt.Fprintf(&b, "; the three-way merge conflicts in %s", strings.Join(d.ConflictPaths, ", "))
@@ -165,13 +216,16 @@ func collectDivergenceDiagnostic(ctx context.Context, dir, local, preserved, pre
 		PreservedHead:  preserved,
 		PreservedLabel: preservedLabel,
 	}
-	diagnostic.AncestryHeld = isAncestor(ctx, dir, local, preserved)
+	diagnostic.Ancestry = ancestryOutcome(ctx, dir, local, preserved)
 	base, err := git.Run(ctx, dir, "merge-base", local, preserved)
-	if err == nil && base != "" {
+	if err != nil || base == "" {
+		// The merge base could not be found, so the three-way merge proof
+		// was never attempted. It established nothing, and this refusal
+		// must not report it as a result.
+		diagnostic.MergeProof = checkUndetermined
+	} else {
 		diagnostic.MergeBase = base
-		proof := runContainmentProof(ctx, dir, base, local, preserved)
-		diagnostic.MergeProofHeld = proof.held
-		diagnostic.ConflictPaths = proof.conflictPaths
+		diagnostic.MergeProof, diagnostic.ConflictPaths = runContainmentProof(ctx, dir, base, local, preserved)
 	}
 	diagnostic.PatchIdentity = patchIdentityDiagnostic(ctx, dir, local, preserved)
 	return diagnostic

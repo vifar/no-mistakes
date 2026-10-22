@@ -1038,6 +1038,23 @@ func ResolveRef(ctx context.Context, dir, ref string) (string, error) {
 	return out, nil
 }
 
+// ExitCode returns the process exit code of a failed git command, and whether
+// the error carried one.
+//
+// Some git plumbing reports its result through the exit code alone.
+// `git merge-base --is-ancestor` answers 0 for yes and 1 for no, and
+// `git merge-tree --write-tree` answers 1 when the merge conflicts. A caller
+// that must tell "the command ran and said no" from "the command could not
+// run" needs the code, not only the fact that it failed: the first is a
+// result and the second establishes nothing.
+func ExitCode(err error) (int, bool) {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return 0, false
+	}
+	return exitErr.ExitCode(), true
+}
+
 func DirectRefTarget(ctx context.Context, dir, ref string) (string, bool, error) {
 	target, err := Run(ctx, dir, "symbolic-ref", "--quiet", "--no-recurse", ref)
 	if err == nil {

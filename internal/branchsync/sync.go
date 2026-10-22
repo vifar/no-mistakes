@@ -2299,43 +2299,45 @@ func revList(ctx context.Context, dir string, args ...string) ([]string, error) 
 	return strings.Fields(out), nil
 }
 
-// containmentProof is the result of the executable three-way merge proof.
-//
-// The proof itself is the held field: merging the local branch into the
-// preserved head must produce exactly the preserved head's tree. The conflict
-// paths are reporting only - they tell the operator WHY the proof did not
-// hold, and they never change it.
-type containmentProof struct {
-	// held reports whether the merged tree is exactly the preserved head's
-	// tree, which is what makes the preserved head carry every local change.
-	held bool
-	// conflictPaths names the paths whose content conflicted, when the merge
-	// conflicted.
-	conflictPaths []string
-}
-
 // runContainmentProof runs the containment proof once and reports what it
 // found.
 //
-// A conflicting merge is a failed proof, exactly as it was before: Git writes
-// a tree with conflict markers and exits nonzero, and that tree can never be
-// the preserved head's tree. The conflict list is read from the same run, so
-// the proof and the report of the proof can never disagree.
-func runContainmentProof(ctx context.Context, dir, base, local, pushed string) containmentProof {
+// The proof itself is the outcome: merging the local branch into the
+// preserved head must produce exactly the preserved head's tree. The conflict
+// paths are reporting only - they tell the operator WHY the proof did not
+// hold, and they never change it.
+//
+// The outcome distinguishes a RESULT from NO RESULT. A conflicting merge is a
+// failed proof, exactly as it was before: Git writes a tree with conflict
+// markers and exits 1, and that tree can never be the preserved head's tree.
+// A merge that could not run at all - a bad base, a cancelled context -
+// established nothing, and says so. The conflict list is read from the same
+// run, so the proof and the report of the proof can never disagree.
+func runContainmentProof(ctx context.Context, dir, base, local, pushed string) (checkOutcome, []string) {
 	mergedTree, mergeErr := git.RunAllowingFailure(ctx, dir, "merge-tree", "--write-tree", "--merge-base", base, pushed, local)
 	conflicts := parseMergeConflictPaths(mergedTree)
 	if mergeErr != nil {
-		return containmentProof{conflictPaths: conflicts}
+		if code, ok := git.ExitCode(mergeErr); ok && code == 1 {
+			// Git wrote a tree with conflict markers and exited 1: the
+			// merge ran, and the proof did not hold.
+			return checkFailed, conflicts
+		}
+		// The merge could not run, so it established nothing.
+		return checkUndetermined, conflicts
 	}
 	pushedTree, err := git.Run(ctx, dir, "rev-parse", pushed+"^{tree}")
 	if err != nil {
-		return containmentProof{conflictPaths: conflicts}
+		return checkUndetermined, conflicts
 	}
-	return containmentProof{held: strings.TrimSpace(mergedTree) == pushedTree, conflictPaths: conflicts}
+	if strings.TrimSpace(mergedTree) == pushedTree {
+		return checkPassed, conflicts
+	}
+	return checkFailed, conflicts
 }
 
 func mergeTreePreservesFinalHead(ctx context.Context, dir, base, local, pushed string) bool {
-	return runContainmentProof(ctx, dir, base, local, pushed).held
+	outcome, _ := runContainmentProof(ctx, dir, base, local, pushed)
+	return outcome == checkPassed
 }
 
 func (s *Service) remoteName(ctx context.Context) string {
