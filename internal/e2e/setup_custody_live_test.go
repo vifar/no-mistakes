@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -19,56 +21,119 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// A planned stop interrupts a real Git checkout blocked in a smudge filter.
-// The recorded branch decision keeps setup's own operation failure: stopping
-// the subprocess is cancellation provenance, not a cancelled run verdict.
-// The oracle is a failed setup outcome naming the interrupted operation, plus
-// the captured daemon's exit; replacing that failure with the shutdown reason
-// would violate the decided setup contract.
+// A planned stop owns an interrupted setup's outcome. Exercise real Git
+// checkout and trusted-config fetch processes; a shutdown must persist the
+// documented cancellation reason rather than their signal-exit diagnostics.
 func TestPlannedStopCancelsRealGitSetup(t *testing.T) {
+	for _, stage := range []string{"worktree", "fetch"} {
+		t.Run(stage, func(t *testing.T) { exerciseRealGitSetupOutcome(t, stage, true, false) })
+		t.Run(stage+"/suspended_group", func(t *testing.T) { exerciseRealGitSetupOutcome(t, stage, true, true) })
+	}
+}
+
+// An independent checkout or trusted-config fetch failure must remain failed.
+// This rejects classifying every setup error as a cancellation and also proves
+// that a failed trusted-config fetch never falls through to agent execution.
+func TestRealGitSetupFailureKeepsFailedOutcome(t *testing.T) {
+	for _, stage := range []string{"worktree", "fetch"} {
+		t.Run(stage, func(t *testing.T) { exerciseRealGitSetupOutcome(t, stage, false, false) })
+	}
+}
+
+func exerciseRealGitSetupOutcome(t *testing.T, stage string, cancelled, suspendGroup bool) {
+	t.Helper()
 	h := NewHarness(t, SetupOpts{Agent: "claude"})
 	if out, err := h.Run("init"); err != nil {
 		t.Fatalf("init: %v\n%s", err, out)
 	}
-	ready := filepath.Join(h.HomeDir, "smudge-started")
-	filter := filepath.Join(h.BinDir, "slow-smudge")
-	if err := os.WriteFile(filter, []byte("#!/bin/sh\nprintf ready > "+shellQuote(ready)+"\nexec sleep 300\n"), 0700); err != nil {
+	ready := filepath.Join(h.HomeDir, "setup-started")
+	helper := filepath.Join(h.BinDir, "setup-helper")
+	body := "exec sleep 300\n"
+	if !cancelled {
+		body = "echo independent-setup-failure >&2\nexit 23\n"
+	}
+	script := "#!/bin/sh\nprintf '%s\\n' \"$$\" > " + shellQuote(ready) + "\n" + body
+	gitConfig := "[filter \"slow\"]\n\tclean = cat\n\tsmudge = " + helper + "\n\trequired = true\n"
+	if stage == "fetch" {
+		// Local Git transport invokes the configured upload-pack. Block only
+		// the worktree's setup fetch, leaving pre-admission reads untouched.
+		script = "#!/bin/sh\ncase \"$PWD\" in */worktrees/*)\nprintf '%s\\n' \"$$\" > " + shellQuote(ready) + "\n" + body + ";; esac\nexec git upload-pack \"$@\"\n"
+		gitConfig = "[remote \"origin\"]\n\tuploadpack = " + helper + "\n"
+	}
+	if err := os.WriteFile(helper, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(os.Getenv("GIT_CONFIG_GLOBAL"), []byte("[filter \"slow\"]\n\tsmudge = "+filter+"\n"), 0600); err != nil {
+	if err := os.WriteFile(os.Getenv("GIT_CONFIG_GLOBAL"), []byte(gitConfig), 0600); err != nil {
 		t.Fatal(err)
 	}
 	const branch = "feature/cancel-git-setup"
-	h.CommitChange(branch, ".gitattributes", "slow.txt filter=slow\n", "configure checkout filter")
-	h.CommitChange(branch, "slow.txt", "checkout is cancellable\n", "exercise git setup")
+	if stage == "worktree" {
+		h.CommitChange(branch, ".gitattributes", "slow.txt filter=slow\n", "configure checkout filter")
+	}
+	h.CommitChange(branch, "slow.txt", "setup outcome\n", "exercise git setup")
 	finishPush := startCustodyPush(t, h, branch)
 	awaitCustodyFixture(t, func() bool {
-		_, err := os.Stat(ready)
-		return err == nil
+		raw, err := os.ReadFile(ready)
+		pid, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+		return err == nil && parseErr == nil && pid > 1
 	})
-	run := h.ActiveRun(branch)
-	if run == nil {
-		t.Fatal("Git setup has no active run")
+	if suspendGroup {
+		// A stopped process cannot handle TERM; cancellation must escalate to
+		// KILL. Suspend Git's own process group, discovered from its helper,
+		// rather than replacing Git with a sleeper or a shell's exit code.
+		raw, err := os.ReadFile(ready)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		group, err := syscall.Getpgid(pid)
+		if err != nil || group <= 1 || group == syscall.Getpgrp() {
+			t.Fatalf("Git helper's isolated process group: %d %v", group, err)
+		}
+		if err := syscall.Kill(-group, syscall.SIGSTOP); err != nil {
+			t.Fatal(err)
+		}
+		defer syscall.Kill(-group, syscall.SIGKILL)
+	}
+	var runID string
+	if cancelled {
+		run := h.ActiveRun(branch)
+		if run == nil {
+			t.Fatal("Git setup has no active run")
+		}
+		runID = run.ID
+	} else {
+		runID = h.WaitForRun(branch, 30*time.Second).ID
 	}
 	out, err := h.Run("daemon", "stop", "--force")
 	if err != nil {
-		t.Fatalf("stop during Git setup: %v\n%s", err, out)
+		t.Fatalf("stop after Git setup boundary: %v\n%s", err, out)
 	}
 	database, err := db.OpenReadOnly(paths.WithRoot(h.NMHome).DB())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	stored, err := database.GetRun(run.ID)
+	stored, err := database.GetRun(runID)
 	if err != nil || stored == nil {
 		t.Fatalf("read settled setup run: %+v %v", stored, err)
 	}
-	assertNoDaemonProcessesForRoot(t, h, "after cancelling Git setup")
+	assertNoDaemonProcessesForRoot(t, h, "after Git setup settled")
 	finishPush()
-	if stored.Status != types.RunFailed || !strings.Contains(deref(stored.Error), "create worktree:") || !strings.Contains(deref(stored.Error), "context canceled") {
-		t.Fatalf("interrupted Git setup lost its operation failure: status=%s error=%q", stored.Status, deref(stored.Error))
+	if cancelled {
+		if stored.Status != types.RunCancelled || deref(stored.Error) != "cancelled: planned daemon shutdown" {
+			t.Fatalf("interrupted Git setup: status=%s error=%q", stored.Status, deref(stored.Error))
+		}
+	} else if stored.Status != types.RunFailed || !strings.Contains(deref(stored.Error), "independent-setup-failure") {
+		t.Fatalf("independent Git setup failure: status=%s error=%q", stored.Status, deref(stored.Error))
 	}
-	t.Logf("RESULT real Git smudge filter started; stop output=%q; durable status=%s error=%q", strings.TrimSpace(out), stored.Status, deref(stored.Error))
+	if invocations := h.AgentInvocations(); len(invocations) != 0 {
+		t.Fatalf("failed setup reached the agent: %+v", invocations)
+	}
+	t.Logf("RESULT stage=%s cancelled=%t suspended_group=%t; real Git helper started; stop output=%q; durable status=%s error=%q; no agent started; daemon exited", stage, cancelled, suspendGroup, strings.TrimSpace(out), stored.Status, deref(stored.Error))
 }
 
 // An admission failure never gets a cancellation handle. Its still-owned

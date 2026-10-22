@@ -645,6 +645,7 @@ func runE2EWrapperWithCap(t *testing.T, failOnMatrix, explicit, cap string) e2eW
 	if len(events) == 1 && events[0] == "" {
 		events = nil
 	}
+	t.Logf("wrapper exit=%d; child invocations:\n%s\ncompletion events:\n%s", status, strings.Join(lines, "\n"), strings.Join(events, "\n"))
 	return e2eWrapperResult{status: status, output: string(output), calls: lines, events: events}
 }
 
