@@ -111,6 +111,6 @@ jobs:
           # hang until the job timeout (see guides/fork-ci.md).
           cache: false
       - name: End-to-end journeys with temporary daemon cleanup
-        # scripts/e2e.sh spends a 40 minute internal budget across its
+        # scripts/e2e.sh spends a 60 minute internal budget across its
         # sequential phases, so the job wall must exceed it.
         run: make e2e
