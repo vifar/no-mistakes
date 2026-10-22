@@ -148,11 +148,19 @@ func TestAcceptedTestGapCommitStatusJourney(t *testing.T) {
 				t.Fatal("status did not name the exact pushed head")
 			}
 			if !strict {
+				if name == "non-strict-gap" {
+					// The run published a real success at the exact head, so
+					// it earns the same exact-head status certificate a clean
+					// run earns (the certificate follows the gates, not the
+					// shipping mode). The certificate binds the accepted gap.
+					if publication.StrictCertificate == nil {
+						t.Fatal("the published success did not earn a status certificate")
+					}
+					assertNonStrictAcceptedGapJourneyAudit(t, j, runID, reason, coveredBy)
+					return
+				}
 				if publication.StrictCertificate != nil {
 					t.Fatal("ordinary approval/override earned a certificate")
-				}
-				if name == "non-strict-gap" {
-					assertNonStrictAcceptedGapJourneyAudit(t, j, runID, reason, coveredBy)
 				}
 				return
 			}
