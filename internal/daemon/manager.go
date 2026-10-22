@@ -3390,14 +3390,14 @@ func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.Step
 	if gaps != nil && action != types.ActionApprove {
 		return pipeline.RespondDispositions{}, fmt.Errorf("--accept-gap requires --action approve")
 	}
-	if run != nil && run.Shipping == nil && gaps != nil {
+	if run != nil && run.Shipping == nil && action == types.ActionApprove && (step == types.StepTest || gaps != nil) {
 		rows, err := m.db.GetStepsByRun(runID)
 		if err != nil {
 			return pipeline.RespondDispositions{}, err
 		}
 		for _, row := range rows {
 			if row.StepName == step {
-				if refusal := row.AcceptedGapRefusal(false, *gaps); refusal != "" {
+				if refusal := row.NonStrictApprovalRefusalWithGaps(approvalReason, gaps); refusal != "" {
 					return pipeline.RespondDispositions{}, errors.New(refusal)
 				}
 			}

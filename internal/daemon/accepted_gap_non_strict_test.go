@@ -280,3 +280,21 @@ func TestStrictAcceptedGapBehaviourIsUnchanged(t *testing.T) {
 		t.Fatalf("completion event = %+v", final)
 	}
 }
+
+func TestNonStrictPlainReasonWithoutRecordedGapCompletesAsAnException(t *testing.T) {
+	h := parkNonStrictTest(t)
+	const reason = "operator approved the exception"
+	if _, err := h.manager.HandleRespondWithOverrides(h.run.ID, types.StepTest, types.ActionApprove, nil, nil, nil, nil, reason, managerGateSnapshot(t, h.manager, h.run.ID, types.StepTest)); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-h.done; err != nil {
+		t.Fatal(err)
+	}
+	row, err := h.database.GetStepResult(h.parked.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.Status != types.StepStatusCompleted || row.ApprovalReason == nil || *row.ApprovalReason != reason || row.AcceptedGapsJSON != nil || row.ValidAcceptedGaps() != nil || !strings.Contains(row.TestOverrideReason(), "Test exception approved") {
+		t.Fatalf("ordinary exception changed: %+v", row)
+	}
+}

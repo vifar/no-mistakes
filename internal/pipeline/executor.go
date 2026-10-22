@@ -495,17 +495,13 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 			e.mu.Unlock()
 			return RespondDispositions{}, errors.New(refusal)
 		}
-	} else if gaps != nil {
-		// A plain run's accepted gap is admitted by the same rule the
-		// manager's pre-check and the durable recording use, and it is
-		// evaluated against the parked row itself: a synthetic row would
-		// hold no findings and refuse every request.
+	} else if action == types.ActionApprove && (step == types.StepTest || gaps != nil) {
 		row, err := e.db.GetStepResult(e.waitingStepResultID)
 		if err != nil || row == nil {
 			e.mu.Unlock()
 			return RespondDispositions{}, fmt.Errorf("cannot read the parked step")
 		}
-		if refusal := row.AcceptedGapRefusal(false, *gaps); refusal != "" {
+		if refusal := row.NonStrictApprovalRefusalWithGaps(approvalReason, gaps); refusal != "" {
 			e.mu.Unlock()
 			return RespondDispositions{}, errors.New(refusal)
 		}
@@ -2609,9 +2605,7 @@ func (e *Executor) applyApprovalOverride(step Step, sctx *StepContext, stepResul
 			// A plain run reuses the recorded audit the same way: the gap rule
 			// refuses a row that already carries a Test exception, so writing
 			// an ordinary approval reason would silently discard an
-			// owner-approved audit and leave the status pending. A plain
-			// approval that carries its own reason is still a plain approval:
-			// it does not reuse the gap.
+			// owner-approved audit and leave the status pending.
 			row, err := e.db.GetStepResult(stepResultID)
 			if err != nil {
 				return err

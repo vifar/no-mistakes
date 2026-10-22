@@ -175,6 +175,16 @@ func (s *StepResult) AcceptedGapRefusal(strict bool, gaps AcceptedGaps) string {
 	return ""
 }
 
+func (s *StepResult) NonStrictApprovalRefusalWithGaps(reason string, gaps *AcceptedGaps) string {
+	if gaps != nil {
+		return s.AcceptedGapRefusal(false, *gaps)
+	}
+	if reason != "" && s.ValidAcceptedGaps() != nil {
+		return "the recorded audit is reused; complete it with `axi respond --action approve` without --reason"
+	}
+	return ""
+}
+
 // RecordedAcceptedGaps decodes the audit record, or nil when none was recorded.
 func (s *StepResult) RecordedAcceptedGaps() (*AcceptedGaps, error) {
 	if s.AcceptedGapsJSON == nil || *s.AcceptedGapsJSON == "" {
