@@ -57,10 +57,10 @@ func TestCandidatesHonoursPathExt(t *testing.T) {
 // environment that names an EMPTY PATH names no program at all, and the
 // child receives that empty PATH, so the process's binary must not be used.
 func TestResolveDistinguishesAbsentFromEmptyPath(t *testing.T) {
-	if _, hasPath, _ := Resolve([]string{"HOME=/tmp"}, "git"); hasPath {
+	if _, hasPath, _ := Resolve([]string{"HOME=/tmp"}, "git", "/tmp"); hasPath {
 		t.Fatal("an environment with no PATH reported one")
 	}
-	_, hasPath, found := Resolve([]string{"PATH="}, "git")
+	_, hasPath, found := Resolve([]string{"PATH="}, "git", "/tmp")
 	if !hasPath {
 		t.Fatal("an environment with an empty PATH reported none")
 	}
@@ -78,7 +78,7 @@ func TestResolveFindsTheProgram(t *testing.T) {
 	if err := os.WriteFile(fake, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	path, hasPath, found := Resolve([]string{"PATH=" + dir}, "git")
+	path, hasPath, found := Resolve([]string{"PATH=" + dir}, "git", dir)
 	if !hasPath || !found {
 		t.Fatalf("resolve = %q, hasPath=%v, found=%v", path, hasPath, found)
 	}
@@ -90,7 +90,7 @@ func TestResolveFindsTheProgram(t *testing.T) {
 	if err := os.WriteFile(plain, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, found := Resolve([]string{"PATH=" + filepath.Join(dir, "empty")}, "not-executable"); found {
+	if _, _, found := Resolve([]string{"PATH=" + filepath.Join(dir, "empty")}, "not-executable", dir); found {
 		t.Fatal("a file without the executable bit was resolved")
 	}
 }

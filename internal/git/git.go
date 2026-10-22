@@ -224,8 +224,8 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 // that names an EMPTY PATH names no program at all, and an environment whose
 // PATH holds no git is refused rather than quietly answered with a different
 // binary.
-func gitBinaryForEnv(extraEnv []string) (string, bool) {
-	path, hasPath, found := execpath.Resolve(extraEnv, "git")
+func gitBinaryForEnv(workDir string, env []string) (string, bool) {
+	path, hasPath, found := execpath.Resolve(env, "git", workDir)
 	if !hasPath {
 		return "git", true
 	}
@@ -236,13 +236,14 @@ func gitBinaryForEnv(extraEnv []string) (string, bool) {
 }
 
 func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEnv []string, input string, args ...string) ([]byte, error) {
-	binary, found := gitBinaryForEnv(extraEnv)
+	env := append(nonInteractiveEnvForContext(ctx, dir), extraEnv...)
+	binary, found := gitBinaryForEnv(dir, env)
 	cmd := exec.CommandContext(ctx, binary, args...)
 	if !found {
 		cmd.Err = &exec.Error{Name: "git", Err: exec.ErrNotFound}
 	}
 	cmd.Dir = dir
-	cmd.Env = append(nonInteractiveEnvForContext(ctx, dir), extraEnv...)
+	cmd.Env = env
 	if len(args) > 0 && strings.HasPrefix(args[0], "--git-dir=") {
 		cmd.Env = bareRepositoryEnv(cmd.Env)
 	}
