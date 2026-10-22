@@ -70,13 +70,33 @@ func TestRepoConfigDocs_CommandsTestIsTargetedContract(t *testing.T) {
 
 // Remote CI must keep the complete race-enabled Go suite as the broad
 // regression owner after local Test stops duplicating it.
+//
+// The suite may be run as one command or through the sharded wrapper. The
+// sharded form still owns the WHOLE suite - every package of the repository,
+// with the race detector - so the guard checks that too: a wrapper that ran
+// only some of the packages, or without the race detector, would narrow the
+// broad regression owner and is refused.
 func TestCIWorkflow_RetainsFullRaceSuiteAsBroadRegressionOwner(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(".github", "workflows", "ci.yml"))
 	if err != nil {
 		t.Fatalf("read ci.yml: %v", err)
 	}
 	content := string(data)
-	if !strings.Contains(content, "run: go test -race ./...") {
+	if strings.Contains(content, "run: go test -race ./...") {
+		return
+	}
+	if !strings.Contains(content, "run: bash scripts/race.sh") {
 		t.Fatal("CI workflow must still run go test -race ./... as the broad regression owner")
+	}
+	wrapper, err := os.ReadFile(filepath.Join("scripts", "race.sh"))
+	if err != nil {
+		t.Fatalf("read scripts/race.sh: %v", err)
+	}
+	shards := string(wrapper)
+	if !strings.Contains(shards, "go test -race") {
+		t.Fatal("the sharded race suite must run the race detector")
+	}
+	if !strings.Contains(shards, "go list ./...") {
+		t.Fatal("the sharded race suite must take its inventory from go list ./... so every package is covered")
 	}
 }
