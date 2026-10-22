@@ -1716,6 +1716,24 @@ func neutralizeAIAttribution(s string) string {
 	return strings.Join(lines, "\n")
 }
 
+// listItemMarker splits a list item's marker from its text.
+func listItemMarker(text string) (string, string, bool) {
+	for _, marker := range []string{"- ", "* ", "+ "} {
+		if strings.HasPrefix(text, marker) {
+			return marker, text[len(marker):], true
+		}
+	}
+	if dot := strings.Index(text, ". "); dot > 0 {
+		for _, r := range text[:dot] {
+			if r < '0' || r > '9' {
+				return "", "", false
+			}
+		}
+		return text[:dot+2], text[dot+2:], true
+	}
+	return "", "", false
+}
+
 // unwrapRenderedText removes the wrappers a rendered detail carries around its
 // text, so the classifier sees the text a reader sees.
 //
@@ -1732,8 +1750,16 @@ func unwrapRenderedText(text string) string {
 	for {
 		before := text
 		text = strings.TrimSpace(text)
+		// A blockquote marker, possibly repeated.
+		for strings.HasPrefix(text, ">") {
+			text = strings.TrimSpace(strings.TrimPrefix(text, ">"))
+		}
 		if strings.HasPrefix(text, "<code>") && strings.HasSuffix(text, "</code>") {
 			text = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(text, "<code>"), "</code>"))
+		}
+		// A list item's marker.
+		if _, rest, ok := listItemMarker(text); ok {
+			text = strings.TrimSpace(rest)
 		}
 		text = strings.TrimSpace(text)
 		text = strings.Trim(text, "`")

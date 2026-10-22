@@ -45,7 +45,13 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 				"**" + tc.line + "**",
 				"<code>" + tc.line + "</code>",
 				"**`" + tc.line + "`**",
-				"* " + tc.line + " *",
+				"* " + tc.line,
+				"- " + tc.line,
+				"1. " + tc.line,
+				"> " + tc.line,
+				"> > " + tc.line,
+				"<code>" + tc.line + "</code>",
+				"  - " + tc.line,
 			} {
 				body := "## Testing\n\n```text\n" + line + "\n```\n"
 				got := neutralizeAttestationMarkers(scm.ProviderGitHub, body)
