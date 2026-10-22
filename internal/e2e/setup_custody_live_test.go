@@ -19,9 +19,12 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// A real Git checkout blocked in a smudge filter is setup work, not an
-// independent failure. Planned stop must preserve the documented cancellation
-// outcome even though Git reports a signal exit through its transport wrapper.
+// A planned stop interrupts a real Git checkout blocked in a smudge filter.
+// The recorded branch decision keeps setup's own operation failure: stopping
+// the subprocess is cancellation provenance, not a cancelled run verdict.
+// The oracle is a failed setup outcome naming the interrupted operation, plus
+// the captured daemon's exit; replacing that failure with the shutdown reason
+// would violate the decided setup contract.
 func TestPlannedStopCancelsRealGitSetup(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude"})
 	if out, err := h.Run("init"); err != nil {
@@ -60,11 +63,11 @@ func TestPlannedStopCancelsRealGitSetup(t *testing.T) {
 	if err != nil || stored == nil {
 		t.Fatalf("read settled setup run: %+v %v", stored, err)
 	}
-	if stored.Status != types.RunCancelled || deref(stored.Error) != "cancelled: planned daemon shutdown" {
-		t.Fatalf("Git setup cancellation: status=%s error=%q", stored.Status, deref(stored.Error))
-	}
 	assertNoDaemonProcessesForRoot(t, h, "after cancelling Git setup")
 	finishPush()
+	if stored.Status != types.RunFailed || !strings.Contains(deref(stored.Error), "create worktree:") || !strings.Contains(deref(stored.Error), "context canceled") {
+		t.Fatalf("interrupted Git setup lost its operation failure: status=%s error=%q", stored.Status, deref(stored.Error))
+	}
 	t.Logf("RESULT real Git smudge filter started; stop output=%q; durable status=%s error=%q", strings.TrimSpace(out), stored.Status, deref(stored.Error))
 }
 

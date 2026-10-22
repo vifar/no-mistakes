@@ -31,6 +31,38 @@ func TestE2EWrapperTerminalMergeJourneyHasIndependentWorker(t *testing.T) {
 	}
 }
 
+// The shared budget is wall time, so two seconds spent in the step worker
+// must leave the later shards at least two seconds less than the terminal
+// worker. The oracle is elapsed time in an external child, not the wrapper's
+// budget calculation; reusing the pre-wait allowance would fail this check.
+func TestE2EWrapperChargesStepWorkerTimeToShardBudget(t *testing.T) {
+	result := runE2EWrapper(t, "slow-steps", "")
+	if result.status != 0 {
+		t.Fatalf("wrapper failed: %s", result.output)
+	}
+	timeout := func(call string) time.Duration {
+		t.Helper()
+		fields := strings.Fields(call)
+		for i := 0; i+1 < len(fields); i++ {
+			if fields[i] == "-timeout" {
+				duration, err := time.ParseDuration(fields[i+1])
+				if err != nil {
+					t.Fatal(err)
+				}
+				return duration
+			}
+		}
+		t.Fatalf("worker has no timeout: %s", call)
+		return 0
+	}
+	terminal := timeout(callContaining(t, result.calls, "-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$"))
+	shard := timeout(callContaining(t, result.calls, "-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$"))
+	if shard <= 0 || terminal-shard < 2*time.Second {
+		t.Fatalf("terminal allowance=%s shard allowance=%s; step-worker time was not charged", terminal, shard)
+	}
+	t.Logf("RESULT terminal allowance=%s; after two-second step worker, shard allowance=%s", terminal, shard)
+}
+
 // Regression at f5fcfcb2: CI's terminal worker passed in1013.254s while
 // the remainder exhausted2255s. The added nine-case table took923.27s in
 // measured local validation, so place it beside the terminal table.
@@ -574,6 +606,7 @@ func runE2EWrapperWithCap(t *testing.T, failOnMatrix, explicit, cap string) e2eW
 	contents += "case \" $* \" in *' run ./internal/e2edaemon/reapmain.go '*) printf 'cleanup\\n' >>\"$NM_E2E_FAKE_GO_EVENTS\"; exit 0 ;; esac\n"
 	contents += wrapperDiscoveryScript
 	contents += "printf 'begin:%s\\n' \"$*\" >>\"$NM_E2E_FAKE_GO_EVENTS\"\nstatus=0\n"
+	contents += "case \"$NM_E2E_FAKE_GO_FAIL_MATRIX:$*\" in slow-steps:*'./internal/pipeline/steps/...'*) sleep 2 ;; esac\n"
 	contents += "case \"$NM_E2E_FAKE_GO_FAIL_MATRIX:$*\" in first:*\"-run ^TestUserJourney$/(claude|codex)$\"*) status=17 ;; terminal:*\"-run ^(TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$\"*) status=19 ;; shard:*\"-skip ^(TestUserJourney|TestTargetAdvanceTerminalMergeLiveJourney|TestRetainedTargetContinuityLiveJourney)$\"*) status=29 ;; esac\n"
 	contents += "printf 'end:%s:%s\\n' \"$*\" \"$status\" >>\"$NM_E2E_FAKE_GO_EVENTS\"\nexit \"$status\"\n"
 	if err := os.WriteFile(fakeGo, []byte(contents), 0o755); err != nil {
