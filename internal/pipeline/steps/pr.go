@@ -889,7 +889,13 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 // section and the Pipeline section all reach the reader through it, and a
 // consumer that scans the body for attribution scans all of them.
 func appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {
-	return renderQuotedAttributionAsLabelledFields(appendGeneratedSectionsToCleanBodyWithinLimitRaw(body, riskLine, testingMD, pipelineMD, maxBytes, provider))
+	// The pipeline's evidence sections render a QUOTED co-author as a
+	// labelled field. The body's own prose - the intent, the narrative,
+	// the risk line - keeps its attribution verbatim, because that is the
+	// PR's own attribution and it is the reader's to judge.
+	testingMD = renderQuotedAttributionAsLabelledFields(testingMD)
+	pipelineMD = renderQuotedAttributionAsLabelledFields(pipelineMD)
+	return appendGeneratedSectionsToCleanBodyWithinLimitRaw(body, riskLine, testingMD, pipelineMD, maxBytes, provider)
 }
 
 func appendGeneratedSectionsToCleanBodyWithinLimitRaw(body, riskLine, testingMD, pipelineMD string, maxBytes int, provider scm.Provider) string {

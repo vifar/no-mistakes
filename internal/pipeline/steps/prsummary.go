@@ -1700,22 +1700,26 @@ func escapePipelineFoldMarkers(s string) string {
 // wherever it is, so the key is rewritten wherever it is.
 var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)`)
 
-// publishedGeneratedWithEmoji matches the robot emoji a "Generated with" line
-// may carry, for the same reason: the emoji is how the line reads as a claim.
-var publishedGeneratedWithEmoji = regexp.MustCompile(`(?i)(^|\n)([ \t]*)\x{1F916}([ \t]+)`)
-
-// renderQuotedAttributionAsLabelledFields renders a quoted co-author as a
+// renderQuotedAttributionAsLabelledFields renders a QUOTED co-author as a
 // labelled field rather than as a raw trailer line.
 //
 // This is the PUBLISHED text's rule, and it is deliberately not the
 // classifier's: the classifier decides whether a line is an AI attribution, and
 // it is precise - a person whose name happens to contain a tool's name is a
-// person. The published text is read by consumers that cannot make that
-// distinction, so a quoted trailer is rendered in a form none of them reads as
-// a claim. The quote stays a quote: the name and the address are still there.
+// person, and that attribution stays whole. The published text is read by
+// consumers that cannot make that distinction: one that scans the body for
+// attribution reads a raw "Co-Authored-By:" line as a claim, and it reads it
+// that way even inside a code fence, because it scans the raw text.
+//
+// So a co-author the body QUOTES - a test fixture, an example, a captured
+// artifact - is rendered in a form no consumer reads as a claim, with the name
+// and the address still there because they are the evidence. The labelled
+// field says what it is: a quote.
+//
+// The body's OWN attribution is not touched: the intent, the narrative and the
+// risk line are the PR's own words, and they keep their attribution verbatim.
 func renderQuotedAttributionAsLabelledFields(s string) string {
-	s = publishedCoAuthorKey.ReplaceAllString(s, "co-author (quoted)${1}")
-	return publishedGeneratedWithEmoji.ReplaceAllString(s, "$1$2$3")
+	return publishedCoAuthorKey.ReplaceAllString(s, "co-author (quoted)${1}")
 }
 
 // neutralizeAttestationMarkers breaks every attestation comment prefix in
