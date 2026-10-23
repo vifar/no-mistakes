@@ -97,7 +97,15 @@ jobs:
           done
 
   e2e:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # The race suite and the e2e journeys each saturate the same eight-vCPU
+    # VM, and separate runner processes on that VM accept them concurrently:
+    # in run 39963484774 the two jobs overlapped for 26 of the e2e job's 48
+    # minutes. Sequence them, and keep the e2e job eligible when the race job
+    # fails, because its result is evidence either way. The same-repository
+    # guard is preserved inside the status-function wrapper, so external fork
+    # code still never reaches the runner.
+    needs: test
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: [self-hosted, Linux, X64, king-server, no-mistakes]
     timeout-minutes: 90
     steps:

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"testing"
 )
 
 type workflowConditionContext struct {
@@ -14,17 +15,35 @@ type workflowConditionContext struct {
 	HeadRepo   string
 	Author     string
 	Cancelled  bool
+	Failed     bool
+	Skipped    bool
 }
 
 func evaluateWorkflowCondition(expression string, context workflowConditionContext) (bool, error) {
+	evaluator := workflowConditionEvaluator{context: context}
+	return evaluator.evaluate(expression)
+}
+
+type workflowConditionEvaluator struct {
+	context        workflowConditionContext
+	hasStatusCheck bool
+}
+
+func evaluateWorkflowJobCondition(expression string, context workflowConditionContext) (bool, error) {
+	evaluator := workflowConditionEvaluator{context: context}
+	value, err := evaluator.evaluate(expression)
+	return value && (evaluator.hasStatusCheck || (!context.Cancelled && !context.Failed && !context.Skipped)), err
+}
+
+func (e *workflowConditionEvaluator) evaluate(expression string) (bool, error) {
 	expression = strings.TrimSpace(expression)
 	if strings.HasPrefix(expression, "${{") && strings.HasSuffix(expression, "}}") {
 		expression = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(expression, "${{"), "}}"))
 	}
-	return evaluateWorkflowBoolean(expression, context)
+	return e.boolean(expression)
 }
 
-func evaluateWorkflowBoolean(expression string, context workflowConditionContext) (bool, error) {
+func (e *workflowConditionEvaluator) boolean(expression string) (bool, error) {
 	expression, err := trimWorkflowParentheses(strings.TrimSpace(expression))
 	if err != nil {
 		return false, err
@@ -43,7 +62,7 @@ func evaluateWorkflowBoolean(expression string, context workflowConditionContext
 		}
 		result := operator == "&&"
 		for _, part := range parts {
-			value, err := evaluateWorkflowBoolean(part, context)
+			value, err := e.boolean(part)
 			if err != nil {
 				return false, err
 			}
@@ -57,11 +76,22 @@ func evaluateWorkflowBoolean(expression string, context workflowConditionContext
 	}
 
 	if strings.HasPrefix(expression, "!") {
-		value, err := evaluateWorkflowBoolean(strings.TrimSpace(strings.TrimPrefix(expression, "!")), context)
+		value, err := e.boolean(strings.TrimSpace(strings.TrimPrefix(expression, "!")))
 		return !value, err
 	}
-	if expression == "cancelled()" {
-		return context.Cancelled, nil
+	switch expression {
+	case "cancelled()":
+		e.hasStatusCheck = true
+		return e.context.Cancelled, nil
+	case "success()":
+		e.hasStatusCheck = true
+		return !e.context.Cancelled && !e.context.Failed && !e.context.Skipped, nil
+	case "failure()":
+		e.hasStatusCheck = true
+		return e.context.Failed, nil
+	case "always()":
+		e.hasStatusCheck = true
+		return true, nil
 	}
 
 	for _, operator := range []string{"==", "!="} {
@@ -75,11 +105,11 @@ func evaluateWorkflowBoolean(expression string, context workflowConditionContext
 		if len(parts) != 2 {
 			return false, fmt.Errorf("workflow comparison %q has %d operands", expression, len(parts))
 		}
-		left, err := workflowConditionValue(parts[0], context)
+		left, err := workflowConditionValue(parts[0], e.context)
 		if err != nil {
 			return false, err
 		}
-		right, err := workflowConditionValue(parts[1], context)
+		right, err := workflowConditionValue(parts[1], e.context)
 		if err != nil {
 			return false, err
 		}
@@ -90,6 +120,38 @@ func evaluateWorkflowBoolean(expression string, context workflowConditionContext
 	}
 
 	return false, fmt.Errorf("unsupported workflow condition %q", expression)
+}
+
+func TestWorkflowJobConditionStatusChecks(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		expression string
+		context    workflowConditionContext
+		want       bool
+	}{
+		{"implicit success", "github.event_name == 'push'", workflowConditionContext{EventName: "push"}, true},
+		{"implicit failure", "github.event_name == 'push'", workflowConditionContext{EventName: "push", Failed: true}, false},
+		{"implicit skipped", "github.event_name == 'push'", workflowConditionContext{EventName: "push", Skipped: true}, false},
+		{"implicit cancellation", "github.event_name == 'push'", workflowConditionContext{EventName: "push", Cancelled: true}, false},
+		{"explicit success suppresses failed dependency", "success() && !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)", workflowConditionContext{EventName: "push", Failed: true}, false},
+		{"explicit success allows successful dependency", "success() && !cancelled() && (github.event_name == 'push')", workflowConditionContext{EventName: "push"}, true},
+		{"status check overrides implicit success", "${{ !cancelled() && github.event_name == 'push' }}", workflowConditionContext{EventName: "push", Failed: true}, true},
+		{"cancellation suppresses explicit condition", "!cancelled() && github.event_name == 'push'", workflowConditionContext{EventName: "push", Cancelled: true}, false},
+		{"failure status", "failure()", workflowConditionContext{Failed: true}, true},
+		{"failure status after success", "failure()", workflowConditionContext{}, false},
+		{"always includes cancellation", "always()", workflowConditionContext{Cancelled: true}, true},
+		{"quoted function is not a status check", "github.event_name != 'cancelled()'", workflowConditionContext{EventName: "push", Failed: true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := evaluateWorkflowJobCondition(tc.expression, tc.context)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Fatalf("job admission = %t, want %t", got, tc.want)
+			}
+		})
+	}
 }
 
 func workflowConditionValue(expression string, context workflowConditionContext) (string, error) {
