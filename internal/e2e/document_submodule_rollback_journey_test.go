@@ -50,8 +50,12 @@ func TestDocumentJourneyRecursiveSubmoduleRollback(t *testing.T) {
 				boundary := types.CustomGateStepName(types.StepTest, "boundary")
 				parked := waitForStepStatus(t, h, branch, boundary, types.StepStatusAwaitingApproval, 90*time.Second)
 				worktree := paths.WithRoot(h.NMHome).WorktreeDir(parked.RepoID, parked.ID)
+				// This fixture materializes the dependency between steps. Keep its
+				// registration and recursive setting local to this run's worktree.
+				gitIn(t, h, worktree, "config", "--worktree", "submodule.dependency.url", source)
+				gitIn(t, h, worktree, "config", "--worktree", "submodule.dependency.active", "true")
 				gitIn(t, h, worktree, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "dependency")
-				gitIn(t, h, worktree, "config", "submodule.recurse", "true")
+				gitIn(t, h, worktree, "config", "--worktree", "submodule.recurse", "true")
 				accepted := submitted
 				if reason == "repeated" {
 					h.Respond(parked.ID, boundary, types.ActionApprove)
