@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"gopkg.in/yaml.v3"
 )
@@ -20,11 +21,8 @@ import (
 // Only the external agent and forge are simulated; CLI, daemon, Git and storage
 // run normally in the harness's disposable repositories.
 func TestReviewFixPublicationLiveJourney(t *testing.T) {
-	for _, legacy := range []bool{false, true} {
-		name := "confirmed-repair"
-		if legacy {
-			name = "legacy-unreported-repair"
-		}
+	for _, name := range []string{"confirmed-repair", "legacy-unreported-repair", "fallback-agent-repair"} {
+		legacy := name == "legacy-unreported-repair"
 		t.Run(name, func(t *testing.T) {
 			for key, value := range map[string]string{
 				"GIT_AUTHOR_NAME": "Victor I", "GIT_AUTHOR_EMAIL": "vifarinde@gmail.com",
@@ -39,14 +37,25 @@ func TestReviewFixPublicationLiveJourney(t *testing.T) {
 			const link = "[Co-Authored-By: field](https://example.com)."
 			const wrapped = "**Co-Authored-By: Codex <wrapped-ai@example.com>**.\n\n`co-author (quoted): Codex\n <folded-ai@example.com>`.!\n\n**Co-Authored-By: Jane <jane@example.com>**.\n\n`co-author (quoted): Jane\n <jane@example.com>`.!"
 			const payload = `{"ai":"**Co-Authored-By: Codex <payload-ai@example.com>**.","human":"**Co-Authored-By: Jane <jane@example.com>**.","escape":"A\u0042\/C"}`
-			const wantPayload = `{"ai":"","human":"**co-author (quoted): Jane <jane@example.com>**.","escape":"A\u0042\/C"}`
+			// Quoted recorded payloads use the evidence neutralization notice;
+			// the identity is removed while unrelated serialized bytes survive.
+			const wantPayload = `{"ai":"<no-mistakes: AI attribution line neutralized>","human":"**co-author (quoted): Jane <jane@example.com>**.","escape":"A\u0042\/C"}`
 			const footer = "🤖 Generated with [Claude Code](https://claude.ai/code)"
 			const rationale = "Red first: unsafe value was accepted.\nGreen: focused validation passed."
 			summary := "Guard unsafe value\n\n" + rationale + "\n\n" + disclosure + "\n\n" + human + "\n" + signoff + "\nCo-Authored-By: Codex <commit-ai@example.com>\nClaude-Session: fixture\n" + footer
 			const tail = "{\n \"large\": \"cutoff }\n... [20000 bytes truncated] ...\ncontinued text\", \"ai\": \"<code>co-author (quoted): <code>Codex</code> <tail-ai@example.com></code>\", \"human\": \"Co-Authored-By: Ada & Bob <ada@example.com>\", \"escape\": \"A\\u0042\\/C\"\n}"
-			const wantTail = "{\n \"large\": \"cutoff }\n... [20000 bytes truncated] ...\ncontinued text\", \"ai\": \"\", \"human\": \"co-author (quoted): Ada & Bob <ada@example.com>\", \"escape\": \"A\\u0042\\/C\"\n}"
+			const wantTail = "{\n \"large\": \"cutoff }\n... [20000 bytes truncated] ...\ncontinued text\", \"ai\": \"<no-mistakes: AI attribution line neutralized>\", \"human\": \"co-author (quoted): Ada & Bob <ada@example.com>\", \"escape\": \"A\\u0042\\/C\"\n}"
 			raw := prose + "\n" + disclosure + "\n" + human + "\n> Co-Authored-By: Claude\n- Co-Authored-By: Codex\n`Co-Authored-By: ChatGPT`\n**Co-Authored-By: Gemini**\n> Co-Authored-By: Jane Doe\n\n[\n \"Co-Authored-By: Codex <array-ai@example.com>\",\n \"Co-Authored-By: Ada & Bob <ada@example.com>\"\n]\n\n```json\n" + tail + "\n```\n\n" + footer
 			raw += "\n\n" + link + "\n\n" + wrapped + "\n\n```json\n" + payload + "\n```"
+			// The public key must be labelled even when only the key carries
+			// markup. Preserve human bytes; equivalent AI entries disappear.
+			var labelledKeys []string
+			for _, key := range []string{"**Co-Authored-By**:", "`Co-Authored-By`:", "<code>Co-Authored-By</code>:", "&lt;code&gt;Co-Authored-By&lt;/code&gt;:"} {
+				for _, suffix := range []string{"", " <jane@example.com>.", "\n <jane@example.com>!"} {
+					raw += "\n\n" + key + " Jane" + suffix + "\n\n" + key + " Codex" + strings.ReplaceAll(suffix, "jane@example.com", "key-ai@example.com")
+					labelledKeys = append(labelledKeys, strings.Replace(key, "Co-Authored-By", "co-author (quoted)", 1)+" Jane"+suffix)
+				}
+			}
 			clean := map[string]any{
 				"findings": []any{}, "summary": "no issues found", "risk_level": "low",
 				"risk_rationale": "disposable fixture", "risk_scope": "source-or-external",
@@ -98,7 +107,16 @@ func TestReviewFixPublicationLiveJourney(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(cfg, []byte(strings.Replace(string(data), "  review: 0\n", "  review: 1\n", 1)), 0600); err != nil {
+			configText := strings.Replace(string(data), "  review: 0\n", "  review: 1\n", 1)
+			if name == "fallback-agent-repair" {
+				unavailable := filepath.Join(h.BinDir, "unavailable-codex")
+				if err := os.WriteFile(unavailable, []byte("#!"+filepath.Join(h.BinDir, "absent-interpreter")+"\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				configText = strings.Replace(configText, "agent: claude\n", "agent: [codex, claude]\n", 1)
+				configText = strings.Replace(configText, "agent_path_override:\n", "agent_path_override:\n  codex: "+unavailable+"\n", 1)
+			}
+			if err := os.WriteFile(cfg, []byte(configText), 0600); err != nil {
 				t.Fatal(err)
 			}
 			const remote = "https://github.com/example/no-mistakes.git"
@@ -145,6 +163,20 @@ func TestReviewFixPublicationLiveJourney(t *testing.T) {
 			if run.Status != types.RunCompleted {
 				t.Fatalf("run = %s, error=%v", run.Status, run.Error)
 			}
+			if name == "fallback-agent-repair" {
+				control := openControlDB(t, filepath.Join(h.NMHome, "state.sqlite"))
+				var failures, successes int
+				if err := control.QueryRow("SELECT COUNT(*) FROM agent_invocations WHERE run_id = ? AND step_name = 'pr' AND agent = 'codex' AND exit_status != 'ok'", run.ID).Scan(&failures); err != nil {
+					t.Fatal(err)
+				}
+				if err := control.QueryRow("SELECT COUNT(*) FROM agent_invocations WHERE run_id = ? AND step_name = 'pr' AND agent = 'claude' AND exit_status = 'ok'", run.ID).Scan(&successes); err != nil {
+					t.Fatal(err)
+				}
+				if failures == 0 || successes == 0 {
+					t.Fatalf("PR fallback was not exercised: codex failures=%d, claude successes=%d", failures, successes)
+				}
+				t.Logf("Persisted PR agent attempts: codex startup failures=%d; claude successes=%d", failures, successes)
+			}
 			message := liveStoredCommitMessage(t, h, h.UpstreamDir, "refs/heads/"+branch)
 			wantMessage := "no-mistakes(review): Guard unsafe value\n\nGuard unsafe value\n\nRed first: unsafe value was accepted.\nGreen: focused validation passed.\n\nDisclosure: fixtures were generated with the repository recorder.\n\nRound findings:\n- feature.txt: unsafe value needs validation\n\nCo-Authored-By: Ada & Bob <ada@example.com>\n" + signoff + "\n"
 			if !bytes.Equal(message, []byte(wantMessage)) {
@@ -156,6 +188,11 @@ func TestReviewFixPublicationLiveJourney(t *testing.T) {
 			}
 			invocations := readGHStubInvocations(t, ghLog)
 			body := createdPRBody(t, invocations)
+			for _, want := range labelledKeys {
+				if !strings.Contains(body, want) {
+					t.Errorf("PR lost labelled human key %q", want)
+				}
+			}
 			for _, want := range []string{prose, link, disclosure, "co-author (quoted): Ada & Bob <ada@example.com>", "co-author (quoted): Jane Doe", "**co-author (quoted): Jane <jane@example.com>**.", "`co-author (quoted): Jane\n <jane@example.com>`.!", wantPayload, wantTail, "Preserve the repair rationale."} {
 				if !strings.Contains(body, want) {
 					t.Errorf("PR lost required published bytes %q", want)
@@ -172,7 +209,7 @@ func TestReviewFixPublicationLiveJourney(t *testing.T) {
 					t.Errorf("quoted evidence lost required bytes %q", want)
 				}
 			}
-			for _, forbidden := range []string{"Codex", "ChatGPT", "Gemini", "Claude", "commit-ai@example.com", "tail-ai@example.com", "array-ai@example.com", "wrapped-ai@example.com", "folded-ai@example.com", "payload-ai@example.com", "claude.ai/code", "Claude-Session:", `\u003c`, `\u0026`} {
+			for _, forbidden := range []string{"Codex", "ChatGPT", "Gemini", "Claude", "commit-ai@example.com", "tail-ai@example.com", "array-ai@example.com", "wrapped-ai@example.com", "folded-ai@example.com", "payload-ai@example.com", "key-ai@example.com", "claude.ai/code", "Claude-Session:", `\u003c`, `\u0026`} {
 				if strings.Contains(body, forbidden) {
 					t.Errorf("PR leaked attribution or escaped human bytes %q", forbidden)
 				}
@@ -266,4 +303,57 @@ func TestReviewFixLongSummaryLiveJourney(t *testing.T) {
 	}
 	t.Logf("CLI journey: no-mistakes init; git push no-mistakes %s; isolated Review approval; local publication completed", branch)
 	t.Logf("git show -s --format=%%B refs/heads/%s (4091-byte summary retained):\n%s", branch, message)
+}
+
+// The documented byte bound must reject a 4097-byte report even though the
+// Review subject could be shortened. The fixer edits before returning it, so
+// retaining the edit or publishing any repair would violate the contract.
+func TestReviewFixOversizedSummaryLiveJourney(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: configurableFixCommitScenario(t, strings.Repeat("x", 4097))})
+	cfg := filepath.Join(h.NMHome, "config.yaml")
+	data, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, []byte(strings.Replace(string(data), "  review: 0\n", "  review: 1\n", 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := h.Run("init"); err != nil {
+		t.Fatalf("isolated init: %v\n%s", err, out)
+	} else {
+		t.Logf("no-mistakes init:\n%s", out)
+	}
+	const branch = "feature/oversized-review-summary"
+	submitted := h.CommitChange(branch, "feature.txt", "unsafe\n", "add unsafe feature")
+	if out, err := h.runGit(t.Context(), h.WorkDir, "push", "no-mistakes", branch); err != nil {
+		t.Fatalf("isolated gate push: %v\n%s", err, out)
+	} else {
+		t.Logf("git push no-mistakes %s:\n%s", branch, out)
+	}
+	run := h.WaitForRun(branch, 60*time.Second)
+	if run.Status != types.RunFailed || run.Error == nil || !strings.Contains(*run.Error, "commit summary must not exceed 4096 bytes") {
+		t.Fatalf("oversized report outcome = %s, error=%v", run.Status, deref(run.Error))
+	}
+	worktree := paths.WithRoot(h.NMHome).WorktreeDir(run.RepoID, run.ID)
+	content, err := os.ReadFile(filepath.Join(worktree, "feature.txt"))
+	if err != nil || string(content) != "unsafe\n" {
+		t.Fatalf("rejected repair was not discarded: %q, %v", content, err)
+	}
+	head, err := h.runGit(t.Context(), worktree, "rev-parse", "HEAD")
+	if err != nil || strings.TrimSpace(string(head)) != submitted {
+		t.Fatalf("rejected repair changed HEAD: %q, %v", head, err)
+	}
+	status, err := h.runGit(t.Context(), worktree, "status", "--porcelain")
+	if err != nil || len(status) != 0 {
+		t.Fatalf("rejected repair left edits or index changes: %q, %v", status, err)
+	}
+	if out, err := h.runGit(t.Context(), h.UpstreamDir, "show-ref", "--verify", "refs/heads/"+branch); err == nil {
+		t.Fatalf("rejected repair was published: %s", out)
+	}
+	out, err := h.Run("axi", "status")
+	if err != nil {
+		t.Fatalf("observe rejected run: %v\n%s", err, out)
+	}
+	t.Logf("no-mistakes axi status:\n%s", out)
+	t.Logf("Rejected 4097-byte report: %s\nRestored feature.txt: %q\nHEAD unchanged at %s; worktree and index clean; disposable upstream has no branch.", *run.Error, content, submitted)
 }
