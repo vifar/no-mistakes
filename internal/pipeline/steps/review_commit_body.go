@@ -274,12 +274,30 @@ func reviewFixCommitSummary(summary string, producer *agent.Result, configuredTr
 		}
 		return "", "body: unavailable - " + reason
 	}
-	// Keep the existing subject's normalization and punctuation behavior.
-	subject = strings.Trim(strings.Join(strings.Fields(body), " "), " \t\r\n\"'.;:,-")
+	subject = reviewFixCommitSubject(body)
 	if body == NoChangesAppliedSummary {
 		body = "Fixer summary: " + body
 	}
 	return subject, body
+}
+
+const reviewFixSubjectMaxRunes = 100
+
+func reviewFixCommitSubject(body string) string {
+	first := ""
+	for _, line := range strings.Split(body, "\n") {
+		if first = strings.Join(strings.Fields(line), " "); first != "" {
+			break
+		}
+	}
+	const trimSet = " \t\r\n\"'.;:,-"
+	if runes := []rune(first); len(runes) > reviewFixSubjectMaxRunes {
+		first = string(runes[:reviewFixSubjectMaxRunes])
+		if cut := strings.LastIndexByte(first, ' '); cut > len(first)/2 {
+			first = first[:cut]
+		}
+	}
+	return strings.Trim(first, trimSet)
 }
 
 func reviewFixCommitBody(summary, previousFindings string, configuredTrailers []string) string {

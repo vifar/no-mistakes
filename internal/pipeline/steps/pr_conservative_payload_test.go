@@ -61,7 +61,7 @@ func TestPRConservativePayloadBoundary(t *testing.T) {
 	}
 	const ai = `"<code>co-author (quoted): <code>Codex</code> <payload-ai@example.com></code>"`
 	const human = `"Co-Authored-By: Ada Lovelace <ada@example.com>"`
-	const labelled = `"co-author (quoted): Ada Lovelace \u003cada@example.com\u003e"`
+	const labelled = `"co-author (quoted): Ada Lovelace <ada@example.com>"`
 	const document = "{\r\n \"items\": [" + ai + ", {\"human\": " + human + "}],\r\n \"escape\": \"A\\u0042\\/C\", \"number\": 1.200e+3\r\n}"
 	want := strings.Replace(strings.Replace(document, ai, `""`, 1), human, labelled, 1)
 	if got := prDisplayBody(document); got != want {

@@ -49,7 +49,7 @@ func TestPRPayloadSpanPreservesSurroundingProse(t *testing.T) {
 func TestPRPayloadSpanFiltersOnlyRecordedValues(t *testing.T) {
 	const ai = `"<code>co-author (quoted): <code>Codex</code> <payload-ai@example.com></code>"`
 	const human = `"Co-Authored-By: Ada Lovelace <ada@example.com>"`
-	const labelled = `"co-author (quoted): Ada Lovelace \u003cada@example.com\u003e"`
+	const labelled = `"co-author (quoted): Ada Lovelace <ada@example.com>"`
 	const prose = `Ordinary prose mentions "co-author (quoted): Codex <ai@example.com>" as a field.`
 	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
 	for name, payload := range map[string]string{
@@ -159,5 +159,19 @@ func TestPRPayloadSpanPublicationPaths(t *testing.T) {
 				})
 			}
 		})
+	}
+}
+
+// The recorded bytes stay as written: a preserved human co-author's angle
+// brackets and ampersand are not rewritten as <, > or &, and the AI
+// value on the same payload is still absent.
+func TestPRPayloadRewriteKeepsHumanBytesReadable(t *testing.T) {
+	const ai = `"<code>co-author (quoted): <code>Codex</code> <ai@example.com></code>"`
+	const human = `"Co-Authored-By: Ada & Bob Lovelace <ada&bob@example.com>"`
+	const labelled = `"co-author (quoted): Ada & Bob Lovelace <ada&bob@example.com>"`
+	input := "{\n \"description\": " + ai + ",\n \"human\": " + human + "\n}"
+	want := "{\n \"description\": \"\",\n \"human\": " + labelled + "\n}"
+	if got := prDisplayBody(input); got != want {
+		t.Errorf("got  %q\nwant %q", got, want)
 	}
 }

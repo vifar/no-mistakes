@@ -18,16 +18,21 @@ import (
 // executing the same repair and commit path the review step uses.
 func TestReviewFixCommitBody(t *testing.T) {
 	t.Parallel()
+	// 186 repetitions is 4091 bytes: accepted as a summary, but flattened into
+	// the subject it overflows the 4096-byte commit message limit.
+	longSubject := strings.TrimSpace(strings.Repeat("rebind stale receipts ", 186))
+	longSubjectWant := strings.Repeat("rebind stale receipts ", 4) + "rebind"
 	for _, tc := range []struct {
 		name, summary, wantBody, wantSubject string
 	}{
 		{"rationale", "Reject stale receipts so approval stays bound to the head", "Reject stale receipts so approval stays bound to the head", "Reject stale receipts so approval stays bound to the head"},
 		{"misleading wording", "no changes applied: checked formatting", "no changes applied: checked formatting", "no changes applied: checked formatting"},
 		{"reserved no-change wording", "no changes applied", "Fixer summary: no changes applied", "no changes applied"},
-		{"multiline disclosure", "Bind receipts to HEAD\n\nRed first: stale receipt accepted before fix.\nGreen: focused regression passed.", "Red first: stale receipt accepted before fix.\nGreen: focused regression passed.", "Bind receipts to HEAD Red first: stale receipt accepted before fix. Green: focused regression passed"},
+		{"multiline disclosure", "Bind receipts to HEAD\n\nRed first: stale receipt accepted before fix.\nGreen: focused regression passed.", "Red first: stale receipt accepted before fix.\nGreen: focused regression passed.", "Bind receipts to HEAD"},
+		{"long first line", longSubject, longSubject, longSubjectWant},
 		{"missing", "", "body: unavailable - fixer returned no summary", "address review findings"},
 		{"whitespace", " \n\t", "body: unavailable - fixer returned no summary", "address review findings"},
-		{"quoted attribution", "Guard receipts\n> Co-Authored-By: Claude <noreply@anthropic.com>\nGenerated with Codex\nClaude-Session: abc\nCo-Authored-By: Alex Example <alex@example.com>", "Guard receipts", "Guard receipts Co-Authored-By: Alex Example <alex@example.com>"},
+		{"quoted attribution", "Guard receipts\n> Co-Authored-By: Claude <noreply@anthropic.com>\nGenerated with Codex\nClaude-Session: abc\nCo-Authored-By: Alex Example <alex@example.com>", "Guard receipts", "Guard receipts"},
 		{"only attribution", "> Co-Authored-By: Claude <noreply@anthropic.com>", "body: unavailable - summary contained only attribution", "address review findings"},
 		{"model attribution only", "Assisted-by: gpt-5.5", "body: unavailable - summary contained only attribution", "address review findings"},
 	} {
@@ -188,7 +193,7 @@ func TestReviewFixCommitR2ConfiguredAttribution(t *testing.T) {
 	if body := gitCmd(t, dir, "show", "-s", "--format=%b"); body != wantBody {
 		t.Errorf("body = %q, want %q", body, wantBody)
 	}
-	wantSubject := "no-mistakes(review): Guard receipts " + disclosure + " " + human + " " + humanWithAIEmail
+	wantSubject := "no-mistakes(review): Guard receipts"
 	if subject := lastCommitMessage(t, dir); subject != wantSubject {
 		t.Errorf("subject = %q, want %q", subject, wantSubject)
 	}
@@ -299,7 +304,7 @@ func assertUnconfiguredReviewAttributionFiltered(t *testing.T, attribution strin
 	if summary != cleanSummary {
 		t.Errorf("returned summary = %q, want %q", summary, cleanSummary)
 	}
-	wantSubject := "no-mistakes(review): guard unsafe value " + disclosure + " " + human + " " + quotedHuman + " " + personalClaude + " > **Co-Authored-By: Claude** > **<claude@example.com>** " + recorder
+	wantSubject := "no-mistakes(review): guard unsafe value"
 	if subject := lastCommitMessage(t, dir); subject != wantSubject {
 		t.Errorf("subject = %q, want %q", subject, wantSubject)
 	}
@@ -445,7 +450,7 @@ func TestReviewFixCommitRecordedProducerTrailers(t *testing.T) {
 				}
 			}
 			wantBody := "Guard unsafe value\n\n" + disclosure + "\n\n" + human + "\n\n" + lookalike
-			if !strings.Contains(subject, lookalike) || !strings.HasPrefix(body, wantBody+"\n\nRound findings:") {
+			if subject != "no-mistakes(review): Guard unsafe value" || !strings.HasPrefix(body, wantBody+"\n\nRound findings:") {
 				t.Errorf("rationale or unrendered lookalike lost: subject=%q body=%q", subject, body)
 			}
 			for _, finding := range []string{"- review.go: Guard unsafe value", "- fix.go: Keep verification"} {

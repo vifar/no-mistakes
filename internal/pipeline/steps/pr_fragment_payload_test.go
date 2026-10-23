@@ -21,7 +21,7 @@ import (
 func TestPRFragmentPayloadByteContract(t *testing.T) {
 	const ai = `"<code>co-author (quoted): <code>Codex</code> <ai@example.com></code>"`
 	const human = `"Co-Authored-By: Ada Lovelace <ada@example.com>"`
-	const labelled = `"co-author (quoted): Ada Lovelace \u003cada@example.com\u003e"`
+	const labelled = `"co-author (quoted): Ada Lovelace <ada@example.com>"`
 	for _, input := range []string{
 		"{\r\n\t\"description\" : " + ai + ",\r\n \"human\": " + human + ",\r\n \"escape\": \"A\\u0042\\/C\",\r\n",
 		"\"description\" : " + ai + ",\n\"human\": " + human,

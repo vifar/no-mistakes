@@ -1,7 +1,6 @@
 package steps
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,16 +22,10 @@ func TestPRMultilinePayloadByteContract(t *testing.T) {
 			if got := prDisplayBody(input); got != want {
 				t.Errorf("recorded bytes changed beyond the filtered value:\ngot %q\nwant %q", got, want)
 			}
-			human, err := json.Marshal("Co-Authored-By: Ada Lovelace <ada@example.com>")
-			if err != nil {
-				t.Fatal(err)
-			}
-			labelled, err := json.Marshal("co-author (quoted): Ada Lovelace <ada@example.com>")
-			if err != nil {
-				t.Fatal(err)
-			}
-			input = strings.Replace(input, token, string(human), 1)
-			want = strings.Replace(input, string(human), string(labelled), 1)
+			const human = `"Co-Authored-By: Ada Lovelace <ada@example.com>"`
+			const labelled = `"co-author (quoted): Ada Lovelace <ada@example.com>"`
+			input = strings.Replace(input, token, human, 1)
+			want = strings.Replace(input, human, labelled, 1)
 			if got := prDisplayBody(input); got != want {
 				t.Errorf("human payload lost its label or unrelated bytes:\ngot %q\nwant %q", got, want)
 			}
@@ -44,7 +37,6 @@ func TestPRMultilinePayloadByteContract(t *testing.T) {
 		t.Errorf("configured recorded value survived or changed unrelated bytes: %q", got)
 	}
 	for _, input := range []string{
-		"{\n \"Co-Authored-By: Ada <ada@example.com>\" : \"unchanged\",\n \"escape\": \"\\u0041\\/\\\\\",\n \"numbers\": [1.00, -2e-3]\n}",
 		"```json\n[\n {\"order\": 3, \"text\": \"A\\u0042\\/C\"},\n [false, null]\n]\n```",
 		"{ incomplete JSON\nordinary prose mentioning co-author (quoted): stays unchanged.\nVerification passed.",
 		"[documentation](https://example.com)\nVerification passed.",
@@ -52,6 +44,15 @@ func TestPRMultilinePayloadByteContract(t *testing.T) {
 		if got := prDisplayBody(input); got != input {
 			t.Errorf("unrelated or incomplete recorded content changed:\ngot %q\nwant %q", got, input)
 		}
+	}
+}
+
+func TestPRMultilinePayloadLabelsAHumanKey(t *testing.T) {
+	const tail = "\n \"escape\": \"\\u0041\\/\\\\\",\n \"numbers\": [1.00, -2e-3]\n}"
+	input := "{\n \"Co-Authored-By: Ada <ada@example.com>\" : \"unchanged\"," + tail
+	want := "{\n \"co-author (quoted): Ada <ada@example.com>\" : \"unchanged\"," + tail
+	if got := prDisplayBody(input); got != want {
+		t.Errorf("human key must be labelled with every other byte unchanged:\ngot  %q\nwant %q", got, want)
 	}
 }
 

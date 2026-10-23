@@ -144,7 +144,7 @@ func filterRecordedPayload(line string, notice, fragment bool, configuredTrailer
 		var value string
 		if err := json.Unmarshal([]byte(literal), &value); err == nil && !(fragment && bareQuotedMention(out, start, end, value, configuredTrailers)) {
 			if filtered := prDisplayTextMode(value, notice, configuredTrailers...); filtered != value {
-				if encoded, err := json.Marshal(filtered); err == nil {
+				if encoded, err := marshalJSONString(filtered); err == nil {
 					rebuilt := make([]byte, 0, len(out))
 					rebuilt = append(rebuilt, out[:start]...)
 					rebuilt = append(rebuilt, encoded...)
@@ -158,6 +158,16 @@ func filterRecordedPayload(line string, notice, fragment bool, configuredTrailer
 		offset = end
 	}
 	return string(out)
+}
+
+func marshalJSONString(value string) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // bareQuotedMention reports whether the string at out[start:end] is a bare

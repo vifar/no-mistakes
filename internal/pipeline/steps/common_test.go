@@ -1388,7 +1388,7 @@ func TestCommitAgentFixes_OversizedRenderedMessageDoesNotStageChanges(t *testing
 
 	ag := &mockAgent{name: "test"}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Config.Commit = config.Commit{FixMessage: "{{.Summary}}{{.Summary}}"}
+	sctx.Config.Commit = config.Commit{FixMessage: strings.Repeat("{{.Summary}}", 50)}
 
 	if err := os.WriteFile(filepath.Join(dir, "agent-change.txt"), []byte("change"), 0o644); err != nil {
 		t.Fatal(err)
