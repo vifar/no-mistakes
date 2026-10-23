@@ -23,6 +23,8 @@ func TestPRTitleAttributionBoundaries(t *testing.T) {
 		"<code>🤖 Generated with Claude Code</code>",
 		"co-author (quoted): **Codex** <code><ai@example.com></code>",
 		"**Co-Authored-By: Codex <ai@example.com>**.",
+		"**Co-Authored-By: Codex** <ai@example.com>",
+		html.EscapeString("<code>co-author (quoted): Codex</code> <ai@example.com>"),
 		"**`Co-Authored-By: Codex <ai@example.com>`.**",
 		html.EscapeString("~~!<code>?co-author (quoted): Codex <ai@example.com>.</code>;~~?"),
 		"`co-author (quoted): Codex <ai@example.com>`.!",

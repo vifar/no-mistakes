@@ -1375,17 +1375,23 @@ func TestCommitAgentFixes_OversizedRenderedMessageDoesNotStageChanges(t *testing
 
 	ag := &mockAgent{name: "test"}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Config.Commit = config.Commit{FixMessage: strings.Repeat("{{.Summary}}", 50)}
+	sctx.Config.Commit = config.Commit{FixMessage: strings.Repeat("{{.Summary}}", 16)}
+	if _, err := sctx.Config.Commit.RenderFixMessage(types.StepReview, "x"); err != nil {
+		t.Fatalf("invalid size regression template: %v", err)
+	}
 
 	if err := os.WriteFile(filepath.Join(dir, "agent-change.txt"), []byte("change"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	summary := strings.Repeat("x", 2049)
-	if err := commitAgentFixes(sctx, types.StepReview, summary, "fallback"); err == nil {
-		t.Fatal("commitAgentFixes() accepted an oversized rendered message")
+	summary := strings.Repeat("界", 100)
+	if err := commitAgentFixes(sctx, types.StepReview, summary, "fallback"); err == nil || !strings.Contains(err.Error(), "must not render to more than 4096 bytes") {
+		t.Fatalf("commitAgentFixes() error = %v, want rendered-size rejection", err)
 	}
 	if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "" {
 		t.Fatalf("staged files after rendered message error = %q, want none", got)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("HEAD after rendered message error = %q, want %q", got, headSHA)
 	}
 }
 

@@ -15,13 +15,20 @@ func TestPRNestedPunctuationPublication(t *testing.T) {
 			}
 			for _, key := range []string{"Co-Authored-By:", "co-author (quoted):"} {
 				for _, separator := range []string{" ", "\n "} {
-					for _, shape := range []string{"whole", "fields"} {
+					for _, shape := range []string{"whole", "fields", "key-and-name", "name-and-mailbox"} {
 						ai, human := key+" Codex"+separator+"<ai@example.com>", key+" Jane"+separator+"<jane@example.com>"
-						if shape == "whole" {
+						switch shape {
+						case "whole":
 							ai, human = wrap(ai), wrap(human)
-						} else {
+						case "fields":
 							ai = wrap(key) + " " + wrap("Codex") + separator + wrap("<ai@example.com>")
 							human = wrap(key) + " " + wrap("Jane") + separator + wrap("<jane@example.com>")
+						case "key-and-name":
+							ai = wrap(key+" Codex") + separator + wrap("<ai@example.com>")
+							human = wrap(key+" Jane") + separator + wrap("<jane@example.com>")
+						case "name-and-mailbox":
+							ai = wrap(key) + " " + wrap("Codex"+separator+"<ai@example.com>")
+							human = wrap(key) + " " + wrap("Jane"+separator+"<jane@example.com>")
 						}
 						want := strings.Replace(human, key, "co-author (quoted):", 1)
 						for _, escaped := range []bool{false, true} {
@@ -73,6 +80,38 @@ func TestPRNestedPunctuationPublication(t *testing.T) {
 							})
 						}
 					}
+				}
+			}
+		}
+	}
+}
+
+func TestPRSpanningCoauthorWrapper(t *testing.T) {
+	for _, wrapper := range [][2]string{{"**", "**"}, {"`", "`"}, {"<code>", "</code>"}, {"*", "*"}, {"~~", "~~"}, {"**`", "`.**"}} {
+		for _, key := range []string{"Co-Authored-By:", "co-author (quoted):"} {
+			for _, separator := range []string{" ", "\n "} {
+				ai := wrapper[0] + key + " Codex" + wrapper[1] + separator + "<ai@example.com>"
+				human := wrapper[0] + key + " Jane" + wrapper[1] + separator + "<jane@example.com>"
+				want := wrapper[0] + "co-author (quoted): Jane" + wrapper[1] + separator + "<jane@example.com>"
+				for _, escaped := range []bool{false, true} {
+					input, retained, expected := ai, human, want
+					if escaped {
+						input, retained, expected = html.EscapeString(input), html.EscapeString(retained), html.EscapeString(expected)
+					}
+					t.Run(input, func(t *testing.T) {
+						if got := prDisplayBody(input); got != "" {
+							t.Errorf("AI attribution survived: %q", got)
+						}
+						if got := prDisplayNoticeText(input); got != prAIAttributionNotice {
+							t.Errorf("evidence attribution = %q", got)
+						}
+						if got := neutralizeAIAttribution(input); got != prAIAttributionNotice {
+							t.Errorf("neutralized attribution = %q", got)
+						}
+						if got := prDisplayBody(retained); got != expected {
+							t.Errorf("human attribution = %q, want %q", got, expected)
+						}
+					})
 				}
 			}
 		}

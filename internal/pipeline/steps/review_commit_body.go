@@ -150,24 +150,7 @@ func attributionViewWithLine(line string, lineView func(string) (string, bool)) 
 			}
 			for {
 				before := value
-				mailbox := ""
-				for end := len(value); end > 0; {
-					at := strings.LastIndexAny(value[:end], "<`*_~\"'")
-					if at < 0 {
-						break
-					}
-					address, _ := lineView(value[at:])
-					if strings.HasPrefix(address, "<") && strings.HasSuffix(address, ">") {
-						if _, err := mail.ParseAddress(address); err == nil {
-							mailbox = " " + address
-							value = value[:at]
-							break
-						}
-					}
-					end = at
-				}
-				value, _ = lineView(value)
-				value += mailbox
+				value = attributionTextView(value, lineView)
 				if value == before {
 					break
 				}
@@ -180,6 +163,31 @@ func attributionViewWithLine(line string, lineView func(string) (string, bool)) 
 		parts[i] = text
 	}
 	return strings.Join(parts, "\n"), continuation
+}
+
+func attributionTextView(value string, lineView func(string) (string, bool)) string {
+	mailbox := ""
+	for end := len(value); end > 0; {
+		at := strings.LastIndexAny(value[:end], "<`*_~\"'")
+		if at < 0 {
+			break
+		}
+		address, _ := lineView(value[at:])
+		if strings.HasPrefix(address, "<") && strings.HasSuffix(address, ">") {
+			if _, err := mail.ParseAddress(address); err == nil {
+				mailbox = " " + address
+				value = value[:at]
+				trimmed := strings.TrimRight(value, " \t\r\n.,;:!?")
+				if strings.Contains(value[len(trimmed):], "\n") {
+					mailbox = "\n " + address
+				}
+				break
+			}
+		}
+		end = at
+	}
+	value, _ = lineView(value)
+	return value + mailbox
 }
 
 func attributionKeyView(text string, lineView func(string) (string, bool)) string {

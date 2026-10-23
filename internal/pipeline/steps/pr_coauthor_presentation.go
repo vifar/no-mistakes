@@ -99,7 +99,7 @@ func publishedAttributionLine(line string) (string, bool) {
 	for {
 		before := line
 		var indented bool
-		line, indented = reviewAttributionLine(strings.Trim(line, ".,;:!?"))
+		line, indented = reviewAttributionLine(strings.Trim(line, "\n.,;:!?"))
 		continuation = continuation || indented
 		if line == before {
 			return line, continuation
@@ -108,8 +108,26 @@ func publishedAttributionLine(line string) (string, bool) {
 }
 
 func publishedAttributionView(line string) (string, bool) {
-	line = attributionKeyView(html.UnescapeString(line), publishedAttributionLine)
-	return attributionViewWithLine(html.EscapeString(line), publishedAttributionLine)
+	line = html.UnescapeString(line)
+	_, continuation := publishedAttributionLine(line)
+	for {
+		before := line
+		line = attributionKeyView(line, publishedAttributionLine)
+		prefix := reviewTrailerKey.FindString(line)
+		if prefix == "" {
+			prefix = reviewGeneratedWith.FindString(line)
+		}
+		if prefix == "" {
+			line = attributionTextView(line, publishedAttributionLine)
+		} else {
+			line = strings.TrimRight(prefix, " \t") + " " + attributionTextView(line[len(prefix):], publishedAttributionLine)
+		}
+		if line == before {
+			break
+		}
+	}
+	view, _ := attributionViewWithLine(html.EscapeString(line), publishedAttributionLine)
+	return view, continuation
 }
 
 func publishedAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
