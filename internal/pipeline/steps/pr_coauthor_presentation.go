@@ -67,6 +67,10 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 			lines[start] = presentHumanCoauthor(lines[start])
 		case recordedFragmentLine(lines[start]):
 			lines[start] = filterRecordedPayload(lines[start], notice, true, configuredTrailers...)
+		default:
+			if cut, ok := recordedTailCut(lines[start]); ok {
+				lines[start] = lines[start][:cut] + filterRecordedPayload(lines[start][cut:], notice, true, configuredTrailers...)
+			}
 		}
 		kept = append(kept, lines[start:end]...)
 		start = end
@@ -201,6 +205,28 @@ func recordedFragmentLine(line string) bool {
 		}
 	}
 	return sawString
+}
+
+// recordedTailCut reports where the payload resumes on a line that starts
+// inside a string the evidence was cut in: the text up to the first closing
+// quote is the tail of that string, and what follows must be made only of JSON
+// tokens and open with the punctuation that ends a string. Prose and Markdown
+// quote their phrases from the opening quote, so they never qualify.
+func recordedTailCut(line string) (int, bool) {
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case '\\':
+			i++
+		case '"':
+			rest := line[i+1:]
+			next := strings.TrimLeft(rest, " \t")
+			if next == "" || strings.IndexByte(",:}]", next[0]) < 0 || !recordedFragmentLine(rest) {
+				return 0, false
+			}
+			return i + 1, true
+		}
+	}
+	return 0, false
 }
 
 // jsonStringEnd returns the end of the JSON string literal that starts at the

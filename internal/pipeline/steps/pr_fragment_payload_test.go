@@ -26,6 +26,7 @@ func TestPRFragmentPayloadByteContract(t *testing.T) {
 		"{\r\n\t\"description\" : " + ai + ",\r\n \"human\": " + human + ",\r\n \"escape\": \"A\\u0042\\/C\",\r\n",
 		"\"description\" : " + ai + ",\n\"human\": " + human,
 		"{\n \"cutoff\": \"unfinished\n\n... [20000 bytes truncated] ...\n\n \"description\" : " + ai + ",\n \"human\": " + human + "\n}",
+		"{\n \"large\": \"cutoff\n... [20000 bytes truncated] ...\ncontinued text\", \"description\": " + ai + ", \"human\": " + human + "\n}",
 		"```json\n{\n \"description\" : " + ai + ", \"human\": " + human + ",\n```\nVerification passed.",
 	} {
 		want := strings.Replace(strings.Replace(input, ai, `""`, 1), human, labelled, 1)

@@ -26,6 +26,7 @@ func TestPRPayloadSpanPreservesSurroundingProse(t *testing.T) {
 		"array-then-markdown":        "[\n \"ordinary\"\n]\n\n" + link,
 		"array-then-disclosure":      "[\n \"ordinary\"\n]\n\n" + disclosure,
 		"fenced-then-prose":          "```json\n[\n \"ordinary\"\n]\n```\n\n" + prose,
+		"prose-with-stray-quote":     `He said, "co-author (quoted): Codex <ai@example.com>", "ok", and left.`,
 		"quoted-prose-after-json":    "[\n \"ordinary\"\n]\n\n\"Ordinary prose mentions co-author (quoted): Codex.\"",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -43,7 +44,8 @@ func TestPRPayloadSpanPreservesSurroundingProse(t *testing.T) {
 
 // The intent: a cut payload is filtered like a complete one - the AI value is
 // absent, the human co-author is the labelled field and every other byte is
-// unchanged.
+// unchanged. The cutoff-string case is the tail of a string the evidence was cut
+// in: the AI value after the cut is removed like any other.
 func TestPRPayloadSpanFiltersOnlyRecordedValues(t *testing.T) {
 	const ai = `"<code>co-author (quoted): <code>Codex</code> <payload-ai@example.com></code>"`
 	const human = `"Co-Authored-By: Ada Lovelace <ada@example.com>"`
@@ -57,10 +59,7 @@ func TestPRPayloadSpanFiltersOnlyRecordedValues(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			input := payload + "\n\n" + prose + "\n" + disclosure
-			want := input
-			if name != "cutoff-string" {
-				want = strings.Replace(strings.Replace(input, ai, `""`, 1), human, labelled, 1)
-			}
+			want := strings.Replace(strings.Replace(input, ai, `""`, 1), human, labelled, 1)
 			if got := prDisplayBody(input); got != want {
 				t.Errorf("publication changed bytes outside recorded values:\ngot %q\nwant %q", got, want)
 			}
