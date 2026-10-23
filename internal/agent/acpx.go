@@ -320,6 +320,11 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			// reference/global-config.md that reasoning-only traffic does not
 			// count. Reasoning still satisfies byte-level liveness.
 			reportAcpxProgress(onProgress)
+			if onTool != nil && update.SessionUpdate != "agent_plan" {
+				// A tool call may have left a side effect outside the
+				// worktree; the agent's plan has not.
+				onTool()
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {

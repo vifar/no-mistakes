@@ -788,6 +788,31 @@ func TestParseAcpxJSONEvents_ReportsProgressForNonProseTurnActivity(t *testing.T
 	}
 }
 
+// Tool evidence is narrower than progress: a plan is forward motion but has not
+// acted on anything, so only the tool calls may authorize or withhold a replay.
+func TestParseAcpxJSONEvents_ReportsToolActivityOnlyForToolCalls(t *testing.T) {
+	events := `{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"bash"}}}
+{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"completed"}}}
+{"method":"session/update","params":{"update":{"sessionUpdate":"agent_plan","entries":[]}}}
+`
+	var tools int
+	var usage TokenUsage
+
+	if _, _, err := parseAcpxJSONEvents(
+		context.Background(),
+		strings.NewReader(events),
+		nil,
+		nil,
+		func() { tools++ },
+		&usage,
+	); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tools != 2 {
+		t.Fatalf("tool events = %d, want 2 (tool_call, tool_call_update; not the plan)", tools)
+	}
+}
+
 // Assistant prose is progress too, and a pure usage tick is not: reading token
 // counters reports what the turn spent, not that it moved.
 func TestParseAcpxJSONEvents_ProseIsProgressButUsageIsNot(t *testing.T) {

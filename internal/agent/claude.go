@@ -463,11 +463,12 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), o
 						onChunk(c.Text)
 					}
 				}
-				if c.Type == "text" {
+				if c.Type == "text" || !isToolContentType(c.Type) {
 					continue
 				}
-				// Any other block is a tool call or its result: a turn advance
-				// and side-effect evidence at once.
+				// A tool call is a turn advance and side-effect evidence at
+				// once. Reasoning blocks ("thinking") stay out: see
+				// isToolContentType.
 				if onProgress != nil {
 					onProgress()
 				}

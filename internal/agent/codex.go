@@ -422,8 +422,8 @@ func reportCodexTool(onTool func(), item *codexItem) {
 	if onTool == nil || item == nil {
 		return
 	}
-	switch item.Type {
-	case "reasoning", "agent_message", "":
+	if isTool, _, _ := codexToolItemKind(item.Type); !isTool {
+		// Reasoning, assistant messages, plans and errors act on nothing.
 		return
 	}
 	onTool()

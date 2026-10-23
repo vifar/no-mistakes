@@ -184,3 +184,39 @@ func TestReviewAgentsBoundsASingleRouteThroughTheSeam(t *testing.T) {
 		t.Fatalf("seam calls = %d, want the single route run through it once", calls)
 	}
 }
+
+// Reasoning is not a side effect. The tool phase must count only real tool
+// blocks, or a thinking-only response would withhold a safe refusal fallback.
+func TestIsToolContentType(t *testing.T) {
+	for _, tc := range []struct {
+		blockType string
+		want      bool
+	}{
+		{"tool_use", true},
+		{"tool_result", true},
+		{"server_tool_use", true},
+		{"mcp_tool_call", false},
+		{"function_call", true},
+		{"thinking", false},
+		{"redacted_thinking", false},
+		{"reasoning", false},
+		{"text", false},
+		{"", false},
+	} {
+		if got := isToolContentType(tc.blockType); got != tc.want {
+			t.Errorf("isToolContentType(%q) = %v, want %v", tc.blockType, got, tc.want)
+		}
+	}
+}
+
+// A codex reasoning item carries no side effect; a command item does.
+func TestReportCodexToolCountsOnlyToolItems(t *testing.T) {
+	count := 0
+	reportCodexTool(func() { count++ }, &codexItem{Type: "reasoning"})
+	reportCodexTool(func() { count++ }, &codexItem{Type: "agent_message"})
+	reportCodexTool(func() { count++ }, &codexItem{Type: "command_execution"})
+	reportCodexTool(func() { count++ }, &codexItem{Type: "file_change"})
+	if count != 2 {
+		t.Fatalf("tool events = %d, want the two tool items only", count)
+	}
+}

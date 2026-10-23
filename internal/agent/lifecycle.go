@@ -50,6 +50,20 @@ const (
 	LifecyclePhaseTool = "tool"
 )
 
+// isToolContentType reports whether a Messages-compatible content block is a
+// tool call or a tool result.
+//
+// The allowlist is explicit because the other non-text blocks are reasoning:
+// "thinking", "redacted_thinking" and "reasoning" are not side effects, and
+// counting them as tools would withhold a refusal fallback that is safe.
+func isToolContentType(blockType string) bool {
+	switch blockType {
+	case "tool_use", "tool_result", "server_tool_use", "mcp_tool_use", "mcp_tool_result", "function_call", "function_result":
+		return true
+	}
+	return false
+}
+
 // nativeAgentActivityInterval throttles LifecyclePhaseActivity so a chatty
 // subprocess cannot flood the observer. It is a liveness signal, not a log: the
 // first byte of a quiet period is reported immediately and further bytes are

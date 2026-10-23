@@ -292,11 +292,11 @@ func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string), onP
 				if content.Type == "text" && content.Text != "" && onChunk != nil {
 					onChunk(content.Text)
 				}
-				if content.Type == "text" || content.Type == "" {
+				if !isToolContentType(content.Type) {
+					// Text is streamed above; everything else that is not a
+					// tool block is reasoning, which is not a side effect.
 					continue
 				}
-				// Anything else in a Messages-compatible content list is a
-				// tool call or its result.
 				if onProgress != nil {
 					onProgress()
 				}
