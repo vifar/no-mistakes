@@ -1715,27 +1715,12 @@ func escapePipelineFoldMarkers(s string) string {
 	return out
 }
 
-// renderCoAuthorAsLabelledField renders a co-author ATTRIBUTION as a labelled
-// field rather than as a raw trailer line.
-//
-// This is the PUBLISHED text's rule, and it is deliberately not the
-// classifier's rule. The classifier decides whether a line IS an AI
-// attribution, and it is precise: a person whose name happens to contain a
-// tool's name is a person, and that attribution stays whole, name and address
-// and all.
-//
-// The published text is read by consumers that cannot make that distinction.
-// One that scans the pull request body for attribution reads a raw
-// "Co-Authored-By:" line as a claim of AI attribution, and it reads it that
-// way even inside a code fence, because it scans the raw text. So a co-author
-// the body carries is rendered in a form no such consumer reads as a claim,
-// with the name and the address still there, because they are the evidence.
-//
-// The rule is the merge bar's owner's: the bar's rule does not change, and a
-// published body never carries a raw co-author trailer line. It is a
-// publication policy, and it is deliberately narrow: only the KEY of a
-// complete co-author entry is rendered, including entries without a mailbox.
-// A sentence that merely names the field stays the sentence it was.
+// renderCoAuthorAsLabelledField delegates to the shared publication filter in
+// pr_coauthor_presentation.go. Raw PR-body scanners treat co-author trailers as
+// attribution even inside code fences, so preserved human entries need a
+// labelled key while their names and addresses remain visible as evidence.
+// prDisplayNoticeText owns AI neutralization and human presentation; a sentence
+// that merely names the field stays the sentence it was.
 func renderCoAuthorAsLabelledField(s string) string {
 	return prDisplayNoticeText(s)
 }
@@ -1750,10 +1735,9 @@ func renderCoAuthorAsLabelledField(s string) string {
 // (closingGrammarFor). The grammar has to travel with the text, because GitLab
 // resolves a reference inside a code block where GitHub does not.
 //
-// Within this helper, AI attribution must be neutralized before retained
-// co-author keys are rendered. Rendering a key first would hide the trailer
-// from the AI classifier. Pipeline and Testing sections also render their
-// retained keys at their sources, before callers budget the body.
+// The shared publication filter recognizes both raw and already-labelled
+// attribution entries. Pipeline and Testing sections also apply it at their
+// sources, before callers budget the body.
 func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 	s = strings.NewReplacer(acceptedGapsStart, "<!-- no-mistakes:accepted\\-gaps:start -->", acceptedGapsEnd, "<!-- no-mistakes:accepted\\-gaps:end -->").Replace(s)
 	escaped := escapePRAppendixMarkers(strings.ReplaceAll(s, pipelineAttestationCommentPrefix, escapedPipelineAttestationCommentPrefix))
