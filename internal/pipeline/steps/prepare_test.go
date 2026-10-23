@@ -367,8 +367,6 @@ func TestEnsurePrepared_DoesNotInitializeUnrelatedSubmodule(t *testing.T) {
 	gitCmd(t, dir, "commit", "-m", "add unavailable module")
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "submodule", "deinit", "-f", "module")
-	// Registration must have per-worktree scope, as it does in a run worktree.
-	gitCmd(t, dir, "config", "extensions.worktreeConfig", "true")
 
 	sctx := newPreparationTestContext(t, nil, dir, baseSHA, headSHA, config.Commands{Prepare: successfulPreparationCommand()})
 	sctx.Shared = &pipeline.RunShared{}
@@ -401,7 +399,6 @@ func TestEnsurePrepared_KeepsSubmoduleInitializedByPreparationAtRecordedCommit(t
 	gitCmd(t, dir, "commit", "-m", "add module")
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "submodule", "deinit", "-f", "module")
-	gitCmd(t, dir, "config", "extensions.worktreeConfig", "true")
 
 	sctx := newPreparationTestContext(t, nil, dir, baseSHA, headSHA, config.Commands{Prepare: initializesSubmodulePreparationCommand()})
 	sctx.Shared = &pipeline.RunShared{}
@@ -446,7 +443,6 @@ func TestEnsurePrepared_ResetsSubmoduleConfiguredToRebase(t *testing.T) {
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	recorded := gitCmd(t, dir, "rev-parse", "HEAD:module")
 	gitCmd(t, dir, "submodule", "deinit", "-f", "module")
-	gitCmd(t, dir, "config", "extensions.worktreeConfig", "true")
 
 	sctx := newPreparationTestContext(t, nil, dir, baseSHA, headSHA, config.Commands{Prepare: initializesSubmodulePreparationCommand()})
 	sctx.Shared = &pipeline.RunShared{}
