@@ -22,12 +22,11 @@ func TestClassifyTransientNetworkFailures(t *testing.T) {
 		`HTTP 504: Gateway Timeout`:                      ClassHTTP5xx,
 		`unexpected status code 500 from api.github.com`: ClassHTTP5xx,
 		`You have exceeded a secondary rate limit. Please wait before you try again. Retry-After: 60`:                                         ClassRateLimit,
-		`You have exceeded a secondary rate limit. Please wait a few minutes before you try again.`:                                           ClassRateLimit,
 		`error: RPC failed; curl 56 OpenSSL SSL_read: Connection reset by peer`:                                                               ClassConnection,
 		`error: RPC failed; curl 18 transfer closed with outstanding read data remaining`:                                                     ClassConnection,
 		`fatal: unable to access 'https://github.com/x/y.git/': Failed to connect to github.com port 443 after 75001 ms: Timeout was reached`: ClassTimeout,
 		`fatal: the remote end hung up unexpectedly`:                                                                                          ClassConnection,
-		`HTTP 429: Too Many Requests; Retry-After: 30`:                                                                                        ClassRateLimit,
+		`HTTP 429: You have exceeded a secondary rate limit; Retry-After: 30`:                                                                 ClassRateLimit,
 	}
 	for message, want := range cases {
 		if got := ClassifyText(message); got != want {
@@ -55,6 +54,9 @@ func TestClassifyNeverRetriesRealFailures(t *testing.T) {
 		`remote: error: GH013: Repository rule violations found for refs/heads/main. : [remote rejected] main -> main (push declined due to repository rule violations)`,
 		`! [remote rejected] main -> main (pre-receive hook declined)`,
 		`API rate limit exceeded for user ID 12345.`,
+		`You have exceeded a secondary rate limit. Please wait a few minutes before you try again.`,
+		`HTTP 429: Too Many Requests; Retry-After: 30`,
+		`gnutls_handshake() failed: Error in protocol version`,
 		`gh: command not found`,
 		``,
 	}
@@ -62,6 +64,51 @@ func TestClassifyNeverRetriesRealFailures(t *testing.T) {
 		if class := ClassifyText(message); class != "" {
 			t.Errorf("ClassifyText(%q) = %q, want no retry", message, class)
 		}
+	}
+}
+
+func TestDoEnforcesTransportRetryEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		message string
+		class   Class
+	}{
+		{"curl low speed timeout", "error: RPC failed; curl 28 Operation too slow. Less than 1000 bytes/sec transferred the last 30 seconds", ClassTimeout},
+		{"curl timeout with permission failure", "HTTP 403: forbidden; RPC failed; curl 28 Operation too slow", ""},
+		{"other curl code", "error: RPC failed; curl 280 unknown failure", ""},
+		{"secondary limit with header", "HTTP 403: You have exceeded a secondary rate limit.\nRetry-After: 60", ClassRateLimit},
+		{"secondary limit without header", "HTTP 403: You have exceeded a secondary rate limit.", ""},
+		{"secondary limit without status or header", "You have exceeded a secondary rate limit.", ""},
+		{"secondary limit with prose wait", "HTTP 403: secondary rate limit; retry after a few minutes", ""},
+		{"unqualified rate limit with header", "HTTP 429: Too Many Requests; Retry-After: 30", ""},
+		{"primary limit with header", "HTTP 403: API rate limit exceeded; Retry-After: 60", ""},
+		{"gnutls protocol mismatch", "gnutls_handshake() failed: Error in protocol version", ""},
+		{"gnutls timeout", "gnutls_handshake() failed: Connection timed out", ClassTimeout},
+		{"gnutls reset", "gnutls_handshake() failed: Connection reset by peer", ClassConnection},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			var logs []string
+			failure := errors.New(tc.message)
+			value, err := Do(context.Background(), Options{
+				Base: time.Millisecond,
+				Max:  time.Millisecond,
+				Log:  func(line string) { logs = append(logs, line) },
+			}, func() (string, error) {
+				calls++
+				if calls == 1 {
+					return "", failure
+				}
+				return "recovered", nil
+			})
+			if tc.class == "" {
+				if calls != 1 || !errors.Is(err, failure) || len(logs) != 0 {
+					t.Fatalf("calls=%d err=%v logs=%v, want original failure without retry", calls, err, logs)
+				}
+			} else if calls != 2 || err != nil || value != "recovered" || len(logs) != 1 || !strings.Contains(logs[0], "class="+string(tc.class)) {
+				t.Fatalf("calls=%d value=%q err=%v logs=%v, want recovery with class %s", calls, value, err, logs, tc.class)
+			}
+		})
 	}
 }
 

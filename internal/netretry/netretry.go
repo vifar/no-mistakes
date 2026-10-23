@@ -49,8 +49,7 @@ const (
 	ClassDNS Class = "dns"
 	// ClassHTTP5xx covers a 5xx response from the GitHub API.
 	ClassHTTP5xx Class = "http_5xx"
-	// ClassRateLimit covers a secondary rate limit GitHub reports in its error
-	// message, whether or not response headers named Retry-After.
+	// ClassRateLimit covers a secondary rate limit with Retry-After.
 	ClassRateLimit Class = "secondary_rate_limit"
 )
 
@@ -252,6 +251,7 @@ var http5xx = regexp.MustCompile(`\b(?:http(?:/[0-9.]+)?|http error|status|statu
 // 56 (receive failure) and 92 (HTTP/2 stream error). A 413 or another terminal
 // HTTP status never matches.
 var curlTransportFailure = regexp.MustCompile(`rpc failed; curl (?:18|52|55|56|92)\b`)
+var curlTimeout = regexp.MustCompile(`\bcurl 28\b`)
 
 // ClassifyText classifies one failure message. A transient class is returned
 // only for the failures a retry can fix.
@@ -275,7 +275,8 @@ func ClassifyText(text string) Class {
 		return ClassRateLimit
 	}
 	switch {
-	case strings.Contains(lower, "tls handshake timeout"),
+	case curlTimeout.MatchString(lower),
+		strings.Contains(lower, "tls handshake timeout"),
 		strings.Contains(lower, "i/o timeout"),
 		strings.Contains(lower, "operation timed out"),
 		strings.Contains(lower, "connection timed out"),
@@ -287,7 +288,6 @@ func ClassifyText(text string) Class {
 		strings.Contains(lower, "connection reset"),
 		strings.Contains(lower, "connection refused"),
 		strings.Contains(lower, "couldn't connect to server"),
-		strings.Contains(lower, "gnutls_handshake"),
 		strings.Contains(lower, "the remote end hung up unexpectedly"),
 		strings.Contains(lower, "unexpected disconnect while reading sideband packet"),
 		curlTransportFailure.MatchString(lower),
@@ -310,16 +310,6 @@ func ClassifyText(text string) Class {
 	return ""
 }
 
-// secondaryRateLimit recognises GitHub's own secondary-rate-limit diagnostic.
-// gh does not print response headers, so a Retry-After value is usually not in
-// the captured output; the message GitHub writes for a secondary limit is the
-// evidence, and the bounded backoff is the wait. A primary rate-limit quota
-// ("API rate limit exceeded") is NOT retried: only the secondary class is a
-// momentary burst control, and an unqualified 403 stays a permission failure.
 func secondaryRateLimit(lower string) bool {
-	if strings.Contains(lower, "secondary rate limit") {
-		return true
-	}
-	return strings.Contains(lower, "http 429") &&
-		(strings.Contains(lower, "retry-after") || strings.Contains(lower, "retry after"))
+	return strings.Contains(lower, "secondary rate limit") && strings.Contains(lower, "retry-after")
 }
