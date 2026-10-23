@@ -888,6 +888,22 @@ func newPreparationTestContext(t *testing.T, ag agent.Agent, workDir, baseSHA, h
 	gateDir := t.TempDir()
 	gitCmd(t, gateDir, "init", "--bare")
 	sctx.GateDir = gateDir
+	// A run's worktree is a linked worktree of the gate, and the gate carries
+	// per-worktree configuration scope. The submodule registration the
+	// Prepare step performs writes per-worktree, and refuses to write the
+	// SHARED configuration of a repository no-mistakes does not own. A fixture
+	// that is an ordinary checkout must carry that scope too, or it would
+	// exercise a configuration a run cannot be in.
+	//
+	// A linked worktree already inherits the gate's scope, and writing it
+	// there would take the gate's shared configuration lock that the guard is
+	// holding. An ordinary checkout is the one whose Git directory IS its
+	// common directory, so it is the one that has no gate to inherit from.
+	gitDir := gitCmd(t, workDir, "rev-parse", "--path-format=absolute", "--absolute-git-dir")
+	commonDir := gitCmd(t, workDir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if filepath.Clean(gitDir) == filepath.Clean(commonDir) {
+		gitCmd(t, workDir, "config", "extensions.worktreeConfig", "true")
+	}
 	return sctx
 }
 
