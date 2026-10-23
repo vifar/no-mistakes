@@ -118,6 +118,12 @@ func handleFakeCLI(mode string) {
 
 	switch mode {
 	case "pr-context-read":
+		if marker := os.Getenv("FAKE_CLI_TRANSIENT_FAILURE_FILE"); marker != "" {
+			if err := os.Remove(marker); err == nil {
+				fmt.Fprint(os.Stderr, os.Getenv("FAKE_CLI_TRANSIENT_FAILURE"))
+				os.Exit(128)
+			}
+		}
 		fmt.Fprint(os.Stdout, os.Getenv("FAKE_CLI_STDOUT"))
 		fmt.Fprint(os.Stderr, os.Getenv("FAKE_CLI_STDERR"))
 		code, _ := strconv.Atoi(os.Getenv("FAKE_CLI_EXIT_CODE"))

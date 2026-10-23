@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/netretry"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -179,11 +181,18 @@ func reconcileCommitStatusAttempt(sctx *pipeline.StepContext) (*db.CommitStatusP
 // crash reconciliation, including Git credential and forge-profile settings.
 func commitStatusRemoteSHA(sctx *pipeline.StepContext, target, ref string) (string, error) {
 	return lsRemoteSHA(func(args ...string) (string, error) {
-		cmd := stepCmd(sctx, "git", args...)
-		cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
-		shellenv.ConfigureShellCommand(cmd)
-		out, err := shellenv.OutputShellCommand(cmd)
-		return strings.TrimSpace(string(out)), err
+		return netretry.Do(sctx.Ctx, netretry.Options{Operation: "git ls-remote", Log: sctx.Log}, func() (string, error) {
+			cmd := stepCmd(sctx, "git", args...)
+			cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			shellenv.ConfigureShellCommand(cmd)
+			out, err := shellenv.OutputShellCommand(cmd)
+			if err != nil {
+				err = &git.CommandError{Command: safeurl.RedactText(strings.Join(args, " ")), Stderr: safeurl.RedactText(stderr.String()), Err: err}
+			}
+			return strings.TrimSpace(string(out)), err
+		})
 	}, target, ref)
 }
 

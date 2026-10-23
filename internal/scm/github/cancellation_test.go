@@ -16,8 +16,8 @@ import (
 )
 
 func TestCancellationOfRunningGitHubCommandsIsAttributedToCancellation(t *testing.T) {
-	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" {
-		t.Skip("requires POSIX termination status")
+	if runtime.GOOS == "plan9" {
+		t.Skip("requires a platform with cancellation exit evidence")
 	}
 	asset := filepath.Join(t.TempDir(), "proof.png")
 	if err := os.WriteFile(asset, []byte("png bytes"), 0600); err != nil {

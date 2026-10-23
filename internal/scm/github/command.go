@@ -6,7 +6,6 @@ import (
 	"os/exec"
 	"sync/atomic"
 
-	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
@@ -30,7 +29,7 @@ func runGHCommand(ctx context.Context, cmd *exec.Cmd, run func() error) error {
 		return err
 	}
 	err := run()
-	if exit, ok := err.(*exec.ExitError); ok && stopped.Load() && git.ProcessWasCancelled(exit) && ctx.Err() != nil {
+	if exit, ok := err.(*exec.ExitError); ok && stopped.Load() && ghCommandWasStopped(exit) && ctx.Err() != nil {
 		return &ghCancellationError{cause: ctx.Err(), exit: err}
 	}
 	return err

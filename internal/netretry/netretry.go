@@ -230,7 +230,6 @@ var hardVetoes = []string{
 	"repository not found",
 	"non-fast-forward",
 	"[rejected]",
-	"failed to push some refs",
 	"pre-receive hook declined",
 	"protected branch",
 	"merge conflict",

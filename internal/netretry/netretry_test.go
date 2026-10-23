@@ -255,3 +255,36 @@ func TestClassifyIgnoresEchoedURLsAndHonorsHTTPStatuses(t *testing.T) {
 		}
 	}
 }
+
+func TestPushTransportFailureWithGenericFooterRetries(t *testing.T) {
+	for _, detail := range []string{
+		"fatal: connection reset by peer",
+		"fatal: unable to access 'https://github.com/test/repo.git': Operation timed out",
+	} {
+		t.Run(detail, func(t *testing.T) {
+			calls := 0
+			value, err := Do(context.Background(), Options{Base: time.Millisecond, Max: time.Millisecond}, func() (string, error) {
+				calls++
+				if calls < 3 {
+					return "", errors.New(detail + "\nerror: failed to push some refs to 'https://github.com/test/repo.git'")
+				}
+				return "published", nil
+			})
+			if err != nil || calls != 3 || value != "published" {
+				t.Fatalf("calls=%d value=%q err=%v, want recovery after the transport failure", calls, value, err)
+			}
+		})
+	}
+	for _, detail := range []string{"! [rejected] feature -> feature (non-fast-forward)", "remote: Permission denied", "remote: error: protected branch"} {
+		t.Run(detail, func(t *testing.T) {
+			calls := 0
+			_, err := Do(context.Background(), Options{Base: time.Millisecond}, func() (string, error) {
+				calls++
+				return "", errors.New(detail + "\nfatal: connection reset by peer\nerror: failed to push some refs")
+			})
+			if err == nil || calls != 1 {
+				t.Fatalf("calls=%d err=%v, want the rejection on the first attempt", calls, err)
+			}
+		})
+	}
+}

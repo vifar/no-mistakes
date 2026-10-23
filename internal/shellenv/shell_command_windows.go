@@ -22,6 +22,8 @@ import (
 
 const windowsTerminateGrace = 3 * time.Second
 
+const CommandCancelledExitCode uint32 = 0x4e4d0001
+
 // taskkillExitNoSuchProcess is the nonzero exit code taskkill returns when no
 // process matches the given PID (the child had already exited before we could
 // kill it). All other nonzero codes are genuine kill failures that must not
@@ -138,8 +140,7 @@ func configureWindowsShellCommand(cmd *exec.Cmd, cooperative bool) {
 					return nil
 				}
 			}
-			terminateShellCommandJob(cmd, false)
-			return nil
+			return windows.TerminateJobObject(job.handle, CommandCancelledExitCode)
 		}
 		return forceKillShellCommand(cmd)
 	}
@@ -190,7 +191,7 @@ func TerminateShellCommandGroup(cmd *exec.Cmd) {
 		if deadline := job.cooperativeDeadline.Load(); deadline != nil {
 			waitForWindowsJobExit(job.handle, time.Until(*deadline))
 		}
-		terminateShellCommandJob(cmd, true)
+		terminateShellCommandJob(cmd)
 		return
 	}
 	_ = forceKillShellCommand(cmd)
@@ -359,19 +360,15 @@ func closeShellCommandJob(cmd *exec.Cmd) bool {
 	return true
 }
 
-func terminateShellCommandJob(cmd *exec.Cmd, closeJob bool) bool {
+func terminateShellCommandJob(cmd *exec.Cmd) {
 	job, ok := shellCommandJob(cmd)
 	if !ok {
-		return false
+		return
 	}
-	assigned := job.assigned.Load()
-	if assigned {
+	if job.assigned.Load() {
 		_ = windows.TerminateJobObject(job.handle, 1)
 	}
-	if closeJob {
-		closeShellCommandJob(cmd)
-	}
-	return assigned
+	closeShellCommandJob(cmd)
 }
 
 func assignShellCommandJob(job windows.Handle, pid uint32) error {
@@ -428,7 +425,7 @@ func resumeProcessThreads(pid uint32) error {
 }
 
 func failStartedShellCommand(cmd *exec.Cmd, cause error) error {
-	terminateShellCommandJob(cmd, true)
+	terminateShellCommandJob(cmd)
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()

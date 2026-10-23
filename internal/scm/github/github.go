@@ -1324,6 +1324,7 @@ func (h *Host) RerunCheck(ctx context.Context, _ *scm.PR, check scm.Check) error
 		baseline = attempt
 	}
 	attempts := 0
+	var rerunErr error
 	_, err := netretry.Do(ctx, h.retryOptions("gh run rerun"), func() (struct{}, error) {
 		attempts++
 		if attempts > 1 {
@@ -1335,7 +1336,7 @@ func (h *Host) RerunCheck(ctx context.Context, _ *scm.PR, check scm.Check) error
 				return struct{}{}, fmt.Errorf("workflow run %s attempt moved backwards", runID)
 			}
 			if attempt > baseline || status != "completed" {
-				return struct{}{}, nil
+				return struct{}{}, rerunErr
 			}
 		}
 		cmd := h.cmd(ctx, "gh", args...)
@@ -1346,7 +1347,8 @@ func (h *Host) RerunCheck(ctx context.Context, _ *scm.PR, check scm.Check) error
 			return callErr
 		})
 		if err != nil {
-			return struct{}{}, fmt.Errorf("gh run rerun: %s: %w", strings.TrimSpace(string(out)), err)
+			rerunErr = fmt.Errorf("gh run rerun: %s: %w", strings.TrimSpace(string(out)), err)
+			return struct{}{}, rerunErr
 		}
 		return struct{}{}, nil
 	})

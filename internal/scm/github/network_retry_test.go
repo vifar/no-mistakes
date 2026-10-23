@@ -226,7 +226,7 @@ func TestCreatePRRetryFindsRetargetedPRAndFailsClosedOnLookupErrors(t *testing.T
 
 func TestRerunCheckRetriesSafelyAfterTransientFailure(t *testing.T) {
 	for _, job := range []bool{false, true} {
-		for _, scenario := range []string{"not accepted", "accepted queued", "accepted completed", "lookup failure", "lookup malformed", "lookup wrong id", "lookup missing attempt", "lookup unknown status", "lookup backwards", "auth failure", "unknown baseline"} {
+		for _, scenario := range []string{"not accepted", "accepted queued", "accepted completed", "unchanged active", "unknown active baseline", "sibling rerun", "lookup failure", "lookup malformed", "lookup wrong id", "lookup missing attempt", "lookup unknown status", "lookup backwards", "auth failure", "unknown baseline"} {
 			t.Run(fmt.Sprintf("job=%v/%s", job, scenario), func(t *testing.T) {
 				writes, reads := 0, 0
 				host := fastRetryHost(func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -250,6 +250,12 @@ func TestRerunCheckRetriesSafelyAfterTransientFailure(t *testing.T) {
 						}
 						if writes > 0 && scenario == "accepted completed" {
 							attempt = 2
+						}
+						if scenario == "unchanged active" || scenario == "unknown active baseline" {
+							status = "in_progress"
+						}
+						if writes > 0 && scenario == "sibling rerun" {
+							attempt, status = 2, "in_progress"
 						}
 						step.stdout = fmt.Sprintf(`{"id":9,"run_attempt":%d,"status":%q}`, attempt, status)
 						if scenario == "lookup failure" {
@@ -279,7 +285,7 @@ func TestRerunCheckRetriesSafelyAfterTransientFailure(t *testing.T) {
 				if job {
 					check.Link += "/job/10"
 				}
-				if scenario == "unknown baseline" {
+				if scenario == "unknown baseline" || scenario == "unknown active baseline" {
 					check.RunAttempt = 0
 				}
 				if scenario == "lookup backwards" {
@@ -290,11 +296,12 @@ func TestRerunCheckRetriesSafelyAfterTransientFailure(t *testing.T) {
 					if err == nil || writes != 1 {
 						t.Fatalf("writes=%d reads=%d err=%v, want failure without a duplicate request", writes, reads, err)
 					}
+				} else if strings.HasPrefix(scenario, "accepted") || scenario == "unchanged active" || scenario == "unknown active baseline" || scenario == "sibling rerun" {
+					if err == nil || !strings.Contains(err.Error(), "i/o timeout") || writes != 1 {
+						t.Fatalf("writes=%d reads=%d err=%v, want the unproven request's failure retained", writes, reads, err)
+					}
 				} else {
 					wantWrites := 2
-					if strings.HasPrefix(scenario, "accepted") {
-						wantWrites = 1
-					}
 					if err != nil || writes != wantWrites || reads < 1 {
 						t.Fatalf("writes=%d reads=%d err=%v, want %d requests with live replay proof", writes, reads, err, wantWrites)
 					}
