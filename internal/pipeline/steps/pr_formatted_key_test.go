@@ -163,12 +163,11 @@ func assertFormattedKeyPublication(t *testing.T, output, human, prose, disclosur
 
 func TestPRFormattedKeyPreservesMentions(t *testing.T) {
 	for name, prose := range map[string]string{
-		"quoted-field-name":        `"Co-Authored-By:" is a field name.`,
-		"quoted-field-example":     "\"co-author (quoted): Ada Lovelace <ada@example.com>\",\nhe said; this is only an example.",
-		"inline-human-example":     "The recorded field is `Co-Authored-By: Ada Lovelace <quoted-human@example.com>`",
-		"formatted-field-name":     "The field is **Co-Authored-By:** and has no value here.",
-		"quoted-phrase-no-address": "`Co-Authored-By: a quoted phrase`",
-		"published-label-phrase":   "`co-author (quoted): a quoted phrase`",
+		"quoted-field-name":      `"Co-Authored-By:" is a field name.`,
+		"quoted-field-example":   "\"co-author (quoted): Ada Lovelace <ada@example.com>\",\nhe said; this is only an example.",
+		"inline-human-example":   "The recorded field is `Co-Authored-By: Ada Lovelace <quoted-human@example.com>`",
+		"formatted-field-name":   "The field is **Co-Authored-By:** and has no value here.",
+		"published-label-phrase": "`co-author (quoted): a quoted phrase`",
 	} {
 		t.Run(name, func(t *testing.T) {
 			for mode, publish := range map[string]func(string) string{
@@ -190,7 +189,7 @@ func TestPRAttributionEntryRequiresAddressOrKnownIdentity(t *testing.T) {
 			t.Errorf("known AI identity survived: %q", got)
 		}
 	}
-	for _, input := range []string{"co-author (quoted): the original author", "`Co-Authored-By: an ordinary quoted phrase`"} {
+	for _, input := range []string{"co-author (quoted): the original author"} {
 		if got := prDisplayBody(input); got != input {
 			t.Errorf("no-address mention changed: got %q, want %q", got, input)
 		}
@@ -206,10 +205,15 @@ func TestPRMailboxlessCoAuthorLine(t *testing.T) {
 	const prose = "This documents the Co-Authored-By: field."
 	for _, tc := range []struct{ name, line, body, notice string }{
 		{"human", "Co-Authored-By: Jane Doe", "co-author (quoted): Jane Doe", "co-author (quoted): Jane Doe"},
-		{"indented human", "  co-authored-by:Jane Doe", "  co-author (quoted):Jane Doe", "  co-author (quoted):Jane Doe"},
+		{"indented human", "  co-authored-by: Jane Doe", "  co-author (quoted): Jane Doe", "  co-author (quoted): Jane Doe"},
 		{"claude", "Co-Authored-By: Claude", "", prAIAttributionNotice},
 		{"codex", "Co-Authored-By: Codex", "", prAIAttributionNotice},
 		{"model", "Co-Authored-By: gpt-5.5", "", prAIAttributionNotice},
+		{"quoted claude", "> Co-Authored-By: Claude", "", prAIAttributionNotice},
+		{"bullet claude", "- Co-Authored-By: Claude", "", prAIAttributionNotice},
+		{"bold claude", "**Co-Authored-By: Claude**", "", prAIAttributionNotice},
+		{"quoted human", "> Co-Authored-By: Jane Doe", "> co-author (quoted): Jane Doe", "> co-author (quoted): Jane Doe"},
+		{"code human", "`Co-Authored-By: a quoted phrase`", "`co-author (quoted): a quoted phrase`", "`co-author (quoted): a quoted phrase`"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			input := prose + "\n" + tc.line + "\n" + disclosure

@@ -363,11 +363,10 @@ func commitPipelineCorrectionWithCleanup(
 }
 
 func withCommitTrailers(sctx *pipeline.StepContext, message string, producer *agent.Result) (string, error) {
-	trailers, err := renderCommitTrailers(sctx, producer)
-	if err != nil {
+	if _, err := renderCommitTrailers(sctx, producer); err != nil {
 		return "", err
 	}
-	return git.StripAIAttributionTrailers(message, append(trailers, sctx.Config.Commit.Trailers...)...), nil
+	return git.StripAIAttributionTrailers(message, sctx.Config.Commit.Trailers...), nil
 }
 
 func renderCommitTrailers(sctx *pipeline.StepContext, producer *agent.Result) ([]string, error) {

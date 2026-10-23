@@ -154,7 +154,9 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		if current.Body == "" && !parts.managed {
 			parts.before = emptyNarrative
 		}
-		// The author text around the appendix is kept verbatim, so only
+		// The author text around the appendix is kept as written, except that
+		// composeOwnedPRContent renders a raw co-author trailer as the
+		// labelled field and removes an AI attribution line, so only
 		// references it does not already close are added.
 		authorText := parts.before + "\n" + parts.after
 		content, err := composeOwnedPRContent(parts, title, appendIssuesSection(appendix, issuesSection(sctx, authorText)), bodyLimit, configuredTrailers...)
@@ -246,7 +248,8 @@ func rebindOwnedPRAttestation(body, head string, steps []*db.StepResult, policy 
 	// Restamps reach UpdatePR without the draft path's redaction. The generated
 	// appendix is ours, so route it through the same publication filtering on
 	// its ORIGINAL bytes before path redaction rewrites them, then recompute the
-	// integrity guard; author text outside it is untouched.
+	// integrity guard; author text outside it is kept as written, except that
+	// the whole body is filtered below.
 	appendix = prDisplayBody(appendix, configuredTrailers...)
 	appendix = safepath.RedactText(appendix)
 	// The body that is restamped is the one a previous publication left behind,

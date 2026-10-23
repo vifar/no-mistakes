@@ -24,14 +24,13 @@ func TestPRConservativePayloadBoundary(t *testing.T) {
 	const link = `[Example "co-author (quoted): Codex <ai@example.com>"](https://example.com)`
 	const truncated = "{\"status\":\"ok\",\n \"description\": \"kept evidence\","
 	for name, input := range map[string]string{
-		"quoted-comma-prose":            quoted,
-		"human-trailer-mention":         mention,
-		"field-name-mention":            `The field is "Co-Authored-By:" and has no value.`,
-		"quoted-phrase-without-address": "`Co-Authored-By: the original author`",
-		"prose-after-array":             "[\n \"ordinary\"\n]\n\n" + prose,
-		"markdown-link":                 link,
-		"disclosure-after-evidence":     "```json\n{\"status\":\"ok\"}\n```\n" + disclosure,
-		"truncated-payload":             truncated,
+		"quoted-comma-prose":        quoted,
+		"human-trailer-mention":     mention,
+		"field-name-mention":        `The field is "Co-Authored-By:" and has no value.`,
+		"prose-after-array":         "[\n \"ordinary\"\n]\n\n" + prose,
+		"markdown-link":             link,
+		"disclosure-after-evidence": "```json\n{\"status\":\"ok\"}\n```\n" + disclosure,
+		"truncated-payload":         truncated,
 	} {
 		t.Run(name, func(t *testing.T) {
 			for mode, render := range map[string]func(string) string{

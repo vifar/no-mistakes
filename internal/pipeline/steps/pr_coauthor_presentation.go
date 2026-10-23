@@ -3,6 +3,7 @@ package steps
 import (
 	"bytes"
 	"encoding/json"
+	"html"
 	"regexp"
 	"strings"
 
@@ -66,10 +67,10 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 		switch {
 		case entry && strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && reviewAttributionAddressComplete(unfolded):
 			lines[start] = presentHumanCoauthor(lines[start])
-		case !entry && end == start+1 && bareCoAuthorLine(lines[start]):
-			lines[start] = presentHumanCoauthor(lines[start])
 		case recordedFragmentLine(lines[start]):
 			lines[start] = filterRecordedPayload(lines[start], notice, true, configuredTrailers...)
+		case !entry && end == start+1 && bareCoAuthorLine(lines[start]):
+			lines[start] = presentHumanCoauthor(lines[start])
 		default:
 			if cut, ok := recordedTailCut(lines[start]); ok {
 				lines[start] = lines[start][:cut] + filterRecordedPayload(lines[start][cut:], notice, true, configuredTrailers...)
@@ -81,14 +82,14 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 	return strings.Join(kept, "\n")
 }
 
-var bareCoAuthorTrailer = regexp.MustCompile(`(?i)^co-authored-by[ \t]*:[ \t]*(\S.*?)[ \t\r]*$`)
+var bareCoAuthorTrailer = regexp.MustCompile(`(?i)^[ \t>*_~` + "`" + `"'+\-0-9.)]*co-authored-by[ \t]*:[ \t]+(\S.*?)[ \t\r]*$`)
 
 func bareCoAuthorValue(line string) (string, bool) {
-	match := bareCoAuthorTrailer.FindStringSubmatch(strings.TrimLeft(line, " \t"))
+	match := bareCoAuthorTrailer.FindStringSubmatch(html.UnescapeString(line))
 	if match == nil {
 		return "", false
 	}
-	return match[1], true
+	return strings.Trim(match[1], " \t>*_~`\"'"), true
 }
 
 func bareCoAuthorLine(line string) bool {
@@ -97,9 +98,10 @@ func bareCoAuthorLine(line string) bool {
 }
 
 // publishedAttributionEntry classifies an entry for publication. It is the
-// commit filter's classification, except that a line beginning with the
-// co-author key and the bare name Claude is an AI identity in a published
-// body even though the commit filter keeps it.
+// commit filter's classification, except that a line that carries the
+// co-author key (under any list, quote, code or emphasis wrapper) and the bare
+// name Claude is an AI identity in a published body even though the commit
+// filter keeps it.
 func publishedAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
 	end, unfolded, entry, ai = reviewAttributionEntry(lines, start, configuredTrailers)
 	if value, ok := bareCoAuthorValue(lines[start]); ok && end == start+1 && strings.EqualFold(value, "Claude") {

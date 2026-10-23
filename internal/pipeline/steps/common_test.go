@@ -1192,16 +1192,16 @@ func TestExecuteFixMode_NoWorktreeChangesCanonicalizesAgentSummary(t *testing.T)
 	}
 }
 
-func TestExecuteFixMode_ReviewCommitR4ReportsApplied(t *testing.T) {
+func TestExecuteFixMode_ReviewCommitReportsRoundSummary(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name, input, wantSummary, wantHeading, wantDetail string
-		change                                            bool
+		name, input, wantSummary string
+		change                   bool
 	}{
-		{"descriptive repair", "guard unsafe value", "guard unsafe value", "Fix applied", "🔧 Fix applied.", true},
-		{"canonical collision after commit", "no changes applied", "Fixer summary: no changes applied", "Fix applied", "🔧 Fix applied.", true},
-		{"genuine no change", "no changes applied", "no changes applied", "no changes applied", "🔧 No changes applied.", false},
-		{"genuine no change with descriptive prose", "guard unsafe value", "no changes applied", "no changes applied", "🔧 No changes applied.", false},
+		{"descriptive repair", "guard unsafe value", "guard unsafe value", true},
+		{"canonical collision after commit", "no changes applied", "Fixer summary: no changes applied", true},
+		{"genuine no change", "no changes applied", "no changes applied", false},
+		{"genuine no change with descriptive prose", "guard unsafe value", "no changes applied", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, base, head := setupGitRepo(t)
@@ -1253,19 +1253,6 @@ func TestExecuteFixMode_ReviewCommitR4ReportsApplied(t *testing.T) {
 			}
 			if len(rounds) != 2 || rounds[1].FixSummary == nil || *rounds[1].FixSummary != tc.wantSummary {
 				t.Fatalf("persisted Review summary differs from the expected outcome: %+v", rounds)
-			}
-			step.Status = types.StepStatusCompleted
-			for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
-				md, _ := BuildPipelineSummaryFor(
-					[]*db.StepResult{step}, map[string][]*db.StepRound{step.ID: rounds}, testPipelineHeadSHA, provider,
-				)
-				wantHeading := "🔧 **Review** - 1 issue found → " + tc.wantHeading + " ✅"
-				if !strings.Contains(md, wantHeading) || !strings.Contains(md, tc.wantDetail) {
-					t.Errorf("provider %s: want heading %q and detail %q, got:\n%s", provider, wantHeading, tc.wantDetail, md)
-				}
-				if strings.Contains(md, "result not reported") {
-					t.Errorf("provider %s: Review outcome reported as missing:\n%s", provider, md)
-				}
 			}
 		})
 	}
