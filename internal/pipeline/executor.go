@@ -36,6 +36,11 @@ import (
 // EventFunc is called when a pipeline event occurs, for streaming to subscribers.
 type EventFunc func(ipc.Event)
 
+// DocumentCapWayForward is the operator instruction when this run cannot
+// make another documentation commit. A new run's document history starts
+// empty, so it receives a fresh count of the configured cap.
+const DocumentCapWayForward = "Abort this run and start a new one. A new run starts with a fresh document commit count."
+
 const (
 	defaultGateReconcileInterval = config.DefaultGateReconcileInterval
 	defaultGateReconcileTimeout  = config.DefaultGateReconcileTimeout
@@ -477,8 +482,9 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 	}
 	if e.waitingShipping != nil {
 		if action == types.ActionSkip {
+			findings := e.waitingFindings
 			e.mu.Unlock()
-			return RespondDispositions{}, fmt.Errorf("strict shipping forbids skipped steps")
+			return RespondDispositions{}, fmt.Errorf("%s", StrictSkipRefusal(step, findings))
 		}
 		if action == types.ActionFix && e.waitingShipping.Mode == types.ShippingImmutableSource {
 			e.mu.Unlock()
@@ -492,8 +498,9 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 			return RespondDispositions{}, fmt.Errorf("strict shipping cannot read the parked step")
 		}
 		if refusal := row.StrictApprovalRefusalWithGaps(approvalReason, gaps); refusal != "" {
+			findings := e.waitingFindings
 			e.mu.Unlock()
-			return RespondDispositions{}, errors.New(refusal)
+			return RespondDispositions{}, errors.New(StrictDocumentCapRefusal(step, findings, refusal))
 		}
 	} else if action == types.ActionApprove && (step == types.StepTest || gaps != nil) {
 		row, err := e.db.GetStepResult(e.waitingStepResultID)
@@ -1606,6 +1613,47 @@ func (e *Executor) autoFixLimit(stepName types.StepName) int {
 	return e.config.AutoFixLimit(stepName)
 }
 
+func documentCapReached(findings string) bool {
+	return strings.Contains(findings, DocumentCapWayForward)
+}
+
+// StrictDocumentCapRefusal appends the way forward to a strict refusal of a
+// Document gate whose commit cap is spent. The executor and the daemon's
+// pre-checks both refuse, so both use it.
+func StrictDocumentCapRefusal(step types.StepName, findings, refusal string) string {
+	if step != types.StepDocument || !documentCapReached(findings) || strings.Contains(refusal, DocumentCapWayForward) {
+		return refusal
+	}
+	if !strings.HasSuffix(refusal, ".") {
+		refusal += "."
+	}
+	return refusal + " " + DocumentCapWayForward
+}
+
+func StrictSkipRefusal(step types.StepName, findings string) string {
+	refusal := "strict shipping forbids skipped steps"
+	return StrictDocumentCapRefusal(step, findings, refusal)
+}
+
+// refreshDocumentCommitLimit re-reads the machine-local cap. A missing
+// config file keeps the limit the run already resolved, so test executors
+// that never write config.yaml do not lose a limit set on the config.
+func (e *Executor) refreshDocumentCommitLimit(repo *db.Repo) {
+	if e == nil || e.config == nil || e.paths == nil || repo == nil {
+		return
+	}
+	path := e.paths.ConfigFile()
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	global, err := config.LoadGlobal(path)
+	if err != nil {
+		slog.Warn("document commit limit kept; global config could not be re-read", "error", err)
+		return
+	}
+	e.config.RefreshDocumentCommitLimit(global, repo.UpstreamURL)
+}
+
 // executeStep runs a single step with approval coordination.
 // Returns whether to skip the remainder, an optional earlier restart step,
 // and any execution error.
@@ -1937,6 +1985,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// Execute with possible fix loop
 rounds:
 	for {
+		// A raised repository_overrides cap applies on the next Document
+		// pass of a run that is already going, including a fix round.
+		if stepName == types.StepDocument {
+			e.refreshDocumentCommitLimit(repo)
+		}
 		if statusProofRequired {
 			statusProofHead, _ = git.HeadSHA(ctx, workDir)
 			statusProofConfig = StatusConfigDigest(e.config)

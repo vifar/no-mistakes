@@ -176,6 +176,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if history.last != nil && *history.last.ToHeadSHA == sctx.Run.HeadSHA && len(previous.Items) == 0 {
 		return stoppedDocumentOutcome(sctx, previous, "Document already committed and reported no remaining documentation gap"), nil
 	}
+	// Refreshed from repository_overrides at the start of this pass.
 	limit := sctx.Config.Document.MaxCommitsPerRun
 
 	// Skip entirely when nothing the agent would document has changed. No

@@ -56,10 +56,9 @@ Commit budget exhausted (read-only gap check):
 // runs on a cleanup context of its own.
 var documentCapRollbackTimeout = 60 * time.Second
 
-// documentCapNoticeDescription is the informational cap notice's text. It
-// names the bound, not a decision: no fix round and no approval can change
-// it, so it must not be able to block either.
-const documentCapNoticeDescription = "Document commit limit reached; further documentation edits require a new run or an owner decision."
+// documentCapNoticeDescription is informational so the cap alone cannot
+// block a run whose documentation is accurate.
+const documentCapNoticeDescription = "Document commit limit reached. " + pipeline.DocumentCapWayForward
 
 // runCapGapCheck asks the agent what documentation gaps remain, without
 // letting it change anything.

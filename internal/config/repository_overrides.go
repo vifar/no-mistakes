@@ -30,6 +30,9 @@ func normalizeRepositoryOverrides(raw RepositoryOverrides) (RepositoryOverrides,
 		}); err != nil {
 			return nil, fmt.Errorf("invalid repository_overrides.%s.pr: %w", key, err)
 		}
+		if override.Document.MaxCommitsPerRun != nil && *override.Document.MaxCommitsPerRun < 0 {
+			return nil, fmt.Errorf("invalid repository_overrides.%s.document.max_commits_per_run: must not be negative", key)
+		}
 		overrides[key] = override
 	}
 	return overrides, nil

@@ -90,6 +90,55 @@ func TestShippingApprovalRejectsUnsupportedCommandException(t *testing.T) {
 	}
 }
 
+func TestShippingDocumentCapRefusalsNameTheWayForwardThroughHandleRespond(t *testing.T) {
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return nil })
+	repo, head := setupTestGitRepo(t, p, d, "shipping-document-cap")
+	run, err := d.InsertRunWithShipping(repo.ID, "feature", head, head, nil, "", "", "", "main", false, nil, &types.ShippingOptions{Mode: types.ShippingFull})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := pipeline.RecordRunFailure(context.Background(), d, run.ID, "test fixture finished", nil); err != nil {
+			t.Errorf("settle owned shipping fixture: %v", err)
+		}
+	})
+	sr, err := d.InsertStepResult(run.ID, types.StepDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"findings":[` +
+		`{"id":"gap-1","severity":"warning","description":"README is stale","action":"ask-user"},` +
+		`{"id":"cap-1","severity":"info","description":"Document commit limit reached. ` + pipeline.DocumentCapWayForward + `","action":"no-op"}]}`
+	if err := d.StartStep(sr.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.InsertStepRound(sr.ID, 1, "initial", &raw, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, 1, 1, &raw); err != nil {
+		t.Fatal(err)
+	}
+	m := NewRunManager(d, p, nil)
+	executor := pipeline.NewExecutor(d, p, nil, nil, []pipeline.Step{&mockPassStep{name: types.StepDocument}}, nil)
+	parked, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.RegisterRecoveredGate(parked); err != nil {
+		t.Fatal(err)
+	}
+	m.runs[run.ID] = &managedRun{run: parked, executor: executor}
+	for _, action := range []types.ApprovalAction{types.ActionApprove, types.ActionSkip} {
+		err := m.HandleRespond(run.ID, types.StepDocument, action, nil, managerGateSnapshot(t, m, run.ID, types.StepDocument))
+		if err == nil || !strings.Contains(err.Error(), pipeline.DocumentCapWayForward) {
+			t.Fatalf("%s at a spent cap = %v, want the way forward", action, err)
+		}
+	}
+}
+
 func TestShippingStatusBeforeReviewUsesRecordedEnrollment(t *testing.T) {
 	d, err := db.Open(filepath.Join(t.TempDir(), "state.sqlite"))
 	if err != nil {

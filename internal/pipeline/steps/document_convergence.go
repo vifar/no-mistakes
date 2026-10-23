@@ -61,9 +61,9 @@ func documentCapFinding(findings Findings, discarded bool) Findings {
 	if !discarded && len(findings.Items) > 0 {
 		return findings
 	}
-	description := "Document commit limit reached; further documentation edits require a new run or an owner decision."
+	description := documentCapNoticeDescription
 	if discarded {
-		description = "Document discarded an over-budget proposal; the repair was not applied. Inspect the pending documentation gaps and commit budget before continuing."
+		description = "Document discarded an over-budget proposal; the repair was not applied. " + pipeline.DocumentCapWayForward
 	}
 	for _, finding := range findings.Items {
 		if finding.Action == "ask-user" && finding.Description == description {

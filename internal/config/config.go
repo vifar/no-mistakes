@@ -365,8 +365,10 @@ type ForgeProfile struct {
 type ForgeProfiles map[string]ForgeProfile
 
 // RepositoryOverride contains machine-local settings for one normalized remote.
-// Review and Document are additive guidance only: they are rendered alongside
-// the repository's trusted rules and can never replace or remove them.
+// Review path instructions and document instructions are additive guidance:
+// they are rendered alongside the repository's trusted rules and can never
+// replace or remove them. document.max_commits_per_run is a commit budget.
+// When it is set, it replaces the trusted repository value for that remote.
 type RepositoryOverride struct {
 	Commit   GlobalCommitRaw            `yaml:"commit"`
 	PR       RepositoryPRRaw            `yaml:"pr"`
@@ -1077,7 +1079,12 @@ type PR struct {
 // policy in the document prompt.
 type Document struct {
 	MaxCommitsPerRun int
-	Instructions     string
+	// trustedMaxCommitsPerRun is the cap from the trusted repository config,
+	// or the built-in default, before a machine-local override. A later
+	// Document pass re-reads the override against this value.
+	trustedMaxCommitsPerRun int
+	trustedMaxCommitsKnown  bool
+	Instructions            string
 	// RepositoryInstructions come from the repository_overrides entry matching
 	// the repository's remote and are rendered before, never instead of,
 	// Instructions.
@@ -1094,7 +1101,45 @@ func resolveDocument(raw DocumentRaw) Document {
 	if raw.MaxCommitsPerRun != nil {
 		limit = *raw.MaxCommitsPerRun
 	}
-	return Document{Instructions: strings.TrimSpace(raw.Instructions), DocOnlyPaths: trimmedPatterns(raw.DocOnlyPaths), MaxCommitsPerRun: limit}
+	resolved := Document{Instructions: strings.TrimSpace(raw.Instructions), DocOnlyPaths: trimmedPatterns(raw.DocOnlyPaths), MaxCommitsPerRun: limit}
+	resolved.trustedMaxCommitsPerRun = limit
+	resolved.trustedMaxCommitsKnown = true
+	return resolved
+}
+
+// DocumentCommitLimit is the cap a run should use for remote.
+// A matching repository_overrides document.max_commits_per_run replaces
+// repoLimit. repoLimit is the trusted repository value, or the built-in
+// default of 2 when the repository does not set one. An absent override
+// keeps repoLimit. An unrecognized remote keeps repoLimit.
+func DocumentCommitLimit(repoLimit int, global *GlobalConfig, remote string) int {
+	if global == nil {
+		return repoLimit
+	}
+	key, err := normalizeRepositoryRemote(remote)
+	if err != nil {
+		return repoLimit
+	}
+	override, ok := global.RepositoryOverrides[key]
+	if !ok || override.Document.MaxCommitsPerRun == nil {
+		return repoLimit
+	}
+	return *override.Document.MaxCommitsPerRun
+}
+
+// RefreshDocumentCommitLimit applies the live machine-local cap for remote.
+// A running run calls this at each Document pass so a raised override is
+// visible without waiting for a new run. Removing the override restores the
+// trusted repository value recorded when the config was merged.
+func (c *Config) RefreshDocumentCommitLimit(global *GlobalConfig, remote string) {
+	if c == nil {
+		return
+	}
+	base := c.Document.MaxCommitsPerRun
+	if c.Document.trustedMaxCommitsKnown {
+		base = c.Document.trustedMaxCommitsPerRun
+	}
+	c.Document.MaxCommitsPerRun = DocumentCommitLimit(base, global, remote)
 }
 
 // Review is the resolved review-step config. Conversation and PathInstructions
@@ -4163,6 +4208,9 @@ func merge(global *GlobalConfig, repo *RepoConfig, override *RepositoryOverride)
 		cfg.CommandOverrides = copyCommandOverrides(override.Commands)
 		cfg.Review.RepositoryPathInstructions = resolvePathInstructions(override.Review.PathInstructions)
 		cfg.Document.RepositoryInstructions = strings.TrimSpace(override.Document.Instructions)
+		if override.Document.MaxCommitsPerRun != nil {
+			cfg.Document.MaxCommitsPerRun = *override.Document.MaxCommitsPerRun
+		}
 	}
 
 	if repo.Agent != "" {
