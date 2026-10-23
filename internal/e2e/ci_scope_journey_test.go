@@ -169,13 +169,13 @@ type scopeJourney struct {
 	statePath string
 	forgePath string
 	ghLogPath string
-	revision  int
+	revision  *int
 }
 
 func newScopeJourney(t *testing.T, opts SetupOpts) *scopeJourney {
 	t.Helper()
 	h := NewHarness(t, opts)
-	j := &scopeJourney{t: t, h: h}
+	j := &scopeJourney{t: t, h: h, revision: new(int)}
 	j.statePath = setupStatefulGitHub(t, h)
 	j.forgePath = filepath.Join(filepath.Dir(h.AgentLog), "gh-forge.json")
 	j.ghLogPath = filepath.Join(filepath.Dir(h.AgentLog), "gh-stateful.log")
@@ -215,8 +215,8 @@ func (j *scopeJourney) setForge(f forgeState) {
 // base keys are the ones the harness always writes.
 func (j *scopeJourney) setTrusted(extra string) {
 	j.t.Helper()
-	j.revision++
-	cfg := fmt.Sprintf("# trusted revision %d\nignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\nallow_repo_commands: true\n", j.revision) + extra
+	*j.revision++
+	cfg := fmt.Sprintf("# trusted revision %d\nignore_patterns:\n  - '*.generated.go'\n  - 'vendor/**'\nallow_repo_commands: true\n", *j.revision) + extra
 	j.h.CommitChange("main", ".no-mistakes.yaml", cfg, "configure CI scope")
 	if out, err := j.h.runGit(j.t.Context(), j.h.WorkDir, "push", "origin", "main"); err != nil {
 		j.t.Fatalf("push trusted config: %v\n%s", err, out)
@@ -427,15 +427,14 @@ func (j *scopeJourney) finish(branch string) {
 	}
 }
 
-// strictRun starts a strict-shipping run for a new branch with `axi run` and
-// waits (bounded) for its CI-ready point. It returns the worktree, the run,
-// and the axi output.
-//
-// The run asks the CLI for `--wait 90s`, so its budget must exceed that wait
+// strictRunTimeout must exceed the `--wait 90s` strictRun asks the CLI for,
 // with room for the process to start and report on a loaded runner; the
 // generic harness budget used to be smaller than the wait it was granting.
 const strictRunTimeout = 300 * time.Second
 
+// strictRun starts a strict-shipping run for a new branch with `axi run` and
+// waits (bounded) for its CI-ready point. It returns the worktree, the run,
+// and the axi output.
 func (j *scopeJourney) strictRun(branch string) (string, *ipc.RunInfo, string) {
 	j.t.Helper()
 	j.h.CommitChange(branch, "strict-"+strings.ReplaceAll(branch, "/", "-")+".txt", branch+"\n", "add "+branch)
