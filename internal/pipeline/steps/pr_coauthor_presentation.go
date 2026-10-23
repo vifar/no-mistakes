@@ -46,9 +46,9 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 	lines := strings.Split(text, "\n")
 	var kept []string
 	for start := 0; start < len(lines); {
-		if payload, ok := recordedPayloadLine(lines[start]); ok {
+		if payload, end, ok := recordedPayloadBlock(lines, start); ok {
 			kept = append(kept, filterRecordedPayload(payload, notice, configuredTrailers...))
-			start++
+			start = end
 			continue
 		}
 		end, unfolded, entry, ai := reviewAttributionEntry(lines, start, configuredTrailers)
@@ -83,20 +83,29 @@ func presentHumanCoauthor(line string) string {
 	return line[:label] + PreservedHumanCoauthorLabel + line[label+len(literalKey):]
 }
 
-// recordedPayloadLine reports whether a line is a recorded JSON payload whose
-// string values carry published evidence. A payload is one line to a line-based
-// scanner whether or not it keeps its line breaks as the two-character escape,
-// so both forms are filtered: requiring the escape let a single-line payload
-// publish its attribution unfiltered.
-func recordedPayloadLine(line string) (string, bool) {
-	trimmed := strings.TrimSpace(line)
-	if len(trimmed) < 2 || (trimmed[0] != '{' && trimmed[0] != '[') {
-		return "", false
+func recordedPayloadBlock(lines []string, start int) (string, int, bool) {
+	trimmed := strings.TrimSpace(lines[start])
+	if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return "", start, false
 	}
-	if !json.Valid([]byte(trimmed)) {
-		return "", false
+	rest := strings.Join(lines[start:], "\n")
+	decoder := json.NewDecoder(strings.NewReader(rest))
+	var payload json.RawMessage
+	if err := decoder.Decode(&payload); err != nil {
+		return "", start, false
 	}
-	return line, true
+	offset := int(decoder.InputOffset())
+	endOfLine := strings.IndexByte(rest[offset:], '\n')
+	if endOfLine < 0 {
+		endOfLine = len(rest)
+	} else {
+		endOfLine += offset
+	}
+	if strings.TrimSpace(rest[offset:endOfLine]) != "" {
+		return "", start, false
+	}
+	end := start + strings.Count(rest[:endOfLine], "\n") + 1
+	return strings.Join(lines[start:end], "\n"), end, true
 }
 
 // filterRecordedPayload filters the string values inside a recorded payload and
@@ -113,6 +122,14 @@ func filterRecordedPayload(line string, notice bool, configuredTrailers ...strin
 		end, ok := jsonStringEnd(out, start)
 		if !ok {
 			break
+		}
+		next := end
+		for next < len(out) && strings.ContainsRune(" \t\r\n", rune(out[next])) {
+			next++
+		}
+		if next < len(out) && out[next] == ':' {
+			offset = end
+			continue
 		}
 		literal := string(out[start:end])
 		var value string
