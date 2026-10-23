@@ -336,7 +336,7 @@ func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEn
 				// provenance says so.
 				if recorded := refusal.Load(); recorded != nil {
 					err = &CancelledExitError{ExitError: exit, Refused: *recorded}
-				} else if processWasCancelled(exit) {
+				} else if ProcessWasCancelled(exit) {
 					err = &CancelledExitError{ExitError: exit}
 				}
 			default:

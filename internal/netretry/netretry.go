@@ -228,10 +228,6 @@ var hardVetoes = []string{
 	"permission denied",
 	"permission to ",
 	"repository not found",
-	"http 401",
-	"http 403",
-	"http 404",
-	"http 422",
 	"non-fast-forward",
 	"[rejected]",
 	"failed to push some refs",
@@ -241,7 +237,10 @@ var hardVetoes = []string{
 	"validation failed",
 }
 
-var http5xx = regexp.MustCompile(`\b(?:http|http error|status|status code|response code|returned error)[:= ]+5\d\d\b`)
+var diagnosticURLs = regexp.MustCompile(`'(?:[a-z][a-z0-9+.-]*://)[^']*'|"(?:[a-z][a-z0-9+.-]*://)[^"]*"|[a-z][a-z0-9+.-]*://[^\s'"<>]+|[a-z0-9._-]+@[a-z0-9.-]+:[^\s'"<>]+`)
+var http4xx = regexp.MustCompile(`\b(?:http(?:/[0-9.]+)?|http error|status|status code|response code|returned error)[:= ]+(4\d\d)\b`)
+
+var http5xx = regexp.MustCompile(`\b(?:http(?:/[0-9.]+)?|http error|status|status code|response code|returned error)[:= ]+5\d\d\b`)
 
 // curlTransportFailure matches the transient libcurl exit codes Git reports for
 // a dropped transfer: 18 (partial file), 52 (empty reply), 55 (send failure),
@@ -252,17 +251,23 @@ var curlTransportFailure = regexp.MustCompile(`rpc failed; curl (?:18|52|55|56|9
 // ClassifyText classifies one failure message. A transient class is returned
 // only for the failures a retry can fix.
 func ClassifyText(text string) Class {
-	lower := strings.ToLower(text)
+	lower := diagnosticURLs.ReplaceAllString(strings.ToLower(text), "")
 	if lower == "" {
 		return ""
-	}
-	if secondaryRateLimit(lower) {
-		return ClassRateLimit
 	}
 	for _, veto := range hardVetoes {
 		if strings.Contains(lower, veto) {
 			return ""
 		}
+	}
+	rateLimited := secondaryRateLimit(lower)
+	for _, status := range http4xx.FindAllStringSubmatch(lower, -1) {
+		if !rateLimited || status[1] != "403" && status[1] != "429" {
+			return ""
+		}
+	}
+	if rateLimited {
+		return ClassRateLimit
 	}
 	switch {
 	case strings.Contains(lower, "tls handshake timeout"),

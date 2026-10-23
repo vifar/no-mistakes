@@ -223,3 +223,109 @@ func TestCreatePRRetryFindsRetargetedPRAndFailsClosedOnLookupErrors(t *testing.T
 		})
 	}
 }
+
+func TestRerunCheckRetriesSafelyAfterTransientFailure(t *testing.T) {
+	for _, job := range []bool{false, true} {
+		for _, scenario := range []string{"not accepted", "accepted queued", "accepted completed", "lookup failure", "lookup malformed", "lookup wrong id", "lookup missing attempt", "lookup unknown status", "lookup backwards", "auth failure", "unknown baseline"} {
+			t.Run(fmt.Sprintf("job=%v/%s", job, scenario), func(t *testing.T) {
+				writes, reads := 0, 0
+				host := fastRetryHost(func(ctx context.Context, name string, args ...string) *exec.Cmd {
+					step := ghScriptStep{}
+					if len(args) > 1 && args[0] == "run" && args[1] == "rerun" {
+						writes++
+						if job && !strings.Contains(strings.Join(args, " "), "--job 10") {
+							t.Fatal("job rerun broadened its target")
+						}
+						if writes == 1 {
+							step = ghScriptStep{stderr: ghReadTimeout, code: 1}
+						}
+						if scenario == "auth failure" {
+							step = ghScriptStep{stderr: "HTTP 403: Permission denied", code: 1}
+						}
+					} else {
+						reads++
+						attempt, status := 1, "completed"
+						if writes > 0 && scenario == "accepted queued" {
+							attempt, status = 2, "queued"
+						}
+						if writes > 0 && scenario == "accepted completed" {
+							attempt = 2
+						}
+						step.stdout = fmt.Sprintf(`{"id":9,"run_attempt":%d,"status":%q}`, attempt, status)
+						if scenario == "lookup failure" {
+							step = ghScriptStep{stderr: "HTTP 403: Permission denied", code: 1}
+						}
+						if scenario == "lookup malformed" {
+							step.stdout = `not JSON`
+						}
+						if scenario == "lookup wrong id" {
+							step.stdout = `{"id":99,"run_attempt":2,"status":"queued"}`
+						}
+						if scenario == "lookup missing attempt" {
+							step.stdout = `{"id":9,"status":"queued"}`
+						}
+						if scenario == "lookup unknown status" {
+							step.stdout = `{"id":9,"run_attempt":1,"status":"unknown"}`
+						}
+						if scenario == "lookup backwards" {
+							step.stdout = `{"id":9,"run_attempt":1,"status":"completed"}`
+						}
+					}
+					scripted, _ := sequencedGHFactory(t, []ghScriptStep{step})
+					return scripted(ctx, name, args...)
+				})
+				host.repo = "test/repo"
+				check := scm.Check{Name: "build", State: "CANCELLED", RunAttempt: 1, Link: "https://github.com/test/repo/actions/runs/9"}
+				if job {
+					check.Link += "/job/10"
+				}
+				if scenario == "unknown baseline" {
+					check.RunAttempt = 0
+				}
+				if scenario == "lookup backwards" {
+					check.RunAttempt = 2
+				}
+				err := host.RerunCheck(context.Background(), nil, check)
+				if scenario == "auth failure" || strings.HasPrefix(scenario, "lookup ") {
+					if err == nil || writes != 1 {
+						t.Fatalf("writes=%d reads=%d err=%v, want failure without a duplicate request", writes, reads, err)
+					}
+				} else {
+					wantWrites := 2
+					if strings.HasPrefix(scenario, "accepted") {
+						wantWrites = 1
+					}
+					if err != nil || writes != wantWrites || reads < 1 {
+						t.Fatalf("writes=%d reads=%d err=%v, want %d requests with live replay proof", writes, reads, err, wantWrites)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestUserAssetRepositoryLookupRetriesNetworkFailures(t *testing.T) {
+	for name, failure := range map[string]string{"transient": ghReadTimeout, "auth": "HTTP 403: Permission denied"} {
+		t.Run(name, func(t *testing.T) {
+			factory, calls := sequencedGHFactory(t, []ghScriptStep{{stderr: failure, code: 1}, {stdout: `{"data":{"repository":{"databaseId":42,"viewerPermission":"WRITE"}}}`}})
+			host := fastRetryHost(factory)
+			host.repo = "test/repo"
+			id, permission, err := host.userAssetRepo(context.Background())
+			if name == "transient" {
+				if err != nil || id != 42 || permission != "WRITE" || calls() != 2 {
+					t.Fatalf("id=%d permission=%s calls=%d err=%v", id, permission, calls(), err)
+				}
+			} else if err == nil || calls() != 1 {
+				t.Fatalf("calls=%d err=%v, want no retry of an auth failure", calls(), err)
+			}
+		})
+	}
+}
+
+func TestAuthTokenFailureNeverIncludesTokenOutput(t *testing.T) {
+	factory, _ := sequencedGHFactory(t, []ghScriptStep{{stdout: "ghp_secret", stderr: "authentication failed", code: 1}})
+	_, err := fastRetryHost(factory).authToken(context.Background())
+	if err == nil || strings.Contains(err.Error(), "ghp_secret") || !strings.Contains(err.Error(), "authentication failed") {
+		t.Fatalf("unexpected token failure: %v", err)
+	}
+}

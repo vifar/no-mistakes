@@ -1309,7 +1309,7 @@ func TestRerunCheckTargetsJobFromCheckLink(t *testing.T) {
 			var recorded [][]string
 			host := New(recordingCmdFactory("", &recorded), nil, "", "test/repo")
 
-			check := scm.Check{
+			check := scm.Check{RunAttempt: 1,
 				Name:   "build (ubuntu-latest)",
 				Bucket: scm.CheckBucketCancel,
 				State:  "CANCELLED",
@@ -1341,7 +1341,7 @@ func TestRerunCheckTargetsWholeCancelledRun(t *testing.T) {
 			var recorded [][]string
 			host := New(recordingCmdFactory("", &recorded), nil, "", "test/repo")
 
-			check := scm.Check{
+			check := scm.Check{RunAttempt: 1,
 				Name:   "build",
 				Bucket: scm.CheckBucketCancel,
 				State:  "CANCELLED",
@@ -1407,7 +1407,7 @@ func TestRerunCheckPropagatesProviderError(t *testing.T) {
 		},
 	}), nil, "", "test/repo")
 
-	err := host.RerunCheck(context.Background(), &scm.PR{Number: "123"}, scm.Check{
+	err := host.RerunCheck(context.Background(), &scm.PR{Number: "123"}, scm.Check{RunAttempt: 1,
 		Name:   "build",
 		Bucket: scm.CheckBucketFail,
 		State:  "TIMED_OUT",
@@ -1988,6 +1988,13 @@ func TestGitHubHelperProcess(t *testing.T) {
 		return
 	}
 
+	if marker := os.Getenv("GITHUB_TEST_RUNNING"); marker != "" {
+		if err := os.WriteFile(marker, []byte("running"), 0600); err != nil {
+			os.Exit(2)
+		}
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
 	if want := os.Getenv("GITHUB_TEST_WANT_STDIN"); want != "" {
 		got, err := io.ReadAll(os.Stdin)
 		if err != nil {
@@ -2172,7 +2179,7 @@ func TestStdoutOnlyFailureDetail(t *testing.T) {
 			cmd := githubTestCmdFactory(map[string]githubTestResponse{
 				"gh probe": {stdout: tt.stdout, stderr: tt.stderr, code: 1},
 			})(context.Background(), "gh", "probe")
-			_, detail, err := stdoutOnly(cmd)
+			_, detail, err := stdoutOnly(context.Background(), cmd)
 			if err == nil {
 				t.Fatal("stdoutOnly() error = nil, want the exit error")
 			}

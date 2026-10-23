@@ -222,3 +222,36 @@ func TestDoPreservesCompletedFailureWhenCancellationRacesTheResult(t *testing.T)
 		})
 	}
 }
+
+func TestClassifyIgnoresEchoedURLsAndHonorsHTTPStatuses(t *testing.T) {
+	for _, remote := range []string{
+		"'https://github.com/org/timeout.git/'",
+		"\"https://github.com/org/non-fast-forward.git/\"",
+		"https://github.com/org/permission%20denied.git/",
+		"git@github.com:org/non-fast-forward.git",
+		"'https://github.com/org/permission denied.git/'",
+	} {
+		for _, diagnostic := range []struct {
+			message string
+			want    Class
+		}{
+			{"The requested URL returned error: 401", ""},
+			{"The requested URL returned error: 403", ""},
+			{"The requested URL returned error: 404", ""},
+			{"The requested URL returned error: 422", ""},
+			{"HTTP 403: Operation timed out", ""},
+			{"HTTP/2 403: Operation timed out", ""},
+			{"HTTP 401: secondary rate limit; Retry-After: 60", ""},
+			{"HTTP 403: secondary rate limit; Retry-After: 60", ClassRateLimit},
+			{"The requested URL returned error: 502", ClassHTTP5xx},
+			{"Operation timed out", ClassTimeout},
+			{"Timeout", ClassTimeout},
+			{"invalid URL", ""},
+		} {
+			message := "fatal: unable to access " + remote + ": " + diagnostic.message
+			if got := ClassifyText(message); got != diagnostic.want {
+				t.Errorf("ClassifyText(%q)=%q, want %q", message, got, diagnostic.want)
+			}
+		}
+	}
+}

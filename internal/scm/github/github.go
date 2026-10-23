@@ -17,6 +17,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/netretry"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // CmdFactory builds an exec.Cmd in the caller's workdir with the caller's env.
@@ -171,7 +172,7 @@ func (h *Host) Available(ctx context.Context) error {
 		cmd := h.cmd(ctx, "gh", authArgs...)
 		stderr.Reset()
 		cmd.Stderr = &stderr
-		authErr := cmd.Run()
+		authErr := runGHCommand(ctx, cmd, func() error { return shellenv.RunShellCommand(cmd) })
 		if authErr != nil {
 			return struct{}{}, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), authErr)
 		}
@@ -255,17 +256,20 @@ func parsePullRequestURL(raw, expectedHost, expectedRepo string) (int, error) {
 // stdoutOnly runs cmd and returns its stdout alone, so notices a gh wrapper
 // writes to stderr never become part of the data. On failure, detail carries
 // the trimmed stderr, or stdout when stderr is empty.
-func stdoutOnly(cmd *exec.Cmd) (out []byte, detail string, err error) {
-	out, err = cmd.Output()
+func stdoutOnly(ctx context.Context, cmd *exec.Cmd) (out []byte, detail string, err error) {
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err = runGHCommand(ctx, cmd, func() error {
+		var callErr error
+		out, callErr = shellenv.OutputShellCommand(cmd)
+		return callErr
+	})
 	if err == nil {
 		return out, "", nil
 	}
 	detail = strings.TrimSpace(string(out))
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
-			detail = stderr
-		}
+	if text := strings.TrimSpace(stderr.String()); text != "" {
+		detail = text
 	}
 	return out, detail, err
 }
@@ -279,7 +283,7 @@ func (h *Host) ghStdout(ctx context.Context, operation, stdin string, args ...st
 		if stdin != "" {
 			cmd.Stdin = strings.NewReader(stdin)
 		}
-		out, detail, err = stdoutOnly(cmd)
+		out, detail, err = stdoutOnly(ctx, cmd)
 		if err != nil {
 			// stdoutOnly keeps gh's message on stderr; fold it into the error
 			// the retry classifier reads.
@@ -301,7 +305,11 @@ func (h *Host) ghCombined(ctx context.Context, operation, stdin string, args ...
 		if stdin != "" {
 			cmd.Stdin = strings.NewReader(stdin)
 		}
-		out, err = cmd.CombinedOutput()
+		err = runGHCommand(ctx, cmd, func() error {
+			var callErr error
+			out, callErr = shellenv.CombinedOutputShellCommand(cmd)
+			return callErr
+		})
 		if err != nil {
 			return struct{}{}, fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
 		}
@@ -430,7 +438,7 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 		}
 		cmd := h.cmd(ctx, "gh", args...)
 		cmd.Stdin = strings.NewReader(content.Body)
-		out, detail, err := stdoutOnly(cmd)
+		out, detail, err := stdoutOnly(ctx, cmd)
 		if err != nil {
 			return nil, fmt.Errorf("gh pr create: %s: %w", detail, err)
 		}
@@ -1306,11 +1314,76 @@ func (h *Host) RerunCheck(ctx context.Context, _ *scm.PR, check scm.Check) error
 	}
 	args := append([]string{"run", "rerun"}, rerunArgs...)
 	args = append(args, h.repoArgs()...)
-	cmd := h.cmd(ctx, "gh", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("gh run rerun: %s: %w", strings.TrimSpace(string(out)), err)
+	runID, _, _ := h.actionsRerunTarget(check.Link)
+	baseline := check.RunAttempt
+	if baseline <= 0 {
+		attempt, _, err := h.rerunAttempt(ctx, runID)
+		if err != nil {
+			return err
+		}
+		baseline = attempt
 	}
-	return nil
+	attempts := 0
+	_, err := netretry.Do(ctx, h.retryOptions("gh run rerun"), func() (struct{}, error) {
+		attempts++
+		if attempts > 1 {
+			attempt, status, err := h.rerunAttempt(ctx, runID)
+			if err != nil {
+				return struct{}{}, err
+			}
+			if attempt < baseline {
+				return struct{}{}, fmt.Errorf("workflow run %s attempt moved backwards", runID)
+			}
+			if attempt > baseline || status != "completed" {
+				return struct{}{}, nil
+			}
+		}
+		cmd := h.cmd(ctx, "gh", args...)
+		var out []byte
+		err := runGHCommand(ctx, cmd, func() error {
+			var callErr error
+			out, callErr = shellenv.CombinedOutputShellCommand(cmd)
+			return callErr
+		})
+		if err != nil {
+			return struct{}{}, fmt.Errorf("gh run rerun: %s: %w", strings.TrimSpace(string(out)), err)
+		}
+		return struct{}{}, nil
+	})
+	return err
+}
+
+func (h *Host) rerunAttempt(ctx context.Context, runID string) (int, string, error) {
+	repo := h.repoSlug()
+	if repo == "" {
+		repo = "{owner}/{repo}"
+	}
+	args := []string{"api"}
+	if h.host != "" {
+		args = append(args, "--hostname", h.host)
+	}
+	args = append(args, "--method", "GET", "repos/"+repo+"/actions/runs/"+runID)
+	out, _, err := h.ghStdout(ctx, "gh api workflow rerun attempt", "", args...)
+	if err != nil {
+		return 0, "", err
+	}
+	var run struct {
+		ID      int64  `json:"id"`
+		Attempt int    `json:"run_attempt"`
+		Status  string `json:"status"`
+	}
+	if err := json.Unmarshal(out, &run); err != nil {
+		return 0, "", fmt.Errorf("parse workflow rerun attempt: %w", err)
+	}
+	if strconv.FormatInt(run.ID, 10) != runID || run.Attempt <= 0 {
+		return 0, "", errors.New("invalid workflow rerun attempt")
+	}
+	switch run.Status {
+	case "completed", "queued", "in_progress", "waiting", "pending", "requested":
+		return run.Attempt, run.Status, nil
+	default:
+		return 0, "", fmt.Errorf("unrecognized workflow rerun status %q", run.Status)
+	}
 }
 
 // rerunTargetArgs turns a check into the `gh run rerun` arguments that re-run

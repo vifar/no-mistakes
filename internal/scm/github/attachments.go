@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // User-attachments upload contract, pinned against cli/cli v2.99.0
@@ -375,12 +377,8 @@ func (h *Host) authToken(ctx context.Context) (string, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		detail := strings.TrimSpace(stderr.String())
-		if detail != "" {
-			return "", fmt.Errorf("gh auth token: %s", detail)
-		}
-		return "", fmt.Errorf("gh auth token: %w", err)
+	if err := runGHCommand(ctx, cmd, func() error { return shellenv.RunShellCommand(cmd) }); err != nil {
+		return "", fmt.Errorf("gh auth token: %s: %w", strings.TrimSpace(stderr.String()), err)
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
@@ -397,7 +395,7 @@ func (h *Host) userAssetRepo(ctx context.Context) (int64, string, error) {
 	}
 	args = append(args, "graphql", "-f", "query="+userAssetRepoQuery,
 		"-F", "owner="+parts[0], "-F", "name="+parts[1])
-	out, err := h.cmd(ctx, "gh", args...).CombinedOutput()
+	out, err := h.ghCombined(ctx, "gh api repository for user-attachments", "", args...)
 	if err != nil {
 		return 0, "", fmt.Errorf("gh api repository for user-attachments: %s: %w", strings.TrimSpace(string(out)), err)
 	}
