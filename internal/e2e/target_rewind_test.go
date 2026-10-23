@@ -237,8 +237,8 @@ func TestTargetAdvanceExistingPRJourney(t *testing.T) {
 			launch := make(chan launchResult, 1)
 			go func() {
 				// This follower spans two validation passes plus the explicit
-				// release below. Match the journey's completion budget rather
-				// than the harness's 60-second budget for individual commands.
+				// release below. Keep its budget aligned with the journey's
+				// completion budget.
 				ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
 				defer cancel()
 				cmd := exec.CommandContext(ctx, h.NMBin, "axi", "run", "--intent", "validate the existing PR", "--skip", "ci")

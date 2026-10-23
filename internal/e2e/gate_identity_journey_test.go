@@ -281,7 +281,7 @@ func TestGateIdentityJourney_DelayedClosingAnswer(t *testing.T) {
 // reply nor the response/refusal is synthesized. Moving A to B while the wire
 // request waits detects callers that bind to admission time instead of the
 // snapshot they read. All connections and the socket rename are cleaned up.
-func gateJourneyProxy(t *testing.T, socket string) (string, <-chan ipc.RespondParams, func()) {
+func gateJourneyProxy(t *testing.T, socket, reconcileReady string) (string, <-chan ipc.RespondParams, func()) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("this wire-delay helper uses Unix sockets")
@@ -328,6 +328,24 @@ func gateJourneyProxy(t *testing.T, socket string) (string, <-chan ipc.RespondPa
 				for scanner.Scan() {
 					line := append([]byte(nil), scanner.Bytes()...)
 					var req ipc.Request
+					if json.Unmarshal(line, &req) == nil && req.Method == ipc.MethodGetRun && reconcileReady != "" {
+						// Hold startup reconciliation until the driver has observed
+						// disabled controls. Even a fast daemon must exercise the
+						// transition back to an actionable gate before the key.
+						tick := time.NewTicker(10 * time.Millisecond)
+						for {
+							if _, err := os.Stat(reconcileReady); err == nil {
+								break
+							}
+							select {
+							case <-tick.C:
+							case <-ctx.Done():
+								tick.Stop()
+								return
+							}
+						}
+						tick.Stop()
+					}
 					if json.Unmarshal(line, &req) == nil && req.Method == ipc.MethodRespond && intercepted.CompareAndSwap(false, true) {
 						var params ipc.RespondParams
 						if json.Unmarshal(req.Params, &params) == nil {
@@ -379,8 +397,20 @@ func gateJourneyObservedResponse(t *testing.T, tui bool) {
 	t.Helper()
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: axiScenario(t)})
 	a := gateJourneyStart(t, h, "feature/cli-snapshot")
-	backend, arrived, release := gateJourneyProxy(t, paths.WithRoot(h.NMHome).Socket())
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	reconcileReady := ""
+	if tui {
+		reconcileReady = filepath.Join(t.TempDir(), "tui-reconciling")
+	}
+	backend, arrived, release := gateJourneyProxy(t, paths.WithRoot(h.NMHome).Socket(), reconcileReady)
+	// The budget covers the whole caller: the driver's three prompt waits (60s each)
+	// and the answer that supersedes the gate. The CLI path needs a second;
+	// the TUI path needs whatever a loaded runner costs to render its first
+	// frame and print the refusal, so 30s was a bet on an idle machine.
+	callerTimeout := 30 * time.Second
+	if tui {
+		callerTimeout = 210 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), callerTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.NMBin, "axi", "respond", "--run", a.RunID, "--action", "approve")
 	if tui {
@@ -389,13 +419,24 @@ func gateJourneyObservedResponse(t *testing.T, tui bool) {
 			t.Fatal(err)
 		}
 		cmd = exec.CommandContext(ctx, "python3", driver, h.NMBin, h.WorkDir, "a", "6", "6")
+		// The heading also appears before startup reconciliation disables the
+		// controls. Wait through that refresh and for approval to return, then
+		// send exactly one key and wait for the refusal.
+		cmd.Env = append(os.Environ(),
+			"NM_TUI_RECONCILE_READY="+reconcileReady,
+			"NM_TUI_WAIT_BEFORE=approve",
+			"NM_TUI_WAIT_AFTER=gate already resolved or superseded",
+			"NM_TUI_WAIT_LIMIT=60",
+		)
 		// Let the driver's finally block terminate and wait for its PTY child
 		// when a failing assertion cancels this command.
 		cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 		cmd.WaitDelay = 5 * time.Second
 	}
 	cmd.Dir = h.WorkDir
-	cmd.Env = os.Environ()
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
 	type cliResult struct {
 		out []byte
 		err error
@@ -410,6 +451,9 @@ func gateJourneyObservedResponse(t *testing.T, tui bool) {
 		cancel()
 		select {
 		case <-done:
+			if tui && t.Failed() {
+				t.Logf("TUI terminal transcript after failure:\n%s", got.out)
+			}
 		case <-time.After(10 * time.Second):
 			t.Error("caller process did not exit")
 		}
