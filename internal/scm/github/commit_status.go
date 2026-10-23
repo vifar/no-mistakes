@@ -3,8 +3,10 @@ package github
 import (
 	"context"
 	"fmt"
-	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"strings"
+
+	"github.com/kunchenguid/no-mistakes/internal/netretry"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // CommitStatusContext names the plain GitHub status published by the pipeline.
@@ -24,11 +26,17 @@ func (h *Host) PostCommitStatus(ctx context.Context, sha, state, description, ta
 	if targetURL != "" {
 		args = append(args, "-f", "target_url="+targetURL)
 	}
-	cmd := h.cmd(ctx, "gh", args...)
-	shellenv.ConfigureShellCommand(cmd)
-	out, err := shellenv.CombinedOutputShellCommand(cmd)
+	_, err := netretry.Do(ctx, h.retryOptions("post GitHub commit status"), func() (struct{}, error) {
+		cmd := h.cmd(ctx, "gh", args...)
+		shellenv.ConfigureShellCommand(cmd)
+		out, callErr := shellenv.CombinedOutputShellCommand(cmd)
+		if callErr != nil {
+			return struct{}{}, fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), callErr)
+		}
+		return struct{}{}, nil
+	})
 	if err != nil {
-		return fmt.Errorf("post GitHub commit status: %s: %w", strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("post GitHub commit status: %w", err)
 	}
 	return nil
 }

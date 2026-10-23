@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/netretry"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
@@ -22,32 +23,24 @@ func PRContextReadTimedOut(message string) bool {
 // ReadPRContext retries only a typed credential-store timeout. The callback
 // must be a single read, never a step, agent turn, retarget or publication.
 // Three attempts with 1s/2s backoff keep a transient keyring failure from
-// throwing away completed review work without hiding real auth failures.
+// throwing away completed review work without hiding real auth failures. It
+// shares the network retry helper's bounded, cancellation-aware loop; the
+// credential class is typed here rather than matched from text.
 func ReadPRContext[T any](ctx context.Context, log func(string), read func() (T, error)) (T, error) {
-	var value T
-	for attempt := 1; attempt <= 3; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return value, err
-		}
-		result, err := read()
-		value = result
-		if err == nil || !errors.Is(err, scm.ErrTransientTimeout) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return value, err
-		}
-		if attempt == 3 {
-			return value, fmt.Errorf("%s: %w", prContextReadUnavailable, err)
-		}
-		delay := time.Duration(attempt) * time.Second
-		if log != nil {
-			log(fmt.Sprintf("PR-context read unavailable: transient keyring timeout; retry %d/3 in %s", attempt+1, delay))
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return value, ctx.Err()
-		case <-timer.C:
-		}
-	}
-	panic("unreachable")
+	return netretry.Do(ctx, netretry.Options{
+		Operation: "PR-context read",
+		Attempts:  3,
+		Base:      time.Second,
+		Max:       2 * time.Second,
+		Log:       log,
+		Retryable: func(err error) bool {
+			return errors.Is(err, scm.ErrTransientTimeout) &&
+				!errors.Is(err, context.Canceled) &&
+				!errors.Is(err, context.DeadlineExceeded)
+		},
+		Describe: func(error) string { return scm.ErrTransientTimeout.Error() },
+		Exhausted: func(_ int, err error) error {
+			return fmt.Errorf("%s: %w", prContextReadUnavailable, err)
+		},
+	}, read)
 }

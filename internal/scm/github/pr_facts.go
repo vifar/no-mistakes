@@ -90,7 +90,7 @@ func (h *Host) prFactsAPI(ctx context.Context, args ...string) ([]byte, error) {
 		command = append(command, "--hostname", h.host)
 	}
 	command = append(command, args...)
-	out, err := h.cmd(ctx, "gh", command...).CombinedOutput()
+	out, err := h.ghCombined(ctx, "gh api pull request facts", "", command...)
 	if err != nil {
 		return nil, prReadError(ctx, "gh api pull request facts", strings.TrimSpace(string(out)), err)
 	}
@@ -186,7 +186,7 @@ func (h *Host) GetPRFacts(ctx context.Context, pr *scm.PR) (scm.PRFacts, error) 
 	if h.host != "" {
 		args = append(args, "--hostname", h.host)
 	}
-	out, detail, err := stdoutOnly(h.cmd(ctx, "gh", args...))
+	out, detail, err := h.ghStdout(ctx, "read exact GitHub PR facts", "", args...)
 	if err != nil {
 		return scm.PRFacts{}, prReadError(ctx, "read exact GitHub PR facts", detail, err)
 	}

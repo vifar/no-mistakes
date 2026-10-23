@@ -98,7 +98,7 @@ func observeRewindBranch(c *pipeline.StepContext, remote, branch, privateRef str
 		return nil, fmt.Errorf("rewind branch is empty")
 	}
 	ctx, cancel := context.WithTimeout(c.Ctx, fetchUpstreamTimeout)
-	out, err := git.Run(ctx, c.WorkDir, "ls-remote", "--exit-code", "--refs", remote, "refs/heads/"+branch)
+	out, err := git.RunNetwork(ctx, c.WorkDir, "ls-remote", "--exit-code", "--refs", remote, "refs/heads/"+branch)
 	cancel()
 	if err != nil {
 		var exit *exec.ExitError

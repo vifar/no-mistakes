@@ -119,7 +119,7 @@ func (s *Store) storeCaseObjects(ctx context.Context, gateDir, repoFingerprint, 
 	// --no-tags keeps the pool's refs to exactly the case pins. A tag ref
 	// would pin objects no case needs and survive every retention pass,
 	// quietly making the pool unreclaimable.
-	if _, err := git.Run(ctx, pool, "fetch", "--no-tags", clone, "+"+prefix+"*:"+prefix+"*"); err != nil {
+	if _, err := git.RunNetwork(ctx, pool, "fetch", "--no-tags", clone, "+"+prefix+"*:"+prefix+"*"); err != nil {
 		return fmt.Errorf("store case objects: %w", err)
 	}
 	return nil
@@ -133,7 +133,7 @@ func restoreCaseObjects(ctx context.Context, poolPath, gateDir, caseID string) e
 		return fmt.Errorf("case objects are unavailable: %w", err)
 	}
 	prefix := caseRefPrefix(caseID)
-	if _, err := git.Run(ctx, gateDir, "fetch", "--no-tags", poolPath, "+"+prefix+"*:"+prefix+"*"); err != nil {
+	if _, err := git.RunNetwork(ctx, gateDir, "fetch", "--no-tags", poolPath, "+"+prefix+"*:"+prefix+"*"); err != nil {
 		return fmt.Errorf("restore case objects: %w", err)
 	}
 	return nil

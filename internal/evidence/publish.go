@@ -192,7 +192,7 @@ func publishOnce(ctx context.Context, req Request, branch, dir string, files []c
 	if err != nil {
 		return nil, err
 	}
-	if _, err := git.Run(ctx, req.RepoDir, "push", req.PushURL, commit+":refs/heads/"+branch); err != nil {
+	if _, err := git.RunNetwork(ctx, req.RepoDir, "push", req.PushURL, commit+":refs/heads/"+branch); err != nil {
 		return nil, fmt.Errorf("push evidence branch %s to %s: %w", branch, safeurl.Redact(req.PushURL), err)
 	}
 	return &Result{Branch: branch, CommitSHA: commit, Dir: dir, Files: published}, nil
@@ -221,14 +221,14 @@ func hashEvidenceFile(ctx context.Context, repoDir string, env []string, abs str
 // the remote is an error: publishing onto a branch whose current state is
 // unknown is exactly the case that must not proceed.
 func remoteTip(ctx context.Context, repoDir, pushURL, branch string) (string, error) {
-	out, err := git.Run(ctx, repoDir, "ls-remote", "--heads", pushURL, "refs/heads/"+branch)
+	out, err := git.RunNetwork(ctx, repoDir, "ls-remote", "--heads", pushURL, "refs/heads/"+branch)
 	if err != nil {
 		return "", fmt.Errorf("read evidence branch %s on %s: %w", branch, safeurl.Redact(pushURL), err)
 	}
 	if strings.TrimSpace(out) == "" {
 		return "", nil
 	}
-	if _, err := git.Run(ctx, repoDir, "fetch", "--no-tags", "--force", pushURL, "+refs/heads/"+branch+":"+fetchRef); err != nil {
+	if _, err := git.RunNetwork(ctx, repoDir, "fetch", "--no-tags", "--force", pushURL, "+refs/heads/"+branch+":"+fetchRef); err != nil {
 		return "", fmt.Errorf("fetch evidence branch %s: %w", branch, err)
 	}
 	sha, err := git.Run(ctx, repoDir, "rev-parse", "--verify", fetchRef+"^{commit}")
