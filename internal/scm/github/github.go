@@ -340,9 +340,8 @@ func (h *Host) ghCombined(ctx context.Context, operation, stdin string, args ...
 	return out, retryErr
 }
 
-// retryOptions bounds one retried gh call. The classifier always reads the
-// command's own message, so a 401, 403, 404, 422 or validation refusal is never
-// retried.
+// retryOptions uses the shared classifier, including typed rate-limit evidence
+// from the GET-only header probe rather than response data.
 func (h *Host) retryOptions(operation string) netretry.Options {
 	return netretry.Options{Operation: operation, Base: h.retryBase, Max: h.retryMax}
 }
