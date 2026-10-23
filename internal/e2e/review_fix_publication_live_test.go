@@ -34,13 +34,19 @@ func TestReviewFixPublicationLiveJourney(t *testing.T) {
 			}
 			const disclosure = "Disclosure: fixtures were generated with the repository recorder."
 			const human = "Co-Authored-By: Ada & Bob <ada@example.com>"
+			const signoff = "Signed-off-by: Victor I <vifarinde@gmail.com>"
 			const prose = "Ordinary prose mentions the Co-Authored-By: field without attributing anyone."
+			const link = "[Co-Authored-By: field](https://example.com)."
+			const wrapped = "**Co-Authored-By: Codex <wrapped-ai@example.com>**.\n\n`co-author (quoted): Codex\n <folded-ai@example.com>`.!\n\n**Co-Authored-By: Jane <jane@example.com>**.\n\n`co-author (quoted): Jane\n <jane@example.com>`.!"
+			const payload = `{"ai":"**Co-Authored-By: Codex <payload-ai@example.com>**.","human":"**Co-Authored-By: Jane <jane@example.com>**.","escape":"A\u0042\/C"}`
+			const wantPayload = `{"ai":"","human":"**co-author (quoted): Jane <jane@example.com>**.","escape":"A\u0042\/C"}`
 			const footer = "🤖 Generated with [Claude Code](https://claude.ai/code)"
 			const rationale = "Red first: unsafe value was accepted.\nGreen: focused validation passed."
-			summary := "Guard unsafe value\n\n" + rationale + "\n\n" + disclosure + "\n\n" + human + "\nCo-Authored-By: Codex <commit-ai@example.com>\nClaude-Session: fixture\n" + footer
+			summary := "Guard unsafe value\n\n" + rationale + "\n\n" + disclosure + "\n\n" + human + "\n" + signoff + "\nCo-Authored-By: Codex <commit-ai@example.com>\nClaude-Session: fixture\n" + footer
 			const tail = "{\n \"large\": \"cutoff }\n... [20000 bytes truncated] ...\ncontinued text\", \"ai\": \"<code>co-author (quoted): <code>Codex</code> <tail-ai@example.com></code>\", \"human\": \"Co-Authored-By: Ada & Bob <ada@example.com>\", \"escape\": \"A\\u0042\\/C\"\n}"
 			const wantTail = "{\n \"large\": \"cutoff }\n... [20000 bytes truncated] ...\ncontinued text\", \"ai\": \"\", \"human\": \"co-author (quoted): Ada & Bob <ada@example.com>\", \"escape\": \"A\\u0042\\/C\"\n}"
 			raw := prose + "\n" + disclosure + "\n" + human + "\n> Co-Authored-By: Claude\n- Co-Authored-By: Codex\n`Co-Authored-By: ChatGPT`\n**Co-Authored-By: Gemini**\n> Co-Authored-By: Jane Doe\n\n[\n \"Co-Authored-By: Codex <array-ai@example.com>\",\n \"Co-Authored-By: Ada & Bob <ada@example.com>\"\n]\n\n```json\n" + tail + "\n```\n\n" + footer
+			raw += "\n\n" + link + "\n\n" + wrapped + "\n\n```json\n" + payload + "\n```"
 			clean := map[string]any{
 				"findings": []any{}, "summary": "no issues found", "risk_level": "low",
 				"risk_rationale": "disposable fixture", "risk_scope": "source-or-external",
@@ -140,17 +146,17 @@ func TestReviewFixPublicationLiveJourney(t *testing.T) {
 				t.Fatalf("run = %s, error=%v", run.Status, run.Error)
 			}
 			message := liveStoredCommitMessage(t, h, h.UpstreamDir, "refs/heads/"+branch)
-			wantMessage := "no-mistakes(review): Guard unsafe value\n\nGuard unsafe value\n\nRed first: unsafe value was accepted.\nGreen: focused validation passed.\n\nDisclosure: fixtures were generated with the repository recorder.\n\nRound findings:\n- feature.txt: unsafe value needs validation\n\nCo-Authored-By: Ada & Bob <ada@example.com>\n"
+			wantMessage := "no-mistakes(review): Guard unsafe value\n\nGuard unsafe value\n\nRed first: unsafe value was accepted.\nGreen: focused validation passed.\n\nDisclosure: fixtures were generated with the repository recorder.\n\nRound findings:\n- feature.txt: unsafe value needs validation\n\nCo-Authored-By: Ada & Bob <ada@example.com>\n" + signoff + "\n"
 			if !bytes.Equal(message, []byte(wantMessage)) {
 				t.Fatalf("published commit bytes = %q, want %q", message, wantMessage)
 			}
 			trailers, err := h.runGit(t.Context(), h.UpstreamDir, "show", "-s", "--format=%(trailers:only,unfold)", "refs/heads/"+branch)
-			if err != nil || strings.TrimSpace(string(trailers)) != human {
+			if err != nil || strings.TrimSpace(string(trailers)) != human+"\n"+signoff {
 				t.Fatalf("Git trailer parser = %q, %v", trailers, err)
 			}
 			invocations := readGHStubInvocations(t, ghLog)
 			body := createdPRBody(t, invocations)
-			for _, want := range []string{prose, disclosure, "co-author (quoted): Ada & Bob <ada@example.com>", "co-author (quoted): Jane Doe", wantTail, "Preserve the repair rationale."} {
+			for _, want := range []string{prose, link, disclosure, "co-author (quoted): Ada & Bob <ada@example.com>", "co-author (quoted): Jane Doe", "**co-author (quoted): Jane <jane@example.com>**.", "`co-author (quoted): Jane\n <jane@example.com>`.!", wantPayload, wantTail, "Preserve the repair rationale."} {
 				if !strings.Contains(body, want) {
 					t.Errorf("PR lost required published bytes %q", want)
 				}
@@ -166,7 +172,7 @@ func TestReviewFixPublicationLiveJourney(t *testing.T) {
 					t.Errorf("quoted evidence lost required bytes %q", want)
 				}
 			}
-			for _, forbidden := range []string{"Codex", "ChatGPT", "Gemini", "Claude", "commit-ai@example.com", "tail-ai@example.com", "array-ai@example.com", "claude.ai/code", "Claude-Session:", `\u003c`, `\u0026`} {
+			for _, forbidden := range []string{"Codex", "ChatGPT", "Gemini", "Claude", "commit-ai@example.com", "tail-ai@example.com", "array-ai@example.com", "wrapped-ai@example.com", "folded-ai@example.com", "payload-ai@example.com", "claude.ai/code", "Claude-Session:", `\u003c`, `\u0026`} {
 				if strings.Contains(body, forbidden) {
 					t.Errorf("PR leaked attribution or escaped human bytes %q", forbidden)
 				}
