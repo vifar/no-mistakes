@@ -6,12 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // This file covers the two fallback classes that a step could not reach before
@@ -144,6 +146,103 @@ func TestRunAgent_StallWithProgressDoesNotFallBack(t *testing.T) {
 	}
 	if next.calls != 0 {
 		t.Fatalf("next agent ran %d time(s) after a stall that had progress", next.calls)
+	}
+}
+
+// The #201 silent-turn contract applies to the whole candidate invocation:
+// schema-invalid assistant prose still vetoes fallback if a native retry stalls.
+// Drive the real adapter and retry loop so clearing evidence on retry is caught.
+func TestRunAgent_NativeRetryRetainsProgress(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-only")
+	}
+	t.Parallel()
+	dir := fallbackTestWorktree(t)
+	bin := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(bin, []byte(`#!/bin/sh
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"I could not produce the requested JSON."}}'
+printf '%s\n' '{"type":"turn.completed"}'
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	codex, err := agent.New(types.AgentCodex, bin, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := &hangingAgent{name: "claude"}
+	sctx := attemptStepContext(dir, codex, next)
+	sctx.Config.AgentStallTimeout = 2 * time.Second
+	var retries int
+	var lifecycle []agent.LifecycleEvent
+	var output strings.Builder
+	_, err = sctx.RunAgent(agent.RunOpts{
+		Prompt:     "review",
+		CWD:        dir,
+		JSONSchema: []byte(`{"type":"object","properties":{"success":{"type":"boolean"}},"required":["success"]}`),
+		OnChunk:    func(text string) { output.WriteString(text) },
+		OnLifecycle: func(event agent.LifecycleEvent) {
+			lifecycle = append(lifecycle, event)
+			if event.Phase == agent.LifecyclePhaseRetry {
+				retries++
+			}
+		},
+	})
+	if retries == 0 || !strings.Contains(output.String(), "requested JSON") {
+		t.Fatalf("did not reach native retry after assistant output: retries=%d output=%q error=%v lifecycle=%+v", retries, output.String(), err, lifecycle)
+	}
+	if !errors.Is(err, ErrAgentStall) || next.calls != 0 {
+		t.Fatalf("error = %v, next calls = %d; want a stall without fallback after earlier assistant output", err, next.calls)
+	}
+}
+
+// The recorded Codex metadata warning is diagnostic output, not assistant or
+// tool progress. A subsequent silent stall must still reach the next provider.
+func TestRunAgent_DiagnosticOnlyCodexStallFallsBack(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture is Unix-only")
+	}
+	t.Parallel()
+	dir := fallbackTestWorktree(t)
+	bin := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(bin, []byte(`#!/bin/sh
+printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `+"`gpt-5.4`"+` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}'
+printf '%s\n' '{"type":"turn.started"}'
+exec sleep 30
+`), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	codex, err := agent.New(types.AgentCodex, bin, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := &hangingAgent{name: "claude"}
+	sctx := attemptStepContext(dir, codex, next)
+	sctx.Config.AgentStallTimeout = 2 * time.Second
+	var lifecycle []agent.LifecycleEvent
+	var output strings.Builder
+	result, err := sctx.RunAgent(agent.RunOpts{
+		Prompt:      "review",
+		CWD:         dir,
+		OnChunk:     func(text string) { output.WriteString(text) },
+		OnLifecycle: func(event agent.LifecycleEvent) { lifecycle = append(lifecycle, event) },
+	})
+	if err != nil || result == nil || result.Text != "ok" || next.calls != 1 {
+		t.Fatalf("result = %+v, error = %v, next calls = %d; want successful fallback after diagnostic-only output", result, err, next.calls)
+	}
+	var sawActivity bool
+	for _, event := range lifecycle {
+		if event.Agent == "codex" && event.Phase == agent.LifecyclePhaseActivity {
+			sawActivity = true
+		}
+	}
+	if !sawActivity {
+		t.Fatal("Codex never reported the diagnostic bytes")
+	}
+	if output.Len() != 0 {
+		t.Fatalf("assistant output = %q, want none", output.String())
+	}
+	if log := fallbackEvents(lifecycle); !strings.Contains(log, "(stalled:") {
+		t.Fatalf("fallback log = %q, want the stalled class", log)
 	}
 }
 

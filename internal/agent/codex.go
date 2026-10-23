@@ -373,12 +373,12 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), on
 
 		case "item.started":
 			metrics.onItem(event.Type, event.Item, time.Now())
-			reportCodexProgress(onProgress)
+			reportCodexProgress(onProgress, event.Item)
 			reportCodexTool(onTool, event.Item)
 
 		case "item.completed":
 			metrics.onItem(event.Type, event.Item, time.Now())
-			reportCodexProgress(onProgress)
+			reportCodexProgress(onProgress, event.Item)
 			reportCodexTool(onTool, event.Item)
 			if event.Item != nil && event.Item.Type == "agent_message" {
 				*lastMessage = event.Item.Text
@@ -407,8 +407,12 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), on
 // reportCodexProgress forwards one turn advance when an observer is installed.
 // Codex reports tool and reasoning work as item events and only emits assistant
 // text at item completion, so without this its long tool stretches carry no
-// progress signal at all.
-func reportCodexProgress(onProgress func()) {
+// progress signal at all. Diagnostic error items (such as model-metadata
+// warnings) are byte-level activity, not forward motion in the assistant turn.
+func reportCodexProgress(onProgress func(), item *codexItem) {
+	if item != nil && item.Type == "error" {
+		return
+	}
 	if onProgress != nil {
 		onProgress()
 	}

@@ -510,10 +510,13 @@ type agentActivity struct {
 	// the stall bound watches.
 	progressed    time.Time
 	progressCount int
+	// everProgressed is candidate-wide replay evidence. Native retries reset
+	// the subprocess's diagnostic clock, but cannot erase an earlier turn.
+	everProgressed bool
 	// toolCount counts progress events that were a tool call or tool result
 	// rather than assistant text. A refusal is only safe to hand to another
 	// agent when the turn ran no tool: replaying one would repeat its side
-	// effects. Text alone does not carry that risk.
+	// effects. Text alone does not carry that risk. It survives native retries.
 	toolCount int
 	// launchedPID is the native subprocess PID, when one was reported.
 	launchedPID int
@@ -664,7 +667,6 @@ func (a *agentActivity) beginAttempt() {
 	a.observed = 0
 	a.progressed = time.Time{}
 	a.progressCount = 0
-	a.toolCount = 0
 	a.launched = false
 	a.launchedPID = 0
 	a.launchedAt = time.Time{}
@@ -746,12 +748,13 @@ func (a *agentActivity) observeProgress() {
 	}
 	a.mu.Lock()
 	a.progressCount++
+	a.everProgressed = true
 	a.progressed = time.Now()
 	a.zeroCPUSince = time.Time{}
 	a.mu.Unlock()
 }
 
-// madeProgress reports whether the attempt advanced its turn at least once:
+// madeProgress reports whether the candidate advanced any turn at least once:
 // assistant text, a tool call, or a tool result. It is the definition of "this
 // turn did something", which is what decides whether a stalled attempt may be
 // handed to another agent.
@@ -760,9 +763,9 @@ func (a *agentActivity) madeProgress() bool {
 		return false
 	}
 	a.mu.Lock()
-	count := a.progressCount
+	progressed := a.everProgressed
 	a.mu.Unlock()
-	return count > 0
+	return progressed
 }
 
 // observeToolProgress records that the turn reported a tool call or tool
