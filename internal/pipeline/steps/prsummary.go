@@ -896,7 +896,7 @@ func embeddedArtifactText(artifact types.TestArtifact, opts testingSummaryOption
 	if err != nil {
 		return "", false
 	}
-	text = strings.TrimRight(prDisplayText(text, opts.configuredTrailers...), "\n")
+	text = strings.TrimRight(prDisplayNoticeText(text, opts.configuredTrailers...), "\n")
 	if text == "" {
 		return "", false
 	}
@@ -1734,11 +1734,11 @@ func escapePipelineFoldMarkers(s string) string {
 //
 // The key can also sit inside a line - a backtick-wrapped quote, or a quoted
 // string in embedded evidence - and a consumer scans the raw text wherever it
-// is, so the key is rewritten wherever it is.
+// is, so an attribution entry is rendered wherever it is.
 var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)`)
 
-// renderCoAuthorAsLabelledField renders a co-author as a labelled field
-// rather than as a raw trailer line.
+// renderCoAuthorAsLabelledField renders a co-author ATTRIBUTION as a labelled
+// field rather than as a raw trailer line.
 //
 // This is the PUBLISHED text's rule, and it is deliberately not the
 // classifier's rule. The classifier decides whether a line IS an AI
@@ -1755,10 +1755,76 @@ var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)
 //
 // The rule is the merge bar's owner's: the bar's rule does not change, and a
 // published body never carries a raw co-author trailer line. It is a
-// publication policy, and it is deliberately narrow - it renders the KEY and
-// nothing else, so the attribution itself survives the rendering.
+// publication policy, and it is deliberately narrow: only the KEY of an
+// attribution entry - one that carries a mailbox, which is what makes it an
+// attribution rather than a mention - is rendered. A sentence that merely
+// names the field stays the sentence it was.
 func renderCoAuthorAsLabelledField(s string) string {
-	return publishedCoAuthorKey.ReplaceAllString(s, "co-author (quoted)${1}")
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = renderCoAuthorKeysInLine(line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderCoAuthorKeysInLine renders every co-author attribution entry in one
+// line. A bare mention of the key - no mailbox follows it on the line - is
+// ordinary prose and is left alone.
+func renderCoAuthorKeysInLine(line string) string {
+	offset := 0
+	for {
+		loc := publishedCoAuthorKey.FindStringIndex(line[offset:])
+		if loc == nil {
+			return line
+		}
+		start, end := offset+loc[0], offset+loc[1]
+		if !lineCarriesCoAuthorAttribution(line, end) {
+			offset = end
+			continue
+		}
+		groups := publishedCoAuthorKey.FindStringSubmatch(line[start:end])
+		suffix := ""
+		if len(groups) > 1 {
+			suffix = groups[1]
+		}
+		replacement := "co-author (quoted)" + suffix
+		line = line[:start] + replacement + line[end:]
+		offset = start + len(replacement)
+	}
+}
+
+// lineCarriesCoAuthorAttribution reports whether the text after the key is a
+// complete co-author attribution: a name and a mailbox that parse as an
+// address, with nothing trailing it. A near miss - a trailing period or
+// hyphen - is a mention, not an entry, and stays the text it was.
+func lineCarriesCoAuthorAttribution(line string, from int) bool {
+	// Escaped evidence carries its mailbox as &lt;...&gt;; the check decodes it,
+	// while the replacement keeps the bytes the line was published with.
+	value := trimPublishedWrappers(strings.TrimSpace(html.UnescapeString(line[from:])))
+	if value == "" {
+		return false
+	}
+	return reviewAttributionAddressComplete("Co-Authored-By: " + value)
+}
+
+// trimPublishedWrappers removes the closing markup a quote can carry after its
+// address (a backtick span, bold, or a <code> element). Punctuation is NOT a
+// wrapper: a trailing period or hyphen makes the line a mention, not an entry.
+func trimPublishedWrappers(value string) string {
+	for {
+		trimmed := strings.TrimSpace(value)
+		trimmed = strings.TrimSpace(strings.TrimSuffix(trimmed, "</code>"))
+		for _, suffix := range []string{"``", "`", "**", "__", "~~", "*", "_"} {
+			if strings.HasSuffix(trimmed, suffix) {
+				trimmed = strings.TrimSpace(strings.TrimSuffix(trimmed, suffix))
+				break
+			}
+		}
+		if trimmed == value {
+			return value
+		}
+		value = trimmed
+	}
 }
 
 // neutralizeAttestationMarkers breaks every attestation comment prefix in
@@ -1789,7 +1855,7 @@ func neutralizeAIAttribution(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
 		if lineCarriesAIAttribution(line) {
-			lines[i] = "<no-mistakes: AI attribution line neutralized>"
+			lines[i] = prAIAttributionNotice
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -1920,7 +1986,7 @@ func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyF
 		b.WriteString("Step was skipped.\n\n")
 	case types.StepStatusFailed:
 		if sr.Error != nil && strings.TrimSpace(*sr.Error) != "" {
-			b.WriteString(escapePRText(strings.TrimSpace(prDisplayText(*sr.Error, configuredTrailers...)), flavor))
+			b.WriteString(escapePRText(strings.TrimSpace(prDisplayNoticeText(*sr.Error, configuredTrailers...)), flavor))
 			b.WriteString("\n\n")
 			return
 		}

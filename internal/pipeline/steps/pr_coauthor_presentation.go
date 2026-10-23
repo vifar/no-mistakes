@@ -18,6 +18,12 @@ import (
 // whichever path published it.
 const PreservedHumanCoauthorLabel = "co-author (quoted):"
 
+// prAIAttributionNotice is what a published generated section shows in place
+// of an AI attribution line. The line is broken, not dropped: the evidence
+// still shows that the source carried an attribution, and no AI identity
+// survives in the published body.
+const prAIAttributionNotice = "<no-mistakes: AI attribution line neutralized>"
+
 // prDisplayText renders one published text block: AI attribution and the
 // exactly configured trailers are removed, a preserved human co-author becomes a
 // labelled field, and ordinary prose is left alone.
@@ -26,11 +32,22 @@ const PreservedHumanCoauthorLabel = "co-author (quoted):"
 // entries are one line to a line-based scanner. Such a line is filtered through
 // its own string values, and the payload keeps the bytes it was recorded with.
 func prDisplayText(text string, configuredTrailers ...string) string {
+	return prDisplayTextMode(text, false, configuredTrailers...)
+}
+
+// prDisplayNoticeText keeps the generated-section contract for a block whose
+// reader can verify the behaviour from the body: an AI attribution line is
+// replaced by the neutralization notice instead of being silently removed.
+func prDisplayNoticeText(text string, configuredTrailers ...string) string {
+	return prDisplayTextMode(text, true, configuredTrailers...)
+}
+
+func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) string {
 	lines := strings.Split(text, "\n")
 	var kept []string
 	for start := 0; start < len(lines); {
 		if payload, ok := recordedPayloadLine(lines[start]); ok {
-			kept = append(kept, filterRecordedPayload(payload, configuredTrailers...))
+			kept = append(kept, filterRecordedPayload(payload, notice, configuredTrailers...))
 			start++
 			continue
 		}
@@ -41,6 +58,8 @@ func prDisplayText(text string, configuredTrailers ...string) string {
 				lines[start] = presentHumanCoauthor(lines[start])
 			}
 			kept = append(kept, lines[start:end]...)
+		} else if notice {
+			kept = append(kept, prAIAttributionNotice)
 		} else {
 			kept = append(kept, "")
 		}
@@ -64,15 +83,14 @@ func presentHumanCoauthor(line string) string {
 	return line[:label] + PreservedHumanCoauthorLabel + line[label+len(literalKey):]
 }
 
-// recordedPayloadLine reports whether a line is a recorded JSON payload: a
-// document whose string values keep their line breaks as the two-character
-// escape, so its entries are one line to a line-based scanner.
+// recordedPayloadLine reports whether a line is a recorded JSON payload whose
+// string values carry published evidence. A payload is one line to a line-based
+// scanner whether or not it keeps its line breaks as the two-character escape,
+// so both forms are filtered: requiring the escape let a single-line payload
+// publish its attribution unfiltered.
 func recordedPayloadLine(line string) (string, bool) {
 	trimmed := strings.TrimSpace(line)
 	if len(trimmed) < 2 || (trimmed[0] != '{' && trimmed[0] != '[') {
-		return "", false
-	}
-	if !strings.Contains(line, `\n`) {
 		return "", false
 	}
 	if !json.Valid([]byte(trimmed)) {
@@ -84,7 +102,7 @@ func recordedPayloadLine(line string) (string, bool) {
 // filterRecordedPayload filters the string values inside a recorded payload and
 // splices the filtered text back into the payload's own bytes, so the published
 // evidence keeps the shape it was recorded with.
-func filterRecordedPayload(line string, configuredTrailers ...string) string {
+func filterRecordedPayload(line string, notice bool, configuredTrailers ...string) string {
 	out := []byte(line)
 	for offset := 0; offset < len(out); {
 		start := bytes.IndexByte(out[offset:], '"')
@@ -99,7 +117,7 @@ func filterRecordedPayload(line string, configuredTrailers ...string) string {
 		literal := string(out[start:end])
 		var value string
 		if err := json.Unmarshal([]byte(literal), &value); err == nil {
-			if filtered := prDisplayText(value, configuredTrailers...); filtered != value {
+			if filtered := prDisplayTextMode(value, notice, configuredTrailers...); filtered != value {
 				if encoded, err := json.Marshal(filtered); err == nil {
 					rebuilt := make([]byte, 0, len(out))
 					rebuilt = append(rebuilt, out[:start]...)
@@ -131,7 +149,7 @@ func jsonStringEnd(data []byte, start int) (int, bool) {
 }
 
 func prDisplayFindings(raw types.Findings, configuredTrailers ...string) types.Findings {
-	clean := func(text string) string { return prDisplayText(text, configuredTrailers...) }
+	clean := func(text string) string { return prDisplayNoticeText(text, configuredTrailers...) }
 	raw.Summary = clean(raw.Summary)
 	raw.TestingSummary = clean(raw.TestingSummary)
 	raw.RiskRationale = clean(raw.RiskRationale)

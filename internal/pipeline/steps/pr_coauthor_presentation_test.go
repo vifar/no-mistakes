@@ -279,12 +279,23 @@ func TestPRConfiguredAttributionCaseSensitive(t *testing.T) {
 				t.Errorf("Review exact configured attribution survived: %q", got)
 			}
 		}
-		for _, input := range []string{"Build-Agent: worker-a", "Build-Agent: worker&#45;a", "build-agent: Worker-A"} {
+		for _, input := range []string{"Build-Agent: worker-a", "Build-Agent: worker&#45;a"} {
 			if got := prDisplayText(input, configured); got != input {
 				t.Errorf("case-distinct evidence changed: %q, want %q", got, input)
 			}
 			if got := stripReviewAIAttribution(input, []string{configured}); got != input {
 				t.Errorf("Review case-distinct evidence changed: %q, want %q", got, input)
+			}
+		}
+		// Git compares a trailer KEY case-insensitively and allows whitespace
+		// before the colon, so the same configured trailer cannot evade the
+		// filter by changing the key's casing or spacing.
+		for _, input := range []string{"build-agent: Worker-A", "BUILD-AGENT : Worker-A", "Build-Agent\t:\tWorker-A"} {
+			if got := prDisplayText(input, configured); got != "" {
+				t.Errorf("exact configured attribution survived as %q", got)
+			}
+			if got := stripReviewAIAttribution(input, []string{configured}); got != "" {
+				t.Errorf("Review exact configured attribution survived as %q", got)
 			}
 		}
 	}
