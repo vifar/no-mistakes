@@ -4,17 +4,17 @@ description: Self-hosted-only workflow execution and the required execution poli
 ---
 
 This fork runs every job of every workflow (`CI`, `docs`,
-`Guard generated files`, `Nix flake`, and `Require no-mistakes`) on a single
-repository-scoped self-hosted Linux runner, hosted in a dedicated virtual
+`Guard generated files`, `Nix flake`, and `Require no-mistakes`) on
+repository-scoped self-hosted Linux runners sharing a dedicated virtual
 machine. Nothing runs on a GitHub-hosted runner. Every job requires the
-runner's full label set (`self-hosted`, `Linux`, `X64`, plus the fork's
-dedicated runner labels pinned in `workflow_self_hosted_test.go`). There is no hosted fallback
-when this runner is offline; jobs queue until it returns. The runner processes share one
-virtual machine, so jobs from different workflows can and do run at the same time: the machine
-hosts several runner processes, and their jobs compete for the same cores. The CI workflow
-therefore sequences its own two saturating jobs - the race suite finishes (or fails) before the
-e2e journeys start, and the e2e job still runs after a failed race job, because its result is
-evidence either way.
+full label set (`self-hosted`, `Linux`, `X64`, plus the fork's dedicated
+runner labels pinned in `workflow_self_hosted_test.go`). There is no hosted
+fallback when no matching runner is available; jobs queue until one returns.
+The machine hosts several runner processes, so jobs can run at the same time
+and compete for the same cores. Within each CI run, the `e2e` job depends on
+the `test` job, so the race suite and its builds finish before the e2e
+journeys start. The e2e job remains eligible after a failed race job, unless
+the workflow is cancelled; its result is evidence either way.
 
 Every job also carries the same-repository guard
 `github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`,
@@ -155,8 +155,7 @@ verify its published SHA-256 digest, and pass a temporary registration token
 through a protected channel. Never save that bootstrap token in this repo.
 Runner credentials remain restricted to the runner account.
 
-The `docs`, `Guard generated files`, `Nix flake`, and `Require no-mistakes`
-workflows run on the same runner. `actions/setup-node` downloads its own Node.
+`actions/setup-node` downloads its own Node.
 The Nix job does not install Nix: an administrator installs multi-user Nix on
 the runner's virtual machine once (for example with the Determinate installer and `sudo`), and the
 job fails with an actionable error if it is missing. None of these workflows change
