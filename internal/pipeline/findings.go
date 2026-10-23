@@ -629,15 +629,16 @@ func normalizeCoveredPath(value string) string {
 // its ReviewedPaths coverage, that path is in the trusted reviewable set, and
 // the round's own output (thisRoundRaw) neither re-reports the defect nor
 // reports anything else at all in that same file. The file-less exception
-// below requires coverage of the entire trusted reviewable set. Strict restored
-// anchors also require complete coverage and an empty round; review_resolution.go
-// supplies unchangedFindingIDs only after native exact-comparison proof.
+// below requires coverage of the entire trusted reviewable set. A strict
+// resolved anchor also requires complete coverage and an empty round;
+// review_resolution.go supplies resolvedAnchorIDs only after native proof that
+// the anchor was restored to the target or deleted from the branch.
 //
 // This is the only way a selected-and-fixed finding leaves the outstanding set
 // besides an explicit operator action (approve/skip/abort). A file the round
-// did not list (without the strict restored-anchor proof), a missing coverage
-// record, a round that re-reports the defect,
-// or a round that reports ANY OTHER finding in the same file all leave the
+// did not list (without a strict restored- or deleted-anchor proof), a missing
+// coverage record, a round that re-reports the defect, or a round that reports
+// ANY OTHER finding in the same file all leave the
 // item in place. Any file-less finding in the current round also blocks
 // verification of every selected item in that round: silence, or
 // a round that did not look, is never resolution, and neither is an ambiguous
@@ -657,7 +658,7 @@ func normalizeCoveredPath(value string) string {
 // the recorded-decision review machinery was removed can carry such items (a
 // synthesized decision finding whose source finding had no file), and without
 // this rule a fix selection could never clear them.
-func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, reviewedPaths, reviewablePaths []string, thisRoundRaw string, unchangedFindingIDs ...map[string]bool) string {
+func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, reviewedPaths, reviewablePaths []string, thisRoundRaw string, resolvedAnchorIDs ...map[string]bool) string {
 	if outstandingRaw == "" || len(pendingIDs) == 0 || len(reviewedPaths) == 0 {
 		return outstandingRaw
 	}
@@ -715,8 +716,8 @@ func resolveVerifiedFindingsJSON(outstandingRaw string, pendingIDs []string, rev
 	result := types.FindingsMetadata(outstanding)
 	for _, item := range outstanding.Items {
 		file := normalizeCoveredPath(item.File)
-		restored := len(unchangedFindingIDs) == 1 && unchangedFindingIDs[0][item.ID] && fullyCovered && len(thisRound.Items) == 0
-		if pending[item.ID] && !hasUnanchoredFinding && (covered[file] || file == "" && fullyCovered || restored) && !hasFindingMatch(item, reported, outstandingCounts, thisRoundCounts) && !reportedFiles[file] {
+		resolvedAnchor := len(resolvedAnchorIDs) == 1 && resolvedAnchorIDs[0][item.ID] && fullyCovered && len(thisRound.Items) == 0
+		if pending[item.ID] && !hasUnanchoredFinding && (covered[file] || file == "" && fullyCovered || resolvedAnchor) && !hasFindingMatch(item, reported, outstandingCounts, thisRoundCounts) && !reportedFiles[file] {
 			continue
 		}
 		result.Items = append(result.Items, item)

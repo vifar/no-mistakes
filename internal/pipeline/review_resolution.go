@@ -47,7 +47,7 @@ func resolveReviewCarry(sctx *StepContext, raw string, pending []string, outcome
 	if raw == "" {
 		return raw, nil
 	}
-	unchanged := make(map[string]bool)
+	resolved := make(map[string]bool)
 	var applied []types.WithdrawnFinding
 	if strictReviewResolutionEvidence(sctx, outcome, current) {
 		comparison, err := sctx.DB.GetReviewComparison(sctx.Run.ID)
@@ -64,8 +64,32 @@ func resolveReviewCarry(sctx *StepContext, raw string, pending []string, outcome
 					headEntry, headErr := git.RunRaw(sctx.Ctx, sctx.WorkDir, "--literal-pathspecs", "ls-tree", "-z", comparison.HeadSHA, "--", file)
 					baseEntry, baseErr := git.RunRaw(sctx.Ctx, sctx.WorkDir, "--literal-pathspecs", "ls-tree", "-z", comparison.MergeBaseSHA, "--", file)
 					targetEntry, targetErr := git.RunRaw(sctx.Ctx, sctx.WorkDir, "--literal-pathspecs", "ls-tree", "-z", comparison.TargetSHA, "--", file)
-					if headErr == nil && baseErr == nil && targetErr == nil && string(headEntry) == string(baseEntry) && string(headEntry) == string(targetEntry) && selectedAnchorWasChanged(sctx, item, comparison.TargetSHA) {
-						unchanged[item.ID] = true
+					if headErr != nil || baseErr != nil || targetErr != nil {
+						continue
+					}
+					if string(headEntry) != string(baseEntry) || string(headEntry) != string(targetEntry) {
+						continue
+					}
+					// The anchor either sits at the target state in every tree, or
+					// it is gone from every tree. Nothing between those two can
+					// be proven, and a finding that still names a file the change
+					// carries keeps blocking.
+					//
+					// The restored anchor: the file is back where the target has
+					// it, so the change no longer carries it.
+					if selectedAnchorWasChanged(sctx, item, comparison.TargetSHA) {
+						resolved[item.ID] = true
+					}
+					// The deleted anchor: the file is gone from the run head, the
+					// merge base and the target, so nothing in the delivered
+					// change carries the file the finding is about. The deletion
+					// is the resolution, and the branch's own history has to show
+					// the code was removed rather than moved. The two proofs are
+					// independent: deletion before selection leaves no selected
+					// head where the anchor differed from the target, so the
+					// deletion must be provable without the restored proof.
+					if len(headEntry) == 0 && deletedAnchorNotRelocated(sctx, item, comparison) {
+						resolved[item.ID] = true
 					}
 				}
 			}
@@ -82,7 +106,103 @@ func resolveReviewCarry(sctx *StepContext, raw string, pending []string, outcome
 		}
 		raw, applied = dropWithdrawnFindingsJSON(raw, withdrawals)
 	}
-	return resolveVerifiedFindingsJSON(raw, pending, outcome.ReviewedPaths, outcome.ReviewablePaths, current, unchanged), applied
+	return resolveVerifiedFindingsJSON(raw, pending, outcome.ReviewedPaths, outcome.ReviewablePaths, current, resolved), applied
+}
+
+// deletedAnchorNotRelocated reports that the anchor file was deleted from the
+// branch rather than moved to another path.
+//
+// The anchor is absent from the run head, the merge base and the target, so
+// nothing in the delivered change carries the file the finding is about. That
+// alone does not prove the code is gone: a rename leaves the anchor path empty
+// while the code lives on under a new name, and git records a rewritten rename
+// as a deletion plus an addition, which no path comparison can see.
+//
+// The branch's own history is the evidence. The commit that removed the anchor
+// removed it and replaced nothing: a rename shows up there as a rename entry,
+// and a rewritten rename as an addition beside the deletion. An anchor the
+// branch never tracked has no code to relocate at all.
+//
+// Every proof here fails closed: an unreadable history, an unreadable commit or
+// a removal that carried a replacement all leave the finding outstanding.
+func deletedAnchorNotRelocated(sctx *StepContext, item types.Finding, comparison *db.ReviewComparison) bool {
+	removed, err := anchorRemovalCommits(sctx, item, comparison)
+	if err != nil {
+		return false
+	}
+	if len(removed) == 0 {
+		touched, err := anchorHistoryCommits(sctx, item, comparison)
+		if err != nil {
+			return false
+		}
+		return len(touched) == 0
+	}
+	for _, commit := range removed {
+		changes, err := git.RunRaw(sctx.Ctx, sctx.WorkDir, "show", "--diff-merges=first-parent", "--name-status", "-z", "--find-renames", "--find-copies", "--no-ext-diff", "--no-textconv", "--format=", commit)
+		if err != nil {
+			return false
+		}
+		if commitReplacedPath(changes) {
+			return false
+		}
+	}
+	return true
+}
+
+// anchorRemovalCommits lists the branch commits that removed the anchor file.
+//
+// The pathspec is literal: a finding may name a path that reads as pathspec
+// magic, and a magic pathspec would silently match a different set of files
+// than the anchor the finding is about.
+//
+// --full-history turns git's path-history simplification off. Without it a
+// merge commit whose anchor state matches one of its parents is pruned, and
+// the traversal follows that parent alone, which can hide both the removal
+// and the branch that added the anchor. --diff-merges=first-parent gives a
+// merge commit its first-parent diff, so a removal a merge performed is
+// visible, and --no-patch keeps the output a list of SHAs and nothing else.
+func anchorRemovalCommits(sctx *StepContext, item types.Finding, comparison *db.ReviewComparison) ([]string, error) {
+	out, err := git.Run(sctx.Ctx, sctx.WorkDir, "--literal-pathspecs", "log", "--format=%H", "--no-patch", "--full-history", "--diff-filter=D", "--diff-merges=first-parent", comparison.MergeBaseSHA+".."+comparison.HeadSHA, "--", item.File)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(out), nil
+}
+
+// anchorHistoryCommits lists every branch commit that touched the anchor file.
+//
+// It is the search that tells an anchor the branch never tracked from one whose
+// removal the diff machinery omitted, so it may not hide a commit either: the
+// same --full-history that keeps a pruned merge visible keeps the branch that
+// added the anchor visible.
+func anchorHistoryCommits(sctx *StepContext, item types.Finding, comparison *db.ReviewComparison) ([]string, error) {
+	out, err := git.Run(sctx.Ctx, sctx.WorkDir, "--literal-pathspecs", "log", "--format=%H", "--no-patch", "--full-history", "--diff-merges=first-parent", comparison.MergeBaseSHA+".."+comparison.HeadSHA, "--", item.File)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(out), nil
+}
+
+// commitReplacedPath reports whether a commit's own diff added or relocated
+// anything.
+//
+// A commit that only removed the anchor's file removed it. A commit that also
+// added a path may have moved the anchor's code there instead, and that is
+// exactly how git records a rewritten rename: a deletion beside an addition.
+func commitReplacedPath(changes []byte) bool {
+	fields := strings.Split(strings.TrimSuffix(string(changes), "\x00"), "\x00")
+	for i := 0; i < len(fields); {
+		if fields[i] == "" {
+			i++
+			continue
+		}
+		status := fields[i]
+		if strings.HasPrefix(status, "A") || strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
+			return true
+		}
+		i += 2
+	}
+	return false
 }
 
 func scopeFindingsForReview(sctx *StepContext, raw string) string {
