@@ -41,6 +41,13 @@ const (
 	// Adapters that forward assistant prose alone contribute it through
 	// OnChunk, which is the same forward motion.
 	LifecyclePhaseProgress = "progress"
+	// LifecyclePhaseTool marks a tool call or tool result inside a running
+	// turn. It says something progress cannot: a tool may have left a side
+	// effect behind, so a turn that reported one must never be replayed under
+	// another agent. Adapters emit it IN ADDITION to progress for a tool
+	// event, and for nothing else - reasoning and prose are progress only, and
+	// reporting those here would withhold safe fallbacks.
+	LifecyclePhaseTool = "tool"
 )
 
 // nativeAgentActivityInterval throttles LifecyclePhaseActivity so a chatty
@@ -147,6 +154,23 @@ func agentProgressEmitter(opts RunOpts, name string) func() {
 		emitLifecycle(opts, LifecycleEvent{
 			Agent: name,
 			Phase: LifecyclePhaseProgress,
+		})
+	}
+}
+
+// agentToolEmitter returns the callback a structured-stream parser uses to
+// report a tool call or tool result, or nil when nobody is observing the
+// invocation. It is emitted alongside progress for the same event: the progress
+// phase keeps a long tool stretch from looking wedged, and this one carries the
+// side-effect fact the fallback classes must not replay.
+func agentToolEmitter(opts RunOpts, name string) func() {
+	if opts.OnLifecycle == nil {
+		return nil
+	}
+	return func() {
+		emitLifecycle(opts, LifecycleEvent{
+			Agent: name,
+			Phase: LifecyclePhaseTool,
 		})
 	}
 }

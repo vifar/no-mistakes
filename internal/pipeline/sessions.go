@@ -94,7 +94,10 @@ func (rs *RunSessions) Run(ctx context.Context, a agent.Agent, role SessionRole,
 		rs.remember(role, result.SessionID, sessionProvider(a, result))
 		return result, nil
 	}
-	if storedID == "" || ctx.Err() != nil {
+	// An attempt the invocation's own bound ended is not a failed resume: the
+	// turn was cut, not the identity. Retrying cold would repeat work it may
+	// already have done and spend the invocation twice.
+	if storedID == "" || ctx.Err() != nil || agent.AttemptEnded(err) {
 		return nil, err
 	}
 

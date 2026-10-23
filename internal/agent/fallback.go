@@ -166,6 +166,15 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 	return nil, lastErr
 }
 
+// ReplayUnsafe reports whether a failure's own record says its turn may not be
+// run again: it provably ran a tool, or nothing available proves it did not.
+// The pipeline's attempt seam reads it before classifying a stall or a budget
+// cut too, because an adapter that lost its stream can hold a tool event it
+// never delivered.
+func ReplayUnsafe(err error) bool {
+	return replayRanTools(err) || opencodeReplayUnsafe(err)
+}
+
 // FallbackReasonFor classifies a failed attempt by the reason class the
 // fallback wrapper announces, for callers that run candidates themselves
 // through RunOpts.RunAttempt.
@@ -188,7 +197,7 @@ func FallbackReasonFor(err error) FallbackReason {
 	// after a tool has run, and before the unavailable class because the
 	// killed-process report a timeout appends ("codex exited: signal: killed")
 	// would otherwise read as an agent that never started.
-	if replayRanTools(err) || opencodeReplayUnsafe(err) {
+	if ReplayUnsafe(err) {
 		return FallbackNone
 	}
 	if IsRefused(err) {

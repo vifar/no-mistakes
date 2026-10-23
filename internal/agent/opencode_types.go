@@ -231,11 +231,11 @@ type opencodeTextPart struct {
 type opencodeStreamState struct {
 	sessionID string
 	onChunk   func(string)
-	// onProgress reports a turn advance to the caller's activity observer. It
-	// is the only liveness signal a tool-only stretch can produce: a tool call
-	// streams no assistant text, so without it an opencode turn that is running
-	// tools looks exactly like a wedged one and is cut at the stall bound.
-	onProgress      func()
+	// onTool reports a tool part as a turn advance AND as side-effect
+	// evidence. It is the only liveness signal a tool-only stretch can produce
+	// (a tool call streams no assistant text), and it is what stops a
+	// tool-running turn from being replayed under another agent.
+	onTool          func()
 	textParts       map[string]*opencodeTextPart
 	textPartOrder   []string
 	usageByMsg      map[string]TokenUsage

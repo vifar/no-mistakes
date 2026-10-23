@@ -129,7 +129,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		}
 		return res
 	}
-	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, agentProgressEmitter(opts, "codex"), &usage, &lastMessage, &codexErr, &threadID, metrics); err != nil {
+	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, agentProgressEmitter(opts, "codex"), agentToolEmitter(opts, "codex"), &usage, &lastMessage, &codexErr, &threadID, metrics); err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("codex parse events: %w", err)
@@ -339,7 +339,7 @@ type codexUsage struct {
 // evidence (round-trips, tool calls + categories, subprocess wait time). It is
 // clocked by time.Now as events arrive, so a tool item's started->completed gap
 // is its real subprocess wall time.
-func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), onProgress func(), usage *TokenUsage, lastMessage *string, codexErr *string, threadID *string, metrics *codexMetricsAccumulator) error {
+func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), onProgress, onTool func(), usage *TokenUsage, lastMessage *string, codexErr *string, threadID *string, metrics *codexMetricsAccumulator) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024*1024)
 
@@ -374,10 +374,12 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), on
 		case "item.started":
 			metrics.onItem(event.Type, event.Item, time.Now())
 			reportCodexProgress(onProgress)
+			reportCodexTool(onTool, event.Item)
 
 		case "item.completed":
 			metrics.onItem(event.Type, event.Item, time.Now())
 			reportCodexProgress(onProgress)
+			reportCodexTool(onTool, event.Item)
 			if event.Item != nil && event.Item.Type == "agent_message" {
 				*lastMessage = event.Item.Text
 				if onChunk != nil {
@@ -410,6 +412,21 @@ func reportCodexProgress(onProgress func()) {
 	if onProgress != nil {
 		onProgress()
 	}
+}
+
+// reportCodexTool reports an item that may have acted on the world. Codex
+// reports reasoning and assistant prose as items too, so only the item types
+// that run something count: reporting the others would withhold a fallback that
+// is safe.
+func reportCodexTool(onTool func(), item *codexItem) {
+	if onTool == nil || item == nil {
+		return
+	}
+	switch item.Type {
+	case "reasoning", "agent_message", "":
+		return
+	}
+	onTool()
 }
 
 func codexOutputSchema(schema json.RawMessage) ([]byte, error) {

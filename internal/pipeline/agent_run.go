@@ -320,6 +320,12 @@ func (a *agentAttempt) run(candidate agent.Agent, opts agent.RunOpts) (*agent.Re
 		return result, nil, agent.FallbackNone
 	}
 	a.lastErr = err
+	if errors.Is(err, ErrAgentStall) || budgetCut(err) {
+		// The invocation's own bound ended this turn. A wrapper above this seam
+		// (the session layer) must not restart it as if the adapter had failed:
+		// that would run the same candidate twice over partial work.
+		err = agent.MarkAttemptEnded(err)
+	}
 	return partial, err, a.reason(err, activity)
 }
 
@@ -351,7 +357,11 @@ func (a *agentAttempt) reason(err error, activity *agentActivity) agent.Fallback
 		// acted and then wedged, or ran out of budget while working, may have
 		// edited files, and a turn still waiting on a child process was
 		// working rather than silent, so none of those hands the work on.
-		if activity.madeProgress() || activity.waitingOnChild() {
+		//
+		// The adapter's own record is read first: a stream that died can hold
+		// a tool event it never delivered, so silence in the measurement is
+		// not proof that nothing ran.
+		if agent.ReplayUnsafe(err) || activity.madeProgress() || activity.ranTools() || activity.waitingOnChild() {
 			return agent.FallbackNone
 		}
 		if !a.worktreeUntouched() {
@@ -368,7 +378,7 @@ func (a *agentAttempt) reason(err error, activity *agentActivity) agent.Fallback
 	// another agent's fresh turn would not build on edits or a commit the
 	// refused one already made. A clean tree alone is not replay safety - a
 	// live-validation tool can act outside it.
-	if activity.ranTools() || !a.worktreeUntouched() {
+	if agent.ReplayUnsafe(err) || activity.ranTools() || !a.worktreeUntouched() {
 		return agent.FallbackNone
 	}
 	return reason
@@ -874,6 +884,11 @@ func observeAgentActivity(opts *agent.RunOpts) *agentActivity {
 		case agent.LifecyclePhaseActivity:
 			activity.observe()
 		case agent.LifecyclePhaseProgress:
+			activity.observe()
+			activity.observeProgress()
+		case agent.LifecyclePhaseTool:
+			// A tool call is progress AND the side-effect fact the fallback
+			// classes must respect.
 			activity.observe()
 			activity.observeProgress()
 			activity.observeToolProgress()

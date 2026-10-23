@@ -308,6 +308,7 @@ func newPiParser(opts RunOpts, name string) *piParser {
 	return &piParser{
 		onChunk:    opts.OnChunk,
 		onProgress: agentProgressEmitter(opts, name),
+		onTool:     agentToolEmitter(opts, name),
 	}
 }
 
@@ -323,6 +324,9 @@ type piParser struct {
 	// progress signal would be the occasional line of prose and a healthy long
 	// turn would look identical to a wedged one. See LifecyclePhaseProgress.
 	onProgress func()
+	// onTool, when set, is invoked for a tool execution boundary: the side
+	// effect the fallback classes must never replay.
+	onTool func()
 
 	streamText     map[int]string
 	completeText   map[int]string
@@ -386,12 +390,15 @@ func (p *piParser) handleEvent(event map[string]any) {
 		p.progress()
 	case "tool_execution_start":
 		// A tool boundary is unambiguous forward motion, and these are the
-		// events that keep a long tool-heavy turn visible as progress.
+		// events that keep a long tool-heavy turn visible as progress. They are
+		// also the tool evidence a replay must respect.
 		p.progress()
+		p.tool()
 	case "agent_end":
 		p.rememberAgentEnd(event["messages"])
 	case "tool_execution_end":
 		p.progress()
+		p.tool()
 		p.rememberOutputTool(event)
 	}
 }
@@ -400,6 +407,13 @@ func (p *piParser) handleEvent(event map[string]any) {
 func (p *piParser) progress() {
 	if p.onProgress != nil {
 		p.onProgress()
+	}
+}
+
+// tool reports a tool execution boundary to the observer.
+func (p *piParser) tool() {
+	if p.onTool != nil {
+		p.onTool()
 	}
 }
 

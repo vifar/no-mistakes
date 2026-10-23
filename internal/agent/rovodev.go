@@ -74,7 +74,7 @@ func (a *rovodevAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 
 	// Stream chat response
 	var usage TokenUsage
-	text, err := a.streamChat(ctx, baseURL, sessionID, opts.OnChunk, &usage)
+	text, err := a.streamChat(ctx, baseURL, sessionID, opts.OnChunk, agentToolEmitter(opts, a.Name()), &usage)
 	if err != nil {
 		// Best-effort cancel on error
 		a.cancelSession(baseURL, sessionID)
@@ -162,7 +162,7 @@ func (a *rovodevAgent) setChatMessage(ctx context.Context, baseURL, sessionID, m
 	return nil
 }
 
-func (a *rovodevAgent) streamChat(ctx context.Context, baseURL, sessionID string, onChunk func(string), usage *TokenUsage) (string, error) {
+func (a *rovodevAgent) streamChat(ctx context.Context, baseURL, sessionID string, onChunk func(string), onTool func(), usage *TokenUsage) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/v3/stream_chat", nil)
 	if err != nil {
 		return "", fmt.Errorf("rovodev stream request: %w", err)
@@ -182,7 +182,7 @@ func (a *rovodevAgent) streamChat(ctx context.Context, baseURL, sessionID string
 	}
 
 	var latestText string
-	err = parseRovodevSSE(resp.Body, onChunk, usage, &latestText)
+	err = parseRovodevSSE(resp.Body, onChunk, onTool, usage, &latestText)
 	return latestText, err
 }
 
@@ -259,7 +259,7 @@ type rovodevSSEDelta struct {
 //
 // Tool activity ("tool-return", "on_call_tools_start") resets the buffer so
 // only the final post-tool text segment is returned as the structured answer.
-func parseRovodevSSE(r io.Reader, onChunk func(string), usage *TokenUsage, latestText *string) error {
+func parseRovodevSSE(r io.Reader, onChunk func(string), onTool func(), usage *TokenUsage, latestText *string) error {
 	var parts []string
 	partIndex := map[int]int{}
 	var hasEmittedText, hadToolActivity bool
@@ -344,6 +344,11 @@ func parseRovodevSSE(r io.Reader, onChunk func(string), usage *TokenUsage, lates
 		case "tool-return", "on_call_tools_start":
 			resetParts()
 			hadToolActivity = true
+			// The stream has no separate progress signal, so a tool boundary
+			// is both the turn advance and the side-effect evidence.
+			if onTool != nil {
+				onTool()
+			}
 		}
 
 		return true

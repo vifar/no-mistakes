@@ -169,7 +169,7 @@ func TestParseGrokEventsStructuredSuccess(t *testing.T) {
 
 	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), func(chunk string) {
 		chunks = append(chunks, chunk)
-	})
+	}, nil, nil)
 	if err != nil {
 		t.Fatalf("parseGrokEvents() error = %v", err)
 	}
@@ -196,7 +196,7 @@ func TestParseGrokEventsStructuredSuccess(t *testing.T) {
 
 func TestParseGrokEventsTreatsAllZeroUsageAsUnknown(t *testing.T) {
 	events := `{"type":"result","subtype":"success","is_error":false,"result":"done","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"reasoning_tokens":0}}` + "\n"
-	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
+	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("parseGrokEvents() error = %v", err)
 	}
@@ -207,7 +207,7 @@ func TestParseGrokEventsTreatsAllZeroUsageAsUnknown(t *testing.T) {
 
 func TestParseGrokEventsRequiresStructuredOutputWhenSchemaRequested(t *testing.T) {
 	events := `{"type":"result","subtype":"success","is_error":false,"result":"plain"}` + "\n"
-	parsed, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
+	parsed, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil, nil, nil)
 	if err != nil {
 		t.Fatalf("parseGrokEvents() error = %v", err)
 	}
@@ -261,7 +261,7 @@ func TestFinalizeGrokResultRejectionReturnsUsageWithoutOutput(t *testing.T) {
 // the failed round as having used nothing.
 func TestParseGrokEventsErrorResultCarriesItsUsage(t *testing.T) {
 	events := `{"type":"result","subtype":"error_max_turns","is_error":true,"errors":["turn limit"],"usage":{"input_tokens":11,"output_tokens":7,"cache_read_input_tokens":5,"cache_creation_input_tokens":3}}` + "\n"
-	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
+	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "turn limit") {
 		t.Fatalf("parseGrokEvents() error = %v, want the terminal detail", err)
 	}
@@ -279,7 +279,7 @@ func TestParseGrokEventsErrorResultCarriesItsUsage(t *testing.T) {
 // invocation's tokens unknown.
 func TestParseGrokEventsErrorResultWithoutUsageStaysUnknown(t *testing.T) {
 	events := `{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["tool failed"]}` + "\n"
-	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
+	result, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected a terminal error")
 	}
@@ -293,7 +293,7 @@ func TestParseGrokEventsErrorResultWithoutUsageStaysUnknown(t *testing.T) {
 
 func TestParseGrokEventsSurfacesTerminalError(t *testing.T) {
 	events := `{"type":"result","subtype":"error_during_execution","is_error":true,"errors":["tool failed"]}` + "\n"
-	_, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
+	_, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "tool failed") {
 		t.Fatalf("parseGrokEvents() error = %v, want terminal detail", err)
 	}

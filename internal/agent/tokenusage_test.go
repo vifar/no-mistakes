@@ -14,14 +14,14 @@ func TestTokenUsageNormalizesProviderInputBuckets(t *testing.T) {
 		{"claude", func(t *testing.T) TokenUsage {
 			var usage TokenUsage
 			events := `{"type":"assistant","message":{"usage":{"input_tokens":10000,"output_tokens":500,"cache_read_input_tokens":20000,"cache_creation_input_tokens":1000},"content":[]}}`
-			if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, &usage, nil); err != nil {
+			if err := parseClaudeEvents(context.Background(), strings.NewReader(events), nil, nil, nil, &usage, nil); err != nil {
 				t.Fatal(err)
 			}
 			return usage
 		}},
 		{"grok", func(t *testing.T) TokenUsage {
 			events := `{"type":"result","subtype":"success","result":"done","usage":{"input_tokens":10000,"output_tokens":500,"cache_read_input_tokens":20000,"cache_creation_input_tokens":1000}}`
-			result, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil)
+			result, err := parseGrokEvents(context.Background(), strings.NewReader(events), nil, nil, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -47,7 +47,7 @@ func TestTokenUsageNormalizesProviderInputBuckets(t *testing.T) {
 			var usage TokenUsage
 			var text string
 			events := "event: request-usage\ndata: {\"input_tokens\":31000,\"output_tokens\":500,\"cache_read_tokens\":20000,\"cache_write_tokens\":1000}\n\n"
-			if err := parseRovodevSSE(strings.NewReader(events), nil, &usage, &text); err != nil {
+			if err := parseRovodevSSE(strings.NewReader(events), nil, nil, &usage, &text); err != nil {
 				t.Fatal(err)
 			}
 			return usage

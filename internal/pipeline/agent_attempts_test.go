@@ -512,3 +512,95 @@ func TestAgentAttempt_SingleAttemptKeepsItsConfiguredWorkingCap(t *testing.T) {
 		t.Fatalf("attempt deadline = %s, want the configured 3h still-working cap", seen)
 	}
 }
+
+// A refusal after reasoning only is safe to hand on: no tool ran, so there is no
+// side effect to repeat. Counting every progress event as a tool would withhold
+// that safe fallback.
+func TestRunAgent_RefusalAfterReasoningOnlyStillFallsBack(t *testing.T) {
+	t.Parallel()
+	dir := fallbackTestWorktree(t)
+	refused := &hangingAgent{
+		name: "grok",
+		runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			opts.OnLifecycle(agent.LifecycleEvent{Agent: "grok", Phase: agent.LifecyclePhaseProgress})
+			return nil, errors.New("grok error: subtype=error_during_execution: request rejected by content policy")
+		},
+	}
+	next := &hangingAgent{
+		name: "claude",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Text: "reviewed"}, nil
+		},
+	}
+	sctx := attemptStepContext(dir, refused, next)
+
+	if _, err := sctx.RunAgent(agent.RunOpts{Prompt: "review"}); err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if next.calls != 1 {
+		t.Fatalf("next agent calls = %d, want the refusal handed on", next.calls)
+	}
+}
+
+// A tool call is not assistant output, so a tool-only turn reports it through
+// LifecyclePhaseTool. That evidence must stop the stall class: the tool may have
+// left a side effect a second agent would repeat.
+func TestRunAgent_StallAfterToolActivityDoesNotFallBack(t *testing.T) {
+	t.Parallel()
+	dir := fallbackTestWorktree(t)
+	worked := &hangingAgent{
+		name: "claude",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			opts.OnLifecycle(agent.LifecycleEvent{Agent: "claude", Phase: agent.LifecyclePhaseTool})
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	next := &hangingAgent{name: "codex"}
+	sctx := attemptStepContext(dir, worked, next)
+
+	_, err := sctx.RunAgent(agent.RunOpts{Prompt: "review"})
+	if !errors.Is(err, ErrAgentStall) {
+		t.Fatalf("error = %v, want ErrAgentStall", err)
+	}
+	if next.calls != 0 {
+		t.Fatalf("next agent ran %d time(s) over a turn that ran a tool", next.calls)
+	}
+}
+
+// A fixer turn the invocation budget cut is not a failed resume: the session
+// wrapper must not retry the same candidate cold over partial work.
+func TestRunAgentSession_BoundedTurnIsNotRetriedCold(t *testing.T) {
+	t.Parallel()
+	dir := fallbackTestWorktree(t)
+	database, run := sessionTestDB(t)
+	if err := database.UpsertRunAgentSession(run.ID, string(SessionRoleFixer), "claude", "claude-sess"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	claude := newFakeSessionAgent()
+	claude.name = "claude"
+	claude.blockNext = true
+	spare := newFakeSessionAgent()
+	spare.name = "codex"
+	// Two candidates so this is a real chain, and claude owns the session so
+	// the chain starts there.
+	chain := agent.NewFallback([]agent.Agent{spare, claude})
+
+	sctx := attemptStepContext(dir, spare, claude)
+	sctx.Agent = chain
+	sctx.Run = run
+	sctx.Sessions = NewRunSessions(database, run.ID, chain, true)
+	sctx.Config.AgentTimeout = 80 * time.Millisecond
+	sctx.Config.AgentStallTimeout = 10 * time.Second
+
+	_, err := sctx.RunAgentSession(SessionRoleFixer, agent.RunOpts{Prompt: "fix"})
+	if err == nil || !errors.Is(err, ErrAgentTimeout) {
+		t.Fatalf("error = %v, want the invocation budget", err)
+	}
+	if len(claude.calls) != 1 {
+		t.Fatalf("claude calls = %d, want the bounded turn to run once", len(claude.calls))
+	}
+	if len(spare.calls) != 0 {
+		t.Fatalf("spare agent ran %d time(s) after a bounded turn", len(spare.calls))
+	}
+}
