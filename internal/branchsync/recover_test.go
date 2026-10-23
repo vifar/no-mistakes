@@ -1104,25 +1104,41 @@ func TestCancellationReconcilesCommittedWorktreeHeadBeforeReleaseClassification(
 	}
 	f.run.Status = types.RunPending
 
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	// The executor protects the enrolled gate at its resolved repository path.
+	if err := os.Rename(f.gate, p.RepoDir(f.repo.ID)); err != nil {
+		t.Fatal(err)
+	}
+	f.gate = p.RepoDir(f.repo.ID)
+	f.service.GateDir = f.gate
+
 	managed := filepath.Join(t.TempDir(), "managed")
 	if err := gitpkg.WorktreeAdd(f.ctx, f.gate, managed, f.submitted); err != nil {
 		t.Fatal(err)
 	}
 	configureIdentity(t, managed)
-
-	p := paths.WithRoot(t.TempDir())
-	if err := p.EnsureDirs(); err != nil {
+	if err := gitpkg.RecordSharedConfigBaseline(f.ctx, f.gate); err != nil {
 		t.Fatal(err)
 	}
+
 	step := &cancellationRaceStep{committed: make(chan string, 1)}
 	executor := pipelinepkg.NewExecutor(f.db, p, nil, nil, []pipelinepkg.Step{step}, nil)
 	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
 	done := make(chan error, 1)
 	go func() {
 		done <- executor.Execute(ctx, f.run, f.repo, managed)
 	}()
 
-	committed := <-step.committed
+	var committed string
+	select {
+	case committed = <-step.committed:
+	case err := <-done:
+		t.Fatalf("executor stopped before the review commit: %v", err)
+	}
 	cancel(errors.New(types.RunCancelReasonAbortedByUser))
 	if err := <-done; err == nil {
 		t.Fatal("cancelled executor returned nil")

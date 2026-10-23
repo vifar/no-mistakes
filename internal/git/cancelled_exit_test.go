@@ -139,20 +139,31 @@ func TestCancelledExitRecordsOnlyTheContextsOwnStop(t *testing.T) {
 func TestCancelledExitRecordsARefusedStop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	// The child finishes on its own, so the command's own outcome is a
-	// success. The stop is refused, so the standard library reports the
-	// refusal INSTEAD of the success - and that report is the shape this
-	// failure takes: the command was interrupted, and the interruption
-	// could not reach the child.
-	cmd := exec.CommandContext(ctx, "true")
-	cmd.Cancel = func() error { return errors.New("operation not permitted") }
+	// Keep the child waiting for EOF until Cancel runs. An immediately
+	// exiting child can win the race with cancellation, in which case the
+	// standard library correctly reports success without calling Cancel.
+	cmd := exec.CommandContext(ctx, "git", "hash-object", "--stdin")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stdin.Close()
+	cmd.Cancel = func() error {
+		// EOF lets the child finish successfully; the refused stop must
+		// still be the standard library's reported outcome.
+		_ = stdin.Close()
+		return errors.New("operation not permitted")
+	}
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	cancel()
-	err := cmd.Wait()
+	err = cmd.Wait()
 	if err == nil {
 		t.Fatal("the refused stop reported success")
+	}
+	if !cmd.ProcessState.Success() {
+		t.Fatalf("child did not finish successfully: %v", err)
 	}
 	// The standard library's own report is the oracle: the test never
 	// builds the text the recogniser looks for, so a recogniser that
