@@ -347,7 +347,7 @@ func testRepairOutcomeExecutor(t *testing.T, capture bool, description string, c
 		t.Fatal("no persisted fixer round")
 	}
 	md, _ := BuildPipelineSummary(steps, grouped, c.Run.HeadSHA)
-	if change && (!strings.Contains(md, "1 issue found → Fix applied") || !strings.Contains(md, "🔧 Fix applied.") || strings.Contains(md, "result not reported") || strings.Contains(md, "🔧 No changes applied.")) {
+	if change && (!strings.Contains(md, "auto-fixed") || !strings.Contains(md, "🔧 Fix applied.") || strings.Contains(md, "result not reported") || strings.Contains(md, "🔧 No changes applied.")) {
 		t.Fatalf("ordinary Review rendering:\n%s", md)
 	}
 	if !change && (!strings.Contains(md, "🔧 No changes applied.") || strings.Contains(md, "auto-fixed")) {
@@ -392,16 +392,12 @@ func TestRepairOutcomeDescriptionIsNotEvidence(t *testing.T) {
 	for _, tc := range []struct {
 		name, description, want string
 		evidence                *bool
-		// A Review round's descriptive summary accompanies the round's own
-		// committed body edit, so for Review it IS evidence of an applied fix.
-		// An empty description is not evidence for any step.
-		descriptiveReviewRepair bool
 	}{
-		{"applied contradicts description", "no changes applied", "🔧 Fix applied.", &applied, false},
-		{"noop contradicts description", "changes applied", "🔧 No changes applied.", &noChange, false},
-		{"no report", "guard unsafe value", "🔧 Fix applied.", nil, true},
-		{"committed without description", "", "🔧 Fix applied.", &applied, false},
-		{"nothing reported", "", "🔧 Fix attempted; result not reported.", nil, false},
+		{"applied contradicts description", "no changes applied", "🔧 Fix applied.", &applied},
+		{"noop contradicts description", "changes applied", "🔧 No changes applied.", &noChange},
+		{"no report", "guard unsafe value", "🔧 Fix attempted; result not reported.", nil},
+		{"committed without description", "", "🔧 Fix applied.", &applied},
+		{"nothing reported", "", "🔧 Fix attempted; result not reported.", nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			findings := `{"findings":[{"id":"f1","severity":"error","description":"unsafe value"}]}`
@@ -409,7 +405,7 @@ func TestRepairOutcomeDescriptionIsNotEvidence(t *testing.T) {
 			if !strings.Contains(md, tc.want) {
 				t.Fatalf("round outcome:\n%s", md)
 			}
-			if tc.evidence == nil && !tc.descriptiveReviewRepair && (strings.Contains(md, "auto-fixed") || strings.Contains(md, "🔧 Fix applied.")) {
+			if tc.evidence == nil && (strings.Contains(md, "auto-fixed") || strings.Contains(md, "🔧 Fix applied.")) {
 				t.Fatalf("description claimed activity:\n%s", md)
 			}
 		})
