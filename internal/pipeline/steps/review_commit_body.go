@@ -203,15 +203,19 @@ func reviewAttributionKeyView(text string) string {
 }
 
 func reviewAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
+	return attributionEntryWithView(lines, start, configuredTrailers, reviewAttributionView)
+}
+
+func attributionEntryWithView(lines []string, start int, configuredTrailers []string, view func(string) (string, bool)) (end int, unfolded string, entry, ai bool) {
 	end = start + 1
-	firstLine, _ := reviewAttributionView(lines[start])
+	firstLine, _ := view(lines[start])
 	unfolded = firstLine
 	if end < len(lines) {
-		nextLine, continuation := reviewAttributionView(lines[end])
+		nextLine, continuation := view(lines[end])
 		if continuation {
 			nextLine = " " + nextLine
 		}
-		paired, _ := reviewAttributionView(lines[start] + "\n" + lines[end])
+		paired, _ := view(lines[start] + "\n" + lines[end])
 		first, following, hasPair := strings.Cut(paired, "\n")
 		if reviewAttributionStart(unfolded) {
 			if joined, ok := reviewAttributionContinuation(unfolded, nextLine); ok {

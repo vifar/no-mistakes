@@ -88,8 +88,23 @@ func bareCoAuthorLine(line string) bool {
 	return strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && strings.TrimSpace(value) != ""
 }
 
+func publishedAttributionView(line string) (string, bool) {
+	view, continuation := reviewAttributionView(line)
+	if close := strings.LastIndexByte(view, '>'); close >= 0 && strings.Trim(view[close+1:], " \t\r.,;:!?") == "" {
+		normalized, _ := reviewAttributionView(html.EscapeString(view[:close+1]))
+		if reviewAttributionAddressComplete("Co-Authored-By: " + normalized) {
+			return normalized, continuation
+		}
+	}
+	return view, continuation
+}
+
 func publishedAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
 	end, unfolded, entry, ai = reviewAttributionEntry(lines, start, configuredTrailers)
+	nativeEnd, nativeUnfolded, nativeEntry, nativeAI := attributionEntryWithView(lines, start, nil, publishedAttributionView)
+	end, unfolded = nativeEnd, nativeUnfolded
+	entry = entry || nativeEntry
+	ai = ai || nativeAI
 	key, value, _ := strings.Cut(unfolded, ":")
 	if strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && !strings.ContainsAny(value, "<>") && git.IsAIAttributionTrailer("Assisted-by:"+value) {
 		return end, unfolded, true, true
