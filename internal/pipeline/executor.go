@@ -484,7 +484,7 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 		if action == types.ActionSkip {
 			findings := e.waitingFindings
 			e.mu.Unlock()
-			return RespondDispositions{}, fmt.Errorf("%s", strictSkipRefusal(step, findings))
+			return RespondDispositions{}, fmt.Errorf("%s", StrictSkipRefusal(step, findings))
 		}
 		if action == types.ActionFix && e.waitingShipping.Mode == types.ShippingImmutableSource {
 			e.mu.Unlock()
@@ -500,7 +500,7 @@ func (e *Executor) RespondWithAcceptedGaps(step types.StepName, action types.App
 		if refusal := row.StrictApprovalRefusalWithGaps(approvalReason, gaps); refusal != "" {
 			findings := e.waitingFindings
 			e.mu.Unlock()
-			return RespondDispositions{}, errors.New(strictDocumentCapRefusal(step, findings, refusal))
+			return RespondDispositions{}, errors.New(StrictDocumentCapRefusal(step, findings, refusal))
 		}
 	} else if action == types.ActionApprove && (step == types.StepTest || gaps != nil) {
 		row, err := e.db.GetStepResult(e.waitingStepResultID)
@@ -1617,7 +1617,10 @@ func documentCapReached(findings string) bool {
 	return strings.Contains(findings, DocumentCapWayForward)
 }
 
-func strictDocumentCapRefusal(step types.StepName, findings, refusal string) string {
+// StrictDocumentCapRefusal appends the way forward to a strict refusal of a
+// Document gate whose commit cap is spent. The executor and the daemon's
+// pre-checks both refuse, so both use it.
+func StrictDocumentCapRefusal(step types.StepName, findings, refusal string) string {
 	if step != types.StepDocument || !documentCapReached(findings) || strings.Contains(refusal, DocumentCapWayForward) {
 		return refusal
 	}
@@ -1627,9 +1630,9 @@ func strictDocumentCapRefusal(step types.StepName, findings, refusal string) str
 	return refusal + " " + DocumentCapWayForward
 }
 
-func strictSkipRefusal(step types.StepName, findings string) string {
+func StrictSkipRefusal(step types.StepName, findings string) string {
 	refusal := "strict shipping forbids skipped steps"
-	return strictDocumentCapRefusal(step, findings, refusal)
+	return StrictDocumentCapRefusal(step, findings, refusal)
 }
 
 // refreshDocumentCommitLimit re-reads the machine-local cap. A missing

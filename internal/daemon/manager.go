@@ -3474,7 +3474,15 @@ func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.Step
 	}
 	if run != nil && run.Shipping != nil {
 		if action == types.ActionSkip {
-			return pipeline.RespondDispositions{}, fmt.Errorf("strict shipping forbids skipped steps")
+			findings := ""
+			if rows, err := m.db.GetStepsByRun(runID); err == nil {
+				for _, row := range rows {
+					if row.StepName == step && row.FindingsJSON != nil {
+						findings = *row.FindingsJSON
+					}
+				}
+			}
+			return pipeline.RespondDispositions{}, errors.New(pipeline.StrictSkipRefusal(step, findings))
 		}
 		if action == types.ActionFix && run.Shipping.Mode == types.ShippingImmutableSource {
 			return pipeline.RespondDispositions{}, fmt.Errorf("immutable source forbids repairs")
@@ -3487,7 +3495,11 @@ func (m *RunManager) HandleRespondWithAcceptedGaps(runID string, step types.Step
 			for _, row := range rows {
 				if row.StepName == step {
 					if refusal := row.StrictApprovalRefusalWithGaps(approvalReason, gaps); refusal != "" {
-						return pipeline.RespondDispositions{}, errors.New(refusal)
+						findings := ""
+						if row.FindingsJSON != nil {
+							findings = *row.FindingsJSON
+						}
+						return pipeline.RespondDispositions{}, errors.New(pipeline.StrictDocumentCapRefusal(step, findings, refusal))
 					}
 				}
 			}
