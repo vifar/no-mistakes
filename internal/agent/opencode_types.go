@@ -229,8 +229,13 @@ type opencodeTextPart struct {
 
 // opencodeStreamState holds mutable state during SSE event processing.
 type opencodeStreamState struct {
-	sessionID       string
-	onChunk         func(string)
+	sessionID string
+	onChunk   func(string)
+	// onProgress reports a turn advance to the caller's activity observer. It
+	// is the only liveness signal a tool-only stretch can produce: a tool call
+	// streams no assistant text, so without it an opencode turn that is running
+	// tools looks exactly like a wedged one and is cut at the stall bound.
+	onProgress      func()
 	textParts       map[string]*opencodeTextPart
 	textPartOrder   []string
 	usageByMsg      map[string]TokenUsage

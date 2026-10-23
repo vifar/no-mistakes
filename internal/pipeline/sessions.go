@@ -87,16 +87,6 @@ func (rs *RunSessions) Run(ctx context.Context, a agent.Agent, role SessionRole,
 	}
 
 	stored := rs.id(role)
-	// An identity is meaningful only to the adapter that minted it. A fallback
-	// chain hands this call one candidate at a time, so the role may hold
-	// another provider's session - claude's, after codex failed and claude
-	// finished the turn. Resuming it here would pass a foreign session id to
-	// this adapter, and the failed resume would then DELETE the identity that
-	// still belongs to the provider that can use it. Start cold instead and
-	// keep the other provider's session intact.
-	if stored.Agent != "" && !agent.SupportsSessionProvider(a, stored.Agent) {
-		stored = agent.SessionRef{}
-	}
 	storedID := stored.ID
 	opts.Session = &stored
 	result, err := a.Run(ctx, opts)

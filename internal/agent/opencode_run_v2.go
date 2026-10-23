@@ -55,6 +55,7 @@ func (a *opencodeAgent) runOnceV2(ctx context.Context, opts RunOpts, baseURL str
 	state := &opencodeStreamState{
 		sessionID:  sessionID,
 		onChunk:    opts.OnChunk,
+		onProgress: agentProgressEmitter(opts, a.Name()),
 		textParts:  make(map[string]*opencodeTextPart),
 		usageByMsg: make(map[string]TokenUsage),
 	}
@@ -142,6 +143,14 @@ func (a *opencodeAgent) runOnceV2(ctx context.Context, opts RunOpts, baseURL str
 		return result, opencodeTurnFailure(state.v2ToolEvidence(), err)
 	}
 	return result, nil
+}
+
+// observeToolProgress reports a tool part as forward motion, when anyone is
+// observing the invocation.
+func (s *opencodeStreamState) observeToolProgress() {
+	if s != nil && s.onProgress != nil {
+		s.onProgress()
+	}
 }
 
 // v2ToolEvidence answers the replay gate's question for a 2.x turn.

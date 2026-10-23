@@ -186,7 +186,16 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 			started:    time.Now(),
 		}
 		opts.RunAttempt = attempts.run
-		result, runErr = ag.Run(parent, opts)
+		if sessionRole != "" && sctx.Sessions != nil {
+			// The session layer wraps the CHAIN, not each candidate: it decides
+			// which provider owns the role's identity and the chain then starts
+			// there, so a provider that recovered cannot silently replace a
+			// healthy session owner. Each candidate still gets its own attempt
+			// through the seam.
+			result, runErr = sctx.Sessions.Run(parent, ag, sessionRole, opts, sctx.Log)
+		} else {
+			result, runErr = ag.Run(parent, opts)
+		}
 	} else {
 		activity := observeAgentActivity(&opts)
 		result, runErr = invokeAgent(parent, timeout, working, stall, cause, activity, func(ctx context.Context) (*agent.Result, error) {
@@ -274,11 +283,17 @@ func fallbackWallClock(timeout time.Duration) time.Duration { return 2 * timeout
 // build on work it cannot see, so a dirty tree fails the step exactly as it did
 // before.
 func (a *agentAttempt) run(candidate agent.Agent, opts agent.RunOpts) (*agent.Result, error, agent.FallbackReason) {
-	// The total wall clock is enforced HERE, not only at admission: a
-	// candidate's own budget is clamped to what is left of it, so two silent
-	// candidates cannot spend two budgets and hand a third another full one.
+	// The fallback total is enforced HERE, not only at admission: from the
+	// second attempt on, a candidate's budget is clamped to what is left of it,
+	// so two silent candidates cannot spend two budgets and hand a third
+	// another full one.
+	//
+	// The FIRST attempt keeps its configured limits untouched. It is the only
+	// attempt on a route with no candidate behind it (a single configured
+	// reviewer or fixer reached through reviewAgents), where a fallback total
+	// must never shorten a cap the operator set for that turn.
 	timeout, working := a.timeout, a.working
-	if a.timeout > 0 {
+	if a.timeout > 0 && a.attempts > 0 {
 		remaining := fallbackWallClock(a.timeout) - time.Since(a.started)
 		if remaining <= 0 {
 			return nil, a.budgetSpent(), agent.FallbackNone
@@ -292,14 +307,20 @@ func (a *agentAttempt) run(candidate agent.Agent, opts agent.RunOpts) (*agent.Re
 	}
 	a.attempts++
 	activity := observeAgentActivity(&opts)
+	var partial *agent.Result
 	result, err := invokeAgent(a.parent, timeout, working, a.stall, a.cause, activity, func(ctx context.Context) (*agent.Result, error) {
-		return a.invoke(ctx, candidate, opts)
+		runResult, runErr := a.invoke(ctx, candidate, opts)
+		// invokeAgent drops a result whenever the attempt failed, but an
+		// adapter's failed turn still carries the usage it spent. Keep it for
+		// the attempt record the fallback wrapper emits.
+		partial = runResult
+		return runResult, runErr
 	})
 	if err == nil {
 		return result, nil, agent.FallbackNone
 	}
 	a.lastErr = err
-	return result, err, a.reason(err, activity)
+	return partial, err, a.reason(err, activity)
 }
 
 // budgetSpent is the terminal error for an invocation that used its fallback
@@ -343,9 +364,11 @@ func (a *agentAttempt) reason(err error, activity *agentActivity) agent.Fallback
 		return reason
 	}
 	// A refusal is only a provider verdict when the attempt has nothing to
-	// undo. The same gate as a stall: another agent's fresh turn must not build
-	// on edits or a commit the refused one already made.
-	if !a.worktreeUntouched() {
+	// undo. Two records must agree: the turn reported no tool activity, and
+	// another agent's fresh turn would not build on edits or a commit the
+	// refused one already made. A clean tree alone is not replay safety - a
+	// live-validation tool can act outside it.
+	if activity.ranTools() || !a.worktreeUntouched() {
 		return agent.FallbackNone
 	}
 	return reason
@@ -477,6 +500,11 @@ type agentActivity struct {
 	// the stall bound watches.
 	progressed    time.Time
 	progressCount int
+	// toolCount counts progress events that were a tool call or tool result
+	// rather than assistant text. A refusal is only safe to hand to another
+	// agent when the turn ran no tool: replaying one would repeat its side
+	// effects. Text alone does not carry that risk.
+	toolCount int
 	// launchedPID is the native subprocess PID, when one was reported.
 	launchedPID int
 	launchedAt  time.Time
@@ -626,6 +654,7 @@ func (a *agentActivity) beginAttempt() {
 	a.observed = 0
 	a.progressed = time.Time{}
 	a.progressCount = 0
+	a.toolCount = 0
 	a.launched = false
 	a.launchedPID = 0
 	a.launchedAt = time.Time{}
@@ -722,6 +751,29 @@ func (a *agentActivity) madeProgress() bool {
 	}
 	a.mu.Lock()
 	count := a.progressCount
+	a.mu.Unlock()
+	return count > 0
+}
+
+// observeToolProgress records that the turn reported a tool call or tool
+// result. Adapters emit LifecyclePhaseProgress for both assistant text and tool
+// activity; only this one means a side effect may exist.
+func (a *agentActivity) observeToolProgress() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.toolCount++
+	a.mu.Unlock()
+}
+
+// ranTools reports whether the attempt reported tool activity at all.
+func (a *agentActivity) ranTools() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	count := a.toolCount
 	a.mu.Unlock()
 	return count > 0
 }
@@ -824,6 +876,7 @@ func observeAgentActivity(opts *agent.RunOpts) *agentActivity {
 		case agent.LifecyclePhaseProgress:
 			activity.observe()
 			activity.observeProgress()
+			activity.observeToolProgress()
 		case agent.LifecyclePhaseRetry, agent.LifecyclePhaseFallback:
 			activity.beginAttempt()
 		case agent.LifecyclePhaseExit:

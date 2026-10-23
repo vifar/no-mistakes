@@ -98,8 +98,11 @@ func parseOpencodeV2SSE(r interface{ Read([]byte) (int, error) }, state *opencod
 
 		case "session.tool.called", "session.tool.input.started", "session.tool.progress":
 			// A tool part means the turn may have left side effects behind,
-			// which is the durable evidence the replay gate reads.
+			// which is the durable evidence the replay gate reads. It is also
+			// forward motion: a tool streams no assistant text, so this is the
+			// only liveness signal a tool-only stretch produces.
 			state.toolInvoked = true
+			state.observeToolProgress()
 
 		case "session.step.ended", "session.step.failed":
 			if data.Tokens != nil {

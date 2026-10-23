@@ -394,7 +394,9 @@ func TestRunAgent_BudgetExpiryAfterProgressDoesNotFallBack(t *testing.T) {
 	next := &hangingAgent{name: "claude"}
 	sctx := attemptStepContext(dir, working, next)
 	sctx.Config.AgentTimeout = 80 * time.Millisecond
-	sctx.Config.AgentWorkingTimeout = 10 * time.Second
+	// Far beyond twice the silent budget: the first attempt keeps the cap the
+	// operator configured for it, because no fallback is owed its time.
+	sctx.Config.AgentWorkingTimeout = 400 * time.Millisecond
 
 	start := time.Now()
 	_, err := sctx.RunAgent(agent.RunOpts{Prompt: "review"})
@@ -406,23 +408,23 @@ func TestRunAgent_BudgetExpiryAfterProgressDoesNotFallBack(t *testing.T) {
 	if next.calls != 0 {
 		t.Fatalf("next agent ran %d time(s) after a budget cut with progress", next.calls)
 	}
-	// The still-working cap is clamped to the fallback total (2x the silent
-	// budget), so the attempt cannot outlive the advertised total.
-	if elapsed > 2*time.Second {
-		t.Fatalf("attempt ran %s, want it bounded by twice the 80ms budget", elapsed)
+	if elapsed > 3*time.Second {
+		t.Fatalf("attempt ran %s, want the configured 400ms still-working cap", elapsed)
 	}
 }
 
-// Each attempt is clamped to what is left of the invocation's total, so two
-// spent candidates cannot hand a third a full budget.
+// A fallback attempt is clamped to what is left of the invocation's total, so
+// two spent candidates cannot hand a third a full budget.
 func TestAgentAttempt_ClampsEachAttemptToTheRemainingTotal(t *testing.T) {
 	t.Parallel()
 	var seen time.Duration
 	attempt := &agentAttempt{
 		parent:  context.Background(),
 		timeout: 100 * time.Millisecond,
-		// 150ms of the 200ms total is already gone.
-		started: time.Now().Add(-150 * time.Millisecond),
+		// The first candidate already ran, and 150ms of the 200ms total is
+		// gone.
+		attempts: 1,
+		started:  time.Now().Add(-150 * time.Millisecond),
 		invoke: func(ctx context.Context, _ agent.Agent, _ agent.RunOpts) (*agent.Result, error) {
 			deadline, ok := ctx.Deadline()
 			if !ok {
@@ -440,11 +442,10 @@ func TestAgentAttempt_ClampsEachAttemptToTheRemainingTotal(t *testing.T) {
 	}
 }
 
-// The fixer role may hold the session of a candidate that finished a turn. The
-// chain still starts at the primary agent every turn, so a stored identity has
-// to survive that: the primary must not be handed it (a foreign resume would
-// delete it), and the provider that owns it must still resume it.
-func TestRunAgentSession_FallbackKeepsEachProvidersSession(t *testing.T) {
+// A provider that owns a stored role session keeps the turn: the chain must not
+// start at a recovered primary and hand it a foreign session id, which would
+// replace the identity the owner could still resume.
+func TestRunAgentSession_StoredIdentityRoutesToItsOwner(t *testing.T) {
 	t.Parallel()
 	dir := fallbackTestWorktree(t)
 	database, run := sessionTestDB(t)
@@ -453,7 +454,6 @@ func TestRunAgentSession_FallbackKeepsEachProvidersSession(t *testing.T) {
 	}
 	codex := newFakeSessionAgent()
 	codex.name = "codex"
-	codex.failNext = errors.New("codex start: executable not found")
 	claude := newFakeSessionAgent()
 	claude.name = "claude"
 	chain := agent.NewFallback([]agent.Agent{codex, claude})
@@ -467,11 +467,11 @@ func TestRunAgentSession_FallbackKeepsEachProvidersSession(t *testing.T) {
 	if _, err := sctx.RunAgentSession(SessionRoleFixer, agent.RunOpts{Prompt: "fix"}); err != nil {
 		t.Fatalf("RunAgentSession: %v", err)
 	}
-	if len(codex.calls) != 1 || len(claude.calls) != 1 {
-		t.Fatalf("calls = codex %d claude %d, want 1/1", len(codex.calls), len(claude.calls))
+	if len(codex.calls) != 0 {
+		t.Fatalf("codex calls = %d, want the stored owner to keep the turn", len(codex.calls))
 	}
-	if got := codex.calls[0].session; got == nil || got.ID != "" {
-		t.Fatalf("codex session = %+v, want a cold start rather than claude's identity", got)
+	if len(claude.calls) != 1 {
+		t.Fatalf("claude calls = %d, want 1", len(claude.calls))
 	}
 	if got := claude.calls[0].session; got == nil || got.ID != "claude-sess" {
 		t.Fatalf("claude session = %+v, want its own stored identity resumed", got)
@@ -482,5 +482,33 @@ func TestRunAgentSession_FallbackKeepsEachProvidersSession(t *testing.T) {
 	}
 	if len(stored) != 1 || stored[0].Agent != "claude" || stored[0].SessionID != "claude-sess" {
 		t.Fatalf("stored session = %+v, want claude's identity kept", stored)
+	}
+}
+
+// A route with no candidate behind it (a single configured reviewer or fixer)
+// keeps the caps the operator set for it: there is no fallback time to bound,
+// so the fallback total must not shorten a three-hour still-working cap.
+func TestAgentAttempt_SingleAttemptKeepsItsConfiguredWorkingCap(t *testing.T) {
+	t.Parallel()
+	var seen time.Duration
+	attempt := &agentAttempt{
+		parent:  context.Background(),
+		timeout: 30 * time.Minute,
+		working: 3 * time.Hour,
+		started: time.Now(),
+		invoke: func(ctx context.Context, _ agent.Agent, _ agent.RunOpts) (*agent.Result, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("attempt ran with no deadline")
+			}
+			seen = time.Until(deadline)
+			return &agent.Result{Text: "ok"}, nil
+		},
+	}
+	if _, err, _ := attempt.run(&hangingAgent{name: "claude"}, agent.RunOpts{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if seen < 2*time.Hour {
+		t.Fatalf("attempt deadline = %s, want the configured 3h still-working cap", seen)
 	}
 }
