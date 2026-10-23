@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -65,6 +68,53 @@ func TestTransientNetworkFailureIsRetriedThenSucceeds(t *testing.T) {
 	}
 	if got := calls(t, counter); got != 3 {
 		t.Fatalf("git calls = %d, want 3 (two transient failures then success)", got)
+	}
+}
+
+func TestFetchRetriesStalledHTTPTransfer(t *testing.T) {
+	previousBase, previousMax := networkRetryBase, networkRetryMax
+	networkRetryBase, networkRetryMax = time.Millisecond, time.Millisecond
+	t.Cleanup(func() { networkRetryBase, networkRetryMax = previousBase, previousMax })
+
+	source := initTestRepo(t)
+	run(t, source, "git", "branch", "dev")
+	want := run(t, source, "git", "rev-parse", "HEAD")
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	run(t, root, "git", "clone", "--bare", source, remote)
+	run(t, remote, "git", "update-server-info")
+
+	// Git's low-speed timeout must retry twice, then fetch the actual commit
+	// through dumb HTTP. This diagnostic has no "curl 28" prefix.
+	var attempts atomic.Int32
+	files := http.FileServer(http.Dir(root))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/remote.git/info/refs" && attempts.Add(1) <= 2 {
+			select {
+			case <-r.Context().Done():
+			case <-time.After(10 * time.Second):
+			}
+			return
+		}
+		files.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+
+	work := t.TempDir()
+	run(t, work, "git", "init")
+	run(t, work, "git", "config", "http.lowSpeedLimit", "1")
+	run(t, work, "git", "config", "http.lowSpeedTime", "1")
+	run(t, work, "git", "remote", "add", "origin", server.URL+"/remote.git")
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := FetchRemoteBranch(ctx, work, "origin", "dev"); err != nil {
+		t.Fatalf("fetch after two stalled transfers (attempts=%d): %v", attempts.Load(), err)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("fetch attempts = %d, want 3", got)
+	}
+	if got := run(t, work, "git", "rev-parse", "refs/remotes/origin/dev"); got != want {
+		t.Fatalf("fetched commit = %s, want %s", got, want)
 	}
 }
 

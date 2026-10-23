@@ -283,6 +283,7 @@ func ClassifyText(text string) Class {
 		strings.Contains(lower, "tls handshake timeout"),
 		strings.Contains(lower, "i/o timeout"),
 		strings.Contains(lower, "operation timed out"),
+		strings.Contains(lower, "operation too slow. less than"),
 		strings.Contains(lower, "connection timed out"),
 		strings.Contains(lower, "timeout was reached"),
 		strings.Contains(lower, "client.timeout exceeded"),

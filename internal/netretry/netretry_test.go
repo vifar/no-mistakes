@@ -74,6 +74,11 @@ func TestDoEnforcesTransportRetryEligibility(t *testing.T) {
 		class   Class
 	}{
 		{"curl low speed timeout", "error: RPC failed; curl 28 Operation too slow. Less than 1000 bytes/sec transferred the last 30 seconds", ClassTimeout},
+		{"git low speed timeout", "fatal: unable to access 'https://github.com/x/y.git/': Operation too slow. Less than 1 bytes/sec transferred the last 1 seconds", ClassTimeout},
+		{"git low speed with permission failure", "HTTP 403: forbidden; Operation too slow. Less than 1 bytes/sec transferred the last 1 seconds", ""},
+		{"git low speed with rejected push", "[remote rejected] main -> main; Operation too slow. Less than 1 bytes/sec transferred the last 1 seconds", ""},
+		{"git low speed with conflict", "Merge conflict; Operation too slow. Less than 1 bytes/sec transferred the last 1 seconds", ""},
+		{"git low speed with validation failure", "Validation Failed; Operation too slow. Less than 1 bytes/sec transferred the last 1 seconds", ""},
 		{"curl timeout with permission failure", "HTTP 403: forbidden; RPC failed; curl 28 Operation too slow", ""},
 		{"other curl code", "error: RPC failed; curl 280 unknown failure", ""},
 		{"secondary limit with header", "HTTP 403: You have exceeded a secondary rate limit.\nRetry-After: 60", ClassRateLimit},
