@@ -94,16 +94,22 @@ func bareCoAuthorLine(line string) bool {
 	return strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && strings.TrimSpace(value) != ""
 }
 
-func publishedAttributionView(line string) (string, bool) {
-	line = strings.TrimRight(html.UnescapeString(line), " \t\r.,;:!?")
-	view, continuation := reviewAttributionView(html.EscapeString(line))
-	if close := strings.LastIndexByte(view, '>'); close >= 0 && strings.Trim(view[close+1:], " \t\r.,;:!?") == "" {
-		normalized, _ := reviewAttributionView(html.EscapeString(view[:close+1]))
-		if reviewAttributionAddressComplete("Co-Authored-By: " + normalized) {
-			return normalized, continuation
+func publishedAttributionLine(line string) (string, bool) {
+	continuation := false
+	for {
+		before := line
+		var indented bool
+		line, indented = reviewAttributionLine(strings.Trim(line, ".,;:!?"))
+		continuation = continuation || indented
+		if line == before {
+			return line, continuation
 		}
 	}
-	return view, continuation
+}
+
+func publishedAttributionView(line string) (string, bool) {
+	line = attributionKeyView(html.UnescapeString(line), publishedAttributionLine)
+	return attributionViewWithLine(html.EscapeString(line), publishedAttributionLine)
 }
 
 func publishedAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {

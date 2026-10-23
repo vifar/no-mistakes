@@ -131,13 +131,17 @@ func reviewAttributionContinuation(first, following string) (string, bool) {
 }
 
 func reviewAttributionView(line string) (string, bool) {
-	content, continuation := reviewAttributionLine(html.UnescapeString(line))
+	return attributionViewWithLine(line, reviewAttributionLine)
+}
+
+func attributionViewWithLine(line string, lineView func(string) (string, bool)) (string, bool) {
+	content, continuation := lineView(html.UnescapeString(line))
 	parts := strings.Split(content, "\n")
 	for i, part := range parts {
-		text, indented := reviewAttributionLine(part)
-		text = reviewAttributionKeyView(text)
+		text, indented := lineView(part)
+		text = attributionKeyView(text, lineView)
 		if prefix := reviewGeneratedWith.FindString(text); prefix != "" {
-			value, _ := reviewAttributionLine(text[len(prefix):])
+			value, _ := lineView(text[len(prefix):])
 			text = prefix + value
 		} else if key, value, ok := strings.Cut(text, ":"); ok {
 			separator := ":"
@@ -152,7 +156,7 @@ func reviewAttributionView(line string) (string, bool) {
 					if at < 0 {
 						break
 					}
-					address, _ := reviewAttributionLine(value[at:])
+					address, _ := lineView(value[at:])
 					if strings.HasPrefix(address, "<") && strings.HasSuffix(address, ">") {
 						if _, err := mail.ParseAddress(address); err == nil {
 							mailbox = " " + address
@@ -162,7 +166,7 @@ func reviewAttributionView(line string) (string, bool) {
 					}
 					end = at
 				}
-				value, _ = reviewAttributionLine(value)
+				value, _ = lineView(value)
 				value += mailbox
 				if value == before {
 					break
@@ -178,22 +182,20 @@ func reviewAttributionView(line string) (string, bool) {
 	return strings.Join(parts, "\n"), continuation
 }
 
-func reviewAttributionKeyView(text string) string {
+func attributionKeyView(text string, lineView func(string) (string, bool)) string {
 	for end := strings.IndexByte(text, ':') + 1; end > 0 && end <= len(text); {
-		prefix, _ := reviewAttributionLine(text[:end])
-		if strings.HasSuffix(prefix, ":") {
-			key, _ := reviewAttributionLine(strings.TrimSuffix(prefix, ":"))
-			candidate := key + ":"
-			if strings.EqualFold(candidate, PreservedHumanCoauthorLabel) {
-				return "Co-Authored-By:" + text[end:]
-			}
-			if reviewTrailerKey.FindString(candidate) == candidate {
-				return candidate + text[end:]
-			}
+		prefix, _ := lineView(text[:end])
+		key, _ := lineView(strings.TrimSuffix(prefix, ":"))
+		candidate := key + ":"
+		if strings.EqualFold(candidate, PreservedHumanCoauthorLabel) {
+			return "Co-Authored-By:" + text[end:]
+		}
+		if reviewTrailerKey.FindString(candidate) == candidate {
+			return candidate + text[end:]
 		}
 		if strings.HasPrefix(text[end:], "</code>") {
 			end += len("</code>")
-		} else if end < len(text) && strings.ContainsRune("`*_~\"' \t", rune(text[end])) {
+		} else if end < len(text) && strings.ContainsRune("`*_~\"' \t.,;:!?", rune(text[end])) {
 			end++
 		} else {
 			break

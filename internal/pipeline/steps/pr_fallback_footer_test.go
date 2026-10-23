@@ -45,6 +45,10 @@ func TestPRFallbackAgentFooterPublicationPaths(t *testing.T) {
 		fallbackAgentFooter,
 		"**" + fallbackAgentFooter + "**",
 		"**" + fallbackAgentFooter + "**.",
+		"**`" + fallbackAgentFooter + "`.**",
+		"**`🤖 Generated with\n [Claude Code](https://claude.ai/code)`.**",
+		"!~~?<code>" + fallbackAgentFooter + ".</code>;~~!",
+		html.EscapeString("**!<code>?" + fallbackAgentFooter + ".</code>;**!"),
 		"`" + fallbackAgentFooter + "`.!",
 		html.EscapeString("<code>" + fallbackAgentFooter + "</code>"),
 	} {

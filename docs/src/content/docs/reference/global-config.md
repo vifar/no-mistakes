@@ -1200,7 +1200,10 @@ The template supports literal text and three Go-style placeholders:
 
 The value must be a valid UTF-8 template that renders to a non-empty, single-line commit subject.
 The template source is limited to 1,024 bytes and 16 placeholders.
-The summary supplied to the template renderer and the final rendered subject are each limited to 4,096 bytes; this does not limit Review's separately preserved full summary.
+The incoming full fix summary, the summary supplied to the template renderer, and the final rendered subject are each limited to 4,096 bytes.
+Review validates the full incoming summary before shortening its derived subject; an oversized summary is rejected and the repair is discarded.
+Within that bound, Review preserves the full summary separately in the commit body and round record.
+An absent, unreadable, or attribution-only summary uses Review's `body: unavailable - <reason>` notice; this fallback does not bypass the size check.
 Before rendering, no-mistakes predicts the subject size from the validated literal text and placeholders, then rejects oversized output without allocating the expanded message.
 Template functions, control actions, named templates, unknown placeholders, malformed syntax, control characters, unsafe Unicode format characters, and Unicode line or paragraph separators cause configuration loading to fail.
 The blocked format set includes every Unicode `Bidi_Control` code point plus `U+00AD`, `U+180E`, `U+200B`, `U+2060` through `U+2064`, the deprecated bidi controls `U+206A` through `U+206F`, `U+FEFF`, `U+FFF9` through `U+FFFB`, and Unicode tag characters in `U+E0000` through `U+E007F`.
