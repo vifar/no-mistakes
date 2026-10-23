@@ -550,12 +550,7 @@ func (s *Service) apply(ctx context.Context, strictFastForward bool) State {
 		return plan
 	}
 	if strictFastForward && plan.State == StateDiverged {
-		// The refusal names the two heads it compared and the tests it ran,
-		// so the operator can tell a rewritten commit from a lost one. The
-		// diagnostic is read-only and decides nothing: the strict
-		// fast-forward requirement already refused.
-		diagnostic := collectDivergenceDiagnostic(ctx, s.workDir(), plan.Local.Head, plan.Pipeline.PushedHead, "pipeline-pushed head")
-		blocked := blockedPlan(plan, StateDiverged, "blocked_recover_diverged", fmt.Sprintf("the local branch has diverged from pipeline-pushed head %s; %s; recovery requires a strict fast-forward; inspect both histories before reconciling manually; no files or branch refs were changed", plan.Pipeline.PushedHead, diagnostic.divergenceDescription()))
+		blocked := blockedPlan(plan, StateDiverged, "blocked_recover_diverged", fmt.Sprintf("%s; recovery requires a strict fast-forward; inspect both histories before reconciling manually; no files or branch refs were changed", collectDivergenceDiagnostic(ctx, s.workDir(), plan.Local.Head, plan.Pipeline.PushedHead, "pipeline-pushed head").divergenceDescription()))
 		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right " + plan.Local.Head + "..." + plan.Pipeline.PushedHead}
 		return blocked
 	}
@@ -1084,12 +1079,7 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 			return s.recoverAdoptPreserved(ctx, run, state, preserved, trustedEqualTreeRewrite)
 		}
 		state.Relation = RelationDiverged
-		// The refusal names the two heads it compared and the tests it ran,
-		// so the operator can tell a rewritten commit from a lost one. The
-		// diagnostic is read-only and decides nothing: the containment
-		// proof above already refused.
-		diagnostic := collectDivergenceDiagnostic(ctx, wd, local, preserved, "preserved pipeline head")
-		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_diverged", fmt.Sprintf("the local branch and the preserved pipeline head have diverged; %s; the preserved commits are anchored at %s - reconcile manually and re-run the recovery, or use --keep-local to keep the current head. `no-mistakes rerun` resumes validating the selected preserved head, but refuses a known clean caller HEAD mismatch. If heads differ, inspect `no-mistakes axi status` and follow its exact `branch_sync.next_action.command` for custody or synchronization, then submit intended local commits with a fresh `no-mistakes axi run` once custody permits; no files or refs were changed", diagnostic.divergenceDescription(), anchorRef))
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_diverged", fmt.Sprintf("%s; the preserved commits are anchored at %s - reconcile manually and re-run the recovery, or use --keep-local to keep the current head. `no-mistakes rerun` resumes validating the selected preserved head, but refuses a known clean caller HEAD mismatch. If heads differ, inspect `no-mistakes axi status` and follow its exact `branch_sync.next_action.command` for custody or synchronization, then submit intended local commits with a fresh `no-mistakes axi run` once custody permits; no files or refs were changed", collectDivergenceDiagnostic(ctx, wd, local, preserved, "preserved pipeline head").divergenceDescription(), anchorRef))
 		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right " + local + "..." + preserved}
 		return blocked
 	}
