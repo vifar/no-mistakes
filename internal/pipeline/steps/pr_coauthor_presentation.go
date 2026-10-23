@@ -45,14 +45,15 @@ func prDisplayNoticeText(text string, configuredTrailers ...string) string {
 func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) string {
 	lines := strings.Split(text, "\n")
 	var kept []string
+	jsonFence := false
 	for start := 0; start < len(lines); {
-		if payload, end, ok := recordedPayloadBlock(lines, start); ok {
-			kept = append(kept, filterRecordedPayload(payload, notice, configuredTrailers...))
+		if fence := strings.TrimSpace(lines[start]); strings.HasPrefix(fence, "```") {
+			jsonFence = !jsonFence && fence == "```json"
+		}
+		if payload, tail, end, ok := recordedPayloadBlock(lines, start, jsonFence); ok {
+			kept = append(kept, filterRecordedPayload(payload, notice, configuredTrailers...)+tail)
 			start = end
 			continue
-		}
-		if recordedPayloadFragment(lines, start) {
-			lines[start] = filterRecordedPayload(lines[start], notice, configuredTrailers...)
 		}
 		end, unfolded, entry, ai := reviewAttributionEntry(lines, start, configuredTrailers)
 		if !ai {
@@ -86,64 +87,106 @@ func presentHumanCoauthor(line string) string {
 	return line[:label] + PreservedHumanCoauthorLabel + line[label+len(literalKey):]
 }
 
-func recordedPayloadBlock(lines []string, start int) (string, int, bool) {
-	trimmed := strings.TrimSpace(lines[start])
-	if len(trimmed) == 0 || (trimmed[0] != '{' && trimmed[0] != '[') {
-		return "", start, false
+func recordedPayloadBlock(lines []string, start int, jsonFence bool) (string, string, int, bool) {
+	line := lines[start]
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return "", "", start, false
 	}
 	rest := strings.Join(lines[start:], "\n")
-	decoder := json.NewDecoder(strings.NewReader(rest))
-	var payload json.RawMessage
-	if err := decoder.Decode(&payload); err != nil {
-		return "", start, false
+	offset := 0
+	if trimmed[0] == '{' || trimmed[0] == '[' {
+		next := strings.TrimSpace(trimmed[1:])
+		if next != "" {
+			allowed := "\"}"
+			if trimmed[0] == '[' {
+				allowed = "\"{[]-0123456789"
+			}
+			if !strings.ContainsRune(allowed, rune(next[0])) && !(trimmed[0] == '[' && (strings.HasPrefix(next, "true") || strings.HasPrefix(next, "false") || strings.HasPrefix(next, "null"))) {
+				return "", "", start, false
+			}
+		}
+		decoder := json.NewDecoder(strings.NewReader(rest))
+		var payload json.RawMessage
+		if err := decoder.Decode(&payload); err == nil {
+			offset = int(decoder.InputOffset())
+		} else {
+			var stack []byte
+			data := []byte(rest)
+			offset = len(rest)
+			for at := 0; at < len(rest); at++ {
+				if at > 0 && rest[at-1] == '\n' && strings.HasPrefix(strings.TrimLeft(rest[at:], " \t\r"), "```") {
+					offset = at - 1
+					break
+				}
+				if rest[at] == '"' {
+					if end, ok := jsonStringEnd(data, at); ok {
+						at = end - 1
+						continue
+					}
+					if newline := strings.IndexByte(rest[at:], '\n'); newline >= 0 {
+						at += newline - 1
+						continue
+					}
+					break
+				}
+				switch rest[at] {
+				case '{':
+					stack = append(stack, '}')
+				case '[':
+					stack = append(stack, ']')
+				case '}', ']':
+					if len(stack) > 0 && stack[len(stack)-1] == rest[at] {
+						stack = stack[:len(stack)-1]
+					}
+					if len(stack) == 0 {
+						offset = at + 1
+					}
+				}
+				if offset != len(rest) {
+					break
+				}
+			}
+		}
+		if trimmed[0] == '[' && strings.HasPrefix(strings.TrimLeft(rest[offset:], " \t"), "(") {
+			return "", "", start, false
+		}
+	} else if trimmed[0] == '"' {
+		end, ok := jsonStringEnd([]byte(line), strings.IndexByte(line, '"'))
+		if !ok {
+			return "", "", start, false
+		}
+		after := strings.TrimSpace(line[end:])
+		if strings.HasPrefix(after, ":") {
+			decoder := json.NewDecoder(strings.NewReader("{" + line))
+			if _, err := decoder.Token(); err != nil {
+				return "", "", start, false
+			}
+			for decoder.More() {
+				if _, err := decoder.Token(); err != nil {
+					break
+				}
+				var value json.RawMessage
+				if err := decoder.Decode(&value); err != nil {
+					break
+				}
+				offset = int(decoder.InputOffset()) - 1
+			}
+		} else if jsonFence || (after != "" && strings.Trim(after, ",]} \t\r") == "") || (after == "" && start+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[start+1]), "]")) {
+			offset = end
+		}
 	}
-	offset := int(decoder.InputOffset())
-	endOfLine := strings.IndexByte(rest[offset:], '\n')
-	if endOfLine < 0 {
-		endOfLine = len(rest)
+	if offset == 0 {
+		return "", "", start, false
+	}
+	lineEnd := strings.IndexByte(rest[offset:], '\n')
+	if lineEnd < 0 {
+		lineEnd = len(rest)
 	} else {
-		endOfLine += offset
+		lineEnd += offset
 	}
-	if strings.TrimSpace(rest[offset:endOfLine]) != "" {
-		return "", start, false
-	}
-	end := start + strings.Count(rest[:endOfLine], "\n") + 1
-	return strings.Join(lines[start:end], "\n"), end, true
-}
-
-func recordedPayloadFragment(lines []string, start int) bool {
-	line := strings.TrimSpace(lines[start])
-	if line == "" {
-		return false
-	}
-	if line[0] == '{' || line[0] == '[' {
-		return true
-	}
-	if !strings.ContainsRune(line, '"') {
-		return false
-	}
-	if line[0] == '"' {
-		if end, ok := jsonStringEnd([]byte(line), 0); ok {
-			rest := strings.TrimSpace(line[end:])
-			if rest != "" && strings.ContainsRune(":,]}", rune(rest[0])) {
-				return true
-			}
-			if rest == "" && start+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[start+1]), "]") {
-				return true
-			}
-		}
-	}
-	for previous := start - 1; previous >= 0; previous-- {
-		context := strings.TrimSpace(lines[previous])
-		if strings.HasPrefix(context, "{") || strings.HasPrefix(context, "[") || strings.HasPrefix(context, "```json") {
-			return true
-		}
-		if context == "" || strings.HasPrefix(context, "\"") || strings.HasPrefix(context, "}") || strings.HasPrefix(context, "]") || strings.Contains(context, " bytes truncated] ...") {
-			continue
-		}
-		break
-	}
-	return false
+	end := start + strings.Count(rest[:lineEnd], "\n") + 1
+	return rest[:offset], rest[offset:lineEnd], end, true
 }
 
 // filterRecordedPayload filters the string values inside a recorded payload and
