@@ -20,6 +20,7 @@ type wfJob struct {
 	name           string
 	RunsOn         any      `yaml:"runs-on"`
 	If             string   `yaml:"if"`
+	Needs          any      `yaml:"needs"`
 	TimeoutMinutes int      `yaml:"timeout-minutes"`
 	Steps          []wfStep `yaml:"steps"`
 }

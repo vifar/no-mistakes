@@ -414,11 +414,6 @@ func TestTargetAdvancePublishedGuardsLiveJourney(t *testing.T) {
 			if err != nil || strict && shippingComparison == nil {
 				t.Fatalf("missing strict comparison: %+v %v", shippingComparison, err)
 			}
-			waitReady := func(want bool, timeout time.Duration) {
-				t.Helper()
-				j.h.WaitForCIReady(run.ID, want, timeout)
-			}
-
 			assertBound := func() {
 				t.Helper()
 				current, err := database.GetRunPRContext(run.ID)
@@ -444,7 +439,27 @@ func TestTargetAdvancePublishedGuardsLiveJourney(t *testing.T) {
 				j.setForge(blocked)
 			}
 			advanceMain(t, j.h, "target.txt", "advanced target\n", "advance target after qualification")
-			waitReady(false, 360*time.Second)
+			j.h.WaitForCIReady(run.ID, false, 360*time.Second)
+			if strict {
+				// Clearing readiness is not the same event as revoking the
+				// approval: the CI monitor clears readiness first and the
+				// executor resets Review afterwards. Asserting the persisted
+				// comparison in between reads the old, still-approved row and
+				// fails a guard that did transfer the qualification, which is
+				// what happened on the shared runner (CI run 40010175133).
+				// Wait for the reset itself, then assert the same thing.
+				deadline := pollDeadline(t, 30*time.Second)
+				for time.Now().Before(deadline) {
+					comparison, err := database.GetReviewComparison(run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if comparison != nil && !comparison.Approved {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
 			assertBound()
 			t.Logf("%s withheld readiness after target advance at unchanged published head %s:\n%s", guard, head, j.ciLog(run.ID))
 			j.finish(branch)

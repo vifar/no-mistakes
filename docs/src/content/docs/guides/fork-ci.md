@@ -9,8 +9,12 @@ repository-scoped self-hosted Linux runner, hosted in a dedicated virtual
 machine. Nothing runs on a GitHub-hosted runner. Every job requires the
 runner's full label set (`self-hosted`, `Linux`, `X64`, plus the fork's
 dedicated runner labels pinned in `workflow_self_hosted_test.go`). There is no hosted fallback
-when this runner is offline; jobs queue until it returns. It is a single
-runner, so jobs from all workflows run one at a time.
+when this runner is offline; jobs queue until it returns. The runner processes share one
+virtual machine, so jobs from different workflows can and do run at the same time: the machine
+hosts several runner processes, and their jobs compete for the same cores. The CI workflow
+therefore sequences its own two saturating jobs - the race suite finishes (or fails) before the
+e2e journeys start, and the e2e job still runs after a failed race job, because its result is
+evidence either way.
 
 Every job also carries the same-repository guard
 `github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`,
