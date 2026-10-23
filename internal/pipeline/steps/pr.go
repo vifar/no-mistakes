@@ -167,7 +167,11 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				if err != nil {
 					return nil, err
 				}
-				emptyNarrative = neutralizeAttestationMarkers(provider, draft.Body)
+				configuredTrailers, err := configuredAttributionTrailers(sctx)
+				if err != nil {
+					return nil, fmt.Errorf("prepare PR attribution filtering: %w", err)
+				}
+				emptyNarrative = neutralizeAttestationMarkers(provider, prDisplayText(draft.Body, configuredTrailers...))
 				title = draft.Title
 			} else if sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
 				title, err = s.draftConfiguredPRTitle(sctx, branch, baseBranch, baseSHA)
@@ -473,7 +477,7 @@ Final diff paths and statuses:
 			content.Title = strings.TrimSpace(content.Title)
 			content.Body = strings.TrimSpace(content.Body)
 			content.Body = unwrapNestedPRBody(content.Body)
-			content.Body = stripGeneratedSections(content.Body)
+			content.Body = stripGeneratedSections(prDisplayText(content.Body, configuredTrailers...))
 			content.Body = neutralizeAttestationMarkers(provider, content.Body)
 			if content.Title != "" && content.Body != "" {
 				originalTitle := content.Title

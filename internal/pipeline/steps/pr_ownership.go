@@ -104,7 +104,7 @@ func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit 
 	// normalised and the digest still binds the bytes that are published.
 	before := prDisplayBody(parts.before, configuredTrailers...)
 	after := prDisplayBody(parts.after, configuredTrailers...)
-	appendix = prDisplayBody(escapePRAppendixMarkers(appendix), configuredTrailers...)
+	appendix = escapePRAppendixMarkers(prDisplayBody(appendix, configuredTrailers...))
 	before = redactPRContent(prContent{Body: before}).Body
 	after = redactPRContent(prContent{Body: after}).Body
 	appendix = redactPRContent(prContent{Body: appendix}).Body
