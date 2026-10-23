@@ -1794,19 +1794,17 @@ func neutralizeAttestationMarkers(provider scm.Provider, s string) string {
 // of this PR, so fenced evidence follows the same rule as generated prose.
 func neutralizeAIAttribution(s string) string {
 	lines := strings.Split(s, "\n")
-	for i, line := range lines {
-		if lineCarriesAIAttribution(line) {
-			lines[i] = prAIAttributionNotice
+	var kept []string
+	for start := 0; start < len(lines); {
+		end, _, _, ai := publishedAttributionEntry(lines, start, nil)
+		if ai {
+			kept = append(kept, prAIAttributionNotice)
+		} else {
+			kept = append(kept, lines[start:end]...)
 		}
+		start = end
 	}
-	return strings.Join(lines, "\n")
-}
-
-// lineCarriesAIAttribution reports whether a rendered line carries an
-// attribution a reader would take for THIS work.
-func lineCarriesAIAttribution(line string) bool {
-	_, _, _, ai := publishedAttributionEntry([]string{line}, 0, nil)
-	return ai
+	return strings.Join(kept, "\n")
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor, configuredTrailers ...string) {

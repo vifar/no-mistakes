@@ -106,6 +106,70 @@ func TestReviewFixCommitBodyBoundsFindings(t *testing.T) {
 	}
 }
 
+func TestReviewFixCommitBodyPreservesWholeTrailerBlock(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, summary, findings, wantBody, wantTrailers string }{
+		{
+			"coauthor before signoff",
+			"Guard receipts\n\nCo-Authored-By: Jane <jane@example.com>\nSigned-off-by: Victor I <vifarinde@gmail.com>",
+			`{"findings":[{"description":"Reject stale receipts"}]}`,
+			"Guard receipts\n\nRound findings:\n- Reject stale receipts\n\nCo-Authored-By: Jane <jane@example.com>\nSigned-off-by: Victor I <vifarinde@gmail.com>",
+			"Co-Authored-By: Jane <jane@example.com>\nSigned-off-by: Victor I <vifarinde@gmail.com>",
+		},
+		{
+			"coauthor after signoff",
+			"Guard receipts\nSigned-off-by: Victor I <vifarinde@gmail.com>\nCo-Authored-By: Jane <jane@example.com>",
+			`{"findings":[{"description":"Reject stale receipts"}]}`,
+			"Guard receipts\n\nRound findings:\n- Reject stale receipts\n\nSigned-off-by: Victor I <vifarinde@gmail.com>\nCo-Authored-By: Jane <jane@example.com>",
+			"Signed-off-by: Victor I <vifarinde@gmail.com>\nCo-Authored-By: Jane <jane@example.com>",
+		},
+		{
+			"unreadable findings",
+			"Guard receipts\n\nCo-Authored-By: Jane <jane@example.com>\nSigned-off-by: Victor I <vifarinde@gmail.com>",
+			`{`,
+			"Guard receipts\n\nRound findings unavailable (payload could not be read).\n\nCo-Authored-By: Jane <jane@example.com>\nSigned-off-by: Victor I <vifarinde@gmail.com>",
+			"Co-Authored-By: Jane <jane@example.com>\nSigned-off-by: Victor I <vifarinde@gmail.com>",
+		},
+		{
+			"trailer only summary",
+			"Co-Authored-By: Jane <jane@example.com>\nSigned-off-by: Victor I <vifarinde@gmail.com>",
+			`{"findings":[{"description":"Reject stale receipts"}]}`,
+			"Round findings:\n- Reject stale receipts\n\nCo-Authored-By: Jane <jane@example.com>\nSigned-off-by: Victor I <vifarinde@gmail.com>",
+			"Co-Authored-By: Jane <jane@example.com>\nSigned-off-by: Victor I <vifarinde@gmail.com>",
+		},
+		{
+			"folded coauthor and generic trailer",
+			"Guard receipts\n\nReviewed-by: Reviewer <reviewer@example.com>\nCo-Authored-By: Jane\n <jane@example.com>\nTicket: 98",
+			`{"findings":[{"description":"Reject stale receipts"}]}`,
+			"Guard receipts\n\nRound findings:\n- Reject stale receipts\n\nReviewed-by: Reviewer <reviewer@example.com>\nCo-Authored-By: Jane\n <jane@example.com>\nTicket: 98",
+			"Reviewed-by: Reviewer <reviewer@example.com>\nCo-Authored-By: Jane <jane@example.com>\nTicket: 98",
+		},
+		{
+			"no findings",
+			"Guard receipts\n\nCo-Authored-By: Jane <jane@example.com>\nSigned-off-by: Victor I <vifarinde@gmail.com>",
+			`{"findings":[]}`,
+			"Guard receipts\n\nCo-Authored-By: Jane <jane@example.com>\nSigned-off-by: Victor I <vifarinde@gmail.com>",
+			"Co-Authored-By: Jane <jane@example.com>\nSigned-off-by: Victor I <vifarinde@gmail.com>",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+			sctx.PreviousFindings = tc.findings
+			writeAgentChange(t, dir)
+			if err := commitAgentFixes(sctx, types.StepReview, tc.summary, "fallback"); err != nil {
+				t.Fatal(err)
+			}
+			if got := gitCmd(t, dir, "show", "-s", "--format=%b"); got != tc.wantBody {
+				t.Errorf("commit body = %q, want %q", got, tc.wantBody)
+			}
+			if got := gitTrailers(t, dir); got != tc.wantTrailers {
+				t.Errorf("Git trailers = %q, want %q", got, tc.wantTrailers)
+			}
+		})
+	}
+}
+
 func TestReviewFixCommitBodySanitizesFindingsAndTrailers(t *testing.T) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)

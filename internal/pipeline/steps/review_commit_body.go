@@ -305,16 +305,18 @@ var reviewCoAuthorTrailer = regexp.MustCompile(`(?i)^co-authored-by[ \t]*:`)
 func splitTrailingCoAuthors(summary string) (head, trailers string) {
 	lines := strings.Split(summary, "\n")
 	cut := len(lines)
+	coauthor := false
 	for i := len(lines); i > 0; i-- {
 		line := lines[i-1]
-		if reviewCoAuthorTrailer.MatchString(line) {
+		if reviewTrailerKey.MatchString(line) {
 			cut = i - 1
+			coauthor = coauthor || reviewCoAuthorTrailer.MatchString(line)
 		} else if line == "" || (line[0] != ' ' && line[0] != '\t') {
 			break
 		}
 	}
 	head = strings.TrimRight(strings.Join(lines[:cut], "\n"), "\r\n \t")
-	if cut == len(lines) || head == "" {
+	if !coauthor {
 		return summary, ""
 	}
 	return head, strings.Join(lines[cut:], "\n")
@@ -329,14 +331,17 @@ func reviewFixCommitBody(summary, previousFindings string, configuredTrailers []
 	head, trailers := splitTrailingCoAuthors(summary)
 	var b strings.Builder
 	b.WriteString(head)
+	if head != "" {
+		b.WriteString("\n\n")
+	}
 	if unreadable {
-		b.WriteString("\n\nRound findings unavailable (payload could not be read).")
+		b.WriteString("Round findings unavailable (payload could not be read).")
 		if trailers != "" {
 			b.WriteString("\n\n" + trailers)
 		}
 		return b.String()
 	}
-	b.WriteString("\n\nRound findings:")
+	b.WriteString("Round findings:")
 	const maxFindings = 5
 	for i, finding := range findings.Items {
 		if i == maxFindings {

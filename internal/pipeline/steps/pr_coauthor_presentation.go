@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"html"
-	"regexp"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -82,29 +82,16 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 	return strings.Join(kept, "\n")
 }
 
-var bareCoAuthorTrailer = regexp.MustCompile(`(?i)^[ \t>*_~` + "`" + `"'+\-0-9.)]*co-authored-by[ \t]*:[ \t]+(\S.*?)[ \t\r]*$`)
-
-func bareCoAuthorValue(line string) (string, bool) {
-	match := bareCoAuthorTrailer.FindStringSubmatch(html.UnescapeString(line))
-	if match == nil {
-		return "", false
-	}
-	return strings.Trim(match[1], " \t>*_~`\"'"), true
-}
-
 func bareCoAuthorLine(line string) bool {
-	_, ok := bareCoAuthorValue(line)
-	return ok
+	view, _ := reviewAttributionLine(html.UnescapeString(line))
+	key, value, _ := strings.Cut(view, ":")
+	return strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && strings.TrimSpace(value) != ""
 }
 
-// publishedAttributionEntry classifies an entry for publication. It is the
-// commit filter's classification, except that a line that carries the
-// co-author key (under any list, quote, code or emphasis wrapper) and the bare
-// name Claude is an AI identity in a published body even though the commit
-// filter keeps it.
 func publishedAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
 	end, unfolded, entry, ai = reviewAttributionEntry(lines, start, configuredTrailers)
-	if value, ok := bareCoAuthorValue(lines[start]); ok && end == start+1 && strings.EqualFold(value, "Claude") {
+	key, value, _ := strings.Cut(unfolded, ":")
+	if strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && !strings.ContainsAny(value, "<>") && git.IsAIAttributionTrailer("Assisted-by:"+value) {
 		return end, unfolded, true, true
 	}
 	return end, unfolded, entry, ai
@@ -209,8 +196,13 @@ func bareQuotedMention(out []byte, start, end int, value string, configuredTrail
 	if !strings.Contains(strings.ToLower(value), PreservedHumanCoauthorLabel) {
 		return false
 	}
-	if _, _, _, ai := reviewAttributionEntry([]string{value}, 0, configuredTrailers); ai {
-		return false
+	lines := strings.Split(value, "\n")
+	for start := 0; start < len(lines); {
+		end, _, _, ai := publishedAttributionEntry(lines, start, configuredTrailers)
+		if ai {
+			return false
+		}
+		start = end
 	}
 	before := bytes.TrimRight(out[:start], " \t")
 	after := bytes.TrimLeft(out[end:], " \t")

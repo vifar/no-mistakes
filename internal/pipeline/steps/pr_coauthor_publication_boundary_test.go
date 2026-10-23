@@ -72,6 +72,52 @@ func TestPRPublishedBodyKeepsAlreadyLabelledHumanCoauthor(t *testing.T) {
 	}
 }
 
+func TestPRPublishedBareCoauthorEntries(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ input, want, notice string }{
+		{"co-author (quoted): Claude", "", prAIAttributionNotice},
+		{"<code>Co-Authored-By: Claude</code>", "", prAIAttributionNotice},
+		{"> Co-Authored-By: Claude", "", prAIAttributionNotice},
+		{"- Co-Authored-By: Claude", "", prAIAttributionNotice},
+		{"co-author (quoted): **Codex**", "", prAIAttributionNotice},
+		{"co-author (quoted): Claude\n <noreply@anthropic.com>", "", prAIAttributionNotice},
+		{"co-author (quoted): Claude Smith <claude@example.com>", "co-author (quoted): Claude Smith <claude@example.com>", "co-author (quoted): Claude Smith <claude@example.com>"},
+		{"co-author (quoted): Claude\n <claude@example.com>", "co-author (quoted): Claude\n <claude@example.com>", "co-author (quoted): Claude\n <claude@example.com>"},
+		{"<code>Co-Authored-By: Jane Doe</code>", "<code>co-author (quoted): Jane Doe</code>", "<code>co-author (quoted): Jane Doe</code>"},
+		{`{"description":"co-author (quoted): Claude"}`, `{"description":""}`, `{"description":"<no-mistakes: AI attribution line neutralized>"}`},
+		{` "co-author (quoted): Claude",`, ` "",`, ` "<no-mistakes: AI attribution line neutralized>",`},
+		{` "co-author (quoted): Jane Doe\nco-author (quoted): Claude",`, ` "co-author (quoted): Jane Doe\n",`, ` "co-author (quoted): Jane Doe\n<no-mistakes: AI attribution line neutralized>",`},
+		{`{"description":"co-author (quoted): Claude\n <noreply@anthropic.com>"}`, `{"description":""}`, `{"description":"<no-mistakes: AI attribution line neutralized>"}`},
+		{"Ordinary prose mentioning co-author (quoted): Claude stays verbatim.", "Ordinary prose mentioning co-author (quoted): Claude stays verbatim.", "Ordinary prose mentioning co-author (quoted): Claude stays verbatim."},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			if got := prDisplayBody(tc.input); got != tc.want {
+				t.Errorf("published body = %q, want %q", got, tc.want)
+			}
+			if got := prDisplayNoticeText(tc.input); got != tc.notice {
+				t.Errorf("published evidence = %q, want %q", got, tc.notice)
+			}
+		})
+	}
+}
+
+func TestPRNeutralizationKeepsFoldedCoauthorContext(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ input, want string }{
+		{"co-author (quoted): Claude", prAIAttributionNotice},
+		{"co-author (quoted): Claude\n <noreply@anthropic.com>", prAIAttributionNotice},
+		{"co-author (quoted): Claude\n <claude@example.com>", "co-author (quoted): Claude\n <claude@example.com>"},
+		{"> Co-Authored-By: Claude\n> <claude@example.com>\n> Focused checks passed", "> Co-Authored-By: Claude\n> <claude@example.com>\n> Focused checks passed"},
+		{`"Co-Authored-By:" is a field name.`, `"Co-Authored-By:" is a field name.`},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			if got := neutralizeAIAttribution(tc.input); got != tc.want {
+				t.Errorf("neutralized evidence = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // The filter must see the original bytes: matching a configured trailer after
 // path redaction rewrote it silently preserves the forbidden entry.
 func TestOwnedCompositionFiltersConfiguredTrailerBeforeRedaction(t *testing.T) {
