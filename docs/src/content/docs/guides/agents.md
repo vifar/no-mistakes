@@ -29,7 +29,7 @@ Testing prompts also ask agents to remove transient working-tree artifacts they 
 
 - Leave `agent: auto` if one good agent is already installed and you do not need repo-specific behavior.
 - Set a repo-level `agent` override when one codebase clearly works better with a different tool.
-- Use an ordered fallback list when you prefer one agent but want no-mistakes to try another when the first one is unavailable, was refused by its provider's content filter, or stalled without producing anything.
+- Use an ordered fallback list when you prefer one agent but want another available under the [`agent` fallback rules](/no-mistakes/reference/global-config/#agent).
 - Set explicit `commands.lint` and a **targeted** `commands.test` if you want deterministic local baseline command execution regardless of agent choice. Test always follows its optional baseline with agent-driven end-user scenarios; remote CI owns broad regression. See [Test](/no-mistakes/reference/pipeline-steps/#test) for the live-validation contract.
 
 That last point matters: explicit repo commands make the baseline predictable, while the agent establishes whether the requested behavior works in the real product.
@@ -211,7 +211,7 @@ Six global config fields tune resolution and invocation, and the [Global Config 
 
 ## Review session reuse
 
-With the default `session_reuse: true`, Claude, Codex, Grok, Pi, Omp, and Antigravity keep one durable review-fixer session per run, and resume failures fall back to a fresh fixer session instead of skipping the fix turn. Pi stores its native fixer transcript in Pi's session directory; no-mistakes persists only the minimum session identity needed to resume it.
+With the default `session_reuse: true`, Claude, Codex, Grok, Pi, Omp, and Antigravity keep one durable review-fixer session per run; the [`session_reuse` reference](/no-mistakes/reference/global-config/#session_reuse) owns recovery from resume failures. Pi stores its native fixer transcript in Pi's session directory; no-mistakes persists only the minimum session identity needed to resume it.
 Review turns always run in fresh, session-free invocations: a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them.
 The [`session_reuse` field reference](/no-mistakes/reference/global-config/#session_reuse) owns the exact reuse, fallback, privacy, and restart-recovery semantics.
 
@@ -227,7 +227,7 @@ All agents implement the same interface. Each invocation receives:
 - **OnLifecycle** - callback for native subprocess start, exit, retry, fallback, and output-liveness activity; control events reach step logs and AXI active-step status, while throttled output liveness updates status without flooding the log. Adapters that parse a structured event stream also report `progress` (assistant prose, a tool call, a tool result) and `tool` (a tool call or result only), so the stall bound sees a tool-only stretch as work and the fallback classes can tell a turn that acted on the world from one that only spoke.
 - **Session** - optional no-mistakes-owned native session identity for review-fixer reuse
 - **Purpose** - local performance label for the pipeline duty served
-- **RunAttempt** - optional per-candidate seam a `agent:` fallback list uses when the pipeline runs the invocation: it executes one candidate under its own bounded context and reports why a failed attempt may hand the turn to the next one (`unavailable`, `refused`, `stalled`). Single agents never call it; the pipeline bounds those itself.
+- **RunAttempt** - optional callback for the pipeline to bound each candidate separately; `internal/agent/agent.go` owns the interface contract and [`agent`](/no-mistakes/reference/global-config/#agent) owns fallback behavior.
 
 Each invocation returns:
 
@@ -301,7 +301,7 @@ Starts a persistent HTTP server (`acli rovodev serve`) on first use and reuses i
 
 Starts a persistent HTTP server (`opencode serve`) on first use and reuses it across invocations. If a reused server refuses a connection, no-mistakes discards it and retries with a fresh server. The adapter detects OpenCode 1.x or 2.x before creating the first session and uses the matching protocol. Each invocation creates a session, sends the prompt, streams events until completion, reads the answer, and deletes the session.
 
-Use [`agent_config.opencode`](/no-mistakes/reference/global-config/#agent_config) for model and reasoning effort; that reference owns the version-specific mapping and constraints. See the [environment reference](/no-mistakes/reference/environment/#opencode_password--opencode_server_password) for server credentials and the [`agent` reference](/no-mistakes/reference/global-config/#agent) for setup-failure fallback behavior.
+Use [`agent_config.opencode`](/no-mistakes/reference/global-config/#agent_config) for model and reasoning effort; that reference owns the version-specific mapping and constraints. See the [environment reference](/no-mistakes/reference/environment/#opencode_password--opencode_server_password) for server credentials and the [`agent` reference](/no-mistakes/reference/global-config/#agent) for provider fallback behavior.
 
 OpenCode 1.x supports native structured output through `json_schema` at `info.format` (OpenCode 1.17 and later), retaining a guarded fallback when native structured output is unavailable. OpenCode 2.x always uses the common prompt-only text fallback described above, validating the answer against the requested schema and allowing `null` for optional fields. See the OpenCode adapter implementation (`internal/agent/opencode*.go`) for the authoritative protocol, tool-choice retry conditions, transient failure boundaries, and prompt-only fallback semantics.
 

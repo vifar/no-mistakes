@@ -148,9 +148,9 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 			return result, nil
 		}
 		lastErr = err
-		// A fallback is another attempt inside this invocation's existing
-		// bounded context, not a fresh timeout policy. Once that context has
-		// expired or been cancelled the next candidate cannot start
+		// The caller may give each candidate its own bound through RunAttempt,
+		// but all candidates still share this parent context. Once the parent
+		// has expired or been cancelled the next candidate cannot start
 		// meaningfully. Preserve the current adapter's report for the caller's
 		// timeout diagnostic, but do not announce or instrument an attempt that
 		// will inherit an already-dead context.
@@ -209,14 +209,12 @@ func FallbackReasonFor(err error) FallbackReason {
 	return FallbackNone
 }
 
-// DrivesAttempts reports whether every invocation of a runs through a fallback
-// chain that honours RunOpts.RunAttempt, so a caller may install its own
-// per-attempt bounds and leave the whole-invocation bound off.
-//
-// Only the wrappers that can route to a chain answer true, and a router answers
-// true only when EVERY route reaches one. A caller that gets false must bound
-// the invocation itself: nothing would call RunAttempt, and an attempt-driven
-// caller would run the agent with no bound at all.
+// DrivesAttempts reports whether a honours RunOpts.RunAttempt on every route,
+// so a caller may install per-attempt bounds and leave the whole-invocation
+// bound off. Fallback chains answer true; reviewAgents also answers true when
+// any route reaches a chain and runs its single-agent routes through the seam
+// itself. A caller that gets false must bound the invocation itself, because
+// nothing would call RunAttempt.
 func DrivesAttempts(a Agent) bool {
 	driver, ok := a.(attemptDriver)
 	return ok && driver.drivesAttempts()
