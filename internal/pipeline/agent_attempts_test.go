@@ -328,3 +328,159 @@ func TestAgentAttempt_FallbackWallClockIsBounded(t *testing.T) {
 		t.Fatalf("error = %q, want the last attempt's failure preserved", err)
 	}
 }
+
+// A wall-clock budget can expire before the progress bound does (a review
+// budget shorter than agent_stall_timeout, say). The evidence, not the adapter's
+// text, decides: an attempt that produced nothing and left the tree untouched
+// is the same class as a stall.
+func TestRunAgent_FallsBackWhenTheBudgetExpiresWithNoOutput(t *testing.T) {
+	t.Parallel()
+	dir := fallbackTestWorktree(t)
+	silent := &hangingAgent{
+		name: "opencode",
+		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}
+	next := &hangingAgent{
+		name: "claude",
+		runFn: func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+			return &agent.Result{Text: "reviewed"}, nil
+		},
+	}
+	sctx := attemptStepContext(dir, silent, next)
+	sctx.Config.AgentTimeout = 80 * time.Millisecond
+	// The progress bound is far away on purpose: only the wall clock can end
+	// this attempt, which is the shape the review budget produces.
+	sctx.Config.AgentStallTimeout = 10 * time.Second
+
+	var lifecycle []agent.LifecycleEvent
+	result, err := sctx.RunAgent(agent.RunOpts{
+		Prompt:      "review",
+		OnLifecycle: func(event agent.LifecycleEvent) { lifecycle = append(lifecycle, event) },
+	})
+	if err != nil {
+		t.Fatalf("RunAgent: %v", err)
+	}
+	if result == nil || result.Text != "reviewed" {
+		t.Fatalf("result = %+v, want the second agent's answer", result)
+	}
+	if log := fallbackEvents(lifecycle); !strings.Contains(log, "(stalled:") {
+		t.Fatalf("fallback log = %q, want the stalled class named", log)
+	}
+}
+
+// A budget that expires while the turn was working is a sizing decision, not a
+// dead agent: its partial work stays with the agent that made it.
+func TestRunAgent_BudgetExpiryAfterProgressDoesNotFallBack(t *testing.T) {
+	t.Parallel()
+	dir := fallbackTestWorktree(t)
+	working := &hangingAgent{
+		name: "opencode",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			for {
+				select {
+				case <-ctx.Done():
+					// A killed native agent reports this on the way out, which
+					// is textually the agent-unavailable class.
+					return nil, errors.New("codex exited: signal: killed")
+				case <-time.After(5 * time.Millisecond):
+					opts.OnChunk("working")
+				}
+			}
+		},
+	}
+	next := &hangingAgent{name: "claude"}
+	sctx := attemptStepContext(dir, working, next)
+	sctx.Config.AgentTimeout = 80 * time.Millisecond
+	sctx.Config.AgentWorkingTimeout = 10 * time.Second
+
+	start := time.Now()
+	_, err := sctx.RunAgent(agent.RunOpts{Prompt: "review"})
+	elapsed := time.Since(start)
+
+	if err == nil || !errors.Is(err, ErrAgentTimeout) {
+		t.Fatalf("error = %v, want the invocation budget", err)
+	}
+	if next.calls != 0 {
+		t.Fatalf("next agent ran %d time(s) after a budget cut with progress", next.calls)
+	}
+	// The still-working cap is clamped to the fallback total (2x the silent
+	// budget), so the attempt cannot outlive the advertised total.
+	if elapsed > 2*time.Second {
+		t.Fatalf("attempt ran %s, want it bounded by twice the 80ms budget", elapsed)
+	}
+}
+
+// Each attempt is clamped to what is left of the invocation's total, so two
+// spent candidates cannot hand a third a full budget.
+func TestAgentAttempt_ClampsEachAttemptToTheRemainingTotal(t *testing.T) {
+	t.Parallel()
+	var seen time.Duration
+	attempt := &agentAttempt{
+		parent:  context.Background(),
+		timeout: 100 * time.Millisecond,
+		// 150ms of the 200ms total is already gone.
+		started: time.Now().Add(-150 * time.Millisecond),
+		invoke: func(ctx context.Context, _ agent.Agent, _ agent.RunOpts) (*agent.Result, error) {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				t.Fatal("attempt ran with no deadline")
+			}
+			seen = time.Until(deadline)
+			return &agent.Result{Text: "ok"}, nil
+		},
+	}
+	if _, err, _ := attempt.run(&hangingAgent{name: "claude"}, agent.RunOpts{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if seen > 60*time.Millisecond {
+		t.Fatalf("attempt deadline = %s, want the ~50ms left of the total rather than a fresh 100ms", seen)
+	}
+}
+
+// The fixer role may hold the session of a candidate that finished a turn. The
+// chain still starts at the primary agent every turn, so a stored identity has
+// to survive that: the primary must not be handed it (a foreign resume would
+// delete it), and the provider that owns it must still resume it.
+func TestRunAgentSession_FallbackKeepsEachProvidersSession(t *testing.T) {
+	t.Parallel()
+	dir := fallbackTestWorktree(t)
+	database, run := sessionTestDB(t)
+	if err := database.UpsertRunAgentSession(run.ID, string(SessionRoleFixer), "claude", "claude-sess"); err != nil {
+		t.Fatalf("seed session: %v", err)
+	}
+	codex := newFakeSessionAgent()
+	codex.name = "codex"
+	codex.failNext = errors.New("codex start: executable not found")
+	claude := newFakeSessionAgent()
+	claude.name = "claude"
+	chain := agent.NewFallback([]agent.Agent{codex, claude})
+
+	sctx := attemptStepContext(dir, codex, claude)
+	sctx.Agent = chain
+	sctx.Run = run
+	sctx.Sessions = NewRunSessions(database, run.ID, chain, true)
+	sctx.Config.AgentTimeout = 30 * time.Second
+
+	if _, err := sctx.RunAgentSession(SessionRoleFixer, agent.RunOpts{Prompt: "fix"}); err != nil {
+		t.Fatalf("RunAgentSession: %v", err)
+	}
+	if len(codex.calls) != 1 || len(claude.calls) != 1 {
+		t.Fatalf("calls = codex %d claude %d, want 1/1", len(codex.calls), len(claude.calls))
+	}
+	if got := codex.calls[0].session; got == nil || got.ID != "" {
+		t.Fatalf("codex session = %+v, want a cold start rather than claude's identity", got)
+	}
+	if got := claude.calls[0].session; got == nil || got.ID != "claude-sess" {
+		t.Fatalf("claude session = %+v, want its own stored identity resumed", got)
+	}
+	stored, err := database.GetRunAgentSessions(run.ID)
+	if err != nil {
+		t.Fatalf("stored sessions: %v", err)
+	}
+	if len(stored) != 1 || stored[0].Agent != "claude" || stored[0].SessionID != "claude-sess" {
+		t.Fatalf("stored session = %+v, want claude's identity kept", stored)
+	}
+}

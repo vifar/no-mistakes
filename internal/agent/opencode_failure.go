@@ -131,6 +131,18 @@ func classifyOpencodeTransient(err error) (string, bool) {
 	return classifyTransient(err)
 }
 
+// replayRanTools reports whether the failure carries typed evidence that its
+// turn already invoked a tool.
+//
+// opencodeMessageFailure records that evidence as a field, set from the
+// server's own parts. It is not the same shape as the replay marker the stream
+// paths carry, so a gate that only knew the marker would read this failure as
+// "nothing ran" and replay a side effect.
+func replayRanTools(err error) bool {
+	var failure *opencodeMessageFailure
+	return errors.As(err, &failure) && failure.toolActivity
+}
+
 // isOpencodeToolPart reports whether a message-part type is a tool
 // invocation. opencode names the part "tool"; the prefix match is deliberate
 // slack for wire drift, because a part type this misses is a side effect

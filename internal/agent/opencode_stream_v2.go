@@ -70,10 +70,15 @@ func parseOpencodeV2SSE(r interface{ Read([]byte) (int, error) }, state *opencod
 
 		switch event.Type {
 		case "session.execution.succeeded":
+			state.terminalFrame = true
 			sawDone = true
 			return false
 
 		case "session.execution.failed", "session.execution.interrupted":
+			// The turn is over: nothing after this frame can describe it, so
+			// the stream is a complete record and its tool parts are the whole
+			// truth about what ran.
+			state.terminalFrame = true
 			if data.Error != nil {
 				streamErr = &opencodeV2ExecutionError{event: event.Type, err: data.Error}
 			} else {

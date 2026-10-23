@@ -253,4 +253,12 @@ type opencodeStreamState struct {
 	// decides whether the turn can be retried in a fresh session. A
 	// step-finish alone never sets it: every turn emits one.
 	toolInvoked bool
+
+	// terminalFrame records that the turn's own terminal event crossed the
+	// stream (session.execution.succeeded, failed or interrupted). The 2.x
+	// stream is the only record of a turn's tool parts, so once it has reached
+	// a terminal frame the absence of a tool part is a PROOF that none ran -
+	// the same rule the 1.x stream gets from session.idle. Without the frame
+	// the record is incomplete and tool evidence stays unknown.
+	terminalFrame bool
 }

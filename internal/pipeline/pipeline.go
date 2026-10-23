@@ -190,12 +190,12 @@ type StepContext struct {
 	// PR-step start. Steps read this snapshot instead of mutable run state.
 	ClosingIssueRefs []string
 
-	// AgentAttempts records that the configured agent tree is made of fallback
-	// chains only (see agent.DrivesAttempts). RunAgent then installs its bound
-	// as RunOpts.RunAttempt, so every candidate gets its OWN bounded
-	// invocation: a bound around the whole chain would let one stalled
-	// candidate spend the budget the next one needs and cancel the context
-	// they share. Set by the executor from the run's configured agent.
+	// AgentAttempts records that a configured agent route can land on a fallback
+	// chain (see agent.DrivesAttempts). RunAgent then installs its bound as
+	// RunOpts.RunAttempt, so every candidate gets its OWN bounded invocation: a
+	// bound around the whole chain would let one stalled candidate spend the
+	// budget the next one needs and cancel the context they share. Set by the
+	// executor from the run's configured agent.
 	AgentAttempts bool
 }
 

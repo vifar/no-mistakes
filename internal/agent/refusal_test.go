@@ -125,9 +125,9 @@ func TestFallbackReasonForClassification(t *testing.T) {
 	}
 }
 
-// A caller installs its own per-attempt bounds only when every route reaches a
-// chain that honours RunOpts.RunAttempt; otherwise the invocation would run
-// with no bound at all.
+// A caller installs its own per-attempt bounds only when a runs every
+// invocation through a seamless chain; a router that can select a single agent
+// answers true because it runs that route through the seam itself.
 func TestDrivesAttempts(t *testing.T) {
 	single := &fallbackTestAgent{name: "codex"}
 	chain := NewFallback([]Agent{
@@ -143,10 +143,44 @@ func TestDrivesAttempts(t *testing.T) {
 	if !DrivesAttempts(WithSteering(chain, "/evidence")) {
 		t.Fatal("steering must forward the chain's capability")
 	}
-	if DrivesAttempts(WithReviewRoles(single, ReviewRoles{Fixer: RoundedRole{Agent: chain}})) {
-		t.Fatal("a mixed tree (single primary, chained fixer) must not claim to drive attempts")
-	}
 	if !DrivesAttempts(WithReviewRoles(chain, ReviewRoles{Fixer: RoundedRole{Agent: chain}})) {
 		t.Fatal("an all-chain tree must drive attempts")
+	}
+	if !DrivesAttempts(WithReviewRoles(chain, ReviewRoles{Fixer: RoundedRole{Agent: single}})) {
+		t.Fatal("a tree with any chain route must drive attempts; the router bounds the single route")
+	}
+	if DrivesAttempts(WithReviewRoles(single, ReviewRoles{Fixer: RoundedRole{Agent: single}})) {
+		t.Fatal("an all-single tree must not claim to drive attempts")
+	}
+}
+
+// A single-agent route inside a mixed tree must still run under the caller's
+// seam, or enabling the seam for that run would leave the route unbounded.
+func TestReviewAgentsBoundsASingleRouteThroughTheSeam(t *testing.T) {
+	single := &fallbackTestAgent{name: "codex", run: func() (*Result, error) { return &Result{Text: "ok"}, nil }}
+	router := WithReviewRoles(single, ReviewRoles{Fixer: RoundedRole{
+		Agent: NewFallback([]Agent{
+			&fallbackTestAgent{name: "codex"},
+			&fallbackTestAgent{name: "claude"},
+		}),
+	}})
+	if !DrivesAttempts(router) {
+		t.Fatal("mixed tree must drive attempts")
+	}
+
+	calls := 0
+	opts := RunOpts{
+		Purpose: "review",
+		RunAttempt: func(a Agent, _ RunOpts) (*Result, error, FallbackReason) {
+			calls++
+			result, err := a.Run(context.Background(), RunOpts{})
+			return result, err, FallbackNone
+		},
+	}
+	if _, err := router.Run(context.Background(), opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("seam calls = %d, want the single route run through it once", calls)
 	}
 }

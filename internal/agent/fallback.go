@@ -178,15 +178,17 @@ func FallbackReasonFor(err error) FallbackReason {
 	if err == nil || IsStructuredOutputRejected(err) {
 		return FallbackNone
 	}
-	// A turn that provably ran tools must not be replayed under another
-	// agent: whatever it already did is on disk, in a commit, or in a posted
-	// comment, and a second agent's fresh turn would do it twice.
+	// The adapter's own replay evidence outranks every class. A turn that
+	// provably ran tools already has side effects on disk, in a commit, or in a
+	// posted comment, and a second agent's fresh turn would do them twice. A
+	// turn whose tool activity cannot be verified is the same answer in the
+	// other direction - silence is not a proof - so both stay a verdict.
 	//
-	// "Unknown" tool evidence does not withhold the refusal class. It exists
-	// because a replay of the SAME turn could re-run an unrecorded tool; a
-	// refusal is the provider ending the turn itself, and the pipeline's
-	// worktree check is the stronger evidence that nothing was left behind.
-	if errors.Is(err, errOpencodeToolsAlreadyRan) {
+	// It is read before the refusal class because a provider can refuse a turn
+	// after a tool has run, and before the unavailable class because the
+	// killed-process report a timeout appends ("codex exited: signal: killed")
+	// would otherwise read as an agent that never started.
+	if replayRanTools(err) || opencodeReplayUnsafe(err) {
 		return FallbackNone
 	}
 	if IsRefused(err) {

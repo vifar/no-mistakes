@@ -147,13 +147,19 @@ func (a *opencodeAgent) runOnceV2(ctx context.Context, opts RunOpts, baseURL str
 // v2ToolEvidence answers the replay gate's question for a 2.x turn.
 //
 // The 2.x stream names tool activity explicitly (session.tool.called and
-// friends), so a tool that ran is a fact. The absence of one is NOT a proof
-// that none ran: the stream is the only record of the turn's tool parts, so
-// an unobserved turn stays UNKNOWN and fails closed, exactly like the 1.x
-// path does.
+// friends), so a tool that ran is a fact. The absence of one is a proof only
+// once the turn's terminal frame has crossed the stream: the stream is the only
+// record of the turn's tool parts, so a turn that ended on
+// session.execution.succeeded, .failed or .interrupted delivered every part it
+// ran, exactly as session.idle does on 1.x. Before that frame - a dropped
+// connection, an unparsable tail - the record is incomplete and the evidence
+// stays UNKNOWN, which fails closed.
 func (s *opencodeStreamState) v2ToolEvidence() opencodeToolEvidence {
 	if s.toolInvoked {
 		return opencodeToolsRan
+	}
+	if s.terminalFrame {
+		return opencodeToolsNone
 	}
 	return opencodeToolsUnknown
 }

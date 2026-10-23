@@ -229,9 +229,11 @@ func invokeAgent(parent context.Context, timeout, working, stall time.Duration, 
 }
 
 // agentAttempt drives one candidate of the configured fallback chain. It is
-// installed as RunOpts.RunAttempt when the run's agent tree is nothing but
-// fallback chains, so each candidate gets its OWN bounded invocation derived
-// from the step context.
+// installed as RunOpts.RunAttempt when the run's agent tree can route an
+// invocation to a fallback chain, so each candidate gets its OWN bounded
+// invocation derived from the step context. A route that selects a single agent
+// runs through the same seam as one attempt, so enabling it never leaves an
+// invocation unbounded.
 //
 // The shared bound is why this exists. Before it, one invocation bound wrapped
 // the whole chain: a silent stall spent the budget and cancelled the context
@@ -272,12 +274,25 @@ func fallbackWallClock(timeout time.Duration) time.Duration { return 2 * timeout
 // build on work it cannot see, so a dirty tree fails the step exactly as it did
 // before.
 func (a *agentAttempt) run(candidate agent.Agent, opts agent.RunOpts) (*agent.Result, error, agent.FallbackReason) {
-	if a.attempts > 0 && a.timeout > 0 && time.Since(a.started) >= fallbackWallClock(a.timeout) {
-		return nil, a.budgetSpent(), agent.FallbackNone
+	// The total wall clock is enforced HERE, not only at admission: a
+	// candidate's own budget is clamped to what is left of it, so two silent
+	// candidates cannot spend two budgets and hand a third another full one.
+	timeout, working := a.timeout, a.working
+	if a.timeout > 0 {
+		remaining := fallbackWallClock(a.timeout) - time.Since(a.started)
+		if remaining <= 0 {
+			return nil, a.budgetSpent(), agent.FallbackNone
+		}
+		if timeout > remaining {
+			timeout = remaining
+		}
+		if working > remaining {
+			working = remaining
+		}
 	}
 	a.attempts++
 	activity := observeAgentActivity(&opts)
-	result, err := invokeAgent(a.parent, a.timeout, a.working, a.stall, a.cause, activity, func(ctx context.Context) (*agent.Result, error) {
+	result, err := invokeAgent(a.parent, timeout, working, a.stall, a.cause, activity, func(ctx context.Context) (*agent.Result, error) {
 		return a.invoke(ctx, candidate, opts)
 	})
 	if err == nil {
@@ -300,16 +315,21 @@ func (a *agentAttempt) budgetSpent() error {
 	return fmt.Errorf("%s; last attempt failed: %w", spent, a.lastErr)
 }
 
-// reason classifies a failed attempt. A stall is read from its own cause before
-// any text classifier, because a stall diagnostic quotes the killed adapter and
-// that report ("codex exited: signal: killed") otherwise reads as the
-// agent-unavailable class, which carries no side-effect check.
+// reason classifies a failed attempt.
+//
+// An attempt the invocation's own limit cut (the stall bound, the silent
+// budget, a still-working cap, or a Review/Test budget) is read from the
+// measured evidence first, never from the adapter's report: a killed native
+// agent says "codex exited: signal: killed", which is textually the
+// agent-unavailable class, and that class carries no side-effect check. Without
+// this order a timeout after partial edits could hand a dirty worktree to the
+// next agent.
 func (a *agentAttempt) reason(err error, activity *agentActivity) agent.FallbackReason {
-	if errors.Is(err, ErrAgentStall) {
-		// Nothing to preserve: the turn never advanced. A stall after any
-		// progress is a turn that acted and then wedged - it may have edited
-		// files - and a turn still waiting on a child process was working, not
-		// silent, so neither hands the work to another agent.
+	if errors.Is(err, ErrAgentStall) || budgetCut(err) {
+		// Nothing to preserve only when the turn never advanced. A turn that
+		// acted and then wedged, or ran out of budget while working, may have
+		// edited files, and a turn still waiting on a child process was
+		// working rather than silent, so none of those hands the work on.
 		if activity.madeProgress() || activity.waitingOnChild() {
 			return agent.FallbackNone
 		}
@@ -329,6 +349,21 @@ func (a *agentAttempt) reason(err error, activity *agentActivity) agent.Fallback
 		return agent.FallbackNone
 	}
 	return reason
+}
+
+// budgetCut reports whether the attempt ended on a limit the invocation
+// applied - the silent budget, the still-working cap, or a caller's Review/Test
+// budget - rather than on the agent's own verdict.
+//
+// The diagnosis this seam builds for every such cut carries the applied bound
+// (or the inherited deadline), so identity is read from that rather than from a
+// step-local cause sentinel a shared helper cannot name.
+func budgetCut(err error) bool {
+	var inv *agentInvocationError
+	if !errors.As(err, &inv) {
+		return false
+	}
+	return inv.bound != "" || errors.Is(err, context.DeadlineExceeded)
 }
 
 // worktreeUntouched reports whether the step worktree is exactly as the

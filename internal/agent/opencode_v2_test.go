@@ -747,3 +747,44 @@ func TestOpencodeAgent_V2ContentFilterAfterToolsIsNotARefusal(t *testing.T) {
 		t.Fatalf("FallbackReasonFor = %q, want no fallback after a turn that ran tools", reason)
 	}
 }
+
+// The 2.x stream is the only record of a turn's tool parts, so its terminal
+// frame makes the absence of a tool part a proof rather than an absence - the
+// same rule 1.x gets from session.idle. A stream that ends without one stays
+// unknown and fails closed.
+func TestOpencodeAgent_V2TerminalFrameProvesNoTools(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stream string
+		want   opencodeToolEvidence
+	}{
+		{
+			name: "succeeded",
+			stream: "data: {\"type\":\"session.text.delta\",\"data\":{\"sessionID\":\"v2s1\",\"assistantMessageID\":\"m1\",\"ordinal\":0,\"delta\":\"done\"}}\n\n" +
+				"data: {\"type\":\"session.execution.succeeded\",\"data\":{\"sessionID\":\"v2s1\"}}\n\n",
+			want: opencodeToolsNone,
+		},
+		{
+			name:   "failed on content policy",
+			stream: "data: {\"type\":\"session.execution.failed\",\"data\":{\"sessionID\":\"v2s1\",\"error\":{\"type\":\"provider.content-filter\",\"message\":\"Provider blocked the response\"}}}\n\n",
+			want:   opencodeToolsNone,
+		},
+		{
+			name:   "dropped before any terminal frame",
+			stream: "data: {\"type\":\"session.text.delta\",\"data\":{\"sessionID\":\"v2s1\",\"assistantMessageID\":\"m1\",\"ordinal\":0,\"delta\":\"partial\"}}\n\n",
+			want:   opencodeToolsUnknown,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &opencodeStreamState{
+				sessionID:  "v2s1",
+				textParts:  make(map[string]*opencodeTextPart),
+				usageByMsg: make(map[string]TokenUsage),
+			}
+			_ = parseOpencodeV2SSE(strings.NewReader(tc.stream), state)
+			if got := state.v2ToolEvidence(); got != tc.want {
+				t.Fatalf("evidence = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
