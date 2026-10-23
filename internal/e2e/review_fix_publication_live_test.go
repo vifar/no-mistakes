@@ -44,7 +44,9 @@ func TestReviewFixPublicationLiveJourney(t *testing.T) {
 			const rationale = "Red first: unsafe value was accepted.\nGreen: focused validation passed."
 			summary := "Guard unsafe value\n\n" + rationale + "\n\n" + disclosure + "\n\n" + human + "\n" + signoff + "\nCo-Authored-By: Codex <commit-ai@example.com>\nClaude-Session: fixture\n" + footer
 			const tail = "{\n \"large\": \"cutoff }\n... [20000 bytes truncated] ...\ncontinued text\", \"ai\": \"<code>co-author (quoted): <code>Codex</code> <tail-ai@example.com></code>\", \"human\": \"Co-Authored-By: Ada & Bob <ada@example.com>\", \"escape\": \"A\\u0042\\/C\"\n}"
-			const wantTail = "{\n \"large\": \"cutoff }\n... [20000 bytes truncated] ...\ncontinued text\", \"ai\": \"<no-mistakes: AI attribution line neutralized>\", \"human\": \"co-author (quoted): Ada & Bob <ada@example.com>\", \"escape\": \"A\\u0042\\/C\"\n}"
+			// Narrative filtering removes AI values before closing-reference
+			// rewriting. Quoted evidence separately retains the notice below.
+			const wantTail = "{\n \"large\": \"cutoff }\n... [20000 bytes truncated] ...\ncontinued text\", \"ai\": \"\", \"human\": \"co-author (quoted): Ada & Bob <ada@example.com>\", \"escape\": \"A\\u0042\\/C\"\n}"
 			raw := prose + "\n" + disclosure + "\n" + human + "\n> Co-Authored-By: Claude\n- Co-Authored-By: Codex\n`Co-Authored-By: ChatGPT`\n**Co-Authored-By: Gemini**\n> Co-Authored-By: Jane Doe\n\n[\n \"Co-Authored-By: Codex <array-ai@example.com>\",\n \"Co-Authored-By: Ada & Bob <ada@example.com>\"\n]\n\n```json\n" + tail + "\n```\n\n" + footer
 			raw += "\n\n" + link + "\n\n" + wrapped + "\n\n```json\n" + payload + "\n```"
 			// The public key must be labelled even when only the key carries
