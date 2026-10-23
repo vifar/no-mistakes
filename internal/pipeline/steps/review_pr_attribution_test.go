@@ -77,7 +77,7 @@ func TestPRReviewConfiguredTrailersAreRemovedFromRecordedFindingDisplays(t *test
 							}
 						}
 						markdown, _, _ := (&PRStep{}).buildPipelineSection(sctx, provider)
-						for _, forbidden := range []string{"&gt; Build-Agent: private-identifier", "> Build-Agent: private-identifier", "Co-Authored-By: private:writer", "Build-Identity: acp:private:writer / opaque-model", "opaque@example.com"} {
+						for _, forbidden := range []string{"&gt; Build-Agent: private-identifier", "> Build-Agent: private-identifier", "Co-Authored-By: private:writer <opaque@example.com>", "Build-Identity: acp:private:writer / opaque-model"} {
 							if strings.Contains(markdown, forbidden) {
 								t.Errorf("configured trailer reached published finding: %q", forbidden)
 							}
@@ -85,8 +85,8 @@ func TestPRReviewConfiguredTrailersAreRemovedFromRecordedFindingDisplays(t *test
 						if strings.Count(markdown, "Build-Agent: private-identifier") != 1 {
 							t.Error("exact configured trailer must survive only inside ordinary prose")
 						}
-						for _, kept := range []string{disclosure, "co-author (quoted): Claude Smith", prose, "Build-Agent: unconfigured-human"} {
-							if !strings.Contains(markdown, kept) {
+						for _, kept := range []string{disclosure, "co-author (quoted): Claude Smith", prose, "Build-Agent: unconfigured-human", "Co-Authored-By: private:writer\n <opaque@example.com>"} {
+							if !strings.Contains(html.UnescapeString(markdown), kept) {
 								t.Errorf("ordinary finding content lost: %q", kept)
 							}
 						}
@@ -153,13 +153,16 @@ func TestBuildPipelineSummary_ReviewAttributionDoesNotLeakFromRoundFindings(t *t
 		for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 			t.Run(string(provider), func(t *testing.T) {
 				markdown, _ := BuildPipelineSummaryFor([]*db.StepResult{step}, rounds, testPipelineHeadSHA, provider)
-				for _, forbidden := range []string{"Co-Authored-By: gpt-5.5", "Codex-Session: disposable", "Generated with Codex", "Assisted-by: acp:cursor:model", "🤖 Generated with [Claude Code]", "noreply@anthropic.com", "ai@example.com"} {
+				for _, forbidden := range []string{"Co-Authored-By: gpt-5.5", "Codex-Session: disposable", "Generated with Codex", "Assisted-by: acp:cursor:model", "🤖 Generated with [Claude Code]", "ai@example.com"} {
 					if strings.Contains(markdown, forbidden) {
 						t.Errorf("Review findings reintroduced attribution %q:\n%s", forbidden, markdown)
 					}
 				}
-				if !strings.Contains(html.UnescapeString(markdown), strings.Replace(foldedHuman, "Co-Authored-By:", "co-author (quoted):", 1)) || !strings.Contains(markdown, disclosure) || !strings.Contains(markdown, "co-author (quoted): Claude") || !strings.Contains(markdown, recorder+"\n\n"+disclosure) {
+				if !strings.Contains(html.UnescapeString(markdown), foldedHuman) || !strings.Contains(markdown, disclosure) || !strings.Contains(markdown, "co-author (quoted): Claude") || !strings.Contains(markdown, recorder+"\n\n"+disclosure) {
 					t.Errorf("disclosure or human co-author lost:\n%s", markdown)
+				}
+				if !strings.Contains(html.UnescapeString(markdown), "> Co-Authored-By: Claude\n> <noreply@anthropic.com>") {
+					t.Errorf("line-local folded mention changed:\n%s", markdown)
 				}
 				if *step.FindingsJSON != final || *rounds["review"][0].FindingsJSON != initial {
 					t.Fatal("rendering changed recorded findings")

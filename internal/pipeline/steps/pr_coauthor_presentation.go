@@ -45,29 +45,25 @@ func prDisplayNoticeText(text string, configuredTrailers ...string) string {
 func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) string {
 	lines := strings.Split(text, "\n")
 	var kept []string
-	jsonFence := false
 	for start := 0; start < len(lines); {
-		if fence := strings.TrimSpace(lines[start]); strings.HasPrefix(fence, "```") {
-			jsonFence = !jsonFence && fence == "```json"
-		}
-		if payload, tail, end, ok := recordedPayloadBlock(lines, start, jsonFence); ok {
-			kept = append(kept, filterRecordedPayload(payload, notice, configuredTrailers...)+tail)
+		if payload, end, ok := recordedPayloadBlock(lines, start); ok {
+			kept = append(kept, filterRecordedPayload(payload, notice, configuredTrailers...))
 			start = end
 			continue
 		}
-		end, unfolded, entry, ai := reviewAttributionEntry(lines, start, configuredTrailers)
+		_, unfolded, entry, ai := reviewAttributionEntry(lines[start:start+1], 0, configuredTrailers)
 		if !ai {
 			key, _, _ := strings.Cut(unfolded, ":")
 			if entry && strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && reviewAttributionAddressComplete(unfolded) {
 				lines[start] = presentHumanCoauthor(lines[start])
 			}
-			kept = append(kept, lines[start:end]...)
+			kept = append(kept, lines[start])
 		} else if notice {
 			kept = append(kept, prAIAttributionNotice)
 		} else {
 			kept = append(kept, "")
 		}
-		start = end
+		start++
 	}
 	return strings.Join(kept, "\n")
 }
@@ -87,106 +83,30 @@ func presentHumanCoauthor(line string) string {
 	return line[:label] + PreservedHumanCoauthorLabel + line[label+len(literalKey):]
 }
 
-func recordedPayloadBlock(lines []string, start int, jsonFence bool) (string, string, int, bool) {
-	line := lines[start]
-	trimmed := strings.TrimSpace(line)
-	if trimmed == "" {
-		return "", "", start, false
+func recordedPayloadBlock(lines []string, start int) (string, int, bool) {
+	trimmed := strings.TrimSpace(lines[start])
+	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') {
+		return "", start, false
 	}
 	rest := strings.Join(lines[start:], "\n")
-	offset := 0
-	if trimmed[0] == '{' || trimmed[0] == '[' {
-		next := strings.TrimSpace(trimmed[1:])
-		if next != "" {
-			allowed := "\"}"
-			if trimmed[0] == '[' {
-				allowed = "\"{[]-0123456789"
-			}
-			if !strings.ContainsRune(allowed, rune(next[0])) && !(trimmed[0] == '[' && (strings.HasPrefix(next, "true") || strings.HasPrefix(next, "false") || strings.HasPrefix(next, "null"))) {
-				return "", "", start, false
-			}
-		}
-		decoder := json.NewDecoder(strings.NewReader(rest))
-		var payload json.RawMessage
-		if err := decoder.Decode(&payload); err == nil {
-			offset = int(decoder.InputOffset())
-		} else {
-			var stack []byte
-			data := []byte(rest)
-			offset = len(rest)
-			for at := 0; at < len(rest); at++ {
-				if at > 0 && rest[at-1] == '\n' && strings.HasPrefix(strings.TrimLeft(rest[at:], " \t\r"), "```") {
-					offset = at - 1
-					break
-				}
-				if rest[at] == '"' {
-					if end, ok := jsonStringEnd(data, at); ok {
-						at = end - 1
-						continue
-					}
-					if newline := strings.IndexByte(rest[at:], '\n'); newline >= 0 {
-						at += newline - 1
-						continue
-					}
-					break
-				}
-				switch rest[at] {
-				case '{':
-					stack = append(stack, '}')
-				case '[':
-					stack = append(stack, ']')
-				case '}', ']':
-					if len(stack) > 0 && stack[len(stack)-1] == rest[at] {
-						stack = stack[:len(stack)-1]
-					}
-					if len(stack) == 0 {
-						offset = at + 1
-					}
-				}
-				if offset != len(rest) {
-					break
-				}
-			}
-		}
-		if trimmed[0] == '[' && strings.HasPrefix(strings.TrimLeft(rest[offset:], " \t"), "(") {
-			return "", "", start, false
-		}
-	} else if trimmed[0] == '"' {
-		end, ok := jsonStringEnd([]byte(line), strings.IndexByte(line, '"'))
-		if !ok {
-			return "", "", start, false
-		}
-		after := strings.TrimSpace(line[end:])
-		if strings.HasPrefix(after, ":") {
-			decoder := json.NewDecoder(strings.NewReader("{" + line))
-			if _, err := decoder.Token(); err != nil {
-				return "", "", start, false
-			}
-			for decoder.More() {
-				if _, err := decoder.Token(); err != nil {
-					break
-				}
-				var value json.RawMessage
-				if err := decoder.Decode(&value); err != nil {
-					break
-				}
-				offset = int(decoder.InputOffset()) - 1
-			}
-		} else if jsonFence || (after != "" && strings.Trim(after, ",]} \t\r") == "") || (after == "" && start+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[start+1]), "]")) {
-			offset = end
-		}
+	decoder := json.NewDecoder(strings.NewReader(rest))
+	var value json.RawMessage
+	if err := decoder.Decode(&value); err != nil {
+		return "", start, false
 	}
-	if offset == 0 {
-		return "", "", start, false
-	}
+	offset := int(decoder.InputOffset())
 	lineEnd := strings.IndexByte(rest[offset:], '\n')
 	if lineEnd < 0 {
 		lineEnd = len(rest)
 	} else {
 		lineEnd += offset
 	}
+	payload := rest[:lineEnd]
+	if !json.Valid([]byte(strings.TrimSpace(payload))) {
+		return "", start, false
+	}
 	end := start + strings.Count(rest[:lineEnd], "\n") + 1
-	return rest[:offset], rest[offset:lineEnd], end, true
+	return payload, end, true
 }
 
 // filterRecordedPayload filters the string values inside a recorded payload and
@@ -200,18 +120,9 @@ func filterRecordedPayload(line string, notice bool, configuredTrailers ...strin
 			break
 		}
 		start += offset
-		slashes := 0
-		for previous := start - 1; previous >= 0 && out[previous] == '\\'; previous-- {
-			slashes++
-		}
-		if slashes%2 != 0 {
-			offset = start + 1
-			continue
-		}
 		end, ok := jsonStringEnd(out, start)
 		if !ok {
-			offset = start + 1
-			continue
+			break
 		}
 		next := end
 		for next < len(out) && strings.ContainsRune(" \t\r\n", rune(out[next])) {
@@ -236,7 +147,7 @@ func filterRecordedPayload(line string, notice bool, configuredTrailers ...strin
 				}
 			}
 		}
-		offset = start + 1
+		offset = end
 	}
 	return string(out)
 }

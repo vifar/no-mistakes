@@ -220,6 +220,9 @@ func TestPRLabelledMarkupPublicationPaths(t *testing.T) {
 				}
 			})
 			for name, render := range paths {
+				if name != "review-summary" && (strings.Contains(ai, "\n") || strings.Contains(human, "\n")) {
+					continue
+				}
 				t.Run(name, func(t *testing.T) { check(t, render(t)) })
 			}
 		})

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
-	"net/mail"
 	"net/url"
 	"os"
 	"path"
@@ -17,7 +16,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -1731,10 +1729,6 @@ func escapePipelineFoldMarkers(s string) string {
 // The key is rendered as a labelled field that says what it is: a co-author
 // the body QUOTED. A fixture, an example, a review finding quoted whole - none
 // of them is this work's attribution, and the label says so.
-//
-// The key can also sit inside a line - a backtick-wrapped quote, or a quoted
-// string in embedded evidence - and a consumer scans the raw text wherever it
-// is, so an attribution entry is rendered wherever it is.
 var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)`)
 
 // renderCoAuthorAsLabelledField renders a co-author ATTRIBUTION as a labelled
@@ -1767,64 +1761,18 @@ func renderCoAuthorAsLabelledField(s string) string {
 	return strings.Join(lines, "\n")
 }
 
-// renderCoAuthorKeysInLine renders every co-author attribution entry in one
-// line. A bare mention of the key - no mailbox follows it on the line - is
-// ordinary prose and is left alone.
 func renderCoAuthorKeysInLine(line string) string {
-	offset := 0
-	for {
-		loc := publishedCoAuthorKey.FindStringIndex(line[offset:])
-		if loc == nil {
-			return line
-		}
-		start, end := offset+loc[0], offset+loc[1]
-		if !lineCarriesCoAuthorAttribution(line, end) {
-			offset = end
-			continue
-		}
-		groups := publishedCoAuthorKey.FindStringSubmatch(line[start:end])
-		suffix := ""
-		if len(groups) > 1 {
-			suffix = groups[1]
-		}
-		replacement := "co-author (quoted)" + suffix
-		line = line[:start] + replacement + line[end:]
-		offset = start + len(replacement)
+	view, _ := reviewAttributionView(line)
+	key, _, _ := strings.Cut(view, ":")
+	if !strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") || !reviewAttributionAddressComplete(view) {
+		return line
 	}
-}
-
-// lineCarriesCoAuthorAttribution reports whether the text after the key is a
-// complete co-author attribution: a name and a mailbox that parse as an
-// address, with nothing trailing it. A near miss - a trailing period or
-// hyphen - is a mention, not an entry, and stays the text it was.
-func lineCarriesCoAuthorAttribution(line string, from int) bool {
-	// Escaped evidence carries its mailbox as &lt;...&gt;; the check decodes it,
-	// while the replacement keeps the bytes the line was published with.
-	value := trimPublishedWrappers(strings.TrimSpace(html.UnescapeString(line[from:])))
-	if value == "" {
-		return false
+	loc := publishedCoAuthorKey.FindStringIndex(line)
+	if loc == nil {
+		return line
 	}
-	return reviewAttributionAddressComplete("Co-Authored-By: " + value)
-}
-
-// trimPublishedWrappers removes the closing markup a quote can carry after its
-// address (a backtick span, bold, or a <code> element). Punctuation is NOT a
-// wrapper: a trailing period or hyphen makes the line a mention, not an entry.
-func trimPublishedWrappers(value string) string {
-	for {
-		trimmed := strings.TrimSpace(value)
-		trimmed = strings.TrimSpace(strings.TrimSuffix(trimmed, "</code>"))
-		for _, suffix := range []string{"``", "`", "**", "__", "~~", "*", "_"} {
-			if strings.HasSuffix(trimmed, suffix) {
-				trimmed = strings.TrimSpace(strings.TrimSuffix(trimmed, suffix))
-				break
-			}
-		}
-		if trimmed == value {
-			return value
-		}
-		value = trimmed
-	}
+	groups := publishedCoAuthorKey.FindStringSubmatch(line[loc[0]:loc[1]])
+	return line[:loc[0]] + "co-author (quoted)" + groups[1] + line[loc[1]:]
 }
 
 // neutralizeAttestationMarkers breaks every attestation comment prefix in
@@ -1864,110 +1812,8 @@ func neutralizeAIAttribution(s string) string {
 // lineCarriesAIAttribution reports whether a rendered line carries an
 // attribution a reader would take for THIS work.
 func lineCarriesAIAttribution(line string) bool {
-	return git.IsAIAttributionTrailer(normalizeRenderedText(html.UnescapeString(line)))
-}
-
-// listItemMarker splits a list item's marker from its text.
-func listItemMarker(text string) (string, string, bool) {
-	for _, marker := range []string{"- ", "* ", "+ "} {
-		if strings.HasPrefix(text, marker) {
-			return marker, text[len(marker):], true
-		}
-	}
-	if dot := strings.Index(text, ". "); dot > 0 {
-		for _, r := range text[:dot] {
-			if r < '0' || r > '9' {
-				return "", "", false
-			}
-		}
-		return text[:dot+2], text[dot+2:], true
-	}
-	return "", "", false
-}
-
-var renderedGeneratedAttribution = regexp.MustCompile(`(?i)^((?:🤖[ \t]*)?generated[ \t]+with[ \t]+)(.+)$`)
-
-func unwrapAttributionMarkup(text string) (string, bool) {
-	text = strings.TrimSpace(text)
-	for {
-		if strings.HasPrefix(text, "`") {
-			width := len(text) - len(strings.TrimLeft(text, "`"))
-			endWidth := len(text) - len(strings.TrimRight(text, "`"))
-			if width == endWidth && len(text) > 2*width {
-				return strings.TrimSpace(text[width : len(text)-width]), true
-			}
-		}
-		unwrapped := false
-		for _, marker := range []string{"**", "__", "~~", "*", "_"} {
-			if len(text) > 2*len(marker) && strings.HasPrefix(text, marker) && strings.HasSuffix(text, marker) {
-				text = strings.TrimSpace(text[len(marker) : len(text)-len(marker)])
-				unwrapped = true
-				break
-			}
-		}
-		if !unwrapped {
-			return text, false
-		}
-	}
-}
-
-func normalizeRenderedText(text string) string {
-	mailbox := ""
-	for offset := 0; offset < len(text); {
-		start := strings.IndexByte(text[offset:], '<')
-		if start < 0 {
-			break
-		}
-		start += offset
-		end := strings.IndexByte(text[start:], '>')
-		if end < 0 {
-			break
-		}
-		end += start + 1
-		candidate := text[start:end]
-		if _, err := mail.ParseAddress(candidate); err == nil {
-			mailbox = candidate
-			text = text[:start] + text[end:]
-			break
-		}
-		offset = end
-	}
-	literalCode := false
-	for {
-		before := text
-		text = strings.TrimSpace(text)
-		for strings.HasPrefix(text, ">") {
-			text = strings.TrimSpace(strings.TrimPrefix(text, ">"))
-		}
-		if strings.HasPrefix(text, "<code>") && strings.HasSuffix(text, "</code>") {
-			text = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(text, "<code>"), "</code>"))
-			literalCode = true
-			break
-		}
-		if _, rest, ok := listItemMarker(text); ok {
-			text = strings.TrimSpace(rest)
-		}
-		text, literalCode = unwrapAttributionMarkup(text)
-		if literalCode {
-			break
-		}
-		if text == before {
-			break
-		}
-	}
-	if !literalCode {
-		if match := renderedGeneratedAttribution.FindStringSubmatch(text); match != nil {
-			value, _ := unwrapAttributionMarkup(match[2])
-			text = match[1] + value
-		} else if key, value, ok := strings.Cut(text, ":"); ok {
-			value, _ = unwrapAttributionMarkup(value)
-			text = key + ": " + value
-		}
-	}
-	if mailbox != "" {
-		text = strings.TrimSpace(text) + " " + mailbox
-	}
-	return text
+	_, _, _, ai := reviewAttributionEntry([]string{line}, 0, nil)
+	return ai
 }
 
 func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor, configuredTrailers ...string) {

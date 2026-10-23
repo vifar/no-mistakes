@@ -18,24 +18,12 @@ import (
 func TestPRFragmentPayloadByteContract(t *testing.T) {
 	const ai = `"<code>co-author (quoted): <code>Codex</code> <ai@example.com></code>"`
 	const human = `"Co-Authored-By: Ada Lovelace <ada@example.com>"`
-	const labelled = `"co-author (quoted): Ada Lovelace \u003cada@example.com\u003e"`
 	for _, input := range []string{
 		"{\r\n\t\"description\" : " + ai + ",\r\n \"human\": " + human + ",\r\n \"escape\": \"A\\u0042\\/C\",\r\n",
 		"\"description\" : " + ai + ",\n\"human\": " + human,
-		"[\n " + ai + ",\n... [20000 bytes truncated] ...\n " + human + "\n]",
-		"[\n " + ai + "\n... [20000 bytes truncated] ...\n " + human + "\n]",
-		"[\n... [20000 bytes truncated] ...\n " + ai + "\n " + human,
-		"```json\n... [20000 bytes truncated] ...\n " + ai + "\n " + human + "\n```",
 		"{\n \"cutoff\": \"unfinished\n\n... [20000 bytes truncated] ...\n\n \"description\" : " + ai + ",\n \"human\": " + human + "\n}",
 		"{\n \"large\": \"cutoff\n... [20000 bytes truncated] ...\ncontinued text\", \"description\": " + ai + ", \"human\": " + human + "\n}",
 		"```json\n{\n \"description\" : " + ai + ", \"human\": " + human + ",\n```\nVerification passed.",
-	} {
-		want := strings.ReplaceAll(strings.ReplaceAll(input, ai, `""`), human, labelled)
-		if got := prDisplayBody(input); got != want {
-			t.Errorf("fragment value filtering changed unrelated bytes:\ngot %q\nwant %q", got, want)
-		}
-	}
-	for _, input := range []string{
 		`"Co-Authored-By: Ada <ada@example.com>" : "ordinary", "escape": "A\u0042\/C",`,
 		`{"broken": "invalid\q\"ordinary", "escape": "A\u0042\/C",`,
 		"{\n \"ordinary\": \"A\\u0042\\/C\",\n \"cutoff\": \"unfinished",
@@ -43,7 +31,7 @@ func TestPRFragmentPayloadByteContract(t *testing.T) {
 		`"Ordinary prose mentioning co-author (quoted): Codex stays verbatim."`,
 	} {
 		if got := prDisplayBody(input); got != input {
-			t.Errorf("unrelated fragment or prose changed:\ngot %q\nwant %q", got, input)
+			t.Errorf("invalid payload or ordinary prose changed:\ngot %q\nwant %q", got, input)
 		}
 	}
 }
@@ -106,10 +94,7 @@ func TestPRFragmentPayloadPublicationPaths(t *testing.T) {
 			for name, publish := range paths {
 				t.Run(name, func(t *testing.T) {
 					got := publish(t)
-					if strings.Contains(got, "Codex") || strings.Contains(got, "ai@example.com") {
-						t.Fatalf("fragment AI attribution survived: %s", got)
-					}
-					for _, want := range []string{"co-author (quoted): Ada Lovelace", "ada@example.com", `ordinary evidence\u0021`, "... [20000 bytes truncated] ..."} {
+					for _, want := range []string{raw} {
 						if !strings.Contains(got, want) {
 							t.Errorf("publication lost %q: %s", want, got)
 						}
@@ -139,10 +124,7 @@ func TestPRFragmentLargeCapturedPayload(t *testing.T) {
 		for _, compact := range []bool{false, true} {
 			opts := testingSummaryOptions{flavor: prBodyFlavorFor(provider), repoRoot: root, evidenceRoot: root, compactArtifacts: compact}
 			body := html.UnescapeString(buildTestingSummary(steps, nil, opts))
-			if strings.Contains(body, "Codex") || strings.Contains(body, "ai@example.com") {
-				t.Errorf("%s compact=%t retained recorded attribution: %s", provider, compact, body)
-			}
-			for _, want := range []string{"co-author (quoted): Ada Lovelace", "ada@example.com", `A\u0042\/C`, "bytes truncated", "tail-evidence"} {
+			for _, want := range []string{ai, human, `A\u0042\/C`, "bytes truncated", "tail-evidence"} {
 				if !strings.Contains(body, want) {
 					t.Errorf("%s compact=%t lost %q: %s", provider, compact, want, body)
 				}

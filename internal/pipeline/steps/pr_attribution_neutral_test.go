@@ -37,6 +37,7 @@ func TestNeutralizeAIAttributionBreaksTheLinesAReaderTakesForAttribution(t *test
 		{"co-authored inline bot name", "Co-Authored-By: `Claude` <noreply@anthropic.com>"},
 		{"co-authored inline code", "Co-Authored-By: `Codex` <bot@example.invalid>"},
 		{"co-authored double inline code", "Co-Authored-By: ``Codex`` <code@example.com>"},
+		{"nested literal AI name", "`` Co-Authored-By: `OpenCode` <person@example.com> ``"},
 		{"model trailer", "Co-Authored-By: gpt-5.5 <model@example.com>"},
 		{"assisted trailer", "Assisted-by: OpenCode"},
 		{"claude session", "Claude-Session: session-id"},
@@ -172,12 +173,12 @@ func TestNeutralizeAIAttributionKeepsAHumanTrailer(t *testing.T) {
 		"Co-Authored-By: Open~Code <person@example.com>",
 		"Co-Authored-By: Open`Code <person@example.com>",
 		"Co-Authored-By: `Open_Code` <person@example.com>",
-		"Co-Authored-By: `_OpenCode_` <person@example.com>",
-		"Co-Authored-By: `**OpenCode**` <person@example.com>",
+		"Co-Authored-By: `_OpenCode Smith_` <person@example.com>",
+		"Co-Authored-By: `**OpenCode Smith**` <person@example.com>",
 		"Co-Authored-By: ``Open`Code`` <person@example.com>",
 		"Assisted-by: Open_Code <person@example.com>",
 		"Generated with Open_Code",
-		"Generated with `_OpenCode_`",
+		"Generated with `_OpenCode Smith_`",
 		"Co-Authored-By: Claude Smith <human@example.com>",
 		"Co-Authored-By: `Claude Smith` <human@example.com>",
 		// The underscore is in the MAILBOX, so the markup removal must
@@ -253,10 +254,10 @@ func TestPRSummaryFiltersAttributionBeforeRendering(t *testing.T) {
 	}
 	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 		for _, source := range []string{"tested", "tested multiline", "tested code span", "summary", "artifact text", "artifact description", "artifact label", "artifact file", "scenario", "finding", "risk", "error"} {
-			for _, identity := range []string{"", "Claude <no_reply@anthropic.com>", "Open_Code <person@example.com>", "Open`Code <person@example.com>", "`_OpenCode_` <person@example.com>", "`OpenCode` <person@example.com>"} {
+			for _, identity := range []string{"", "Claude <no_reply@anthropic.com>", "Open_Code <person@example.com>", "Open`Code <person@example.com>", "`_OpenCode Smith_` <person@example.com>", "`OpenCode Smith` <person@example.com>"} {
 				human := identity != ""
 				wrappers := []string{"", "`", "``"}
-				if identity == "`OpenCode` <person@example.com>" {
+				if identity == "`OpenCode Smith` <person@example.com>" {
 					wrappers = []string{"``"}
 				}
 				for _, wrapper := range wrappers {
@@ -361,9 +362,9 @@ func coAuthorIdentity(line string) string {
 
 func TestPublishedAttributionPreservesLiteralBackticksInsideCode(t *testing.T) {
 	for _, line := range []string{
-		"Co-Authored-By: `OpenCode` <person@example.com>",
-		"Assisted-by: `OpenCode` <person@example.com>",
-		"Generated with `OpenCode`",
+		"Co-Authored-By: `OpenCode Smith` <person@example.com>",
+		"Assisted-by: `OpenCode Smith` <person@example.com>",
+		"Generated with `OpenCode Smith`",
 	} {
 		for _, text := range []string{
 			"`` " + line + " ``",

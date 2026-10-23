@@ -135,9 +135,7 @@ func reviewAttributionView(line string) (string, bool) {
 	parts := strings.Split(content, "\n")
 	for i, part := range parts {
 		text, indented := reviewAttributionLine(part)
-		if len(text) >= len(PreservedHumanCoauthorLabel) && strings.EqualFold(text[:len(PreservedHumanCoauthorLabel)], PreservedHumanCoauthorLabel) {
-			text = "Co-Authored-By:" + text[len(PreservedHumanCoauthorLabel):]
-		}
+		text = reviewAttributionKeyView(text)
 		if prefix := reviewGeneratedWith.FindString(text); prefix != "" {
 			value, _ := reviewAttributionLine(text[len(prefix):])
 			text = prefix + value
@@ -180,6 +178,30 @@ func reviewAttributionView(line string) (string, bool) {
 	return strings.Join(parts, "\n"), continuation
 }
 
+func reviewAttributionKeyView(text string) string {
+	for end := strings.IndexByte(text, ':') + 1; end > 0 && end <= len(text); {
+		prefix, _ := reviewAttributionLine(text[:end])
+		if strings.HasSuffix(prefix, ":") {
+			key, _ := reviewAttributionLine(strings.TrimSuffix(prefix, ":"))
+			candidate := key + ":"
+			if strings.EqualFold(candidate, PreservedHumanCoauthorLabel) {
+				return "Co-Authored-By:" + text[end:]
+			}
+			if reviewTrailerKey.FindString(candidate) == candidate {
+				return candidate + text[end:]
+			}
+		}
+		if strings.HasPrefix(text[end:], "</code>") {
+			end += len("</code>")
+		} else if end < len(text) && strings.ContainsRune("`*_~\"' \t", rune(text[end])) {
+			end++
+		} else {
+			break
+		}
+	}
+	return text
+}
+
 func reviewAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
 	end = start + 1
 	firstLine, _ := reviewAttributionView(lines[start])
@@ -205,8 +227,11 @@ func reviewAttributionEntry(lines []string, start int, configuredTrailers []stri
 		}
 	}
 	ai = git.IsAIAttributionTrailer(unfolded) || reviewConfiguredAttributionMatches(firstLine, configuredTrailers) || reviewConfiguredAttributionMatches(unfolded, configuredTrailers)
-	_, value, hasKey := strings.Cut(unfolded, ":")
-	entry = ai || (reviewAttributionStart(unfolded) && hasKey && strings.TrimSpace(value) != "" && !reviewGeneratedWith.MatchString(unfolded))
+	key, value, _ := strings.Cut(unfolded, ":")
+	if strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && !strings.EqualFold(strings.TrimSpace(value), "Claude") && !strings.ContainsAny(value, "<>") {
+		ai = ai || git.IsAIAttributionTrailer("Assisted-by:"+value)
+	}
+	entry = ai || (reviewAttributionStart(unfolded) && reviewAttributionAddressComplete(unfolded) && !reviewGeneratedWith.MatchString(unfolded))
 	return end, unfolded, entry, ai
 }
 

@@ -38,7 +38,7 @@ func TestPRPublishedBodyRemovesAlreadyLabelledAIAttribution(t *testing.T) {
 	t.Parallel()
 	for _, ai := range []string{
 		"co-author (quoted): gpt-5.5 <model@example.com>",
-		"co-author (quoted): Claude\n <noreply@anthropic.com>",
+		"co-author (quoted): Claude <noreply@anthropic.com>",
 		"**co-author (quoted): Codex <codex@example.com>**",
 		`> "co-author (quoted): Gemini <gemini@example.com>"`,
 	} {

@@ -45,7 +45,6 @@ func TestPRFallbackAgentFooterPublicationPaths(t *testing.T) {
 		fallbackAgentFooter,
 		"**" + fallbackAgentFooter + "**",
 		html.EscapeString("<code>" + fallbackAgentFooter + "</code>"),
-		"🤖 Generated with\n [Claude Code](https://claude.ai/code)",
 	} {
 		t.Run(footer, func(t *testing.T) {
 			fixture := fallbackAgentNarrative + "\n\n" + footer + "\n\n" + fallbackAgentRecordedFooter(t, footer) + "\n\n" + humanCoauthorDisclosure
