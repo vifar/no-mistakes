@@ -95,12 +95,9 @@ func TestMain(m *testing.M) {
 	}
 	_ = os.Setenv("NM_HOME", root)
 	_ = os.Setenv("HOME", home)
-	// GIT_CONFIG_GLOBAL must exist to be read at all: git silently skips a
-	// missing global file and falls back to nothing, which is
-	// indistinguishable from isolation until a test writes "global" config
-	// and the write lands somewhere real. Materialize it, and carry a
-	// sentinel a test can read back to prove this file is the global scope in
-	// force for every fixture command (testenv_isolation_test.go).
+	// Git silently skips a missing global file. Materialize it with a
+	// sentinel so testenv_isolation_test.go can verify that fixture commands
+	// actually read this temporary global scope.
 	globalConfig := filepath.Join(home, "gitconfig")
 	if err := os.WriteFile(globalConfig, []byte("[no-mistakes-test]\n\tisolation-sentinel = 1\n"), 0o600); err != nil {
 		_ = os.RemoveAll(root)

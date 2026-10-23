@@ -117,8 +117,8 @@ func TestTestEnvironmentNeverResolvesTheOperatorsHome(t *testing.T) {
 // TestFixtureGitCommandsReadOnlyTheTemporaryGlobalConfig proves the same
 // property the way the suspect tests actually exercise it: by running git, in
 // a fixture repository, through the same package path a CLI test uses. The
-// sentinel lives only in the temporary global file, so a fixture command that
-// resolves it is reading that file and nothing else.
+// sentinel lives in the temporary global file, so reading it back verifies
+// that a fixture command sees that file.
 func TestFixtureGitCommandsReadOnlyTheTemporaryGlobalConfig(t *testing.T) {
 	real := operatorHome(t)
 	dir := t.TempDir()
@@ -144,9 +144,8 @@ func TestFixtureGitCommandsReadOnlyTheTemporaryGlobalConfig(t *testing.T) {
 		t.Fatalf("global sentinel = %q, want 1 from %q", got, os.Getenv("GIT_CONFIG_GLOBAL"))
 	}
 
-	// A "global" write from a fixture lands in the temporary file, not the
-	// operator's. This is the write that damaged a registered checkout: it
-	// must be confined to the test HOME.
+	// Verify that explicitly selecting the global scope reads the sentinel
+	// too: this is the scope a fixture's --global write would target.
 	if out, err := exec.Command("git", "-C", dir, "config", "--global", "--get", "no-mistakes-test.isolation-sentinel").Output(); err != nil || strings.TrimSpace(string(out)) != "1" {
 		t.Fatalf("the global scope in force is not the temporary file: %q, %v", out, err)
 	}
