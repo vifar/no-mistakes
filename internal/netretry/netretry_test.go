@@ -22,6 +22,7 @@ func TestClassifyTransientNetworkFailures(t *testing.T) {
 		`HTTP 504: Gateway Timeout`:                      ClassHTTP5xx,
 		`unexpected status code 500 from api.github.com`: ClassHTTP5xx,
 		`You have exceeded a secondary rate limit. Please wait before you try again. Retry-After: 60`:                                         ClassRateLimit,
+		`You have exceeded a secondary rate limit. Please wait a few minutes before you try again.`:                                           ClassRateLimit,
 		`error: RPC failed; curl 56 OpenSSL SSL_read: Connection reset by peer`:                                                               ClassConnection,
 		`error: RPC failed; curl 18 transfer closed with outstanding read data remaining`:                                                     ClassConnection,
 		`fatal: unable to access 'https://github.com/x/y.git/': Failed to connect to github.com port 443 after 75001 ms: Timeout was reached`: ClassTimeout,
@@ -51,6 +52,9 @@ func TestClassifyNeverRetriesRealFailures(t *testing.T) {
 		`Timeout trying to log in to github.com account vifar (keyring)`,
 		`network timeout`,
 		`error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413`,
+		`remote: error: GH013: Repository rule violations found for refs/heads/main. : [remote rejected] main -> main (push declined due to repository rule violations)`,
+		`! [remote rejected] main -> main (pre-receive hook declined)`,
+		`API rate limit exceeded for user ID 12345.`,
 		`gh: command not found`,
 		``,
 	}

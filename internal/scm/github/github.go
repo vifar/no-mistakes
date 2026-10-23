@@ -294,9 +294,11 @@ func (h *Host) ghStdout(ctx context.Context, operation, stdin string, args ...st
 	return out, detail, retryErr
 }
 
-// ghCombined runs one gh command and returns its combined output. A transient
-// network failure is retried; the output of the last attempt is returned with
-// its error so callers can report what GitHub said.
+// ghCombined runs one gh command and returns the output callers report. The
+// command's response data is never part of the retry classification: only its
+// stderr diagnostics are, because a response can legitimately contain words
+// like "permission denied" or "timeout" (a check named after a test, an issue
+// body) and would otherwise veto a real retry.
 func (h *Host) ghCombined(ctx context.Context, operation, stdin string, args ...string) ([]byte, error) {
 	var out []byte
 	var err error
@@ -305,13 +307,18 @@ func (h *Host) ghCombined(ctx context.Context, operation, stdin string, args ...
 		if stdin != "" {
 			cmd.Stdin = strings.NewReader(stdin)
 		}
-		err = runGHCommand(ctx, cmd, func() error {
-			var callErr error
-			out, callErr = shellenv.CombinedOutputShellCommand(cmd)
-			return callErr
-		})
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		err = runGHCommand(ctx, cmd, func() error { return shellenv.RunShellCommand(cmd) })
+		out = stdout.Bytes()
 		if err != nil {
-			return struct{}{}, fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
+			// Keep the diagnostics beside the response so callers report what
+			// GitHub said, but classify only the diagnostics.
+			if stderr.Len() > 0 {
+				out = append(append([]byte{}, out...), stderr.Bytes()...)
+			}
+			return struct{}{}, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
 		}
 		return struct{}{}, nil
 	})

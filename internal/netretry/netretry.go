@@ -49,7 +49,8 @@ const (
 	ClassDNS Class = "dns"
 	// ClassHTTP5xx covers a 5xx response from the GitHub API.
 	ClassHTTP5xx Class = "http_5xx"
-	// ClassRateLimit covers a secondary rate limit that names Retry-After.
+	// ClassRateLimit covers a secondary rate limit GitHub reports in its error
+	// message, whether or not response headers named Retry-After.
 	ClassRateLimit Class = "secondary_rate_limit"
 )
 
@@ -230,6 +231,11 @@ var hardVetoes = []string{
 	"repository not found",
 	"non-fast-forward",
 	"[rejected]",
+	// A ruleset or hook rejection is a decision about the push, not a
+	// transport failure, even when its message names a required check that
+	// happens to contain a timeout word.
+	"[remote rejected]",
+	"push declined",
 	"pre-receive hook declined",
 	"protected branch",
 	"merge conflict",
@@ -304,13 +310,16 @@ func ClassifyText(text string) Class {
 	return ""
 }
 
-// secondaryRateLimit recognises GitHub's secondary rate limit only when the
-// response named how long to wait; an unqualified 403 stays a permission
-// failure.
+// secondaryRateLimit recognises GitHub's own secondary-rate-limit diagnostic.
+// gh does not print response headers, so a Retry-After value is usually not in
+// the captured output; the message GitHub writes for a secondary limit is the
+// evidence, and the bounded backoff is the wait. A primary rate-limit quota
+// ("API rate limit exceeded") is NOT retried: only the secondary class is a
+// momentary burst control, and an unqualified 403 stays a permission failure.
 func secondaryRateLimit(lower string) bool {
-	retryAfter := strings.Contains(lower, "retry-after") || strings.Contains(lower, "retry after")
-	if !retryAfter {
-		return false
+	if strings.Contains(lower, "secondary rate limit") {
+		return true
 	}
-	return strings.Contains(lower, "secondary rate limit") || strings.Contains(lower, "http 429") || strings.Contains(lower, "rate limit exceeded")
+	return strings.Contains(lower, "http 429") &&
+		(strings.Contains(lower, "retry-after") || strings.Contains(lower, "retry after"))
 }

@@ -263,7 +263,8 @@ func TestGetChecksWorkflowCancellationKeepsRerunIdentity(t *testing.T) {
 		"gh api --method GET repos/test/repo/actions/runs -f head_sha=deadbeef -f per_page=100 --paginate --slurp": {
 			stdout: `[{"total_count":1,"workflow_runs":[{"id":101,"name":"build","status":"completed","conclusion":"cancelled"}]}]` + "\n",
 		},
-		"gh run rerun 101 --repo test/repo": {},
+		"gh api --method GET repos/test/repo/actions/runs/101": {stdout: `{"id":101,"run_attempt":1,"status":"completed"}` + "\n"},
+		"gh run rerun 101 --repo test/repo":                    {},
 	}), nil, "", "test/repo")
 
 	pr := &scm.PR{Number: "123", HeadSHA: "deadbeef"}
