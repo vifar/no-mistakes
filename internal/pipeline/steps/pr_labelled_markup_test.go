@@ -90,6 +90,29 @@ func TestPRLabelledMarkupPublicationPaths(t *testing.T) {
 	for _, prefix := range []string{"1. ", "1) "} {
 		cases = append(cases, fixtureCase{ai: prefix + "co-author (quoted): <code>Codex</code> <ai@example.com>", human: prefix + human})
 	}
+	wrap := func(marker, value string) string {
+		close := marker
+		if marker == "<code>" {
+			close = "</code>"
+		}
+		return marker + value + close
+	}
+	wrappers := []string{"`", "``", "**", "__", "*", "_", "~~", "<code>", "\""}
+	for i, outer := range wrappers {
+		for j, identity := range wrappers {
+			for _, separator := range []string{" ", "\n "} {
+				for _, escaped := range []bool{false, true} {
+					mailbox := wrappers[(i+j)%len(wrappers)]
+					ai := wrap(outer, "co-author (quoted): "+wrap(identity, "Codex")+separator+wrap(mailbox, "<ai@example.com>"))
+					human := wrap(outer, "co-author (quoted): "+wrap(identity, "Ada Lovelace")+separator+wrap(mailbox, "<human@example.com>"))
+					if escaped {
+						ai, human = html.EscapeString(ai), html.EscapeString(human)
+					}
+					cases = append(cases, fixtureCase{ai: ai, human: human})
+				}
+			}
+		}
+	}
 	for _, fixture := range cases {
 		ai, human, configured := fixture.ai, fixture.human, fixture.configured
 		t.Run(ai, func(t *testing.T) {
@@ -110,6 +133,10 @@ func TestPRLabelledMarkupPublicationPaths(t *testing.T) {
 			paths := map[string]func(*testing.T) string{
 				"review-summary": func(t *testing.T) string { _, body := reviewFixCommitSummary(fixture, nil, configured); return body },
 				"text":           func(t *testing.T) string { return prDisplayText(fixture, configured...) },
+				"captions": func(t *testing.T) string {
+					fields := prDisplayFindings(types.Findings{Artifacts: []types.TestArtifact{{Label: fixture, Content: fixture}}}, configured...)
+					return fields.Artifacts[0].Label + "\n" + fields.Artifacts[0].Content
+				},
 				"recorded": func(t *testing.T) string {
 					raw, err := json.Marshal(map[string]string{"description": fixture})
 					if err != nil {

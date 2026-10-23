@@ -51,6 +51,9 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 			start = end
 			continue
 		}
+		if recordedPayloadFragment(lines, start) {
+			lines[start] = filterRecordedPayload(lines[start], notice, configuredTrailers...)
+		}
 		end, unfolded, entry, ai := reviewAttributionEntry(lines, start, configuredTrailers)
 		if !ai {
 			key, _, _ := strings.Cut(unfolded, ":")
@@ -108,6 +111,41 @@ func recordedPayloadBlock(lines []string, start int) (string, int, bool) {
 	return strings.Join(lines[start:end], "\n"), end, true
 }
 
+func recordedPayloadFragment(lines []string, start int) bool {
+	line := strings.TrimSpace(lines[start])
+	if line == "" {
+		return false
+	}
+	if line[0] == '{' || line[0] == '[' {
+		return true
+	}
+	if !strings.ContainsRune(line, '"') {
+		return false
+	}
+	if line[0] == '"' {
+		if end, ok := jsonStringEnd([]byte(line), 0); ok {
+			rest := strings.TrimSpace(line[end:])
+			if rest != "" && strings.ContainsRune(":,]}", rune(rest[0])) {
+				return true
+			}
+			if rest == "" && start+1 < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[start+1]), "]") {
+				return true
+			}
+		}
+	}
+	for previous := start - 1; previous >= 0; previous-- {
+		context := strings.TrimSpace(lines[previous])
+		if strings.HasPrefix(context, "{") || strings.HasPrefix(context, "[") || strings.HasPrefix(context, "```json") {
+			return true
+		}
+		if context == "" || strings.HasPrefix(context, "\"") || strings.HasPrefix(context, "}") || strings.HasPrefix(context, "]") || strings.Contains(context, " bytes truncated] ...") {
+			continue
+		}
+		break
+	}
+	return false
+}
+
 // filterRecordedPayload filters the string values inside a recorded payload and
 // splices the filtered text back into the payload's own bytes, so the published
 // evidence keeps the shape it was recorded with.
@@ -119,9 +157,18 @@ func filterRecordedPayload(line string, notice bool, configuredTrailers ...strin
 			break
 		}
 		start += offset
+		slashes := 0
+		for previous := start - 1; previous >= 0 && out[previous] == '\\'; previous-- {
+			slashes++
+		}
+		if slashes%2 != 0 {
+			offset = start + 1
+			continue
+		}
 		end, ok := jsonStringEnd(out, start)
 		if !ok {
-			break
+			offset = start + 1
+			continue
 		}
 		next := end
 		for next < len(out) && strings.ContainsRune(" \t\r\n", rune(out[next])) {
@@ -146,7 +193,7 @@ func filterRecordedPayload(line string, notice bool, configuredTrailers ...strin
 				}
 			}
 		}
-		offset = end
+		offset = start + 1
 	}
 	return string(out)
 }
@@ -158,6 +205,8 @@ func jsonStringEnd(data []byte, start int) (int, bool) {
 		switch data[i] {
 		case '\\':
 			i++
+		case '\n', '\r':
+			return 0, false
 		case '"':
 			return i + 1, true
 		}
