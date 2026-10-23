@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,9 @@ import (
 // calls on PATH, then reports success. It returns the call counter file.
 func stubGit(t *testing.T, failures int, stderr string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell executable on PATH")
+	}
 	dir := t.TempDir()
 	counter := filepath.Join(dir, "calls")
 	script := fmt.Sprintf(`#!/bin/sh

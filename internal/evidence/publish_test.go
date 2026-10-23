@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -491,6 +492,9 @@ func TestPublish_RedactsHomePathsInTextEvidence(t *testing.T) {
 }
 
 func TestPublish_LostPushResponseReusesTheLandedEvidenceCommit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell executable on PATH")
+	}
 	remote, work := newRepoWithRemote(t)
 	source := writeEvidence(t, t.TempDir(), map[string]string{"proof.txt": "ok\n"})
 	realGit, err := testgit.RealGit()
