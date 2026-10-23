@@ -281,7 +281,7 @@ func TestGateIdentityJourney_DelayedClosingAnswer(t *testing.T) {
 // reply nor the response/refusal is synthesized. Moving A to B while the wire
 // request waits detects callers that bind to admission time instead of the
 // snapshot they read. All connections and the socket rename are cleaned up.
-func gateJourneyProxy(t *testing.T, socket string) (string, <-chan ipc.RespondParams, func()) {
+func gateJourneyProxy(t *testing.T, socket, reconcileReady string) (string, <-chan ipc.RespondParams, func()) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("this wire-delay helper uses Unix sockets")
@@ -328,6 +328,24 @@ func gateJourneyProxy(t *testing.T, socket string) (string, <-chan ipc.RespondPa
 				for scanner.Scan() {
 					line := append([]byte(nil), scanner.Bytes()...)
 					var req ipc.Request
+					if json.Unmarshal(line, &req) == nil && req.Method == ipc.MethodGetRun && reconcileReady != "" {
+						// Hold startup reconciliation until the driver has observed
+						// disabled controls. Even a fast daemon must exercise the
+						// transition back to an actionable gate before the key.
+						tick := time.NewTicker(10 * time.Millisecond)
+						for {
+							if _, err := os.Stat(reconcileReady); err == nil {
+								break
+							}
+							select {
+							case <-tick.C:
+							case <-ctx.Done():
+								tick.Stop()
+								return
+							}
+						}
+						tick.Stop()
+					}
 					if json.Unmarshal(line, &req) == nil && req.Method == ipc.MethodRespond && intercepted.CompareAndSwap(false, true) {
 						var params ipc.RespondParams
 						if json.Unmarshal(req.Params, &params) == nil {
@@ -379,8 +397,12 @@ func gateJourneyObservedResponse(t *testing.T, tui bool) {
 	t.Helper()
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: axiScenario(t)})
 	a := gateJourneyStart(t, h, "feature/cli-snapshot")
-	backend, arrived, release := gateJourneyProxy(t, paths.WithRoot(h.NMHome).Socket())
-	// The budget covers the whole caller: the driver's prompt waits (60s each)
+	reconcileReady := ""
+	if tui {
+		reconcileReady = filepath.Join(t.TempDir(), "tui-reconciling")
+	}
+	backend, arrived, release := gateJourneyProxy(t, paths.WithRoot(h.NMHome).Socket(), reconcileReady)
+	// The budget covers the whole caller: the driver's three prompt waits (60s each)
 	// and the answer that supersedes the gate. The CLI path needs a second;
 	// the TUI path needs whatever a loaded runner costs to render its first
 	// frame and print the refusal, so 30s was a bet on an idle machine.
@@ -397,13 +419,12 @@ func gateJourneyObservedResponse(t *testing.T, tui bool) {
 			t.Fatal(err)
 		}
 		cmd = exec.CommandContext(ctx, "python3", driver, h.NMBin, h.WorkDir, "a", "6", "6")
-		// Wait for the parked gate to be on screen before pressing the key, and
-		// for the refusal afterwards. A fixed pre-wait pressed the key before
-		// the gate frame existed on a loaded runner, so the journey failed with
-		// "TUI did not display the refusal" and no refusal was ever requested
-		// (CI run 39963484774).
+		// The heading also appears before startup reconciliation disables the
+		// controls. Wait through that refresh and for approval to return, then
+		// send exactly one key and wait for the refusal.
 		cmd.Env = append(os.Environ(),
-			"NM_TUI_WAIT_BEFORE=Review awaiting action:",
+			"NM_TUI_RECONCILE_READY="+reconcileReady,
+			"NM_TUI_WAIT_BEFORE=approve",
 			"NM_TUI_WAIT_AFTER=gate already resolved or superseded",
 			"NM_TUI_WAIT_LIMIT=60",
 		)
@@ -430,6 +451,9 @@ func gateJourneyObservedResponse(t *testing.T, tui bool) {
 		cancel()
 		select {
 		case <-done:
+			if tui && t.Failed() {
+				t.Logf("TUI terminal transcript after failure:\n%s", got.out)
+			}
 		case <-time.After(10 * time.Second):
 			t.Error("caller process did not exit")
 		}

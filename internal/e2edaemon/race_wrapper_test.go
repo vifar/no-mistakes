@@ -8,7 +8,39 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+// The loaded-runner contract gives each package 50 minutes while the CI job
+// retains its independent 90-minute wall. Inspect the executable boundary,
+// rather than the wrapper's source, so a dead assignment cannot satisfy it.
+func TestRaceWrapperGivesEachShardTheLoadedRunnerBudget(t *testing.T) {
+	result := runRaceWrapper(t, "")
+	if result.status != 0 {
+		t.Fatalf("wrapper failed: %s", result.output)
+	}
+	shards := raceWrapperShards(result.calls)
+	if len(shards) != 3 {
+		t.Fatalf("got %d shard invocations, want 3", len(shards))
+	}
+	for _, call := range shards {
+		fields := strings.Fields(call)
+		var budget time.Duration
+		for i, field := range fields {
+			if field == "-timeout" && i+1 < len(fields) {
+				var err error
+				budget, err = time.ParseDuration(fields[i+1])
+				if err != nil {
+					t.Fatalf("invalid Go timeout in %q: %v", call, err)
+				}
+			}
+		}
+		if budget != 50*time.Minute || budget >= 90*time.Minute {
+			t.Errorf("package budget = %s, want 50m below the 90m job wall: %s", budget, call)
+		}
+		t.Logf("Go shard invocation: %s", call)
+	}
+}
 
 // The race suite is the CI job's wall clock. Run as one go test process, its
 // cost is the SUM of every package's race time, which outgrew the job's
