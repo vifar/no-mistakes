@@ -373,7 +373,7 @@ func (h *Harness) RunInDirWithEnv(dir string, env map[string]string, args ...str
 // It must exceed the longest wait a journey asks the CLI for inside the same
 // command, and it must survive the runner's own load. Both were violated at
 // 60s: journeys run `axi run --wait 90s`, so the harness killed the command
-// three quarters of the way through a wait the command was still entitled to
+// two thirds of the way through a wait the command was still entitled to
 // serve, and the kill surfaced as `strict axi run: signal: killed` - a budget
 // reported as a product failure (CI run 39963484774). The measured cost of an
 // `axi run` that reaches checks-passed on the shared runner is about 100s
@@ -508,10 +508,7 @@ func (h *Harness) CommitChange(branch, path, content, message string) string {
 	return string(bytes.TrimSpace(sha))
 }
 
-// PushToGate pushes the current branch through the no-mistakes remote,
-// which fires the post-receive hook and triggers a daemon-side pipeline
-// run. Returns the IPC client connected to the daemon's socket.
-//
+// harnessPushTimeout bounds the Git push and its post-receive hook.
 // The push returns as soon as the hook does, so its budget is the hook's, not
 // a journey's. 30s was measured too small on the shared CI runner: two
 // journeys failed with `git push no-mistakes ...: signal: killed` while the
@@ -520,6 +517,8 @@ func (h *Harness) CommitChange(branch, path, content, message string) string {
 // cost so that only a push that is actually wedged is killed.
 const harnessPushTimeout = 120 * time.Second
 
+// PushToGate pushes the current branch through the no-mistakes remote,
+// which fires the post-receive hook and triggers a daemon-side pipeline run.
 func (h *Harness) PushToGate(branch string) {
 	h.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), harnessPushTimeout)

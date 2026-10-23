@@ -218,6 +218,8 @@ Daemon lifecycle logs go to `~/.no-mistakes/logs/daemon.log`. Startup logs repor
 
 Managed Rovo Dev and OpenCode server stdout and stderr go to `~/.no-mistakes/logs/managed-server.log`, separate from concise server startup, exit, and failure summaries in the lifecycle log. Output written before the lifecycle logger is ready, plus direct crash output, goes to `~/.no-mistakes/logs/daemon-bootstrap.log`. The lifecycle log retains a 32 MiB current file and three backups, managed-server output retains a 16 MiB current file and two backups, and bootstrap/crash output retains a 1 MiB current file and two backups. Backups use `.1` for the newest retained file.
 
+The daemon allows its bootstrap log-sink helper up to 30 seconds to report ready, accommodating process startup on a loaded host. If that bound expires, startup fails and the helper is killed and reaped.
+
 The setup wizard separately captures managed agent-server output in `~/.no-mistakes/logs/wizard-agent.log`. Each pipeline step writes to `~/.no-mistakes/logs/<runID>/<step>.log`. Except for [database infrastructure failures](#database-write-contention), fatal step errors are appended there so the step log includes the failure reason even when the detail comes from command stderr. `daemon stop`, `daemon uninstall`, `daemon restart`, and `update` invocations are logged separately to `~/.no-mistakes/logs/cli.log` with the caller's PID, parent PID, and parent command line.
 
 Set the log level in global config:
