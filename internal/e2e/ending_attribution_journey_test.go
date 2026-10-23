@@ -279,13 +279,17 @@ func TestEndingPublicSchemaMigrationJourney(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer raw.Close()
+			var currentSchema int
+			if err := raw.QueryRow("PRAGMA user_version").Scan(&currentSchema); err != nil {
+				t.Fatal(err)
+			}
 			if _, err := raw.Exec(fmt.Sprintf("ALTER TABLE runs DROP COLUMN ending_event; PRAGMA user_version=%d", version)); err != nil {
 				t.Fatal(err)
 			}
 			statusCommand(t, h, h.WorkDir, "daemon", "start")
 			var stamp int
-			if err := raw.QueryRow("PRAGMA user_version").Scan(&stamp); err != nil || stamp != 7 {
-				t.Fatalf("schema stamp=%d err=%v", stamp, err)
+			if err := raw.QueryRow("PRAGMA user_version").Scan(&stamp); err != nil || stamp != currentSchema {
+				t.Fatalf("schema stamp=%d want=%d err=%v", stamp, currentSchema, err)
 			}
 			info := h.RunInfo(r.ID)
 			if info.EndingEvent != nil || info.HeadSHA != r.HeadSHA {
@@ -363,10 +367,11 @@ func TestEndingPublicMidAutoFixJourney(t *testing.T) {
 	t.Log(statusCommand(t, h, h.WorkDir, "axi", "status", "--run", run.ID, "--json"))
 }
 
-// A real agent-process failure reaches terminal storage before the request.
-// A temporary SQL trigger refuses that write. The cancellation must return
-// without waiting for storage, and recovery must preserve the independent
-// failure while adding the accepted caller and explicit reason.
+// A rejected terminal write releases the completed workload's slot while
+// retaining custody for settlement. Abort after that public boundary is a
+// no-op: it must return promptly and never invent cancellation attribution.
+// The successful-write race below separately covers a request accepted while
+// the initial terminal write is still in flight.
 func TestEndingPublicTerminalOutageJourney(t *testing.T) {
 	scenario := filepath.Join(t.TempDir(), "ending-independent-failure.yaml")
 	if err := os.WriteFile(scenario, []byte(`actions:
@@ -399,6 +404,13 @@ func TestEndingPublicTerminalOutageJourney(t *testing.T) {
 		log, _ := os.ReadFile(filepath.Join(h.NMHome, "logs", "daemon.log"))
 		return strings.Contains(string(log), `msg="retrying terminal outcome settlement"`)
 	})
+	gateJourneyAwaitSlots(t, h, func(slots ipc.SlotsResult) bool { return slots.InUse == 0 })
+	if stored := h.RunInfo(run.ID); stored.Status.Terminal() || stored.EndingEvent != nil {
+		t.Fatalf("outage did not retain unsettled custody: %+v", stored)
+	}
+	if _, err := os.Stat(paths.WithRoot(h.NMHome).WorktreeDir(run.RepoID, run.ID)); err != nil {
+		t.Fatalf("outage lost the unsettled worktree: %v", err)
+	}
 	start := time.Now()
 	endingJourneyCall(t, h, ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: run.ID, Caller: "late-terminal-caller", Client: "journey-ipc", Reason: "stop while settlement is unavailable"}, nil)
 	if time.Since(start) > time.Second {
@@ -408,18 +420,22 @@ func TestEndingPublicTerminalOutageJourney(t *testing.T) {
 	if _, err := control.Exec("DROP TRIGGER ending_terminal_outage"); err != nil {
 		t.Fatal(err)
 	}
-	r := endingJourneyRecord(t, h, run.ID)
-	if r.Status != types.RunFailed || !strings.Contains(deref(r.Error), "claude exited: exit status 1") || r.EndingEvent == nil || r.EndingEvent.Caller != "late-terminal-caller" || r.EndingEvent.Reason != "stop while settlement is unavailable" {
-		t.Fatalf("late accepted request lost or independent failure replaced: %+v", r)
+	var r *ipc.RunInfo
+	waitSQLiteJourney(t, h, "independent failure settled after storage recovered", func() bool {
+		r = h.RunInfo(run.ID)
+		return r.Status.Terminal()
+	})
+	if r.Status != types.RunFailed || !strings.Contains(deref(r.Error), "claude exited: exit status 1") || r.EndingEvent != nil {
+		t.Fatalf("late abort replaced the independent failure or fabricated attribution: %+v", r)
 	}
 	t.Log(statusCommand(t, h, h.WorkDir, "axi", "abort", "--run", run.ID, "--owner", "too-late", "--reason", "must not overwrite"))
-	after := endingJourneyRecord(t, h, run.ID)
-	if after.EndingEvent.Caller != "late-terminal-caller" || after.EndingEvent.Reason != r.EndingEvent.Reason {
-		t.Fatal("closed cancellation acceptance overwrote the audit")
+	after := h.RunInfo(run.ID)
+	if after.Status != types.RunFailed || deref(after.Error) != deref(r.Error) || after.EndingEvent != nil {
+		t.Fatal("terminal abort changed the outcome or fabricated attribution")
 	}
 	log, _ := os.ReadFile(filepath.Join(h.NMHome, "logs", "daemon.log"))
-	if strings.Contains(string(log), "caller=too-late") {
-		t.Fatal("closed cancellation acceptance fabricated a second audit")
+	if strings.Contains(string(log), "caller=late-terminal-caller") || strings.Contains(string(log), "caller=too-late") {
+		t.Fatal("closed cancellation acceptance fabricated an audit")
 	}
 	t.Log(statusCommand(t, h, h.WorkDir, "axi", "status", "--run", run.ID, "--json"))
 }

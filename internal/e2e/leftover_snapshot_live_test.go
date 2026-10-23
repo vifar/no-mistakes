@@ -53,7 +53,7 @@ func TestLeftoverSnapshotRecoveryLiveJourney(t *testing.T) {
 			edit := "printf 'working version\\n' > feature.txt\n"
 			switch kind {
 			case "mixed_bytes":
-				edit = "printf 'index version\\n' > feature.txt\ngit add feature.txt\nprintf 'working version\\n' > feature.txt\nprintf '\\000\\377\\001' > 'new\nfile.bin'\nchmod 750 'new\nfile.bin'\nln -s \"$(printf 'target\\377')\" link-one\nln -s \"$(printf 'target\\376')\" link-two\ngit config color.ui always\ngit config color.diff always\ngit config diff.noprefix true\ngit config diff.outputIndicatorNew '^'\n"
+				edit = "printf 'index version\\n' > feature.txt\ngit add feature.txt\nprintf 'working version\\n' > feature.txt\nprintf '\\000\\377\\001' > 'new\nfile.bin'\nchmod 750 'new\nfile.bin'\nln -s \"$(printf 'target\\377')\" link-one\nln -s \"$(printf 'target\\376')\" link-two\ngit config --worktree color.ui always\ngit config --worktree color.diff always\ngit config --worktree diff.noprefix true\ngit config --worktree diff.outputIndicatorNew '^'\n"
 			case "deleted_survivor":
 				edit = "git rm --cached feature.txt\nprintf 'working version\\n' > feature.txt\n"
 			case "replacement_staged", "replacement_intent":
@@ -66,7 +66,7 @@ func TestLeftoverSnapshotRecoveryLiveJourney(t *testing.T) {
 			case "large_scratch":
 				edit += "mkdir -p .journal-live\ni=0\nwhile [ $i -lt 12000 ]; do printf 'private scratch\\n' > .journal-live/$(printf '%05d' $i)-" + strings.Repeat("x", 200) + ".log; i=$((i+1)); done\n"
 			case "gitlink":
-				edit += fmt.Sprintf("git clone %s module\ngit -C module checkout --detach %s\ngit update-index --cacheinfo 160000,%s,module\ngit config diff.ignoreSubmodules all\ngit config diff.submodule log\n", shellQuote(h.WorkDir), head, head)
+				edit += fmt.Sprintf("git clone %s module\ngit -C module checkout --detach %s\ngit update-index --cacheinfo 160000,%s,module\ngit config --worktree diff.ignoreSubmodules all\ngit config --worktree diff.submodule log\n", shellQuote(h.WorkDir), head, head)
 			case "git_filename_bytes":
 				edit += "blob=$(printf 'index byte name\\n' | git hash-object -w --stdin)\ngit update-index --add --cacheinfo \"100644,$blob,$(printf 'x\\377')\"\ngit update-index --add --cacheinfo \"100644,$blob,$(printf 'x\\376')\"\n"
 			case "clean":

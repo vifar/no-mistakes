@@ -45,7 +45,7 @@ func TestReviewPostMergeStaleSnapshotJourney(t *testing.T) {
 			injected := filepath.Join(h.HomeDir, "snapshot-injected")
 			shim := fmt.Sprintf(`#!/bin/sh
 case "$*" in
-  'merge --no-ff --no-edit origin/main')
+  'merge --no-ff --no-edit %s')
     %s "$@" || exit "$?"
     : > %s
     exit 0 ;;
@@ -64,7 +64,7 @@ case "$*" in
     fi ;;
 esac
 exec %s "$@"
-`, shellQuote(realGit), shellQuote(armed), shellQuote(armed), shellQuote(injected), shellQuote(injected), shellQuote(realGit), shellQuote(request), shellQuote(release), shellQuote(submitted), shellQuote(realGit))
+`, mainSHA, shellQuote(realGit), shellQuote(armed), shellQuote(armed), shellQuote(injected), shellQuote(injected), shellQuote(realGit), shellQuote(request), shellQuote(release), shellQuote(submitted), shellQuote(realGit))
 			if err := os.WriteFile(filepath.Join(h.BinDir, "git"), []byte(shim), 0o700); err != nil {
 				t.Fatal(err)
 			}

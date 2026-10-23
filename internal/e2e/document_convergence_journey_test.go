@@ -702,7 +702,7 @@ func TestDocumentJourneyUnsafeAndStrictRestart(t *testing.T) {
 				documentJourneyScenarioWith(t, h.Scenario, action, documentJourneyCapGapAction())
 			}
 			if kind == "executable-document" {
-				action["git"] = [][]string{{"config", "core.filemode", "false"}, {"add", "README.md"}, {"update-index", "--chmod=+x", "README.md"}, {"commit", "-m", "executable documentation"}}
+				action["git"] = [][]string{{"config", "--worktree", "core.filemode", "false"}, {"add", "README.md"}, {"update-index", "--chmod=+x", "README.md"}, {"commit", "-m", "executable documentation"}}
 				documentJourneyScenarioWith(t, h.Scenario, action, documentJourneyCapGapAction())
 			}
 			if kind == "hidden-gitlink" {
@@ -711,7 +711,7 @@ func TestDocumentJourneyUnsafeAndStrictRestart(t *testing.T) {
 				old := h.UpstreamBranchSHA("main")
 				new := h.CommitChange("main", "module.txt", "new module\n", "new module commit")
 				gitIn(t, h, h.WorkDir, "push", "origin", "main")
-				action["git"] = [][]string{{"config", "diff.ignoreSubmodules", "all"}, {"update-index", "--add", "--cacheinfo", "160000," + new + ",module"}, {"commit", "-m", "update hidden gitlink"}}
+				action["git"] = [][]string{{"config", "--worktree", "diff.ignoreSubmodules", "all"}, {"update-index", "--add", "--cacheinfo", "160000," + new + ",module"}, {"commit", "-m", "update hidden gitlink"}}
 				// The submitted branch starts with the older gitlink.
 				gitIn(t, h, h.WorkDir, "update-index", "--add", "--cacheinfo", "160000,"+old+",module")
 				gitIn(t, h, h.WorkDir, "commit", "-m", "seed hidden gitlink")
