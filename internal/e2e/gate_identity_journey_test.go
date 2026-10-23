@@ -380,7 +380,7 @@ func gateJourneyObservedResponse(t *testing.T, tui bool) {
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: axiScenario(t)})
 	a := gateJourneyStart(t, h, "feature/cli-snapshot")
 	backend, arrived, release := gateJourneyProxy(t, paths.WithRoot(h.NMHome).Socket())
-	// The budget covers the whole caller: the driver's prompt waits (90s each)
+	// The budget covers the whole caller: the driver's prompt waits (60s each)
 	// and the answer that supersedes the gate. The CLI path needs a second;
 	// the TUI path needs whatever a loaded runner costs to render its first
 	// frame and print the refusal, so 30s was a bet on an idle machine.

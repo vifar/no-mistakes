@@ -427,11 +427,6 @@ func (j *scopeJourney) finish(branch string) {
 	}
 }
 
-// strictRunTimeout must exceed the `--wait 90s` strictRun asks the CLI for,
-// with room for the process to start and report on a loaded runner; the
-// generic harness budget used to be smaller than the wait it was granting.
-const strictRunTimeout = 300 * time.Second
-
 // strictRun starts a strict-shipping run for a new branch with `axi run` and
 // waits (bounded) for its CI-ready point. It returns the worktree, the run,
 // and the axi output.
@@ -439,7 +434,7 @@ func (j *scopeJourney) strictRun(branch string) (string, *ipc.RunInfo, string) {
 	j.t.Helper()
 	j.h.CommitChange(branch, "strict-"+strings.ReplaceAll(branch, "/", "-")+".txt", branch+"\n", "add "+branch)
 	wt := j.h.AddWorktree(branch)
-	out, err := j.h.RunInDirWithEnvTimeout(wt, nil, strictRunTimeout, "axi", "run", "--intent", "validate the CI check scope", "--shipping-mode", "full", "--wait", "90s")
+	out, err := j.h.RunInDir(wt, "axi", "run", "--intent", "validate the CI check scope", "--shipping-mode", "full", "--wait", "90s")
 	if err != nil {
 		j.t.Fatalf("strict axi run: %v\n%s", err, out)
 	}
