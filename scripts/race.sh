@@ -25,7 +25,18 @@ fi
 
 # The per-package timeout. A package that exceeds it is a real failure and
 # must be reported as one, not swallowed by the job's wall clock.
-package_timeout_seconds=1500
+#
+# It is sized to the machine, not to a quiet-machine measurement. The three
+# long poles are the heavy packages, and one of them measured 903.6s on the
+# shared runner while the e2e job shared the host (internal/pipeline at
+# 47a2c9a8b9, CI run 39803115989); at 1500s the same package then overran on
+# a slower day and the suite reported a timeout instead of a result
+# (CI run 39963484774). The job wall is 90 minutes, and each shard runs one
+# long pole, so a ceiling of 50 minutes still leaves the job wall as the
+# outer bound while giving a loaded machine room to finish. A package that
+# genuinely hangs is still killed and reported: by this bound, or by the
+# job's own wall.
+package_timeout_seconds=3000
 
 # The shards.
 shard_count=3

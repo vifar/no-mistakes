@@ -20,6 +20,12 @@ type bootstrapCapture struct {
 	restore func() error
 }
 
+// bootstrapSinkReadinessTimeout bounds how long the daemon waits for its own
+// log-sink helper to answer. It is a spawn budget on a shared machine, not a
+// product deadline: the helper is this binary re-executed, and a loaded runner
+// took longer than the original 5s to get it to print "ready".
+const bootstrapSinkReadinessTimeout = 30 * time.Second
+
 func startBootstrapCapture(p *paths.Paths) (*bootstrapCapture, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -55,6 +61,13 @@ func startBootstrapCapture(p *paths.Paths) (*bootstrapCapture, error) {
 		}
 		readyResult <- err
 	}()
+	// The sink is this same binary re-executed, so its readiness budget is a
+	// process spawn plus path setup, not product work. 5s was measured too
+	// small on the shared CI runner: `nm init` failed with "daemon child ...
+	// exited before readiness" and the bootstrap log held "bootstrap sink
+	// readiness timed out" while the race suite shared the host (CI run
+	// 39963484774). A startup budget that a loaded machine cannot meet turns
+	// load into a product failure, so it is sized well above the spawn.
 	select {
 	case err := <-readyResult:
 		if err != nil {
@@ -63,7 +76,7 @@ func startBootstrapCapture(p *paths.Paths) (*bootstrapCapture, error) {
 			_ = cmd.Wait()
 			return nil, fmt.Errorf("bootstrap sink readiness: %w", err)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(bootstrapSinkReadinessTimeout):
 		_ = input.Close()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()

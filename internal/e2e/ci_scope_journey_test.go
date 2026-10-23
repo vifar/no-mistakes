@@ -183,6 +183,16 @@ func newScopeJourney(t *testing.T, opts SetupOpts) *scopeJourney {
 	return j
 }
 
+// forTest returns the journey bound to t for one subtest. It rebinds both the
+// journey and its harness, so a failure inside the subtest is reported against
+// the subtest that caused it rather than ending the parent test.
+func (j *scopeJourney) forTest(t *testing.T) *scopeJourney {
+	clone := *j
+	clone.t = t
+	clone.h = j.h.forTest(t)
+	return &clone
+}
+
 // setForge atomically replaces the fake forge; the next gh call, whether from
 // the daemon's monitor or from a receipt process, observes it.
 func (j *scopeJourney) setForge(f forgeState) {
@@ -420,11 +430,17 @@ func (j *scopeJourney) finish(branch string) {
 // strictRun starts a strict-shipping run for a new branch with `axi run` and
 // waits (bounded) for its CI-ready point. It returns the worktree, the run,
 // and the axi output.
+//
+// The run asks the CLI for `--wait 90s`, so its budget must exceed that wait
+// with room for the process to start and report on a loaded runner; the
+// generic harness budget used to be smaller than the wait it was granting.
+const strictRunTimeout = 300 * time.Second
+
 func (j *scopeJourney) strictRun(branch string) (string, *ipc.RunInfo, string) {
 	j.t.Helper()
 	j.h.CommitChange(branch, "strict-"+strings.ReplaceAll(branch, "/", "-")+".txt", branch+"\n", "add "+branch)
 	wt := j.h.AddWorktree(branch)
-	out, err := j.h.RunInDir(wt, "axi", "run", "--intent", "validate the CI check scope", "--shipping-mode", "full", "--wait", "90s")
+	out, err := j.h.RunInDirWithEnvTimeout(wt, nil, strictRunTimeout, "axi", "run", "--intent", "validate the CI check scope", "--shipping-mode", "full", "--wait", "90s")
 	if err != nil {
 		j.t.Fatalf("strict axi run: %v\n%s", err, out)
 	}
@@ -448,6 +464,7 @@ func TestCIScopeFirstAttemptKeepsCompletedRequiredJob(t *testing.T) {
 	j.init()
 	for _, conclusion := range []string{"SUCCESS", "FAILURE"} {
 		t.Run(conclusion, func(t *testing.T) {
+			j := j.forTest(t)
 			branch := "feature/scope-first-attempt-" + strings.ToLower(conclusion)
 			build := actionsCheck("build", conclusion)
 			build.DatabaseID, build.Workflow = 5, "CI"
@@ -498,6 +515,7 @@ func TestCIScopeActionsLinkedStatusStillBlocksReadiness(t *testing.T) {
 	j.init()
 	for _, retirement := range []bool{false, true} {
 		t.Run(fmt.Sprintf("retirement=%v", retirement), func(t *testing.T) {
+			j := j.forTest(t)
 			variant := "reconciliation"
 			if retirement {
 				variant = "retirement"
@@ -656,6 +674,7 @@ func TestCIScopeRequiredChecksBlockReadiness(t *testing.T) {
 	j.init()
 
 	t.Run("control satisfied requirement is ready", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-required-ok"
 		j.setForge(forgeState{Protection: protectionJSON("build@15368"), Checks: []forgeCheck{greenCheck("build"), redCheck("optional-lint")}})
 		j.push(branch)
@@ -664,6 +683,7 @@ func TestCIScopeRequiredChecksBlockReadiness(t *testing.T) {
 	})
 
 	t.Run("failing required check parks a gate and invokes no repair agent", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-required-failing"
 		before := len(j.ciRepairPrompts())
 		j.setForge(forgeState{Protection: protectionJSON("build@15368"), Checks: []forgeCheck{redCheck("build"), greenCheck("other")}})
@@ -695,6 +715,7 @@ func TestCIScopeRequiredChecksBlockReadiness(t *testing.T) {
 		}()}},
 	} {
 		t.Run(tc.name+" withholds readiness", func(t *testing.T) {
+			j := j.forTest(t)
 			j.setForge(forgeState{Protection: protectionJSON("build@15368"), Checks: tc.checks})
 			j.push(tc.branch)
 			j.expectWaiting(tc.branch, "CI checks running, waiting for results...")
@@ -703,6 +724,7 @@ func TestCIScopeRequiredChecksBlockReadiness(t *testing.T) {
 	}
 
 	t.Run("stale required check from a superseded attempt withholds readiness until the current attempt reports", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-required-stale"
 		// Run 7 was re-run (attempt 2) and is still going. The rollup still
 		// carries attempt 1's green build job, completed before the re-run
@@ -748,6 +770,7 @@ func TestCIScopeAutoDiscovery(t *testing.T) {
 	j.init()
 
 	t.Run("classic protection absent leaves rulesets authoritative", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-ruleset-only"
 		j.setForge(forgeState{
 			Rules:  &forgeRules{Pages: []json.RawMessage{rulesetPage("ruleset-check")}},
@@ -762,6 +785,7 @@ func TestCIScopeAutoDiscovery(t *testing.T) {
 	})
 
 	t.Run("required empty set still evaluates every non-external check", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-empty-required"
 		j.setForge(forgeState{Protection: protectionJSON(), Checks: []forgeCheck{greenCheck("build"), redCheck("docs")}})
 		j.push(branch)
@@ -773,6 +797,7 @@ func TestCIScopeAutoDiscovery(t *testing.T) {
 	})
 
 	t.Run("protection and a later ruleset page are unioned", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-union"
 		j.setForge(forgeState{
 			Protection: protectionJSON("build"),
@@ -791,6 +816,7 @@ func TestCIScopeAutoDiscovery(t *testing.T) {
 	})
 
 	t.Run("requirements are discovered once and cached across polls", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-cache"
 		protectionBefore, rulesBefore, rollupBefore := j.protectionReads(), j.rulesReads(), j.rollupReads()
 		j.setForge(forgeState{Protection: protectionJSON("build"), Checks: []forgeCheck{runningCheck("build")}})
@@ -824,6 +850,7 @@ func TestCIScopeAutoDiscovery(t *testing.T) {
 		{"protection server error", forgeState{Protection: &forgeEndpoint{Status: 500, Message: "Server Error"}}},
 	} {
 		t.Run("unreadable requirements fall back to every check: "+tc.name, func(t *testing.T) {
+			j := j.forTest(t)
 			branch := "feature/scope-fallback-" + strings.ReplaceAll(tc.name, " ", "-")
 			tc.forge.Checks = []forgeCheck{greenCheck("build"), redCheck("docs")}
 			j.setForge(tc.forge)
@@ -848,6 +875,7 @@ func TestCIScopeExternalOverridesAndAllExcludedRestriction(t *testing.T) {
 	j.init()
 
 	t.Run("qualified glob exclusions cover an absent required approval context", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-qualified-external"
 		j.setTrusted("ci:\n  must_pass:\n    - 'CI / audit-*'\n  external_checks:\n    - 'Review / approval-*'\n")
 		checks := []forgeCheck{greenCheck("build"), redCheck("audit-123")}
@@ -870,6 +898,7 @@ func TestCIScopeExternalOverridesAndAllExcludedRestriction(t *testing.T) {
 	})
 
 	t.Run("external outranks must_pass and the required set", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-external-outranks"
 		j.setTrusted("ci:\n  must_pass:\n    - approve\n  external_checks:\n    - approve\n")
 		j.setForge(forgeState{Protection: protectionJSON("build", "approve"), Checks: []forgeCheck{greenCheck("build"), redCheck("approve")}})
@@ -882,6 +911,7 @@ func TestCIScopeExternalOverridesAndAllExcludedRestriction(t *testing.T) {
 	})
 
 	t.Run("required_checks all still honors external exclusions", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-all-external"
 		j.setTrusted("ci:\n  required_checks: all\n  external_checks:\n    - approve\n")
 		j.setForge(forgeState{Checks: []forgeCheck{greenCheck("build"), redCheck("approve")}})
@@ -891,6 +921,7 @@ func TestCIScopeExternalOverridesAndAllExcludedRestriction(t *testing.T) {
 	})
 
 	t.Run("everything observed is external with no known required set is not ready", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-all-excluded-unknown"
 		j.setTrusted("ci:\n  external_checks:\n    - approve\n")
 		j.setForge(forgeState{Checks: []forgeCheck{redCheck("approve")}}) // no protection: set unknown
@@ -900,6 +931,7 @@ func TestCIScopeExternalOverridesAndAllExcludedRestriction(t *testing.T) {
 	})
 
 	t.Run("everything observed is external or informational with a known required set is ready", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-all-excluded-known"
 		j.setTrusted("ci:\n  external_checks:\n    - approve\n")
 		j.setForge(forgeState{Protection: protectionJSON("approve"), Checks: []forgeCheck{redCheck("approve"), redCheck("optional-lint")}})
@@ -909,6 +941,7 @@ func TestCIScopeExternalOverridesAndAllExcludedRestriction(t *testing.T) {
 	})
 
 	t.Run("everything observed is external under trusted no_ci is ready", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-all-excluded-no-ci"
 		j.setTrusted("no_ci: true\nci:\n  external_checks:\n    - approve\n")
 		j.setForge(forgeState{Checks: []forgeCheck{redCheck("approve")}})
@@ -1059,6 +1092,7 @@ func TestCIScopeCarriedReplayKeepsAppBoundRequiredRepair(t *testing.T) {
 	required := protectionJSON("build / test@15368")
 
 	t.Run("selected repair of the app-bound required check reaches the fixer", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-repair-kept"
 		before := len(j.ciRepairPrompts())
 		j.setForge(forgeState{Protection: required, Checks: []forgeCheck{redCheck("build / test")}})
@@ -1083,6 +1117,7 @@ func TestCIScopeCarriedReplayKeepsAppBoundRequiredRepair(t *testing.T) {
 	})
 
 	t.Run("selected repair is dropped once the producer no longer satisfies the binding", func(t *testing.T) {
+		j := j.forTest(t)
 		const branch = "feature/scope-repair-dropped"
 		before := len(j.ciRepairPrompts())
 		j.setForge(forgeState{Protection: required, Checks: []forgeCheck{redCheck("build / test")}})

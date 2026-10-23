@@ -76,6 +76,22 @@ type Harness struct {
 	daemonOwn         *e2edaemon.Ownership
 }
 
+// forTest returns the same fixture bound to t.
+//
+// The harness records the test it was created with and reports every setup
+// failure through it. A subtest that drives the same fixture must rebind it:
+// otherwise a failure inside the subtest calls FailNow on the parent, and Go
+// reports "subtest may have called FailNow on a parent test" instead of the
+// failure itself - the real cause is lost, which is exactly what happened to
+// TestCIScopeActionsLinkedStatusStillBlocksReadiness (CI run 39963484774).
+// The copy shares the paths and the daemon ownership; only the reporter
+// changes.
+func (h *Harness) forTest(t *testing.T) *Harness {
+	clone := *h
+	clone.t = t
+	return &clone
+}
+
 // SetupOpts controls per-test setup.
 type SetupOpts struct {
 	// Agent picks which fake the harness wires up: "claude", "codex", "grok",
@@ -352,9 +368,18 @@ func (h *Harness) RunInDirWithEnv(dir string, env map[string]string, args ...str
 	return h.RunInDirWithEnvTimeout(dir, env, harnessCommandTimeout, args...)
 }
 
-// harnessCommandTimeout is the budget for one harness-invoked command. It is
-// generous enough for the slowest ordinary command on a loaded runner.
-const harnessCommandTimeout = 60 * time.Second
+// harnessCommandTimeout is the budget for one harness-invoked command.
+//
+// It must exceed the longest wait a journey asks the CLI for inside the same
+// command, and it must survive the runner's own load. Both were violated at
+// 60s: journeys run `axi run --wait 90s`, so the harness killed the command
+// three quarters of the way through a wait the command was still entitled to
+// serve, and the kill surfaced as `strict axi run: signal: killed` - a budget
+// reported as a product failure (CI run 39963484774). The measured cost of an
+// `axi run` that reaches checks-passed on the shared runner is about 100s
+// alone and more while the race suite shares the host, so the budget is set
+// well above both the 90s wait and that measurement.
+const harnessCommandTimeout = 180 * time.Second
 
 // RunInDirWithEnvTimeout invokes the no-mistakes binary in dir with env
 // overrides and an explicit budget.
@@ -486,9 +511,18 @@ func (h *Harness) CommitChange(branch, path, content, message string) string {
 // PushToGate pushes the current branch through the no-mistakes remote,
 // which fires the post-receive hook and triggers a daemon-side pipeline
 // run. Returns the IPC client connected to the daemon's socket.
+//
+// The push returns as soon as the hook does, so its budget is the hook's, not
+// a journey's. 30s was measured too small on the shared CI runner: two
+// journeys failed with `git push no-mistakes ...: signal: killed` while the
+// race suite shared the host (CI run 39963484774), and the kill was reported
+// as a product failure. The budget is deliberately far above the ordinary
+// cost so that only a push that is actually wedged is killed.
+const harnessPushTimeout = 120 * time.Second
+
 func (h *Harness) PushToGate(branch string) {
 	h.t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), harnessPushTimeout)
 	defer cancel()
 	out, err := h.runGit(ctx, h.WorkDir, "push", "no-mistakes", branch)
 	if err != nil {

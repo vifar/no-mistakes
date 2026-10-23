@@ -380,7 +380,15 @@ func gateJourneyObservedResponse(t *testing.T, tui bool) {
 	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: axiScenario(t)})
 	a := gateJourneyStart(t, h, "feature/cli-snapshot")
 	backend, arrived, release := gateJourneyProxy(t, paths.WithRoot(h.NMHome).Socket())
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	// The budget covers the whole caller: the driver's prompt waits (90s each)
+	// and the answer that supersedes the gate. The CLI path needs a second;
+	// the TUI path needs whatever a loaded runner costs to render its first
+	// frame and print the refusal, so 30s was a bet on an idle machine.
+	callerTimeout := 30 * time.Second
+	if tui {
+		callerTimeout = 210 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), callerTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, h.NMBin, "axi", "respond", "--run", a.RunID, "--action", "approve")
 	if tui {
@@ -389,13 +397,25 @@ func gateJourneyObservedResponse(t *testing.T, tui bool) {
 			t.Fatal(err)
 		}
 		cmd = exec.CommandContext(ctx, "python3", driver, h.NMBin, h.WorkDir, "a", "6", "6")
+		// Wait for the parked gate to be on screen before pressing the key, and
+		// for the refusal afterwards. A fixed pre-wait pressed the key before
+		// the gate frame existed on a loaded runner, so the journey failed with
+		// "TUI did not display the refusal" and no refusal was ever requested
+		// (CI run 39963484774).
+		cmd.Env = append(os.Environ(),
+			"NM_TUI_WAIT_BEFORE=Review awaiting action:",
+			"NM_TUI_WAIT_AFTER=gate already resolved or superseded",
+			"NM_TUI_WAIT_LIMIT=60",
+		)
 		// Let the driver's finally block terminate and wait for its PTY child
 		// when a failing assertion cancels this command.
 		cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 		cmd.WaitDelay = 5 * time.Second
 	}
 	cmd.Dir = h.WorkDir
-	cmd.Env = os.Environ()
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
 	type cliResult struct {
 		out []byte
 		err error
