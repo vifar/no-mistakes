@@ -1,8 +1,10 @@
 package github
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"net/http"
 	"regexp"
 	"strings"
 
@@ -10,13 +12,12 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
-type ghHeaderError struct {
+type ghRateLimitError struct {
 	error
-	diagnostic string
 }
 
-func (e *ghHeaderError) Unwrap() error           { return e.error }
-func (e *ghHeaderError) RetryDiagnostic() string { return e.diagnostic }
+func (e *ghRateLimitError) Unwrap() error              { return e.error }
+func (e *ghRateLimitError) RetryClass() netretry.Class { return netretry.ClassRateLimit }
 
 var ghRateLimitStatus = regexp.MustCompile(`\bHTTP (?:403|429)\b`)
 
@@ -75,19 +76,30 @@ func (h *Host) ghReadAttempt(ctx context.Context, stdin string, args []string) (
 	if err == nil || ctx.Err() != nil || !ghAPIGet(args) || !ghRateLimitStatus.MatchString(detail) {
 		return out, detail, err
 	}
-	probe, probeDetail, probeErr := run(append(append([]string{}, args...), "--include"))
-	end, separator := bytes.Index(probe, []byte("\n\n")), 2
-	if crlf := bytes.Index(probe, []byte("\r\n\r\n")); crlf >= 0 && (end < 0 || crlf < end) {
-		end, separator = crlf, 4
-	}
-	if end < 0 {
-		if probeErr != nil && (ctx.Err() != nil || netretry.ClassifyText(probeDetail) != "") {
-			return out, probeDetail, probeErr
+	probeArgs := make([]string, 0, len(args)+1)
+	for _, arg := range args {
+		flag, _, _ := strings.Cut(arg, "=")
+		if flag != "--paginate" && flag != "--slurp" {
+			probeArgs = append(probeArgs, arg)
 		}
-		return out, detail, err
 	}
-	if probeErr == nil {
-		return probe[end+separator:], probeDetail, nil
+	probe, probeDetail, probeErr := run(append(probeArgs, "--include"))
+	if probeErr != nil && ctx.Err() != nil {
+		return out, probeDetail, probeErr
 	}
-	return out, detail, &ghHeaderError{error: err, diagnostic: probeDetail + "\n" + string(probe[:end])}
+	reader := bufio.NewReader(bytes.NewReader(probe))
+	for {
+		response, headerErr := http.ReadResponse(reader, nil)
+		if headerErr != nil {
+			break
+		}
+		if response.StatusCode >= 200 && response.StatusCode < 300 ||
+			(response.StatusCode == 403 || response.StatusCode == 429) && response.Header.Get("Retry-After") != "" {
+			return out, detail, &ghRateLimitError{error: err}
+		}
+		if response.StatusCode >= 200 {
+			break
+		}
+	}
+	return out, detail, err
 }

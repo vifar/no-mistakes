@@ -206,6 +206,10 @@ func Describe(err error) string {
 	if err == nil {
 		return ""
 	}
+	var classified interface{ RetryClass() Class }
+	if errors.As(err, &classified) {
+		return string(classified.RetryClass())
+	}
 	var diagnostic interface{ RetryDiagnostic() string }
 	if errors.As(err, &diagnostic) {
 		return string(ClassifyText(diagnostic.RetryDiagnostic()))

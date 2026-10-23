@@ -14,38 +14,43 @@ import (
 
 func TestAPIReadHeaderEvidence(t *testing.T) {
 	for _, combined := range []bool{false, true} {
-		for _, scenario := range []string{"recover", "exhausted", "no header", "primary limit", "probe succeeds", "probe succeeds CRLF", "malformed headers", "probe timeout", "CRLF", "slurp headers"} {
+		for _, scenario := range []string{"recover", "exhausted", "no header", "primary limit", "probe 200", "probe 204", "malformed headers", "probe timeout", "CRLF", "informational headers", "header in body", "probe unauthorized", "probe server failure", "explicit pagination flags"} {
 			t.Run(scenario+map[bool]string{false: "/stdout", true: "/combined"}[combined], func(t *testing.T) {
 				reads, probes := 0, 0
-				args := []string{"api", "--hostname", "ghe.example.com", "--method", "GET", "repos/test/repo/pulls/7"}
+				probeArgs := []string{"api", "--hostname", "ghe.example.com", "--method", "GET", "repos/test/repo/pulls", "-f", "per_page=100"}
+				args := append(append([]string{}, probeArgs...), "--paginate", "--slurp")
+				if scenario == "explicit pagination flags" {
+					args = append(append([]string{}, probeArgs...), "--paginate=true", "--slurp=true")
+				}
+				probeArgs = append(probeArgs, "--include")
 				failure := "gh: You have exceeded a secondary rate limit (HTTP 403)\n"
-				body := "{\"number\":7,\"body\":\"permission denied tests\"}\n\r\n\r\n"
+				body := "[[{\"number\":7,\"body\":\"permission denied tests\"}],[{\"number\":8}]]\n"
 				host := fastRetryHost(func(ctx context.Context, name string, got ...string) *exec.Cmd {
-					step := ghScriptStep{stderr: failure, code: 1}
-					if len(got) == len(args)+1 && got[len(got)-1] == "--include" {
-						if !reflect.DeepEqual(got[:len(args)], args) {
-							t.Fatalf("probe changed the read: %v", got)
-						}
+					step := ghScriptStep{stdout: "[[{\"number\":7}]", stderr: failure, code: 1}
+					if reflect.DeepEqual(got, probeArgs) {
 						probes++
 						headers := "HTTP/2.0 403 Forbidden\nRetry-After: 60\nX-Private: header-secret\n\n"
-						if scenario == "no header" {
+						switch scenario {
+						case "no header", "primary limit", "header in body":
 							headers = "HTTP/2.0 403 Forbidden\nX-Private: header-secret\n\n"
+						case "CRLF":
+							headers = "HTTP/2.0 403 Forbidden\nRetry-After: 60\r\nX-Private: header-secret\r\n\r\n"
+						case "informational headers":
+							headers = "HTTP/1.1 103 Early Hints\r\n\r\n" + headers
+						case "probe 200":
+							headers = "HTTP/2.0 200 OK\nX-Private: header-secret\n\n"
+							step.code, step.stderr = 0, ""
+						case "probe 204":
+							headers = "HTTP/2.0 204 No Content\nX-Private: header-secret\n\n"
+							step.code, step.stderr = 0, ""
+						case "probe unauthorized":
+							headers = "HTTP/2.0 401 Unauthorized\nRetry-After: 60\n\n"
+						case "probe server failure":
+							headers = "HTTP/2.0 503 Service Unavailable\n\n"
 						}
+						step.stdout = headers + `{"probe_body":"must-never-be-returned","Retry-After":60}`
 						if scenario == "primary limit" {
 							step.stderr = "gh: API rate limit exceeded (HTTP 403)\n"
-						}
-						if scenario == "CRLF" {
-							headers = "HTTP/2.0 403 Forbidden\nRetry-After: 60\r\nX-Private: header-secret\r\n\r\n"
-						}
-						if scenario == "slurp headers" {
-							headers = "[" + headers
-						}
-						step.stdout = headers + body
-						if strings.HasPrefix(scenario, "probe succeeds") {
-							step = ghScriptStep{stdout: "HTTP/2.0 200 OK\nX-Private: header-secret\n\n" + body}
-							if scenario == "probe succeeds CRLF" {
-								step.stdout = "HTTP/2.0 200 OK\nX-Private: header-secret\r\n\r\n" + body
-							}
 						}
 						if scenario == "malformed headers" {
 							step.stdout = "HTTP/2.0 403 Forbidden\nRetry-After: 60\nX-Private: header-secret"
@@ -55,7 +60,7 @@ func TestAPIReadHeaderEvidence(t *testing.T) {
 						}
 					} else {
 						if !reflect.DeepEqual(got, args) {
-							t.Fatalf("unexpected read: %v", got)
+							t.Fatalf("unexpected command arguments: %v", got)
 						}
 						reads++
 						if reads > 1 && scenario != "exhausted" {
@@ -73,25 +78,27 @@ func TestAPIReadHeaderEvidence(t *testing.T) {
 				} else {
 					out, detail, err = host.ghStdout(context.Background(), "read PR facts", "", args...)
 				}
-				if strings.Contains(string(out)+detail, "HTTP/") || strings.Contains(string(out)+detail, "Retry-After") || strings.Contains(string(out)+detail, "header-secret") || err != nil && (strings.Contains(err.Error(), "header-secret") || strings.Contains(err.Error(), "Retry-After")) {
-					t.Fatalf("headers escaped: output=%q detail=%q err=%v", out, detail, err)
+				reported := string(out) + detail
+				if err != nil {
+					reported += err.Error()
+				}
+				for _, private := range []string{"HTTP/", "header-secret", "Retry-After", "must-never-be-returned"} {
+					if strings.Contains(reported, private) {
+						t.Fatalf("probe escaped into response or error: %q", reported)
+					}
 				}
 				switch scenario {
 				case "exhausted":
 					if err == nil || reads != 3 || probes != 3 || netretry.Describe(err) != string(netretry.ClassRateLimit) {
 						t.Fatalf("reads=%d probes=%d err=%v, want bounded secondary-limit failure", reads, probes, err)
 					}
-				case "no header", "primary limit", "malformed headers":
-					if err == nil || reads != 1 || probes != 1 || netretry.Retryable(err) {
-						t.Fatalf("reads=%d probes=%d err=%v, want no retry without qualifying evidence", reads, probes, err)
+				case "no header", "primary limit", "malformed headers", "probe timeout", "header in body", "probe unauthorized", "probe server failure":
+					if err == nil || reads != 1 || probes != 1 || netretry.Retryable(err) || !strings.Contains(err.Error(), strings.TrimSpace(failure)) {
+						t.Fatalf("reads=%d probes=%d err=%v, want original failure without retry", reads, probes, err)
 					}
 				default:
-					wantReads := 2
-					if strings.HasPrefix(scenario, "probe succeeds") {
-						wantReads = 1
-					}
-					if err != nil || string(out) != body || detail != "" || reads != wantReads || probes != 1 {
-						t.Fatalf("reads=%d probes=%d output=%q detail=%q err=%v, want exact response body", reads, probes, out, detail, err)
+					if err != nil || string(out) != body || detail != "" || reads != 2 || probes != 1 {
+						t.Fatalf("reads=%d probes=%d output=%q detail=%q err=%v, want exact response from retried paginated command", reads, probes, out, detail, err)
 					}
 				}
 			})

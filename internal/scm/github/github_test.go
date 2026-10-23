@@ -1990,6 +1990,9 @@ func TestGitHubHelperProcess(t *testing.T) {
 	}
 
 	if marker := os.Getenv("GITHUB_TEST_RUNNING"); marker != "" {
+		if _, err := fmt.Fprint(os.Stdout, os.Getenv("GITHUB_TEST_STDOUT")); err != nil {
+			os.Exit(1)
+		}
 		if err := os.WriteFile(marker, []byte("running"), 0600); err != nil {
 			os.Exit(2)
 		}
