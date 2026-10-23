@@ -145,6 +145,10 @@ func reviewPublishedLabelAsTrailer(line string) string {
 	return line[:idx] + "Co-Authored-By:" + line[idx+len(label):]
 }
 
+func reviewRenderedLineCarriesAIAttribution(line string) bool {
+	return lineCarriesAIAttribution(reviewPublishedLabelAsTrailer(line))
+}
+
 func reviewAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
 	end = start + 1
 	firstLine := html.UnescapeString(reviewPublishedLabelAsTrailer(lines[start]))
@@ -186,10 +190,10 @@ func reviewAttributionEntry(lines []string, start int, configuredTrailers []stri
 	// decides it, on the ORIGINAL bytes so a literal code span keeps its own
 	// inner markup and stays the quoted evidence it is.
 	if !ai {
-		ai = lineCarriesAIAttribution(lines[start])
+		ai = reviewRenderedLineCarriesAIAttribution(lines[start])
 	}
 	if !ai && end > start+1 {
-		ai = lineCarriesAIAttribution(strings.Join(lines[start:end], " "))
+		ai = reviewRenderedLineCarriesAIAttribution(strings.Join(lines[start:end], " "))
 	}
 	_, value, hasKey := strings.Cut(unfolded, ":")
 	entry = ai || (hasKey && strings.TrimSpace(value) != "" && !reviewGeneratedWith.MatchString(unfolded))
