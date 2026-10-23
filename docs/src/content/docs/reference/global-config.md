@@ -1331,6 +1331,7 @@ repository_overrides:
           instructions: |
             Sync wording is always "sync from <upstream>": it is a one-way overwrite, never a merge.
     document:
+      max_commits_per_run: 6
       instructions: |
         Configuration keys are owned by docs/reference/config.md.
 ```
@@ -1338,7 +1339,7 @@ repository_overrides:
 `review.path_instructions` behaves like the [global list](#reviewpath_instructions): its rules render in their own labeled section after the global rules and before the repository's trusted rules, and they count toward the same combined limits.
 `document.instructions` is added to the document step's prompt in a labeled section before the repository's trusted [`document.instructions`](/no-mistakes/reference/repo-config/#documentinstructions), and like that field it augments the built-in placement policy and cannot weaken it.
 Those two fields are additive only: the repository's trusted values still apply in full.
-`document.max_commits_per_run` is the one budget in this block. When it is set, it replaces the trusted repository value (or the default of 2) for a remote that matches this entry. The match is the same upstream-URL match as the rest of the entry. `0` disables Document commits. A negative value is a configuration error. A running run reads it again at the start of each Document pass, so raising it takes effect on the next pass of a run that is already parked. Removing it restores the trusted repository value. See [`document.max_commits_per_run`](/no-mistakes/reference/repo-config/#documentmax_commits_per_run).
+`document.max_commits_per_run` replaces the trusted repository cap for a matching upstream URL; unmatched remotes retain the trusted value or built-in default. It accepts the same non-negative values as repository [`document.max_commits_per_run`](/no-mistakes/reference/repo-config/#documentmax_commits_per_run), which owns the commit-counting and exhausted-cap behavior. A running run re-reads the override at the start of each Document pass, including a fix round, so raising it takes effect on the next pass without a daemon restart. Removing the override from a successfully loaded config restores the trusted repository value or built-in default captured when the run's config was merged. If the global config file is missing, unreadable, or invalid, the previous effective cap stays, including a cap set directly on the run's config.
 Under `review` only `path_instructions` is accepted, and under `document` only `instructions` and `max_commits_per_run`; settings that could weaken a gate, such as `no_ci`, `allow_repo_commands`, or `pr.base_branch`, are not accepted here.
 
 Eval replay cases store no remote URL, so a replay does not apply a matching entry's review or documentation guidance.
