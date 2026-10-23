@@ -75,7 +75,7 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 			lines[start] = presentHumanCoauthor(lines[start])
 		case fragment:
 			lines[start] = filterRecordedPayload(lines[start], notice, true, configuredTrailers...)
-		case !entry && end == start+1 && bareCoAuthorLine(lines[start]):
+		case !entry && end == start+1 && bareCoAuthorLine(lines[start], unfolded):
 			lines[start] = presentHumanCoauthor(lines[start])
 		default:
 			if cut, ok := recordedTailCut(lines[start]); ok {
@@ -88,10 +88,14 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 	return strings.Join(kept, "\n")
 }
 
-func bareCoAuthorLine(line string) bool {
-	view, _ := reviewAttributionLine(html.UnescapeString(line))
-	key, value, _ := strings.Cut(view, ":")
-	return strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && strings.TrimSpace(value) != ""
+func bareCoAuthorLine(line, unfolded string) bool {
+	key, value, _ := strings.Cut(unfolded, ":")
+	if !strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") || strings.TrimSpace(value) == "" {
+		return false
+	}
+	literal, _ := reviewAttributionLine(html.UnescapeString(line))
+	colon := strings.IndexByte(literal, ':')
+	return !(strings.HasPrefix(literal, "\"") && colon >= 0 && colon+1 < len(literal) && literal[colon+1] == '"')
 }
 
 func publishedAttributionLine(line string) (string, bool) {
@@ -151,11 +155,12 @@ func presentHumanCoauthor(line string) string {
 	if label < 0 {
 		return line
 	}
-	literalKey := reviewTrailerKey.FindString(line[label:])
-	if literalKey == "" {
+	keyEnd := label + len("Co-Authored-By")
+	colon := strings.IndexByte(line, ':')
+	if colon < keyEnd || strings.Contains(html.UnescapeString(line[keyEnd:colon]), ":") {
 		return line
 	}
-	return line[:label] + PreservedHumanCoauthorLabel + line[label+len(literalKey):]
+	return line[:label] + strings.TrimSuffix(PreservedHumanCoauthorLabel, ":") + line[keyEnd:]
 }
 
 func recordedPayloadBlock(lines []string, start int) (string, int, bool) {

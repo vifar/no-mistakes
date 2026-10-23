@@ -9,7 +9,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1716,14 +1715,6 @@ func escapePipelineFoldMarkers(s string) string {
 	return out
 }
 
-// publishedCoAuthorKey matches the commit trailer key that PUBLISHED text must
-// not carry raw.
-//
-// The key is rendered as a labelled field that says what it is: a co-author
-// the body QUOTED. A fixture, an example, a review finding quoted whole - none
-// of them is this work's attribution, and the label says so.
-var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)`)
-
 // renderCoAuthorAsLabelledField renders a co-author ATTRIBUTION as a labelled
 // field rather than as a raw trailer line.
 //
@@ -1746,25 +1737,7 @@ var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)
 // complete co-author entry is rendered, including entries without a mailbox.
 // A sentence that merely names the field stays the sentence it was.
 func renderCoAuthorAsLabelledField(s string) string {
-	lines := strings.Split(s, "\n")
-	for i, line := range lines {
-		lines[i] = renderCoAuthorKeysInLine(line)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func renderCoAuthorKeysInLine(line string) string {
-	view, _ := reviewAttributionView(line)
-	key, _, _ := strings.Cut(view, ":")
-	if !strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") || !(reviewAttributionAddressComplete(view) || bareCoAuthorLine(line)) {
-		return line
-	}
-	loc := publishedCoAuthorKey.FindStringIndex(line)
-	if loc == nil {
-		return line
-	}
-	groups := publishedCoAuthorKey.FindStringSubmatch(line[loc[0]:loc[1]])
-	return line[:loc[0]] + "co-author (quoted)" + groups[1] + line[loc[1]:]
+	return prDisplayNoticeText(s)
 }
 
 // neutralizeAttestationMarkers breaks every attestation comment prefix in
