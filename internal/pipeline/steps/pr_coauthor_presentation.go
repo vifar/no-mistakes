@@ -53,6 +53,12 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 			start = end
 			continue
 		}
+		fragment := recordedFragmentLine(lines[start])
+		if fragment && !json.Valid([]byte(strings.TrimSpace(lines[start]))) {
+			kept = append(kept, filterRecordedPayload(lines[start], notice, true, configuredTrailers...))
+			start++
+			continue
+		}
 		end, unfolded, entry, ai := publishedAttributionEntry(lines, start, configuredTrailers)
 		if ai {
 			if notice {
@@ -67,7 +73,7 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 		switch {
 		case entry && strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && reviewAttributionAddressComplete(unfolded):
 			lines[start] = presentHumanCoauthor(lines[start])
-		case recordedFragmentLine(lines[start]):
+		case fragment:
 			lines[start] = filterRecordedPayload(lines[start], notice, true, configuredTrailers...)
 		case !entry && end == start+1 && bareCoAuthorLine(lines[start]):
 			lines[start] = presentHumanCoauthor(lines[start])
@@ -89,7 +95,8 @@ func bareCoAuthorLine(line string) bool {
 }
 
 func publishedAttributionView(line string) (string, bool) {
-	view, continuation := reviewAttributionView(line)
+	line = strings.TrimRight(html.UnescapeString(line), " \t\r.,;:!?")
+	view, continuation := reviewAttributionView(html.EscapeString(line))
 	if close := strings.LastIndexByte(view, '>'); close >= 0 && strings.Trim(view[close+1:], " \t\r.,;:!?") == "" {
 		normalized, _ := reviewAttributionView(html.EscapeString(view[:close+1]))
 		if reviewAttributionAddressComplete("Co-Authored-By: " + normalized) {

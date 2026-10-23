@@ -44,6 +44,8 @@ func TestPRFallbackAgentFooterPublicationPaths(t *testing.T) {
 	for _, footer := range []string{
 		fallbackAgentFooter,
 		"**" + fallbackAgentFooter + "**",
+		"**" + fallbackAgentFooter + "**.",
+		"`" + fallbackAgentFooter + "`.!",
 		html.EscapeString("<code>" + fallbackAgentFooter + "</code>"),
 	} {
 		t.Run(footer, func(t *testing.T) {

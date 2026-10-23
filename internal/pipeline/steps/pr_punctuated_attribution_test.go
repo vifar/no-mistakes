@@ -31,7 +31,7 @@ func TestPRPunctuatedCoauthorPublication(t *testing.T) {
 		{"Co-Authored-By: Claude\n <claude@example.com>.", "co-author (quoted): Claude\n <claude@example.com>."},
 		{"Co-Authored-By: Claude Smith <claude@example.com>?!", "co-author (quoted): Claude Smith <claude@example.com>?!"},
 	} {
-		for _, wrapper := range [][2]string{{"", ""}, {"> ", ""}, {"- ", ""}, {"**", "**"}, {"`", "`"}, {"<code>", "</code>"}} {
+		for _, wrapper := range [][2]string{{"", ""}, {"> ", ""}, {"- ", ""}, {"**", "**"}, {"`", "`"}, {"<code>", "</code>"}, {"**", "**."}, {"`", "`."}, {"<code>", "</code>."}} {
 			for _, escaped := range []bool{false, true} {
 				input := wrapper[0] + tc.input + wrapper[1]
 				want, notice := "", prAIAttributionNotice
@@ -86,9 +86,67 @@ func TestPRPunctuatedCoauthorPublication(t *testing.T) {
 	}
 }
 
+func TestPRWrappedCoauthorTerminalPunctuation(t *testing.T) {
+	t.Parallel()
+	for _, wrapper := range [][2]string{{"**", "**"}, {"`", "`"}, {"<code>", "</code>"}, {"**`", "`**"}} {
+		for _, key := range []string{"Co-Authored-By:", "co-author (quoted):"} {
+			for _, separator := range []string{" ", "\n "} {
+				for _, punctuation := range []string{".", ",", ";", ":", "!", "?", "?!"} {
+					for _, escaped := range []bool{false, true} {
+						ai := wrapper[0] + key + " Codex" + separator + "<ai@example.com>" + wrapper[1] + punctuation
+						human := wrapper[0] + key + " Jane" + separator + "<jane@example.com>" + wrapper[1] + punctuation
+						want := wrapper[0] + "co-author (quoted): Jane" + separator + "<jane@example.com>" + wrapper[1] + punctuation
+						if escaped {
+							ai, human, want = html.EscapeString(ai), html.EscapeString(human), html.EscapeString(want)
+						}
+						t.Run(ai, func(t *testing.T) {
+							if got := prDisplayBody(ai); got != "" {
+								t.Errorf("AI attribution survived: %q", got)
+							}
+							if got := prDisplayNoticeText(ai); got != prAIAttributionNotice {
+								t.Errorf("evidence attribution = %q", got)
+							}
+							if got := neutralizeAIAttribution(ai); got != prAIAttributionNotice {
+								t.Errorf("neutralized attribution = %q", got)
+							}
+							if got := prDisplayBody(human); got != want {
+								t.Errorf("human attribution = %q, want %q", got, want)
+							}
+							encoded, err := marshalJSONString(ai)
+							if err != nil {
+								t.Fatal(err)
+							}
+							for _, payload := range []struct{ input, want string }{
+								{`{"description":` + string(encoded) + `}`, `{"description":""}`},
+								{" " + string(encoded) + ",", ` "",`},
+							} {
+								if got := prDisplayBody(payload.input); got != payload.want {
+									t.Errorf("recorded attribution = %q, want %q", got, payload.want)
+								}
+							}
+							if got := stripReviewAIAttribution(ai, nil); got != ai {
+								t.Errorf("commit filter changed %q to %q", ai, got)
+							}
+						})
+					}
+				}
+			}
+		}
+	}
+	for _, text := range []string{
+		"Ordinary prose mentioning **Co-Authored-By: Codex <ai@example.com>**.",
+		"[Co-Authored-By: Codex <ai@example.com>](https://example.com).",
+		"See [Codex](https://example.com).",
+	} {
+		if got := prDisplayBody(text); got != text {
+			t.Errorf("ordinary prose or link changed: %q", got)
+		}
+	}
+}
+
 func TestPRPunctuatedCoauthorComposition(t *testing.T) {
 	t.Parallel()
-	const fixture = "Co-Authored-By: Codex\n <ai@example.com>.\n\nCo-Authored-By: Jane\n <jane@example.com>.\n\nDisclosure: fixtures were generated with the repository recorder."
+	const fixture = "**Co-Authored-By: Codex\n <ai@example.com>**.\n\n**Co-Authored-By: Jane\n <jane@example.com>**.\n\nDisclosure: fixtures were generated with the repository recorder."
 	appendix := compliantPipelineBody(t, testPipelineHeadSHA)
 	for _, body := range []string{
 		assemblePRBody(&pipeline.StepContext{Config: &config.Config{}}, fixture, "Low risk", "", appendix, 0, scm.ProviderGitHub),
@@ -112,7 +170,7 @@ func TestPRPunctuatedCoauthorComposition(t *testing.T) {
 				t.Errorf("published forbidden attribution %q: %s", forbidden, body)
 			}
 		}
-		for _, retained := range []string{"co-author (quoted): Jane\n <jane@example.com>.", humanCoauthorDisclosure} {
+		for _, retained := range []string{"**co-author (quoted): Jane\n <jane@example.com>**.", humanCoauthorDisclosure} {
 			if !strings.Contains(body, retained) {
 				t.Errorf("lost human attribution or disclosure %q: %s", retained, body)
 			}
