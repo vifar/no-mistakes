@@ -18,7 +18,7 @@ import (
 // internal/pipeline/steps own the Document step's own behavior; these own
 // what the executor and the strict admission do with its outcome.
 const documentCapNoticeFindings = `{"findings":[` +
-	`{"id":"document-1","severity":"info","description":"Document commit limit reached; further documentation edits require a new run or an owner decision.","action":"no-op"}],` +
+	`{"id":"document-1","severity":"info","description":"Document commit limit reached. Abort this run and start a new one. A new run starts with a fresh document commit count.","action":"no-op"}],` +
 	`"summary":"Document commit limit reached; no remaining documentation gap"}`
 
 // The cap notice alone must not park a gate and must not block an approval.
@@ -82,7 +82,7 @@ func TestStrictShippingDocumentCapRealGapStillParksAndTheCapNoticeIsNotTheBlocke
 	bindCompletionFixture(t, database, run, workDir)
 
 	const findings = `{"findings":[` +
-		`{"id":"document-1","severity":"info","description":"Document commit limit reached; further documentation edits require a new run or an owner decision.","action":"no-op"},` +
+		`{"id":"document-1","severity":"info","description":"Document commit limit reached. Abort this run and start a new one. A new run starts with a fresh document commit count.","action":"no-op"},` +
 		`{"id":"document-2","severity":"warning","file":"README.md","description":"the rollout guide is still stale","action":"ask-user"}],` +
 		`"summary":"Document commit limit reached; stopping further commits"}`
 	document := &adaptiveCallStep{name: types.StepDocument, fn: func(*StepContext) (*StepOutcome, error) {
@@ -108,8 +108,11 @@ func TestStrictShippingDocumentCapRealGapStillParksAndTheCapNoticeIsNotTheBlocke
 		}
 	}
 	// The real gap still blocks the approval - that is the point of a gap.
-	if err := exec.Respond(types.StepDocument, types.ActionApprove, nil, gateSnapshot(exec)); err == nil || !strings.Contains(err.Error(), "unresolved actionable findings") {
-		t.Fatalf("the real gap did not block the strict approval: %v", err)
+	if err := exec.Respond(types.StepDocument, types.ActionApprove, nil, gateSnapshot(exec)); err == nil || !strings.Contains(err.Error(), "unresolved actionable findings") || !strings.Contains(err.Error(), DocumentCapWayForward) {
+		t.Fatalf("the real gap did not block the strict approval with a way forward: %v", err)
+	}
+	if err := exec.Respond(types.StepDocument, types.ActionSkip, nil, gateSnapshot(exec)); err == nil || !strings.Contains(err.Error(), "forbids skipped steps") || !strings.Contains(err.Error(), DocumentCapWayForward) {
+		t.Fatalf("strict skip did not name the new run: %v", err)
 	}
 	if err := exec.Respond(types.StepDocument, types.ActionAbort, nil, nil); err != nil {
 		t.Fatal(err)

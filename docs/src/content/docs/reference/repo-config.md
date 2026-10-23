@@ -464,7 +464,7 @@ This field decides which commits skip revalidation, so it is honored **only from
 
 ### document.max_commits_per_run
 
-Maximum accepted Document commits in one run, including commits the agent creates itself. Default: `2`. Values must be non-negative; `0` disables Document commits. This field is read only from the trusted default branch, even when `allow_repo_commands` is enabled.
+Maximum accepted Document commits in one run, including commits the agent creates itself. Default: `2`. Values must be non-negative; `0` disables Document commits. The repository value is read only from the trusted default branch, even when `allow_repo_commands` is enabled. A matching machine-local [`repository_overrides`](/no-mistakes/reference/global-config/#machine-local-review-and-documentation-guidance) `document.max_commits_per_run` replaces that value for the upstream URL it names. Each Document pass reads the override again, so a running run picks up a raised cap on its next pass. The count is per run: a new run starts at zero even when an earlier run on the same branch has spent its cap. When the cap is already spent and a documentation gap remains, strict shipping still refuses to approve or skip that gap. The refusal and the cap notice say to abort this run and start a new one, which receives a fresh count of the configured cap.
 
 The budget survives step resets and database reopen. After a committed pass reports no remaining documentation gap, another pass at that exact head finishes without invoking the agent.
 
