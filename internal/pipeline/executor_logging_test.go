@@ -493,6 +493,11 @@ func TestExecutor_SubprocessLivenessUpdatesActivityWithoutFloodingTheStepLog(t *
 			// as the liveness ticks: reach activity, never the log.
 			{Agent: "pi", Phase: agent.LifecyclePhaseProgress, Message: "pi progress"},
 			{Agent: "pi", Phase: agent.LifecyclePhaseProgress, Message: "pi progress"},
+			// A tool event is emitted per tool boundary; it carries the replay
+			// evidence the fallback classes read and the same obligation as the
+			// other two phases: activity, never the log.
+			{Agent: "pi", Phase: agent.LifecyclePhaseTool, Message: "pi tool"},
+			{Agent: "pi", Phase: agent.LifecyclePhaseTool, Message: "pi tool"},
 		},
 	}
 

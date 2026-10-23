@@ -1773,7 +1773,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, nil); dbErr != nil {
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}
-		case agent.LifecyclePhaseActivity, agent.LifecyclePhaseProgress:
+		case agent.LifecyclePhaseActivity, agent.LifecyclePhaseProgress, agent.LifecyclePhaseTool:
 			// Liveness and forward motion, not narrative: record that the agent is
 			// still working so `axi status` can distinguish a live fix round from a
 			// wedged one, but never write either to the step log. A long turn
@@ -1790,9 +1790,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			// activity observer, never this column, so throttling the write cannot
 			// delay detection.
 			//
-			// The progress phase is handled explicitly so it cannot fall through to
-			// the default branch below, which writes every unknown phase's
-			// synthesized text into the log.
+			// The progress and tool phases are handled explicitly so they cannot
+			// fall through to the default branch below, which writes every unknown
+			// phase's synthesized text into the log. The tool phase is emitted per
+			// tool event - an opencode session.tool.progress stream produces
+			// thousands - and its replay evidence is read from the in-memory
+			// observer, so it needs the same throttle and no log line of its own.
 			touchStepActivityThrottled(text)
 			return
 		default:
