@@ -63,16 +63,21 @@ func TestReviewFixCommitBody(t *testing.T) {
 			if got := lastCommitMessage(t, dir); got != "no-mistakes(review): "+tc.wantSubject {
 				t.Errorf("subject = %q", got)
 			}
-			if !strings.Contains(body, gotSummary) || gotSummary == "changes applied" {
-				t.Errorf("round summary %q is not the body summary: %q", gotSummary, body)
+			for _, line := range strings.Split(gotSummary, "\n") {
+				if line != "" && !strings.Contains(body, line) || gotSummary == "changes applied" {
+					t.Errorf("round summary line %q is not in the body: %q", line, body)
+				}
 			}
 			for _, forbidden := range []string{"Co-Authored-By: Claude", "Generated with", "Claude-Session"} {
 				if strings.Contains(gitCmd(t, dir, "show", "-s", "--format=%B"), forbidden) {
 					t.Errorf("commit contains attribution %q", forbidden)
 				}
 			}
-			if tc.name == "quoted attribution" && !strings.Contains(body, "Co-Authored-By: Alex Example <alex@example.com>") {
-				t.Errorf("human attribution lost: %q", body)
+			if tc.name == "quoted attribution" {
+				const human = "Co-Authored-By: Alex Example <alex@example.com>"
+				if !strings.HasSuffix(body, "\n\n"+human) || gitTrailers(t, dir) != human {
+					t.Errorf("human co-author is not the final trailer paragraph: %q", body)
+				}
 			}
 		})
 	}
@@ -189,7 +194,7 @@ func TestReviewFixCommitR2ConfiguredAttribution(t *testing.T) {
 		t.Errorf("persisted summary = %q, want %q", gotSummary, cleanSummary)
 	}
 	assertPersistedReviewFixSummary(t, sctx.DB, sctx.Run.ID, gotSummary, cleanSummary)
-	wantBody := cleanSummary + "\n\nRound findings:\n- receipt.go: " + disclosure + "\n- " + human + "\n- " + humanWithAIEmail + ": Keep the human attribution\n- " + disclosure + ": Keep ordinary prose"
+	wantBody := "Guard receipts\n\n" + disclosure + "\n\nRound findings:\n- receipt.go: " + disclosure + "\n- " + human + "\n- " + humanWithAIEmail + ": Keep the human attribution\n- " + disclosure + ": Keep ordinary prose\n\n" + human + "\n" + humanWithAIEmail
 	if body := gitCmd(t, dir, "show", "-s", "--format=%b"); body != wantBody {
 		t.Errorf("body = %q, want %q", body, wantBody)
 	}
@@ -197,8 +202,8 @@ func TestReviewFixCommitR2ConfiguredAttribution(t *testing.T) {
 	if subject := lastCommitMessage(t, dir); subject != wantSubject {
 		t.Errorf("subject = %q, want %q", subject, wantSubject)
 	}
-	if trailers := gitTrailers(t, dir); trailers != "" {
-		t.Errorf("trailers = %q, want no configured attribution", trailers)
+	if trailers := gitTrailers(t, dir); trailers != human+"\n"+humanWithAIEmail {
+		t.Errorf("trailers = %q, want only the preserved human co-authors", trailers)
 	}
 }
 

@@ -1764,7 +1764,7 @@ func renderCoAuthorAsLabelledField(s string) string {
 func renderCoAuthorKeysInLine(line string) string {
 	view, _ := reviewAttributionView(line)
 	key, _, _ := strings.Cut(view, ":")
-	if !strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") || !reviewAttributionAddressComplete(view) {
+	if !strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") || !(reviewAttributionAddressComplete(view) || bareCoAuthorLine(line)) {
 		return line
 	}
 	loc := publishedCoAuthorKey.FindStringIndex(line)
@@ -1812,7 +1812,7 @@ func neutralizeAIAttribution(s string) string {
 // lineCarriesAIAttribution reports whether a rendered line carries an
 // attribution a reader would take for THIS work.
 func lineCarriesAIAttribution(line string) bool {
-	_, _, _, ai := reviewAttributionEntry([]string{line}, 0, nil)
+	_, _, _, ai := publishedAttributionEntry([]string{line}, 0, nil)
 	return ai
 }
 

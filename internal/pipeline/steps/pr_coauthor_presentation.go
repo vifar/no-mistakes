@@ -3,6 +3,7 @@ package steps
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -51,7 +52,7 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 			start = end
 			continue
 		}
-		end, unfolded, entry, ai := reviewAttributionEntry(lines, start, configuredTrailers)
+		end, unfolded, entry, ai := publishedAttributionEntry(lines, start, configuredTrailers)
 		if ai {
 			if notice {
 				kept = append(kept, prAIAttributionNotice)
@@ -65,6 +66,8 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 		switch {
 		case entry && strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && reviewAttributionAddressComplete(unfolded):
 			lines[start] = presentHumanCoauthor(lines[start])
+		case !entry && end == start+1 && bareCoAuthorLine(lines[start]):
+			lines[start] = presentHumanCoauthor(lines[start])
 		case recordedFragmentLine(lines[start]):
 			lines[start] = filterRecordedPayload(lines[start], notice, true, configuredTrailers...)
 		default:
@@ -76,6 +79,33 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 		start = end
 	}
 	return strings.Join(kept, "\n")
+}
+
+var bareCoAuthorTrailer = regexp.MustCompile(`(?i)^co-authored-by[ \t]*:[ \t]*(\S.*?)[ \t\r]*$`)
+
+func bareCoAuthorValue(line string) (string, bool) {
+	match := bareCoAuthorTrailer.FindStringSubmatch(strings.TrimLeft(line, " \t"))
+	if match == nil {
+		return "", false
+	}
+	return match[1], true
+}
+
+func bareCoAuthorLine(line string) bool {
+	_, ok := bareCoAuthorValue(line)
+	return ok
+}
+
+// publishedAttributionEntry classifies an entry for publication. It is the
+// commit filter's classification, except that a line beginning with the
+// co-author key and the bare name Claude is an AI identity in a published
+// body even though the commit filter keeps it.
+func publishedAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
+	end, unfolded, entry, ai = reviewAttributionEntry(lines, start, configuredTrailers)
+	if value, ok := bareCoAuthorValue(lines[start]); ok && end == start+1 && strings.EqualFold(value, "Claude") {
+		return end, unfolded, true, true
+	}
+	return end, unfolded, entry, ai
 }
 
 // presentHumanCoauthor renders a preserved human co-author line as a labelled

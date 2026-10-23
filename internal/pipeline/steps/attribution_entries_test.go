@@ -40,8 +40,8 @@ func TestAttributionEntryContract(t *testing.T) {
 		{name: "configured punctuation exact", input: "Build-Agent: worker-", presented: "Build-Agent: worker-", forbidden: "Build-Agent: worker-", configured: []string{"Build-Agent: worker-"}},
 		{name: "configured punctuation differs", input: "Build-Agent: worker", kept: "Build-Agent: worker", presented: "Build-Agent: worker", configured: []string{"Build-Agent: worker-"}},
 		{name: "configured human exact", input: "Co-Authored-By: Name <human@example.com>", presented: "co-author (quoted): Name <human@example.com>", forbidden: "human@example.com", configured: []string{"Co-Authored-By: Name <human@example.com>"}},
-		{name: "unconfigured human period", input: "Co-Authored-By: Name <human@example.com>.", kept: "Co-Authored-By: Name <human@example.com>.", presented: "Co-Authored-By: Name <human@example.com>.", configured: []string{"Co-Authored-By: Name <human@example.com>"}},
-		{name: "unconfigured human hyphen", input: "Co-Authored-By: Name <human@example.com>-", kept: "Co-Authored-By: Name <human@example.com>-", presented: "Co-Authored-By: Name <human@example.com>-", configured: []string{"Co-Authored-By: Name <human@example.com>"}},
+		{name: "unconfigured human period", input: "Co-Authored-By: Name <human@example.com>.", kept: "Co-Authored-By: Name <human@example.com>.", presented: "co-author (quoted): Name <human@example.com>.", configured: []string{"Co-Authored-By: Name <human@example.com>"}},
+		{name: "unconfigured human hyphen", input: "Co-Authored-By: Name <human@example.com>-", kept: "Co-Authored-By: Name <human@example.com>-", presented: "co-author (quoted): Name <human@example.com>-", configured: []string{"Co-Authored-By: Name <human@example.com>"}},
 		{name: "paired folded AI", input: "> \"Co-Authored-By: Claude\n <noreply@anthropic.com>\"", forbidden: "noreply@anthropic.com"},
 		{name: "paired folded human", input: "> \"Co-Authored-By: Claude\n <claude@example.com>\"", kept: "> \"Co-Authored-By: Claude\n <claude@example.com>\"", presented: "> \"co-author (quoted): Claude\n <claude@example.com>\""},
 		{name: "complete AI followed by quoted prose", input: "> Co-Authored-By: Codex <ai@example.com>\n> Focused checks passed", kept: "> Focused checks passed", presented: "\n> Focused checks passed", forbidden: "ai@example.com"},
@@ -122,7 +122,11 @@ func TestAttributionEntryContract(t *testing.T) {
 				t.Errorf("summary = %q, want %q", summary, wantSummary)
 			}
 			body := gitCmd(t, dir, "show", "-s", "--format=%b")
-			if !strings.HasPrefix(body, wantSummary+"\n\nRound findings:") {
+			wantHead, wantTrailers := wantSummary, ""
+			if i := strings.Index(wantSummary, "\nCo-Authored-By:"); i >= 0 && strings.HasSuffix(wantSummary, tc.kept) && strings.HasPrefix(tc.kept, "Co-Authored-By:") {
+				wantHead, wantTrailers = wantSummary[:i], wantSummary[i+1:]
+			}
+			if !strings.HasPrefix(body, wantHead+"\n\nRound findings:") || (wantTrailers != "" && !strings.HasSuffix(body, "\n\n"+wantTrailers)) {
 				t.Errorf("commit body = %q", body)
 			}
 			assertPersistedReviewFixSummary(t, sctx.DB, sctx.Run.ID, summary, wantSummary)
@@ -143,7 +147,7 @@ func TestAttributionEntryContract(t *testing.T) {
 					if tc.kept != "" || (tc.presented != "" && len(tc.configured) == 0) || tc.published != "" {
 						want := strings.TrimLeft(tc.presented, "\n")
 						if len(tc.configured) > 0 {
-							want = tc.kept
+							want = strings.ReplaceAll(tc.kept, "Co-Authored-By:", "co-author (quoted):")
 							if provider == scm.ProviderBitbucket {
 								want = html.UnescapeString(want)
 							}

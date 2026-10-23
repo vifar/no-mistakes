@@ -190,9 +190,47 @@ func TestPRAttributionEntryRequiresAddressOrKnownIdentity(t *testing.T) {
 			t.Errorf("known AI identity survived: %q", got)
 		}
 	}
-	for _, input := range []string{"co-author (quoted): the original author", "`Co-Authored-By: an ordinary quoted phrase`", "Co-Authored-By: Claude"} {
+	for _, input := range []string{"co-author (quoted): the original author", "`Co-Authored-By: an ordinary quoted phrase`"} {
 		if got := prDisplayBody(input); got != input {
 			t.Errorf("no-address mention changed: got %q, want %q", got, input)
 		}
+	}
+}
+
+// The intent: no published line begins with "Co-Authored-By:". A mailbox-less
+// line is classified by its value: an AI identity is removed, a human name is
+// rendered as the labelled field with the value preserved, and ordinary prose
+// and the disclosure stay byte-identical.
+func TestPRMailboxlessCoAuthorLine(t *testing.T) {
+	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
+	const prose = "This documents the Co-Authored-By: field."
+	for _, tc := range []struct{ name, line, body, notice string }{
+		{"human", "Co-Authored-By: Jane Doe", "co-author (quoted): Jane Doe", "co-author (quoted): Jane Doe"},
+		{"indented human", "  co-authored-by:Jane Doe", "  co-author (quoted):Jane Doe", "  co-author (quoted):Jane Doe"},
+		{"claude", "Co-Authored-By: Claude", "", prAIAttributionNotice},
+		{"codex", "Co-Authored-By: Codex", "", prAIAttributionNotice},
+		{"model", "Co-Authored-By: gpt-5.5", "", prAIAttributionNotice},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := prose + "\n" + tc.line + "\n" + disclosure
+			if got, want := prDisplayBody(input), prose+"\n"+tc.body+"\n"+disclosure; got != want {
+				t.Errorf("body: got %q, want %q", got, want)
+			}
+			if got, want := prDisplayNoticeText(input), prose+"\n"+tc.notice+"\n"+disclosure; got != want {
+				t.Errorf("notice: got %q, want %q", got, want)
+			}
+			narrative := neutralizeAttestationMarkers(scm.ProviderGitHub, input)
+			for _, line := range strings.Split(narrative, "\n") {
+				if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "co-authored-by") && strings.TrimSpace(line) != prose {
+					t.Errorf("narrative published a raw trailer line %q:\n%s", line, narrative)
+				}
+			}
+			if strings.Contains(narrative, "Claude") || strings.Contains(narrative, "Codex") || strings.Contains(narrative, "gpt-5.5") {
+				t.Errorf("narrative carries an AI-named co-author:\n%s", narrative)
+			}
+		})
+	}
+	if got := prDisplayBody("Co-Authored-By:"); got != "Co-Authored-By:" {
+		t.Errorf("field name alone changed: %q", got)
 	}
 }

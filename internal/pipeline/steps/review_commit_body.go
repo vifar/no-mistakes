@@ -300,15 +300,40 @@ func reviewFixCommitSubject(body string) string {
 	return strings.Trim(first, trimSet)
 }
 
-func reviewFixCommitBody(summary, previousFindings string, configuredTrailers []string) string {
-	var b strings.Builder
-	b.WriteString(summary)
-	var findings Findings
-	if err := json.Unmarshal([]byte(previousFindings), &findings); err != nil {
-		b.WriteString("\n\nRound findings unavailable (payload could not be read).")
-		return b.String()
+var reviewCoAuthorTrailer = regexp.MustCompile(`(?i)^co-authored-by[ \t]*:`)
+
+func splitTrailingCoAuthors(summary string) (head, trailers string) {
+	lines := strings.Split(summary, "\n")
+	cut := len(lines)
+	for i := len(lines); i > 0; i-- {
+		line := lines[i-1]
+		if reviewCoAuthorTrailer.MatchString(line) {
+			cut = i - 1
+		} else if line == "" || (line[0] != ' ' && line[0] != '\t') {
+			break
+		}
 	}
-	if len(findings.Items) == 0 {
+	head = strings.TrimRight(strings.Join(lines[:cut], "\n"), "\r\n \t")
+	if cut == len(lines) || head == "" {
+		return summary, ""
+	}
+	return head, strings.Join(lines[cut:], "\n")
+}
+
+func reviewFixCommitBody(summary, previousFindings string, configuredTrailers []string) string {
+	var findings Findings
+	unreadable := json.Unmarshal([]byte(previousFindings), &findings) != nil
+	if !unreadable && len(findings.Items) == 0 {
+		return summary
+	}
+	head, trailers := splitTrailingCoAuthors(summary)
+	var b strings.Builder
+	b.WriteString(head)
+	if unreadable {
+		b.WriteString("\n\nRound findings unavailable (payload could not be read).")
+		if trailers != "" {
+			b.WriteString("\n\n" + trailers)
+		}
 		return b.String()
 	}
 	b.WriteString("\n\nRound findings:")
@@ -330,6 +355,9 @@ func reviewFixCommitBody(summary, previousFindings string, configuredTrailers []
 			text = string(runes[:237]) + "..."
 		}
 		b.WriteString("\n- " + text)
+	}
+	if trailers != "" {
+		b.WriteString("\n\n" + trailers)
 	}
 	return b.String()
 }

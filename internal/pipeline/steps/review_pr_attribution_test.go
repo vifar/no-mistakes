@@ -77,7 +77,7 @@ func TestPRReviewConfiguredTrailersAreRemovedFromRecordedFindingDisplays(t *test
 							}
 						}
 						markdown, _, _ := (&PRStep{}).buildPipelineSection(sctx, provider)
-						for _, forbidden := range []string{"&gt; Build-Agent: private-identifier", "> Build-Agent: private-identifier", "Co-Authored-By: private:writer <opaque@example.com>", "Build-Identity: acp:private:writer / opaque-model"} {
+						for _, forbidden := range []string{"&gt; Build-Agent: private-identifier", "> Build-Agent: private-identifier", "Co-Authored-By: private:writer <opaque@example.com>", "Build-Identity: acp:private:writer / opaque-model", "opaque@example.com"} {
 							if strings.Contains(markdown, forbidden) {
 								t.Errorf("configured trailer reached published finding: %q", forbidden)
 							}
@@ -85,9 +85,9 @@ func TestPRReviewConfiguredTrailersAreRemovedFromRecordedFindingDisplays(t *test
 						if strings.Count(markdown, "Build-Agent: private-identifier") != 1 {
 							t.Error("exact configured trailer must survive only inside ordinary prose")
 						}
-						for _, kept := range []string{disclosure, "co-author (quoted): Claude Smith", prose, "Build-Agent: unconfigured-human", "Co-Authored-By: private:writer\n <opaque@example.com>"} {
+						for _, kept := range []string{disclosure, "co-author (quoted): Claude Smith", prose, "Build-Agent: unconfigured-human"} {
 							if !strings.Contains(html.UnescapeString(markdown), kept) {
-								t.Errorf("ordinary finding content lost: %q", kept)
+								t.Errorf("ordinary finding content lost: %q in %q", kept, markdown)
 							}
 						}
 						if field == "Description" && !strings.Contains(markdown, disclosure+"\n\n"+"co-author (quoted): Claude Smith") {
