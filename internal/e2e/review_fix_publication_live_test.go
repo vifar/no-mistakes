@@ -53,15 +53,15 @@ func TestReviewFixPublicationLiveJourney(t *testing.T) {
 			}
 			actions := []any{
 				map[string]any{
-					"match": "Investigate previous review findings",
-					"edits": []any{map[string]any{"path": "feature.txt", "old": "unsafe", "new": "safe"}},
+					"match":      "Investigate previous review findings",
+					"edits":      []any{map[string]any{"path": "feature.txt", "old": "unsafe", "new": "safe"}},
 					"structured": map[string]any{"summary": summary, "verification": "passed"},
 				},
 				map[string]any{
 					"match": "Review the code changes and return structured findings",
 					"structured": map[string]any{
 						"findings": []any{map[string]any{"id": "guard-1", "file": "feature.txt", "line": 1, "severity": "warning", "action": "auto-fix", "description": "unsafe value needs validation"}},
-						"summary": "found one issue", "risk_level": "medium", "risk_rationale": "fixture guard", "risk_scope": "source-or-external",
+						"summary":  "found one issue", "risk_level": "medium", "risk_rationale": "fixture guard", "risk_scope": "source-or-external",
 					},
 				},
 				map[string]any{
@@ -74,7 +74,7 @@ func TestReviewFixPublicationLiveJourney(t *testing.T) {
 					},
 				},
 				map[string]any{
-					"match": "Draft a pull request title and summary for the full branch delta.",
+					"match":      "Draft a pull request title and summary for the full branch delta.",
 					"structured": map[string]any{"title": "fix: preserve repair rationale\n\n" + footer, "body": "## What Changed\n\nPreserve the repair rationale.\n\n" + raw},
 				},
 				map[string]any{"structured": clean},
