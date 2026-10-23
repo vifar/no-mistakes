@@ -234,3 +234,45 @@ func attestedTestOverrideReason(att pipelineAttestation) string {
 	}
 	return ""
 }
+
+func TestAttributionWaiverQualification(t *testing.T) {
+	for _, reason := range []string{"", "command failed", "Build-Agent: worker", "co-author (quoted): <code>Codex</code> <ai@example.com>"} {
+		for _, allow := range []string{"", "legacy failure accepted", "Build-Agent: worker", "co-author (quoted): <code>Codex</code> <ai@example.com>"} {
+			t.Run(reason+"/"+allow, func(t *testing.T) {
+				steps := []*db.StepResult{
+					{StepName: types.StepReview, Status: types.StepStatusCompleted},
+					{StepName: types.StepTest, Status: types.StepStatusCompleted, OverrideReason: &reason},
+					{StepName: types.StepDocument, Status: types.StepStatusCompleted},
+				}
+				policy := pipelineAttestationPolicy{AllowTestCommandOverride: allow, ConfiguredTrailers: []string{"Build-Agent: worker"}}
+				body, _ := buildPipelineSummaryFor(steps, nil, testPipelineHeadSHA, scm.ProviderGitHub, policy, policy.ConfiguredTrailers...)
+				check := func(body, head string) {
+					t.Helper()
+					att := parsePipelineAttestationForTest(t, body)
+					if (attestedTestOverrideReason(att) != "") != (reason != "") || (att.AllowTestCommandOverride != "") != (reason != "" && allow != "") {
+						t.Fatalf("display changed waiver presence: %+v", att)
+					}
+					if strings.Contains(body, "Build-Agent: worker") || strings.Contains(body, "ai@example.com") || strings.Contains(body, "Codex") {
+						t.Fatalf("waiver published attribution: %s", body)
+					}
+					want := "success"
+					if reason != "" && allow == "" {
+						want = "failure"
+					}
+					if got, out := runVerifyPy(t, body, head); got != want {
+						t.Fatalf("qualification = %s, want %s: %s", got, want, out)
+					}
+				}
+				check(body, testPipelineHeadSHA)
+				for _, records := range [][]*db.StepResult{nil, steps} {
+					head := strings.Repeat("ab", 20)
+					updated, rebound, err := rebindOwnedPRAttestation(body, head, records, policy, scm.ProviderGitHub)
+					if err != nil || !rebound {
+						t.Fatalf("restamp: %t, %v", rebound, err)
+					}
+					check(updated, head)
+				}
+			})
+		}
+	}
+}

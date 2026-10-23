@@ -21,15 +21,14 @@ func reviewAttributionLine(line string) (string, bool) {
 	indented, bullet := content != line, false
 	content = strings.TrimRight(content, " \t\r")
 	for len(content) > 0 {
-		bullet = bullet || reviewMarkdownList.MatchString(content)
+		if marker := reviewMarkdownList.FindString(content); marker != "" {
+			bullet = true
+			content = strings.TrimLeft(content[len(marker):], " \t\r")
+			continue
+		}
 		var unwrapped string
 		switch content[0] {
 		case '>':
-			unwrapped = content[1:]
-		case '-', '+':
-			if !reviewMarkdownList.MatchString(content) {
-				return content, indented && !bullet
-			}
 			unwrapped = content[1:]
 		case '<':
 			if !strings.HasPrefix(content, "<code>") || !strings.HasSuffix(content, "</code>") {
@@ -41,9 +40,7 @@ func reviewAttributionLine(line string) (string, bool) {
 			for n < len(content) && content[n] == content[0] {
 				n++
 			}
-			if content[0] == '*' && reviewMarkdownList.MatchString(content) {
-				unwrapped = content[1:]
-			} else if len(content) >= 2*n && strings.HasSuffix(content, content[:n]) {
+			if len(content) >= 2*n && strings.HasSuffix(content, content[:n]) {
 				unwrapped = content[n : len(content)-n]
 			} else {
 				return content, indented && !bullet
@@ -93,7 +90,8 @@ func reviewConfiguredAttributionMatches(line string, configuredTrailers []string
 		return false
 	}
 	for _, trailer := range configuredTrailers {
-		configuredKey, configuredValue, ok := reviewConfiguredAttributionParts(trailer)
+		view, _ := reviewAttributionView(trailer)
+		configuredKey, configuredValue, ok := reviewConfiguredAttributionParts(view)
 		if ok && key == configuredKey && value == configuredValue {
 			return true
 		}
@@ -104,8 +102,7 @@ func reviewConfiguredAttributionMatches(line string, configuredTrailers []string
 // reviewConfiguredAttributionParts splits one decoded line into the trailer key
 // as Git compares it and the value as the configuration spells it.
 func reviewConfiguredAttributionParts(line string) (string, string, bool) {
-	decoded, _ := reviewAttributionLine(html.UnescapeString(line))
-	key, value, ok := strings.Cut(decoded, ":")
+	key, value, ok := strings.Cut(line, ":")
 	if !ok {
 		return "", "", false
 	}
@@ -133,34 +130,50 @@ func reviewAttributionContinuation(first, following string) (string, bool) {
 	return joined, (addressForm && addressErr == nil) || (emptyGenerated && git.IsAIAttributionTrailer(joined))
 }
 
-// reviewPublishedLabelAsTrailer rewrites the labelled field a publication
-// renders for a preserved co-author back into the trailer key, for
-// classification only. A published body can carry a value an earlier
-// publication already labelled, and the shared classifier has to decide from
-// the identity - never from the label - whether that value is attribution to
-// remove or a preserved human co-author. Ordinary prose that merely mentions
-// the field stays prose: only text reviewAttributionLine unwraps to a leading
-// key is ever classified.
-func reviewPublishedLabelAsTrailer(line string) string {
-	label := PreservedHumanCoauthorLabel
-	idx := strings.Index(strings.ToLower(line), strings.ToLower(label))
-	if idx < 0 {
-		return line
+func reviewAttributionView(line string) (string, bool) {
+	content, continuation := reviewAttributionLine(html.UnescapeString(line))
+	parts := strings.Split(content, "\n")
+	for i, part := range parts {
+		text, indented := reviewAttributionLine(part)
+		if len(text) >= len(PreservedHumanCoauthorLabel) && strings.EqualFold(text[:len(PreservedHumanCoauthorLabel)], PreservedHumanCoauthorLabel) {
+			text = "Co-Authored-By:" + text[len(PreservedHumanCoauthorLabel):]
+		}
+		if prefix := reviewGeneratedWith.FindString(text); prefix != "" {
+			value, _ := reviewAttributionLine(text[len(prefix):])
+			text = prefix + value
+		} else if key, value, ok := strings.Cut(text, ":"); ok {
+			separator := ":"
+			if strings.TrimLeft(value, " \t\r") != value {
+				separator += " "
+			}
+			mailbox := ""
+			if at := strings.LastIndex(value, "<"); at >= 0 {
+				if _, err := mail.ParseAddress(strings.TrimSpace(value[at:])); err == nil {
+					mailbox = " " + strings.TrimSpace(value[at:])
+					value = value[:at]
+				}
+			}
+			value, _ = reviewAttributionLine(value)
+			text = key + separator + value + mailbox
+		}
+		if i > 0 && indented {
+			text = " " + text
+		}
+		parts[i] = text
 	}
-	return line[:idx] + "Co-Authored-By:" + line[idx+len(label):]
-}
-
-func reviewRenderedLineCarriesAIAttribution(line string) bool {
-	return lineCarriesAIAttribution(reviewPublishedLabelAsTrailer(line))
+	return strings.Join(parts, "\n"), continuation
 }
 
 func reviewAttributionEntry(lines []string, start int, configuredTrailers []string) (end int, unfolded string, entry, ai bool) {
 	end = start + 1
-	firstLine := html.UnescapeString(reviewPublishedLabelAsTrailer(lines[start]))
-	unfolded, _ = reviewAttributionLine(firstLine)
+	firstLine, _ := reviewAttributionView(lines[start])
+	unfolded = firstLine
 	if end < len(lines) {
-		nextLine := html.UnescapeString(reviewPublishedLabelAsTrailer(lines[end]))
-		paired, _ := reviewAttributionLine(firstLine + "\n" + nextLine)
+		nextLine, continuation := reviewAttributionView(lines[end])
+		if continuation {
+			nextLine = " " + nextLine
+		}
+		paired, _ := reviewAttributionView(lines[start] + "\n" + lines[end])
 		first, following, hasPair := strings.Cut(paired, "\n")
 		if !reviewAttributionStart(unfolded) && hasPair && first != unfolded && reviewAttributionStart(first) {
 			if joined, ok := reviewAttributionContinuation(first, following); ok {
@@ -175,28 +188,7 @@ func reviewAttributionEntry(lines []string, start int, configuredTrailers []stri
 			}
 		}
 	}
-	if reviewConfiguredAttributionMatches(reviewPublishedLabelAsTrailer(lines[start]), configuredTrailers) {
-		return end, unfolded, true, true
-	}
-	ai = git.IsAIAttributionTrailer(unfolded)
-	if end > start+1 {
-		rawPair, _ := reviewAttributionLine(strings.Join(lines[start:end], "\n"))
-		rawFirst, rawNext, _ := strings.Cut(rawPair, "\n")
-		rawFirst, _ = reviewAttributionLine(rawFirst)
-		rawNext, _ = reviewAttributionLine(rawNext)
-		ai = ai || reviewConfiguredAttributionMatches(rawFirst+" "+rawNext, configuredTrailers)
-	}
-	// Rendered markup around a value is not an identity: a published section can
-	// carry the AI's name as `Codex`, **Codex** or <code>Codex</code>, and a
-	// reader still reads attribution. The published-line rule main already uses
-	// decides it, on the ORIGINAL bytes so a literal code span keeps its own
-	// inner markup and stays the quoted evidence it is.
-	if !ai {
-		ai = reviewRenderedLineCarriesAIAttribution(lines[start])
-	}
-	if !ai && end > start+1 {
-		ai = reviewRenderedLineCarriesAIAttribution(strings.Join(lines[start:end], " "))
-	}
+	ai = git.IsAIAttributionTrailer(unfolded) || reviewConfiguredAttributionMatches(firstLine, configuredTrailers) || reviewConfiguredAttributionMatches(unfolded, configuredTrailers)
 	_, value, hasKey := strings.Cut(unfolded, ":")
 	entry = ai || (reviewAttributionStart(unfolded) && hasKey && strings.TrimSpace(value) != "" && !reviewGeneratedWith.MatchString(unfolded))
 	return end, unfolded, entry, ai

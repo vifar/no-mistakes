@@ -233,9 +233,9 @@ func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.Step
 			Status: sr.Status,
 		}
 		if sr.StepName == types.StepTest && sr.OverrideReason != nil {
-			item.OverrideReason = strings.TrimSpace(prDisplayText(*sr.OverrideReason, policy.ConfiguredTrailers...))
+			item.OverrideReason = strings.TrimSpace(prDisplayNoticeText(*sr.OverrideReason, policy.ConfiguredTrailers...))
 			if item.OverrideReason != "" {
-				attestation.AllowTestCommandOverride = strings.TrimSpace(prDisplayText(policy.AllowTestCommandOverride, policy.ConfiguredTrailers...))
+				attestation.AllowTestCommandOverride = strings.TrimSpace(prDisplayNoticeText(policy.AllowTestCommandOverride, policy.ConfiguredTrailers...))
 			}
 		}
 		item.AcceptedGaps = attestedAcceptedGaps(sr, policy.ConfiguredTrailers...)
