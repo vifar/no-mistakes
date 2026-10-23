@@ -175,8 +175,13 @@ agent: [codex, grok]
 The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
 After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` (or `devin` and `acp:devin`) provide one fallback and preserve whichever spelling appears first.
 If no entry is available, the gate fails before its first pipeline step.
-If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback. OpenCode and Rovo Dev server-startup and session-creation failures also count as unavailable agents. For OpenCode, a failed API-generation probe or event-stream connection before submitting the prompt counts the same way.
-Fallback candidates share the invocation's existing bounded context and use only its remaining time; once that context expires or is cancelled, no further candidate is announced or started.
+A failed invocation falls back to the next available candidate in three cases, and the operator-visible `agent <name> failed (<reason>: ...); falling back to <next>` line names which one applied:
+
+- `unavailable` - the agent process cannot start or exits with an error. OpenCode and Rovo Dev server-startup and session-creation failures also count, and so does an OpenCode failed API-generation probe or event-stream connection before the prompt was submitted.
+- `refused` - the provider blocked the turn's content on a content policy, for example OpenCode's `provider.content-filter` or a native CLI's content-policy wording. The refusal says nothing about the agent's fitness for the work, and the same prompt usually goes through on another provider.
+- `stalled` - the attempt stopped advancing its turn for [`agent_stall_timeout`](#agent_stall_timeout) without producing any assistant output or tool activity at all. The next candidate starts a fresh bounded invocation with its own full budget: a stalled attempt that consumed its own `agent_timeout`, `review_agent_timeout` or `test_agent_timeout` does not spend the budget the next candidate needs.
+
+`refused` and `stalled` hand the turn on only when the failed attempt left the worktree exactly as it found it: no uncommitted or untracked change, and no moved HEAD. A stall or refusal after tool activity, partial edits or a commit fails the step exactly as before, so a second agent never starts over on work it cannot see. Each configured agent runs at most once per invocation, and the total wall clock across fallback attempts is bounded at twice the invocation budget; a candidate past that bound is not started and the step fails with the last attempt's failure.
 Structured findings and schema/output validation problems do not trigger fallback. An OpenCode failure from a turn that ran tools, or whose tool activity cannot be established, does not trigger agent fallback.
 
 ### acpx_path
@@ -693,7 +698,9 @@ This is measured behaviour, not a hypothetical: `omp` review turns hit their the
 An invocation is stalled when no assistant text, tool call, or tool result has been observed for this long.
 Reasoning-only traffic, subprocess byte liveness, and retry or fallback bookkeeping do not count - only forward motion does.
 In addition, on platforms that expose process state and CPU time, a launched native agent that remains runnable with zero accumulated CPU time and makes no progress is treated as a confirmed wedge after a short grace window and cancelled early; this catches a process that never began executing instead of waiting for the full configured bound. Malformed or unavailable process samples do not trigger that classification.
-When the bound expires - including for that confirmed zero-CPU wedge - the agent is cancelled and the run fails with `agent made no progress; agent produced no assistant output or tool activity for <measured>` instead of continuing to consume the remaining budget.
+When the bound expires - including for that confirmed zero-CPU wedge - the agent is cancelled and the invocation fails with `agent made no progress; agent produced no assistant output or tool activity for <measured>` instead of continuing to consume the remaining budget.
+When another agent is configured behind it and the attempt produced nothing at all (no assistant output, no tool activity) in a worktree it left untouched, that failure hands the turn to the next candidate with a fresh full budget instead of ending the step; see the [`agent`](#agent) fallback classes.
+A stall after any progress, or one that left edits or a commit behind, still fails the step.
 That diagnostic is deliberately distinct from the timeout one, because the two demand different responses: a wall-clock expiry means the turn was working and needs a larger budget, while a stall means it was not converging and needs investigating.
 
 | Field | Value |

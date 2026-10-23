@@ -31,7 +31,7 @@ func newOpencodeMessageFailure(e *opencodeMessageError, toolActivity bool) error
 	if e == nil {
 		return nil
 	}
-	return &opencodeMessageFailure{
+	failure := &opencodeMessageFailure{
 		name:         e.Name,
 		message:      e.message(),
 		statusCode:   e.statusCode(),
@@ -41,6 +41,13 @@ func newOpencodeMessageFailure(e *opencodeMessageError, toolActivity bool) error
 		terminal:     isTerminalRetryError(strings.ToLower(strings.Join(e.providerText(), "\n"))),
 		toolActivity: toolActivity,
 	}
+	// A provider content-policy block is not a verdict on the work, so the
+	// fallback wrapper may hand the turn to the next agent. It is read from
+	// the typed error the server sent, not from the rendered sentence.
+	if refusesTurn(strings.Join(e.providerText(), "\n")) {
+		return MarkRefused(failure)
+	}
+	return failure
 }
 
 func (e *opencodeMessageFailure) StructuredOutputRejected() bool { return e.structured }

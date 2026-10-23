@@ -125,6 +125,19 @@ func (a *reviewAgents) NeutralizesGateInstructions() bool {
 	return true
 }
 
+// drivesAttempts reports true only when every route this router can take ends
+// in a fallback chain. A caller that installs its own per-attempt bounds is
+// then guaranteed each route to honour RunOpts.RunAttempt; a mixed tree (one
+// role on a single agent) answers false so the caller keeps its own bound.
+func (a *reviewAgents) drivesAttempts() bool {
+	for _, current := range a.all() {
+		if !DrivesAttempts(current) {
+			return false
+		}
+	}
+	return true
+}
+
 func (a *reviewAgents) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	selected := a.primary
 	switch opts.Purpose {

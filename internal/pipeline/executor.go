@@ -1132,18 +1132,19 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, "")
 	}
 	reconcileCtx := &StepContext{
-		Ctx:          ctx,
-		Run:          run,
-		Repo:         repo,
-		WorkDir:      workDir,
-		GateDir:      e.paths.RepoDir(repo.ID),
-		Config:       e.config,
-		ForgeContext: e.forge,
-		DB:           e.db,
-		StepResultID: gate.stepResult.ID,
-		Agent:        limitAgent(e.agent, e.slot),
-		Sessions:     e.sessions,
-		Shared:       e.shared,
+		Ctx:           ctx,
+		Run:           run,
+		Repo:          repo,
+		WorkDir:       workDir,
+		GateDir:       e.paths.RepoDir(repo.ID),
+		Config:        e.config,
+		ForgeContext:  e.forge,
+		DB:            e.db,
+		StepResultID:  gate.stepResult.ID,
+		Agent:         limitAgent(e.agent, e.slot),
+		AgentAttempts: agent.DrivesAttempts(e.agent),
+		Sessions:      e.sessions,
+		Shared:        e.shared,
 		// The same value executeStep supplies. A reconciler or resumer that
 		// reads the review conversation needs its stable directory as well as
 		// the active evidence directory, or it would decline on every tick
@@ -1887,6 +1888,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		WorkDir:               workDir,
 		GateDir:               e.paths.RepoDir(repo.ID),
 		Agent:                 limitAgent(stepAgent, e.slot),
+		AgentAttempts:         agent.DrivesAttempts(e.agent),
 		Config:                e.config,
 		ForgeContext:          e.forge,
 		PRTarget:              e.prTarget,

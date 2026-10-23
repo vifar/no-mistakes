@@ -109,11 +109,11 @@ func emitAgentRetry(opts RunOpts, name string, label string, attempt, max int) {
 	})
 }
 
-func emitAgentFallback(opts RunOpts, current, next string, err error) {
+func emitAgentFallback(opts RunOpts, current, next string, reason FallbackReason, err error) {
 	emitAgentControl(opts, LifecycleEvent{
 		Agent:   current,
 		Phase:   LifecyclePhaseFallback,
-		Message: fmt.Sprintf("agent %s failed (%s); falling back to %s", current, fallbackReason(err), next),
+		Message: fmt.Sprintf("agent %s failed (%s: %s); falling back to %s", current, reason, fallbackDetail(err), next),
 	})
 }
 

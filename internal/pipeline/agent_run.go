@@ -157,16 +157,42 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 			return nil, err
 		}
 	}
-	activity := observeAgentActivity(&opts)
-	result, runErr := invokeAgent(parent, timeout, working, stall, cause, activity, func(ctx context.Context) (*agent.Result, error) {
+	runOne := func(ctx context.Context, a agent.Agent, o agent.RunOpts) (*agent.Result, error) {
 		if sessionRole != "" && sctx != nil && sctx.Sessions != nil {
-			return sctx.Sessions.Run(ctx, ag, sessionRole, opts, sctx.Log)
+			return sctx.Sessions.Run(ctx, a, sessionRole, o, sctx.Log)
 		}
-		if ag == nil {
+		if a == nil {
 			return nil, errors.New("nil agent")
 		}
-		return ag.Run(ctx, opts)
-	})
+		return a.Run(ctx, o)
+	}
+	var result *agent.Result
+	var runErr error
+	if sctx != nil && sctx.AgentAttempts {
+		// The configured agent tree is fallback chains only, so every
+		// invocation reaches a chain that can drive candidates through their
+		// own bounded context. Installing the bound around the whole chain
+		// instead would let one stalled candidate spend it and cancel the
+		// context every remaining candidate would need.
+		attempts := &agentAttempt{
+			parent:     parent,
+			invoke:     runOne,
+			workDir:    sctx.WorkDir,
+			headBefore: before,
+			timeout:    timeout,
+			working:    working,
+			stall:      stall,
+			cause:      cause,
+			started:    time.Now(),
+		}
+		opts.RunAttempt = attempts.run
+		result, runErr = ag.Run(parent, opts)
+	} else {
+		activity := observeAgentActivity(&opts)
+		result, runErr = invokeAgent(parent, timeout, working, stall, cause, activity, func(ctx context.Context) (*agent.Result, error) {
+			return runOne(ctx, ag, opts)
+		})
+	}
 	if runErr == nil && before != "" {
 		after, err := git.HeadSHA(parent, sctx.WorkDir)
 		if err != nil {
@@ -200,6 +226,129 @@ func invokeAgent(parent context.Context, timeout, working, stall time.Duration, 
 		return nil, runErr
 	}
 	return result, nil
+}
+
+// agentAttempt drives one candidate of the configured fallback chain. It is
+// installed as RunOpts.RunAttempt when the run's agent tree is nothing but
+// fallback chains, so each candidate gets its OWN bounded invocation derived
+// from the step context.
+//
+// The shared bound is why this exists. Before it, one invocation bound wrapped
+// the whole chain: a silent stall spent the budget and cancelled the context
+// every candidate shared, so the remaining agents were unreachable by
+// construction, and a fallback after the stall was refused on principle - see
+// the context.Cause check in internal/agent/fallback.go.
+type agentAttempt struct {
+	parent context.Context
+	// invoke is the session-aware single-agent invocation: the same path
+	// RunAgent uses, so a fixer turn keeps its durable session.
+	invoke  func(ctx context.Context, a agent.Agent, opts agent.RunOpts) (*agent.Result, error)
+	workDir string
+	// headBefore is the worktree HEAD recorded when the invocation began. A
+	// candidate may only take over from an attempt that left it unmoved.
+	headBefore string
+	timeout    time.Duration
+	working    time.Duration
+	stall      time.Duration
+	cause      error
+	started    time.Time
+	// attempts counts the candidates started so far; each runs at most once.
+	attempts int
+	lastErr  error
+}
+
+// fallbackWallClock bounds the total wall clock one invocation may spend across
+// fallback attempts. Each attempt gets a fresh full budget, so without a second
+// bound three configured agents could spend three of them. Two covers the
+// measured shape - an agent out of quota, a provider refusing the content, a
+// healthy third - because both failures end in seconds.
+func fallbackWallClock(timeout time.Duration) time.Duration { return 2 * timeout }
+
+// run executes one candidate attempt.
+//
+// It reports the reason the attempt may hand its turn on, or FallbackNone when
+// it may not. A stall or a refusal is only eligible while the attempt left
+// nothing behind: another agent starting over in a half-edited worktree would
+// build on work it cannot see, so a dirty tree fails the step exactly as it did
+// before.
+func (a *agentAttempt) run(candidate agent.Agent, opts agent.RunOpts) (*agent.Result, error, agent.FallbackReason) {
+	if a.attempts > 0 && a.timeout > 0 && time.Since(a.started) >= fallbackWallClock(a.timeout) {
+		return nil, a.budgetSpent(), agent.FallbackNone
+	}
+	a.attempts++
+	activity := observeAgentActivity(&opts)
+	result, err := invokeAgent(a.parent, a.timeout, a.working, a.stall, a.cause, activity, func(ctx context.Context) (*agent.Result, error) {
+		return a.invoke(ctx, candidate, opts)
+	})
+	if err == nil {
+		return result, nil, agent.FallbackNone
+	}
+	a.lastErr = err
+	return result, err, a.reason(err, activity)
+}
+
+// budgetSpent is the terminal error for an invocation that used its fallback
+// wall clock. The last attempt's failure is kept as the cause, so a step's own
+// classifier (a review budget, say) still matches and the operator still reads
+// why the agent that ran failed.
+func (a *agentAttempt) budgetSpent() error {
+	spent := fmt.Sprintf("fallback stopped after %s across %d attempt(s): %s of per-attempt budget already used",
+		roundActivity(time.Since(a.started)), a.attempts, fallbackWallClock(a.timeout))
+	if a.lastErr == nil {
+		return errors.New(spent)
+	}
+	return fmt.Errorf("%s; last attempt failed: %w", spent, a.lastErr)
+}
+
+// reason classifies a failed attempt. A stall is read from its own cause before
+// any text classifier, because a stall diagnostic quotes the killed adapter and
+// that report ("codex exited: signal: killed") otherwise reads as the
+// agent-unavailable class, which carries no side-effect check.
+func (a *agentAttempt) reason(err error, activity *agentActivity) agent.FallbackReason {
+	if errors.Is(err, ErrAgentStall) {
+		// Nothing to preserve: the turn never advanced. A stall after any
+		// progress is a turn that acted and then wedged - it may have edited
+		// files - and a turn still waiting on a child process was working, not
+		// silent, so neither hands the work to another agent.
+		if activity.madeProgress() || activity.waitingOnChild() {
+			return agent.FallbackNone
+		}
+		if !a.worktreeUntouched() {
+			return agent.FallbackNone
+		}
+		return agent.FallbackStalled
+	}
+	reason := agent.FallbackReasonFor(err)
+	if reason != agent.FallbackRefused {
+		return reason
+	}
+	// A refusal is only a provider verdict when the attempt has nothing to
+	// undo. The same gate as a stall: another agent's fresh turn must not build
+	// on edits or a commit the refused one already made.
+	if !a.worktreeUntouched() {
+		return agent.FallbackNone
+	}
+	return reason
+}
+
+// worktreeUntouched reports whether the step worktree is exactly as the
+// invocation found it: no moved HEAD, no uncommitted or untracked change. An
+// unreadable worktree fails closed.
+func (a *agentAttempt) worktreeUntouched() bool {
+	if a.workDir == "" {
+		return false
+	}
+	if a.headBefore != "" {
+		head, err := git.HeadSHA(a.parent, a.workDir)
+		if err != nil || head != a.headBefore {
+			return false
+		}
+	}
+	dirty, err := git.HasUncommittedChanges(a.parent, a.workDir)
+	if err != nil {
+		return false
+	}
+	return !dirty
 }
 
 // watchAgentStall cancels ctx when an in-flight invocation stops advancing its
@@ -526,6 +675,20 @@ func (a *agentActivity) observeProgress() {
 	a.progressed = time.Now()
 	a.zeroCPUSince = time.Time{}
 	a.mu.Unlock()
+}
+
+// madeProgress reports whether the attempt advanced its turn at least once:
+// assistant text, a tool call, or a tool result. It is the definition of "this
+// turn did something", which is what decides whether a stalled attempt may be
+// handed to another agent.
+func (a *agentActivity) madeProgress() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	count := a.progressCount
+	a.mu.Unlock()
+	return count > 0
 }
 
 // progressSilence reports how long this attempt has gone without advancing its
@@ -905,6 +1068,14 @@ func (a *timeoutAgent) Name() string { return a.inner.Name() }
 func (a *timeoutAgent) Close() error { return a.inner.Close() }
 
 func (a *timeoutAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	if opts.RunAttempt != nil {
+		// The caller drives each candidate of a fallback chain under its own
+		// fresh bound (see agentAttempt). A bound installed here would wrap the
+		// whole chain again: its stall watcher cancels the context every
+		// candidate shares, which is exactly the shape that made a stalled
+		// first agent end the invocation with the remaining agents untried.
+		return a.inner.Run(ctx, opts)
+	}
 	if _, bounded := ctx.Deadline(); bounded {
 		// An outer seam already owns the wall-clock diagnosis. The stall bound
 		// still has to run here: Review and Test install a deadline before

@@ -8,6 +8,31 @@ import (
 	"time"
 )
 
+// FallbackReason is why one attempt in a fallback chain may hand its turn to
+// the next agent. It is the classification the fallback wrapper announces in
+// its agent-fallback line and, for the pipeline, the vocabulary an attempt
+// seam reports back with.
+//
+// The zero value means the attempt's failure is the agent's verdict on the
+// work, and must not be re-run under a different agent.
+type FallbackReason string
+
+const (
+	// FallbackNone is not fallback-eligible: the failure is a verdict.
+	FallbackNone FallbackReason = ""
+	// FallbackUnavailable means the agent never got as far as holding the
+	// prompt (see isAgentUnavailableError).
+	FallbackUnavailable FallbackReason = "unavailable"
+	// FallbackRefused means the provider blocked the turn's content. See
+	// IsRefused.
+	FallbackRefused FallbackReason = "refused"
+	// FallbackStalled means the attempt stopped advancing its turn without
+	// producing anything, so there is nothing to preserve and another agent
+	// may start over. Only the pipeline's attempt seam can establish this: it
+	// owns the progress measurement and checks the worktree for side effects.
+	FallbackStalled FallbackReason = "stalled"
+)
+
 type fallbackAgent struct {
 	agents []Agent
 }
@@ -96,7 +121,23 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 			currentOpts.SessionFallback = false
 		}
 		startedAt := time.Now()
-		result, err := current.Run(ctx, currentOpts)
+		var (
+			result *Result
+			err    error
+			reason FallbackReason
+		)
+		if opts.RunAttempt != nil {
+			// The caller owns this invocation's bounds, so it runs the
+			// attempt and tells us both the attempt's own context and whether
+			// a failure may hand the turn on. That is the only way a stall can
+			// fall back: the stalled attempt consumed a context this wrapper
+			// does not own, and a fresh one has to be derived from the
+			// invocation's parent.
+			result, err, reason = opts.RunAttempt(current, currentOpts)
+		} else {
+			result, err = current.Run(ctx, currentOpts)
+			reason = FallbackReasonFor(err)
+		}
 		if !ReportsAgentAttempts(current) {
 			emitAgentAttempt(currentOpts, current.Name(), result, err, startedAt, time.Now())
 		}
@@ -109,21 +150,74 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 		lastErr = err
 		// A fallback is another attempt inside this invocation's existing
 		// bounded context, not a fresh timeout policy. Once that context has
-		// expired or been cancelled, the next candidate cannot start
+		// expired or been cancelled the next candidate cannot start
 		// meaningfully. Preserve the current adapter's report for the caller's
 		// timeout diagnostic, but do not announce or instrument an attempt that
 		// will inherit an already-dead context.
 		if context.Cause(ctx) != nil {
 			return nil, err
 		}
-		if i == len(candidates)-1 || !isAgentUnavailableError(err) {
+		if i == len(candidates)-1 || reason == FallbackNone {
 			return nil, err
 		}
 		next := candidates[i+1]
-		emitAgentFallback(opts, current.Name(), next.Name(), err)
+		emitAgentFallback(opts, current.Name(), next.Name(), reason, err)
 	}
 	return nil, lastErr
 }
+
+// FallbackReasonFor classifies a failed attempt by the reason class the
+// fallback wrapper announces, for callers that run candidates themselves
+// through RunOpts.RunAttempt.
+//
+// It answers only what the failure itself says. Whether the attempt left
+// something behind - an edit, a commit - is the caller's to check: the pipeline
+// attempt seam withdraws both FallbackRefused and FallbackStalled when the step
+// worktree moved.
+func FallbackReasonFor(err error) FallbackReason {
+	if err == nil || IsStructuredOutputRejected(err) {
+		return FallbackNone
+	}
+	// A turn that provably ran tools must not be replayed under another
+	// agent: whatever it already did is on disk, in a commit, or in a posted
+	// comment, and a second agent's fresh turn would do it twice.
+	//
+	// "Unknown" tool evidence does not withhold the refusal class. It exists
+	// because a replay of the SAME turn could re-run an unrecorded tool; a
+	// refusal is the provider ending the turn itself, and the pipeline's
+	// worktree check is the stronger evidence that nothing was left behind.
+	if errors.Is(err, errOpencodeToolsAlreadyRan) {
+		return FallbackNone
+	}
+	if IsRefused(err) {
+		return FallbackRefused
+	}
+	if isAgentUnavailableError(err) {
+		return FallbackUnavailable
+	}
+	return FallbackNone
+}
+
+// DrivesAttempts reports whether every invocation of a runs through a fallback
+// chain that honours RunOpts.RunAttempt, so a caller may install its own
+// per-attempt bounds and leave the whole-invocation bound off.
+//
+// Only the wrappers that can route to a chain answer true, and a router answers
+// true only when EVERY route reaches one. A caller that gets false must bound
+// the invocation itself: nothing would call RunAttempt, and an attempt-driven
+// caller would run the agent with no bound at all.
+func DrivesAttempts(a Agent) bool {
+	driver, ok := a.(attemptDriver)
+	return ok && driver.drivesAttempts()
+}
+
+type attemptDriver interface {
+	drivesAttempts() bool
+}
+
+// drivesAttempts runs every candidate through RunOpts.RunAttempt when the
+// caller installs one.
+func (a *fallbackAgent) drivesAttempts() bool { return true }
 
 func (a *fallbackAgent) Close() error {
 	var errs []string
@@ -218,7 +312,7 @@ func (e *agentSetupError) Unwrap() error { return e.err }
 
 func (e *agentSetupError) Is(target error) bool { return target == errAgentSetupFailure }
 
-func fallbackReason(err error) string {
+func fallbackDetail(err error) string {
 	if err == nil {
 		return "unknown error"
 	}

@@ -139,6 +139,13 @@ func (e *opencodeV2ExecutionError) Error() string {
 
 func (e *opencodeV2ExecutionError) Unwrap() error { return nil }
 
+// refused reports whether the server ended the turn on a provider content
+// policy. opencode names the cause in the event's error type
+// (provider.content-filter) and repeats it in the message, so both are read.
+func (e *opencodeV2ExecutionError) refused() bool {
+	return e != nil && e.err != nil && (refusesTurn(e.err.Type) || refusesTurn(e.err.Message))
+}
+
 // beginV2Text starts a text block for a 2.x assistant message.
 func (s *opencodeStreamState) beginV2Text(messageID string, ordinal int) {
 	if messageID == "" {

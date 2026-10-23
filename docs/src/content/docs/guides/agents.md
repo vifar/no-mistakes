@@ -29,7 +29,7 @@ Testing prompts also ask agents to remove transient working-tree artifacts they 
 
 - Leave `agent: auto` if one good agent is already installed and you do not need repo-specific behavior.
 - Set a repo-level `agent` override when one codebase clearly works better with a different tool.
-- Use an ordered fallback list when you prefer one agent but want no-mistakes to try another if the first process is unavailable.
+- Use an ordered fallback list when you prefer one agent but want no-mistakes to try another when the first one is unavailable, was refused by its provider's content filter, or stalled without producing anything.
 - Set explicit `commands.lint` and a **targeted** `commands.test` if you want deterministic local baseline command execution regardless of agent choice. Test always follows its optional baseline with agent-driven end-user scenarios; remote CI owns broad regression. See [Test](/no-mistakes/reference/pipeline-steps/#test) for the live-validation contract.
 
 That last point matters: explicit repo commands make the baseline predictable, while the agent establishes whether the requested behavior works in the real product.
@@ -227,6 +227,7 @@ All agents implement the same interface. Each invocation receives:
 - **OnLifecycle** - callback for native subprocess start, exit, retry, fallback, and output-liveness activity; control events reach step logs and AXI active-step status, while throttled output liveness updates status without flooding the log
 - **Session** - optional no-mistakes-owned native session identity for review-fixer reuse
 - **Purpose** - local performance label for the pipeline duty served
+- **RunAttempt** - optional per-candidate seam a `agent:` fallback list uses when the pipeline runs the invocation: it executes one candidate under its own bounded context and reports why a failed attempt may hand the turn to the next one (`unavailable`, `refused`, `stalled`). Single agents never call it; the pipeline bounds those itself.
 
 Each invocation returns:
 

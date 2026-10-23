@@ -100,7 +100,14 @@ func (a *opencodeAgent) runOnceV2(ctx context.Context, opts RunOpts, baseURL str
 			// stream is the evidence that the turn may have left side
 			// effects, which is what the replay gate reads.
 			evidence := state.v2ToolEvidence()
-			return resultFromUsage(state.usage), opencodeTurnFailure(evidence, streamErr)
+			reported := streamErr
+			if execErr.refused() {
+				// A provider content-policy block is not a verdict on the
+				// work: the same prompt usually goes through on another
+				// provider, so the fallback wrapper may hand the turn on.
+				reported = MarkRefused(reported)
+			}
+			return resultFromUsage(state.usage), opencodeTurnFailure(evidence, reported)
 		}
 		return resultFromUsage(state.usage), opencodeTurnFailure(state.v2ToolEvidence(), fmt.Errorf("opencode events: %w", streamErr))
 	}
