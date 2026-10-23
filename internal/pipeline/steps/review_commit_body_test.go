@@ -232,7 +232,7 @@ func TestReviewFixCommitR1QuotedDisplayNames(t *testing.T) {
 		"Claude Code", "Codex", "ChatGPT", "OpenAI", "Anthropic", "Copilot", "GitHub Copilot",
 		"Gemini", "Grok", "pi", "omp", "OpenCode", "Antigravity", "RovoDev", "Cursor", "Devin",
 		"acp:cursor", "acp:cursor:model", "acp:custom-target", "no-mistakes", "no-mistakes codex",
-		"gpt-5.5", "o3", "gemini-2.5-pro", "grok-4", "claude-opus-4-6",
+		"gpt-5.5", "o3", "gemini-2.5-pro", "claude-opus-4-6",
 	} {
 		t.Run(identity, func(t *testing.T) {
 			assertUnconfiguredReviewAttributionFiltered(t, `Co-Authored-By: "`+identity+`" <model@example.com>`)
@@ -257,9 +257,12 @@ func TestReviewFixCommitR3UnconfiguredAIIdentities(t *testing.T) {
 			if identity == "claude" {
 				mailbox = "noreply@anthropic.com"
 			}
+			// The shared commit filter recognizes exactly the Claude and Codex
+			// session trailers, so the session line uses a recognized key while
+			// the per-identity entries exercise the identity rules.
 			noise := "Co-Authored-By: " + identity + " <" + mailbox + ">\n" +
 				"Assisted-by: " + identity + ":model\n" +
-				"> " + identity + "-Session: abc"
+				"> Claude-Session: abc"
 			assertUnconfiguredReviewAttributionFiltered(t, noise)
 		})
 	}

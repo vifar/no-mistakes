@@ -111,7 +111,11 @@ func TestAttributionRepairOutcomeLiveJourney(t *testing.T) {
 				want, forbidden := "🔧 No changes applied.", "auto-fixed"
 				if change {
 					want, forbidden = "🔧 Fix applied.", "🔧 No changes applied."
-					if !strings.Contains(body, "auto-fixed") {
+					// The Review step reports an applied repair as "Fix applied";
+					// "auto-fixed" is the wording for the other steps
+					// (prsummary_rounds_test.go pins both), so the heading must
+					// count this repair without claiming a generic auto-fix.
+					if !strings.Contains(body, "🔧 **Review** - 1 issue found → Fix applied ✅") || strings.Contains(body, "auto-fixed") {
 						t.Fatalf("PR heading did not count applied repair:\n%s", body)
 					}
 				}
