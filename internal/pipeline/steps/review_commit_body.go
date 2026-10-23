@@ -31,7 +31,7 @@ func reviewAttributionLine(line string) (string, bool) {
 		case '>':
 			unwrapped = content[1:]
 		case '<':
-			if !strings.HasPrefix(content, "<code>") || !strings.HasSuffix(content, "</code>") {
+			if !strings.HasPrefix(content, "<code>") || !strings.HasSuffix(content, "</code>") || strings.Index(content, "</code>") != len(content)-len("</code>") {
 				return content, indented && !bullet
 			}
 			unwrapped = content[len("<code>") : len(content)-len("</code>")]
@@ -40,7 +40,7 @@ func reviewAttributionLine(line string) (string, bool) {
 			for n < len(content) && content[n] == content[0] {
 				n++
 			}
-			if len(content) >= 2*n && strings.HasSuffix(content, content[:n]) {
+			if len(content) >= 2*n && strings.HasSuffix(content, content[:n]) && strings.Index(content[n:], content[:n]) == len(content)-2*n {
 				unwrapped = content[n : len(content)-n]
 			} else {
 				return content, indented && !bullet
@@ -146,12 +146,22 @@ func reviewAttributionView(line string) (string, bool) {
 			if strings.TrimLeft(value, " \t\r") != value {
 				separator += " "
 			}
+			value, _ = reviewAttributionLine(value)
 			mailbox := ""
-			if at := strings.LastIndex(value, "<"); at >= 0 {
-				if _, err := mail.ParseAddress(strings.TrimSpace(value[at:])); err == nil {
-					mailbox = " " + strings.TrimSpace(value[at:])
-					value = value[:at]
+			for end := len(value); end > 0; {
+				at := strings.LastIndexAny(value[:end], "<`*_~\"'")
+				if at < 0 {
+					break
 				}
+				address, _ := reviewAttributionLine(value[at:])
+				if strings.HasPrefix(address, "<") && strings.HasSuffix(address, ">") {
+					if _, err := mail.ParseAddress(address); err == nil {
+						mailbox = " " + address
+						value = value[:at]
+						break
+					}
+				}
+				end = at
 			}
 			value, _ = reviewAttributionLine(value)
 			text = key + separator + value + mailbox

@@ -57,6 +57,29 @@ func TestPRLabelledMarkupPublicationPaths(t *testing.T) {
 			}
 		}
 	}
+	for _, wrapper := range []string{"`", "``", "**", "__", "*", "_", "~~", "<code>"} {
+		close := wrapper
+		if wrapper == "<code>" {
+			close = "</code>"
+		}
+		for _, separator := range []string{" ", "\n "} {
+			for _, escaped := range []bool{false, true} {
+				for _, identityWrapper := range []string{"", "`", "``", "**", "__", "*", "_", "~~", "<code>"} {
+					identityClose := identityWrapper
+					if identityWrapper == "<code>" {
+						identityClose = "</code>"
+					}
+					ai := "co-author (quoted): " + identityWrapper + "Codex" + identityClose + separator + wrapper + "<ai@example.com>" + close
+					human := "co-author (quoted): Claude Smith" + separator + wrapper + "<human@example.com>" + close
+					configured := "co-author (quoted): private:writer" + separator + wrapper + "<opaque@example.com>" + close
+					if escaped {
+						ai, human, configured = html.EscapeString(ai), html.EscapeString(human), html.EscapeString(configured)
+					}
+					cases = append(cases, fixtureCase{ai: ai, human: human}, fixtureCase{ai: configured, human: human, configured: []string{"Co-Authored-By: private:writer <opaque@example.com>"}})
+				}
+			}
+		}
+	}
 	for _, escaped := range []bool{false, true} {
 		ai := "co-author (quoted): private:writer\n <opaque@example.com>"
 		if escaped {

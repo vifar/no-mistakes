@@ -111,7 +111,7 @@ func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit 
 	if !parts.managed && before != "" {
 		before += "\n\n"
 	}
-	content := prContent{Title: redactPRContent(prContent{Title: title}).Title, Body: before + wrapPRAppendix(appendix) + after}
+	content := prContent{Title: redactPRContent(prContent{Title: title}, configuredTrailers...).Title, Body: before + wrapPRAppendix(appendix) + after}
 	if err := validateOwnedPRBudget(content.Body, bodyLimit); err != nil {
 		return prContent{}, err
 	}

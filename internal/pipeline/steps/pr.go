@@ -386,7 +386,7 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		}
 		narrative := neutralizeAttestationMarkers(provider, prDisplayText(content.Body, configuredTrailers...))
 		appendix = appendIssuesSection(appendix, issuesSection(sctx, narrative))
-		return composeOwnedPRContent(prOwnedBody{before: narrative}, content.Title, appendix, bodyLimit)
+		return composeOwnedPRContent(prOwnedBody{before: narrative}, content.Title, appendix, bodyLimit, configuredTrailers...)
 	}
 	content, err := s.draftPRContent(sctx, branch, baseBranch, baseSHA, provider, bodyLimit)
 	if err != nil {
@@ -402,8 +402,8 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 // to be published. Ordinary drafts call it after length caps; the placeholder
 // never grows a path. Owned composition calls it before its integrity guard
 // and non-truncating size check so publication cannot invalidate that guard.
-func redactPRContent(content prContent) prContent {
-	content.Title = safepath.RedactText(content.Title)
+func redactPRContent(content prContent, configuredTrailers ...string) prContent {
+	content.Title = safepath.RedactText(prDisplayText(content.Title, configuredTrailers...))
 	content.Body = safepath.RedactText(content.Body)
 	return content
 }
@@ -674,6 +674,14 @@ func prTitleScopeRules(sctx *pipeline.StepContext) string {
 }
 
 func renderPRTitle(sctx *pipeline.StepContext, title string) (string, error) {
+	trailers, err := configuredAttributionTrailers(sctx)
+	if err != nil {
+		return "", fmt.Errorf("prepare PR title attribution filtering: %w", err)
+	}
+	title = strings.TrimSpace(prDisplayText(title, trailers...))
+	if title == "" {
+		return "", fmt.Errorf("PR title contains no publishable text")
+	}
 	if sctx == nil || sctx.Config == nil || sctx.Config.PR.TitleFormat == "" {
 		return conventional.TightenTitle(title), nil
 	}
