@@ -1742,10 +1742,9 @@ var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)
 //
 // The rule is the merge bar's owner's: the bar's rule does not change, and a
 // published body never carries a raw co-author trailer line. It is a
-// publication policy, and it is deliberately narrow: only the KEY of an
-// attribution entry - one that carries a mailbox, which is what makes it an
-// attribution rather than a mention - is rendered. A sentence that merely
-// names the field stays the sentence it was.
+// publication policy, and it is deliberately narrow: only the KEY of a
+// complete co-author entry is rendered, including entries without a mailbox.
+// A sentence that merely names the field stays the sentence it was.
 func renderCoAuthorAsLabelledField(s string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {

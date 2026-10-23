@@ -197,8 +197,8 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 }
 
 // Restamping is also an owner-authorized appendix edit. Recompute its integrity
-// guard without touching author text, while refusing evidence edited by anyone
-// else. Legacy unmarked bodies retain the existing restamp contract.
+// guard after whole-body attribution filtering, while refusing evidence edited
+// by anyone else. Legacy unmarked bodies retain the existing restamp contract.
 func rebindOwnedPRAttestation(body, head string, steps []*db.StepResult, policy pipelineAttestationPolicy, provider scm.Provider) (string, bool, error) {
 	configuredTrailers := policy.ConfiguredTrailers
 	auditSteps := steps

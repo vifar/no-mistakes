@@ -1195,12 +1195,12 @@ The template supports literal text and three Go-style placeholders:
 | Variable | Value |
 | --- | --- |
 | `{{.Step}}` | Pipeline step name, such as `review`, `test`, `document`, `lint`, `ci`, `push`, or `gate.test.mutation-budget` |
-| `{{.Summary}}` | Sanitized one-line summary returned by the fix agent, or the step's deterministic fallback summary |
+| `{{.Summary}}` | Sanitized subject summary derived from the fix agent's output, or the step's deterministic fallback summary; [Review](/no-mistakes/reference/pipeline-steps/#review) preserves the full summary separately |
 | `{{.Branch}}` | Normalized branch name, or the identifier captured and optionally transformed by [`commit.branch_pattern`](#commitbranch_pattern) and [`commit.branch_replacement`](#commitbranch_replacement) |
 
 The value must be a valid UTF-8 template that renders to a non-empty, single-line commit subject.
 The template source is limited to 1,024 bytes and 16 placeholders.
-The fix-agent summary and final rendered subject are each limited to 4,096 bytes.
+The summary supplied to the template renderer and the final rendered subject are each limited to 4,096 bytes; this does not limit Review's separately preserved full summary.
 Before rendering, no-mistakes predicts the subject size from the validated literal text and placeholders, then rejects oversized output without allocating the expanded message.
 Template functions, control actions, named templates, unknown placeholders, malformed syntax, control characters, unsafe Unicode format characters, and Unicode line or paragraph separators cause configuration loading to fail.
 The blocked format set includes every Unicode `Bidi_Control` code point plus `U+00AD`, `U+180E`, `U+200B`, `U+2060` through `U+2064`, the deprecated bidi controls `U+206A` through `U+206F`, `U+FEFF`, `U+FFF9` through `U+FFFB`, and Unicode tag characters in `U+E0000` through `U+E007F`.
