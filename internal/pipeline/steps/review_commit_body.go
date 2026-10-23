@@ -31,7 +31,12 @@ func reviewAttributionLine(line string) (string, bool) {
 				return content, indented && !bullet
 			}
 			unwrapped = content[1:]
-		case '"', '\'', '`', '*':
+		case '<':
+			if !strings.HasPrefix(content, "<code>") || !strings.HasSuffix(content, "</code>") {
+				return content, indented && !bullet
+			}
+			unwrapped = content[len("<code>") : len(content)-len("</code>")]
+		case '"', '\'', '`', '*', '_', '~':
 			n := 1
 			for n < len(content) && content[n] == content[0] {
 				n++
@@ -173,9 +178,6 @@ func reviewAttributionEntry(lines []string, start int, configuredTrailers []stri
 	if reviewConfiguredAttributionMatches(reviewPublishedLabelAsTrailer(lines[start]), configuredTrailers) {
 		return end, unfolded, true, true
 	}
-	if !reviewAttributionStart(unfolded) {
-		return end, unfolded, false, false
-	}
 	ai = git.IsAIAttributionTrailer(unfolded)
 	if end > start+1 {
 		rawPair, _ := reviewAttributionLine(strings.Join(lines[start:end], "\n"))
@@ -196,7 +198,7 @@ func reviewAttributionEntry(lines []string, start int, configuredTrailers []stri
 		ai = reviewRenderedLineCarriesAIAttribution(strings.Join(lines[start:end], " "))
 	}
 	_, value, hasKey := strings.Cut(unfolded, ":")
-	entry = ai || (hasKey && strings.TrimSpace(value) != "" && !reviewGeneratedWith.MatchString(unfolded))
+	entry = ai || (reviewAttributionStart(unfolded) && hasKey && strings.TrimSpace(value) != "" && !reviewGeneratedWith.MatchString(unfolded))
 	return end, unfolded, entry, ai
 }
 

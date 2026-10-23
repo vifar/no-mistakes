@@ -2,6 +2,7 @@ package steps
 
 import (
 	"encoding/json"
+	"html"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,10 +17,39 @@ import (
 func TestPRLabelledMarkupPublicationPaths(t *testing.T) {
 	const prose = "Ordinary prose mentioning co-author (quoted): **Codex** stays verbatim."
 	const human = "co-author (quoted): **Claude Smith** <human@example.com>"
-	for _, ai := range []string{
-		"co-author (quoted): **Codex** <ai@example.com>",
-		"co-author (quoted): **Codex**\n <ai@example.com>",
-	} {
+	type fixtureCase struct{ ai, human string }
+	var cases []fixtureCase
+	for _, wrapper := range []string{"", "`", "``", "**", "__", "*", "_", "~~", "<code>"} {
+		close := wrapper
+		if wrapper == "<code>" {
+			close = "</code>"
+		}
+		for _, folded := range []bool{false, true} {
+			separator := " "
+			if folded {
+				separator = "\n "
+			}
+			for _, escaped := range []bool{false, true} {
+				ai := wrapper + "co-author (quoted): Codex" + separator + "<ai@example.com>" + close
+				human := wrapper + "co-author (quoted): Claude Smith" + separator + "<human@example.com>" + close
+				if escaped {
+					ai, human = html.EscapeString(ai), html.EscapeString(human)
+				}
+				cases = append(cases, fixtureCase{ai, human})
+			}
+		}
+	}
+	for _, separator := range []string{" ", "\n "} {
+		for _, escaped := range []bool{false, true} {
+			ai := "co-author (quoted): **Codex**" + separator + "<ai@example.com>"
+			if escaped {
+				ai = html.EscapeString(ai)
+			}
+			cases = append(cases, fixtureCase{ai, human})
+		}
+	}
+	for _, fixture := range cases {
+		ai, human := fixture.ai, fixture.human
 		t.Run(ai, func(t *testing.T) {
 			fixture := ai + "\n\n" + human + "\n\n" + prose + "\n" + humanCoauthorDisclosure
 			appendix := compliantPipelineBody(t, testPipelineHeadSHA)
