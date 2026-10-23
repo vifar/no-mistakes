@@ -193,15 +193,15 @@ func TestPRHumanCoauthorPresentation_FoldedEntries(t *testing.T) {
 	t.Parallel()
 	for _, address := range []string{"<claude@example.com>", "&lt;claude@example.com&gt;"} {
 		input := "Co-Authored-By: Claude\n " + address + "\n\n" + humanCoauthorDisclosure
-		want := input
+		want := "co-author (quoted): Claude\n " + address + "\n\n" + humanCoauthorDisclosure
 		if got := prDisplayText(input); got != want {
 			t.Errorf("human evidence = %q, want %q", got, want)
 		}
 	}
 	for _, address := range []string{"<noreply@anthropic.com>", "&lt;noreply@anthropic.com&gt;"} {
 		input := "Co-Authored-By: Claude\n " + address + "\n\n" + humanCoauthorDisclosure
-		if got := prDisplayText(input); got != input {
-			t.Errorf("line-local mention changed: %q", got)
+		if got, want := prDisplayText(input), "\n\n"+humanCoauthorDisclosure; got != want {
+			t.Errorf("AI pair = %q, want %q", got, want)
 		}
 	}
 }
@@ -213,7 +213,7 @@ func TestPRHumanCoauthorPresentation_WrappedFoldedEntries(t *testing.T) {
 		for _, escaped := range []bool{false, true} {
 			address := "<claude@example.com>"
 			human := wrapper + "Co-Authored-By: Claude" + close + "\n" + wrapper + address + close
-			want := human
+			want := strings.Replace(human, "Co-Authored-By:", "co-author (quoted):", 1)
 			if escaped {
 				human = html.EscapeString(human)
 				want = html.EscapeString(want)
@@ -222,8 +222,8 @@ func TestPRHumanCoauthorPresentation_WrappedFoldedEntries(t *testing.T) {
 				t.Errorf("human = %q, want %q", got, want)
 			}
 			ai := strings.ReplaceAll(human, "claude@example.com", "noreply@anthropic.com")
-			if got := prDisplayText(ai); got != ai {
-				t.Errorf("line-local mention changed: %q", got)
+			if got := prDisplayText(ai); got != "" {
+				t.Errorf("AI pair published: %q", got)
 			}
 		}
 	}

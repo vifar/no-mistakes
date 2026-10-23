@@ -158,11 +158,11 @@ func TestBuildPipelineSummary_ReviewAttributionDoesNotLeakFromRoundFindings(t *t
 						t.Errorf("Review findings reintroduced attribution %q:\n%s", forbidden, markdown)
 					}
 				}
-				if !strings.Contains(html.UnescapeString(markdown), foldedHuman) || !strings.Contains(markdown, disclosure) || !strings.Contains(markdown, "co-author (quoted): Claude") || !strings.Contains(markdown, recorder+"\n\n"+disclosure) {
+				if !strings.Contains(html.UnescapeString(markdown), strings.Replace(foldedHuman, "Co-Authored-By:", "co-author (quoted):", 1)) || !strings.Contains(markdown, disclosure) || !strings.Contains(markdown, "co-author (quoted): Claude") || !strings.Contains(markdown, recorder+"\n\n"+disclosure) {
 					t.Errorf("disclosure or human co-author lost:\n%s", markdown)
 				}
-				if !strings.Contains(html.UnescapeString(markdown), "> Co-Authored-By: Claude\n> <noreply@anthropic.com>") {
-					t.Errorf("line-local folded mention changed:\n%s", markdown)
+				if strings.Contains(html.UnescapeString(markdown), "noreply@anthropic.com") {
+					t.Errorf("folded AI pair published:\n%s", markdown)
 				}
 				if *step.FindingsJSON != final || *rounds["review"][0].FindingsJSON != initial {
 					t.Fatal("rendering changed recorded findings")
