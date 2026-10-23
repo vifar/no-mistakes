@@ -14,7 +14,7 @@ import (
 
 func TestAPIReadHeaderEvidence(t *testing.T) {
 	for _, combined := range []bool{false, true} {
-		for _, scenario := range []string{"recover", "exhausted", "no header", "primary limit", "probe succeeds", "malformed headers", "probe timeout", "CRLF", "slurp headers"} {
+		for _, scenario := range []string{"recover", "exhausted", "no header", "primary limit", "probe succeeds", "probe succeeds CRLF", "malformed headers", "probe timeout", "CRLF", "slurp headers"} {
 			t.Run(scenario+map[bool]string{false: "/stdout", true: "/combined"}[combined], func(t *testing.T) {
 				reads, probes := 0, 0
 				args := []string{"api", "--hostname", "ghe.example.com", "--method", "GET", "repos/test/repo/pulls/7"}
@@ -41,8 +41,11 @@ func TestAPIReadHeaderEvidence(t *testing.T) {
 							headers = "[" + headers
 						}
 						step.stdout = headers + body
-						if scenario == "probe succeeds" {
+						if strings.HasPrefix(scenario, "probe succeeds") {
 							step = ghScriptStep{stdout: "HTTP/2.0 200 OK\nX-Private: header-secret\n\n" + body}
+							if scenario == "probe succeeds CRLF" {
+								step.stdout = "HTTP/2.0 200 OK\nX-Private: header-secret\r\n\r\n" + body
+							}
 						}
 						if scenario == "malformed headers" {
 							step.stdout = "HTTP/2.0 403 Forbidden\nRetry-After: 60\nX-Private: header-secret"
@@ -78,12 +81,16 @@ func TestAPIReadHeaderEvidence(t *testing.T) {
 					if err == nil || reads != 3 || probes != 3 || netretry.Describe(err) != string(netretry.ClassRateLimit) {
 						t.Fatalf("reads=%d probes=%d err=%v, want bounded secondary-limit failure", reads, probes, err)
 					}
-				case "no header", "primary limit", "malformed headers", "probe succeeds":
+				case "no header", "primary limit", "malformed headers":
 					if err == nil || reads != 1 || probes != 1 || netretry.Retryable(err) {
 						t.Fatalf("reads=%d probes=%d err=%v, want no retry without qualifying evidence", reads, probes, err)
 					}
 				default:
-					if err != nil || string(out) != body || detail != "" || reads != 2 || probes != 1 {
+					wantReads := 2
+					if strings.HasPrefix(scenario, "probe succeeds") {
+						wantReads = 1
+					}
+					if err != nil || string(out) != body || detail != "" || reads != wantReads || probes != 1 {
 						t.Fatalf("reads=%d probes=%d output=%q detail=%q err=%v, want exact response body", reads, probes, out, detail, err)
 					}
 				}

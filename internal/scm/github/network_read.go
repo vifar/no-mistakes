@@ -76,18 +76,18 @@ func (h *Host) ghReadAttempt(ctx context.Context, stdin string, args []string) (
 		return out, detail, err
 	}
 	probe, probeDetail, probeErr := run(append(append([]string{}, args...), "--include"))
-	if probeErr == nil {
-		return out, detail, err
-	}
-	end := bytes.Index(probe, []byte("\n\n"))
+	end, separator := bytes.Index(probe, []byte("\n\n")), 2
 	if crlf := bytes.Index(probe, []byte("\r\n\r\n")); crlf >= 0 && (end < 0 || crlf < end) {
-		end = crlf
+		end, separator = crlf, 4
 	}
 	if end < 0 {
-		if ctx.Err() != nil || netretry.ClassifyText(probeDetail) != "" {
+		if probeErr != nil && (ctx.Err() != nil || netretry.ClassifyText(probeDetail) != "") {
 			return out, probeDetail, probeErr
 		}
 		return out, detail, err
+	}
+	if probeErr == nil {
+		return probe[end+separator:], probeDetail, nil
 	}
 	return out, detail, &ghHeaderError{error: err, diagnostic: probeDetail + "\n" + string(probe[:end])}
 }
