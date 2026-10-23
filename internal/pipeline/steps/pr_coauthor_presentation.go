@@ -186,9 +186,9 @@ func bareQuotedMention(out []byte, start, end int, value string, configuredTrail
 }
 
 // recordedFragmentLine reports whether a line is made only of JSON tokens:
-// strings, scalars and structural punctuation. Prose, Markdown and an
-// incomplete string are not, so only a line a payload could have produced is
-// filtered as one.
+// strings, scalars and structural punctuation. Prose and Markdown are not. A
+// string the evidence was cut in may end the line, but only after a complete
+// string, so only a line a payload could have produced is filtered as one.
 func recordedFragmentLine(line string) bool {
 	data := []byte(line)
 	sawString := false
@@ -199,7 +199,7 @@ func recordedFragmentLine(line string) bool {
 		case c == '"':
 			end, ok := jsonStringEnd(data, i)
 			if !ok {
-				return false
+				return sawString
 			}
 			sawString = true
 			i = end

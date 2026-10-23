@@ -28,6 +28,8 @@ func TestPRFragmentPayloadByteContract(t *testing.T) {
 		"{\n \"cutoff\": \"unfinished\n\n... [20000 bytes truncated] ...\n\n \"description\" : " + ai + ",\n \"human\": " + human + "\n}",
 		"{\n \"large\": \"cutoff\n... [20000 bytes truncated] ...\ncontinued text\", \"description\": " + ai + ", \"human\": " + human + "\n}",
 		"```json\n{\n \"description\" : " + ai + ", \"human\": " + human + ",\n```\nVerification passed.",
+		"{\"description\": " + ai + ", \"human\": " + human + ", \"large\": \"cut mid-string",
+		"{\"description\": " + ai + ", \"human\": " + human + ", \"large\": \"cut mid-string\n... [20000 bytes truncated] ...\ncontinued text\", \"tail\": 1}",
 	} {
 		want := strings.Replace(strings.Replace(input, ai, `""`, 1), human, labelled, 1)
 		if got := prDisplayBody(input); got != want {
@@ -38,6 +40,8 @@ func TestPRFragmentPayloadByteContract(t *testing.T) {
 		`{"broken": "invalid\q\"ordinary", "escape": "A\u0042\/C",`,
 		"{\n \"ordinary\": \"A\\u0042\\/C\",\n \"cutoff\": \"unfinished",
 		`Ordinary prose mentions "co-author (quoted): Codex <ai@example.com>" as a field.`,
+		`Say "co-author (quoted): Codex <ai@example.com>" and then "unfinished`,
+		`"<code>co-author (quoted): <code>Codex</code> <ai@example.com></code> is quoted prose and unfinished`,
 		`"Ordinary prose mentioning co-author (quoted): Codex stays verbatim."`,
 	} {
 		if got := prDisplayBody(input); got != input {
