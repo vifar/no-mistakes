@@ -47,23 +47,29 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 	var kept []string
 	for start := 0; start < len(lines); {
 		if payload, end, ok := recordedPayloadBlock(lines, start); ok {
-			kept = append(kept, filterRecordedPayload(payload, notice, configuredTrailers...))
+			kept = append(kept, filterRecordedPayload(payload, notice, false, configuredTrailers...))
 			start = end
 			continue
 		}
-		_, unfolded, entry, ai := reviewAttributionEntry(lines[start:start+1], 0, configuredTrailers)
-		if !ai {
-			key, _, _ := strings.Cut(unfolded, ":")
-			if entry && strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && reviewAttributionAddressComplete(unfolded) {
-				lines[start] = presentHumanCoauthor(lines[start])
+		end, unfolded, entry, ai := reviewAttributionEntry(lines, start, configuredTrailers)
+		if ai {
+			if notice {
+				kept = append(kept, prAIAttributionNotice)
+			} else {
+				kept = append(kept, "")
 			}
-			kept = append(kept, lines[start])
-		} else if notice {
-			kept = append(kept, prAIAttributionNotice)
-		} else {
-			kept = append(kept, "")
+			start = end
+			continue
 		}
-		start++
+		key, _, _ := strings.Cut(unfolded, ":")
+		switch {
+		case entry && strings.EqualFold(strings.TrimSpace(key), "Co-Authored-By") && reviewAttributionAddressComplete(unfolded):
+			lines[start] = presentHumanCoauthor(lines[start])
+		case recordedFragmentLine(lines[start]):
+			lines[start] = filterRecordedPayload(lines[start], notice, true, configuredTrailers...)
+		}
+		kept = append(kept, lines[start:end]...)
+		start = end
 	}
 	return strings.Join(kept, "\n")
 }
@@ -109,10 +115,15 @@ func recordedPayloadBlock(lines []string, start int) (string, int, bool) {
 	return payload, end, true
 }
 
-// filterRecordedPayload filters the string values inside a recorded payload and
-// splices the filtered text back into the payload's own bytes, so the published
-// evidence keeps the shape it was recorded with.
-func filterRecordedPayload(line string, notice bool, configuredTrailers ...string) string {
+// filterRecordedPayload filters the string values and keys inside a recorded
+// payload and splices the filtered text back into the payload's own bytes, so
+// the published evidence keeps the shape it was recorded with.
+//
+// A fragment is a line of a payload that is not itself a complete document
+// (the evidence was cut, or the document continues on other lines). A bare
+// quoted element there is indistinguishable from a quotation in prose, so one
+// that quotes the published label is a mention of the rendered field and stays.
+func filterRecordedPayload(line string, notice, fragment bool, configuredTrailers ...string) string {
 	out := []byte(line)
 	for offset := 0; offset < len(out); {
 		start := bytes.IndexByte(out[offset:], '"')
@@ -124,17 +135,9 @@ func filterRecordedPayload(line string, notice bool, configuredTrailers ...strin
 		if !ok {
 			break
 		}
-		next := end
-		for next < len(out) && strings.ContainsRune(" \t\r\n", rune(out[next])) {
-			next++
-		}
-		if next < len(out) && out[next] == ':' {
-			offset = end
-			continue
-		}
 		literal := string(out[start:end])
 		var value string
-		if err := json.Unmarshal([]byte(literal), &value); err == nil {
+		if err := json.Unmarshal([]byte(literal), &value); err == nil && !(fragment && bareQuotedMention(out, start, end, value)) {
 			if filtered := prDisplayTextMode(value, notice, configuredTrailers...); filtered != value {
 				if encoded, err := json.Marshal(filtered); err == nil {
 					rebuilt := make([]byte, 0, len(out))
@@ -150,6 +153,49 @@ func filterRecordedPayload(line string, notice bool, configuredTrailers ...strin
 		offset = end
 	}
 	return string(out)
+}
+
+// bareQuotedMention reports whether the string at out[start:end] is a bare
+// element (neither a key nor a member value) that quotes the published label.
+func bareQuotedMention(out []byte, start, end int, value string) bool {
+	if !strings.Contains(strings.ToLower(value), PreservedHumanCoauthorLabel) {
+		return false
+	}
+	before := bytes.TrimRight(out[:start], " \t")
+	after := bytes.TrimLeft(out[end:], " \t")
+	return !bytes.HasSuffix(before, []byte(":")) && !bytes.HasPrefix(after, []byte(":"))
+}
+
+// recordedFragmentLine reports whether a line is made only of JSON tokens:
+// strings, scalars and structural punctuation. Prose, Markdown and an
+// incomplete string are not, so only a line a payload could have produced is
+// filtered as one.
+func recordedFragmentLine(line string) bool {
+	data := []byte(line)
+	sawString := false
+	for i := 0; i < len(data); {
+		switch c := data[i]; {
+		case c == ' ' || c == '\t' || c == '\r' || strings.IndexByte("{}[],:", c) >= 0:
+			i++
+		case c == '"':
+			end, ok := jsonStringEnd(data, i)
+			if !ok {
+				return false
+			}
+			sawString = true
+			i = end
+		default:
+			end := i
+			for end < len(data) && strings.IndexByte(" \t\r{}[],:\"", data[end]) < 0 {
+				end++
+			}
+			if !json.Valid(data[i:end]) {
+				return false
+			}
+			i = end
+		}
+	}
+	return sawString
 }
 
 // jsonStringEnd returns the end of the JSON string literal that starts at the

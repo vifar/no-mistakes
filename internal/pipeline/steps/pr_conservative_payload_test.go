@@ -18,7 +18,7 @@ func TestPRConservativePayloadBoundary(t *testing.T) {
 	const quoted = "\"co-author (quoted): Codex <ai@example.com>\",\nhe said; this is only an example."
 	const prose = `Ordinary prose mentions "co-author (quoted): Codex <ai@example.com>" as a field.`
 	const link = `[Example "co-author (quoted): Codex <ai@example.com>"](https://example.com)`
-	const truncated = "{\"status\":\"ok\",\n \"description\": \"co-author (quoted): **Codex** <payload-ai@example.com>\","
+	const truncated = "{\"status\":\"ok\",\n \"description\": \"kept evidence\","
 	for name, input := range map[string]string{
 		"quoted-comma-prose":            quoted,
 		"human-trailer-mention":         mention,
@@ -66,7 +66,7 @@ func TestPRConservativePayloadPublicationPaths(t *testing.T) {
 	const mention = "The recorded field is `Co-Authored-By: Ada Lovelace <ada@example.com>`"
 	const quoted = "\"co-author (quoted): Codex <ai@example.com>\",\nhe said; this is only an example."
 	const link = `[Example "co-author (quoted): Codex <ai@example.com>"](https://example.com)`
-	const truncated = "{\"status\":\"ok\",\n \"description\": \"co-author (quoted): **Codex** <payload-ai@example.com>\","
+	const truncated = "{\"status\":\"ok\",\n \"description\": \"kept evidence\","
 	raw := "[\n \"ordinary\"\n]\n\n" + mention + "\n" + quoted + "\n" + link + "\n\n" + truncated + "\n" + fallbackAgentFooter + "\n" + disclosure
 	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 		t.Run(string(provider), func(t *testing.T) {
