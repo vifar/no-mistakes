@@ -192,7 +192,7 @@ func publishOnce(ctx context.Context, req Request, branch, dir string, files []c
 	if err != nil {
 		return nil, err
 	}
-	if _, err := git.RunNetwork(ctx, req.RepoDir, "push", req.PushURL, commit+":refs/heads/"+branch); err != nil {
+	if err := git.PushCommit(ctx, req.RepoDir, req.PushURL, commit, "refs/heads/"+branch, "", false); err != nil {
 		return nil, fmt.Errorf("push evidence branch %s to %s: %w", branch, safeurl.Redact(req.PushURL), err)
 	}
 	return &Result{Branch: branch, CommitSHA: commit, Dir: dir, Files: published}, nil

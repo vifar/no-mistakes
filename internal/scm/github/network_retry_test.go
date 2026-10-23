@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -140,5 +141,85 @@ func TestCancelledRetryStopsAtOnce(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("retry kept waiting %v after cancellation", elapsed)
+	}
+}
+
+func TestCancelledGitHubCommandsNeverReportSuccess(t *testing.T) {
+	for name, invoke := range map[string]func(context.Context, *Host) error{
+		"update": func(ctx context.Context, h *Host) error {
+			_, err := h.UpdatePR(ctx, &scm.PR{Number: "7"}, scm.PRContent{Body: "b"})
+			return err
+		},
+		"retarget": func(ctx context.Context, h *Host) error { return h.SetPRBaseBranch(ctx, &scm.PR{Number: "7"}, "main") },
+		"content": func(ctx context.Context, h *Host) error {
+			_, err := h.GetPRContent(ctx, &scm.PR{Number: "7"})
+			return err
+		},
+		"base": func(ctx context.Context, h *Host) error {
+			_, err := h.GetPRBaseBranch(ctx, &scm.PR{Number: "7"})
+			return err
+		},
+		"auth": func(ctx context.Context, h *Host) error { return h.Available(ctx) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			factory, calls := sequencedGHFactory(t, []ghScriptStep{{}})
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			err := invoke(ctx, fastRetryHost(factory))
+			if !errors.Is(err, context.Canceled) || calls() != 0 {
+				t.Fatalf("err=%v calls=%d, want cancellation without a command", err, calls())
+			}
+		})
+		t.Run(name+" preserves failure", func(t *testing.T) {
+			factory, calls := sequencedGHFactory(t, []ghScriptStep{{stderr: "HTTP 403: Resource not accessible by integration", code: 1}})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			host := fastRetryHost(func(_ context.Context, name string, args ...string) *exec.Cmd {
+				cmd := factory(context.Background(), name, args...)
+				cancel()
+				return cmd
+			})
+			err := invoke(ctx, host)
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || !strings.Contains(err.Error(), "HTTP 403") || calls() != 1 {
+				t.Fatalf("err=%v calls=%d, want the independent command failure preserved", err, calls())
+			}
+		})
+	}
+}
+
+func TestCreatePRRetryFindsRetargetedPRAndFailsClosedOnLookupErrors(t *testing.T) {
+	for name, response := range map[string]ghScriptStep{
+		"retargeted": {stdout: `[{"number":7,"url":"https://github.com/test/repo/pull/7","baseRefName":"dev"}]`},
+		"unreadable": {stderr: "HTTP 403: Resource not accessible by integration", code: 1},
+		"malformed":  {stdout: `invalid JSON`},
+		"absent":     {stdout: `[]`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			factory, calls := sequencedGHFactory(t, []ghScriptStep{{stderr: ghReadTimeout, code: 1}, response, {stdout: "https://github.com/test/repo/pull/8"}})
+			host := fastRetryHost(func(ctx context.Context, cmd string, args ...string) *exec.Cmd {
+				if len(args) > 1 && args[0] == "pr" && args[1] == "list" {
+					for _, arg := range args {
+						if arg == "--base" {
+							t.Fatal("recovery lookup must find a PR after retargeting")
+						}
+					}
+				}
+				return factory(ctx, cmd, args...)
+			})
+			host.repo = "test/repo"
+			pr, err := host.CreatePR(context.Background(), "feature", "main", scm.PRContent{Title: "t", Body: "b"})
+			if name == "unreadable" || name == "malformed" {
+				if err == nil || calls() != 2 {
+					t.Fatalf("pr=%+v err=%v calls=%d, want lookup failure without another create", pr, err, calls())
+				}
+			} else if name == "retargeted" {
+				if err != nil || pr == nil || pr.BaseBranch != "dev" || calls() != 2 {
+					t.Fatalf("pr=%+v err=%v calls=%d, want retargeted PR reused", pr, err, calls())
+				}
+			} else if err != nil || pr == nil || pr.Number != "8" || calls() != 3 {
+				t.Fatalf("pr=%+v err=%v calls=%d, want create after confirmed absence", pr, err, calls())
+			}
+		})
 	}
 }

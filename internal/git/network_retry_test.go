@@ -2,12 +2,15 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/netretry"
 )
 
 // stubGit puts a git that fails with the given stderr for its first failures
@@ -135,5 +138,28 @@ func TestPushRetryDoesNotForceOverAMovedRemote(t *testing.T) {
 
 	if _, err := pushAlreadyLanded(context.Background(), work, "origin", "refs/heads/main", "HEAD", landed, true); err == nil {
 		t.Fatal("leased retry accepted a remote that moved; want a refusal, never a force push")
+	}
+}
+
+func TestNetworkRetryUsesDiagnosticsInsteadOfArguments(t *testing.T) {
+	previousBase, previousMax := networkRetryBase, networkRetryMax
+	networkRetryBase, networkRetryMax = time.Millisecond, time.Millisecond
+	t.Cleanup(func() { networkRetryBase, networkRetryMax = previousBase, previousMax })
+	for _, verb := range []string{"fetch", "ls-remote"} {
+		t.Run(verb, func(t *testing.T) {
+			counter := stubGit(t, 1, "fatal: unable to access 'https://github.com/test/conflict.git/': Operation timed out")
+			args := []string{verb, "https://github.com/test/conflict.git", "refs/heads/fix/non-fast-forward-conflict-resolution"}
+			_, err := RunNetwork(context.Background(), t.TempDir(), args...)
+			if err != nil || calls(t, counter) < 2 {
+				t.Fatalf("err=%v, want recovery despite argument text", err)
+			}
+		})
+	}
+}
+
+func TestCommandRetryClassifierDoesNotReadTransientTextFromArguments(t *testing.T) {
+	err := &CommandError{Command: "fetch origin refs/heads/i/o timeout", Stderr: "fatal: invalid refspec", Err: errors.New("exit status 128")}
+	if class := netretry.Describe(err); class != "" {
+		t.Fatalf("class=%q, want no retry for an invalid refspec", class)
 	}
 }

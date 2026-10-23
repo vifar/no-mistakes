@@ -15,6 +15,7 @@ package netretry
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/rand/v2"
 	"regexp"
@@ -98,7 +99,7 @@ func Do[T any](ctx context.Context, opts Options, call func() (T, error)) (T, er
 			return value, nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return zero, ctxErr
+			return last, errors.Join(err, ctxErr)
 		}
 		if !opts.retryable(err) {
 			// A failure a retry cannot fix is the caller's answer on the first
@@ -205,6 +206,10 @@ func Describe(err error) string {
 	if err == nil {
 		return ""
 	}
+	var diagnostic interface{ RetryDiagnostic() string }
+	if errors.As(err, &diagnostic) {
+		return string(ClassifyText(diagnostic.RetryDiagnostic()))
+	}
 	return string(ClassifyText(err.Error()))
 }
 
@@ -233,7 +238,6 @@ var hardVetoes = []string{
 	"pre-receive hook declined",
 	"protected branch",
 	"merge conflict",
-	"conflict",
 	"validation failed",
 }
 

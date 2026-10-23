@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -28,7 +29,7 @@ func isKeyringTimeout(detail string) bool {
 
 func prReadError(ctx context.Context, operation, detail string, err error) error {
 	if ctx.Err() != nil {
-		return fmt.Errorf("%s interrupted: %w", operation, ctx.Err())
+		return fmt.Errorf("%s interrupted: %w", operation, errors.Join(err, ctx.Err()))
 	}
 	if isKeyringTimeout(detail) {
 		return fmt.Errorf("%s: %w: %s: %w", operation, scm.ErrTransientTimeout, strings.TrimSpace(detail), err)

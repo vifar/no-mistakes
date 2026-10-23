@@ -196,7 +196,7 @@ func stepGitRunInput(sctx *pipeline.StepContext, input string, args ...string) (
 			if ee, ok := err.(*exec.ExitError); ok {
 				stderr = strings.TrimSpace(string(ee.Stderr))
 			}
-			return nil, fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
+			return nil, &git.CommandError{Command: safeurl.RedactText(strings.Join(args, " ")), Stderr: safeurl.RedactText(stderr), Err: err}
 		}
 		return out, nil
 	}

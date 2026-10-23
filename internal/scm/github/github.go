@@ -167,29 +167,24 @@ func (h *Host) Available(ctx context.Context) error {
 		authArgs = append(authArgs, "--hostname", h.host)
 	}
 	var stderr bytes.Buffer
-	var authErr error
 	_, retryErr := netretry.Do(ctx, h.retryOptions("gh auth status"), func() (struct{}, error) {
 		cmd := h.cmd(ctx, "gh", authArgs...)
 		stderr.Reset()
 		cmd.Stderr = &stderr
-		authErr = cmd.Run()
+		authErr := cmd.Run()
 		if authErr != nil {
 			return struct{}{}, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), authErr)
 		}
 		return struct{}{}, nil
 	})
-	if authErr == nil && retryErr != nil {
-		// The context stopped the call before (or between) attempts.
-		authErr = retryErr
-	}
-	if err := authErr; err != nil {
+	if err := retryErr; err != nil {
 		// Keep timeout / missing-binary failures distinct from auth failure so a
 		// cancelled reconcile context is not reported as "log in again".
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("gh auth status timed out: %w", ctx.Err())
+			return fmt.Errorf("gh auth status timed out: %w", errors.Join(err, ctx.Err()))
 		}
 		if ctx.Err() != nil {
-			return fmt.Errorf("gh auth status interrupted: %w", ctx.Err())
+			return fmt.Errorf("gh auth status interrupted: %w", errors.Join(err, ctx.Err()))
 		}
 		if isMissingExecutable(err) {
 			return fmt.Errorf("gh CLI is not on PATH: %w", err)
@@ -277,10 +272,9 @@ func stdoutOnly(cmd *exec.Cmd) (out []byte, detail string, err error) {
 
 // ghStdout runs one gh command and returns its stdout, with the trimmed stderr
 // (or stdout) detail a failure reported. A transient network failure is
-// retried with bounded backoff. The returned error is the last attempt's,
-// unchanged, so every caller keeps its own diagnostics and error class.
+// retried with bounded backoff.
 func (h *Host) ghStdout(ctx context.Context, operation, stdin string, args ...string) (out []byte, detail string, err error) {
-	_, _ = netretry.Do(ctx, h.retryOptions(operation), func() (struct{}, error) {
+	_, retryErr := netretry.Do(ctx, h.retryOptions(operation), func() (struct{}, error) {
 		cmd := h.cmd(ctx, "gh", args...)
 		if stdin != "" {
 			cmd.Stdin = strings.NewReader(stdin)
@@ -293,10 +287,7 @@ func (h *Host) ghStdout(ctx context.Context, operation, stdin string, args ...st
 		}
 		return struct{}{}, nil
 	})
-	if err != nil && ctx.Err() != nil {
-		return out, detail, ctx.Err()
-	}
-	return out, detail, err
+	return out, detail, retryErr
 }
 
 // ghCombined runs one gh command and returns its combined output. A transient
@@ -305,7 +296,7 @@ func (h *Host) ghStdout(ctx context.Context, operation, stdin string, args ...st
 func (h *Host) ghCombined(ctx context.Context, operation, stdin string, args ...string) ([]byte, error) {
 	var out []byte
 	var err error
-	_, _ = netretry.Do(ctx, h.retryOptions(operation), func() (struct{}, error) {
+	_, retryErr := netretry.Do(ctx, h.retryOptions(operation), func() (struct{}, error) {
 		cmd := h.cmd(ctx, "gh", args...)
 		if stdin != "" {
 			cmd.Stdin = strings.NewReader(stdin)
@@ -316,10 +307,7 @@ func (h *Host) ghCombined(ctx context.Context, operation, stdin string, args ...
 		}
 		return struct{}{}, nil
 	})
-	if err != nil && ctx.Err() != nil {
-		return out, ctx.Err()
-	}
-	return out, err
+	return out, retryErr
 }
 
 // retryOptions bounds one retried gh call. The classifier always reads the
@@ -432,8 +420,11 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 		if attempts > 1 {
 			// A lost response from an earlier attempt may have opened the PR
 			// already. Reuse that PR instead of opening a duplicate.
-			existing, findErr := h.FindPR(ctx, branch, base)
-			if findErr == nil && existing != nil {
+			existing, findErr := h.FindPR(ctx, branch, "")
+			if findErr != nil {
+				return nil, findErr
+			}
+			if existing != nil {
 				return existing, nil
 			}
 		}

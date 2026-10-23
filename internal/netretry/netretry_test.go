@@ -203,3 +203,22 @@ func TestDelayAddsBoundedJitter(t *testing.T) {
 		}
 	}
 }
+
+func TestDoPreservesCompletedFailureWhenCancellationRacesTheResult(t *testing.T) {
+	for _, message := range []string{"push rejected (non-fast-forward)", "i/o timeout"} {
+		t.Run(message, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			failure := errors.New(message)
+			calls := 0
+			value, err := Do(ctx, Options{}, func() (int, error) {
+				calls++
+				cancel()
+				return 42, failure
+			})
+			if calls != 1 || value != 42 || !errors.Is(err, failure) || !errors.Is(err, context.Canceled) {
+				t.Fatalf("value=%d calls=%d err=%v, want the completed failure and cancellation without retry", value, calls, err)
+			}
+		})
+	}
+}

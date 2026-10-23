@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/netretry"
+
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
@@ -57,5 +59,21 @@ func TestTransientNetworkTimeoutContinuesThePRContextRead(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < time.Second {
 		t.Fatalf("retry returned in %v, want a real backoff", elapsed)
+	}
+}
+
+func TestStepGitRetryClassificationUsesCommandDiagnostics(t *testing.T) {
+	binDir := stepstest.FakeCLIBinDir(t)
+	stepstest.LinkFakeCLI(t, binDir, "git")
+	for _, verb := range []string{"fetch", "ls-remote", "push"} {
+		t.Run(verb, func(t *testing.T) {
+			sctx := &pipeline.StepContext{Ctx: context.Background(), WorkDir: t.TempDir(), Env: stepstest.FakeCLIEnv(binDir, map[string]string{
+				"FAKE_CLI_MODE": "pr-context-read", "FAKE_CLI_STDERR": "fatal: unable to access 'https://github.com/test/conflict.git/': Operation timed out", "FAKE_CLI_EXIT_CODE": "128",
+			})}
+			_, err := stepGitRunRaw(sctx, verb, "origin", "refs/heads/fix/non-fast-forward-conflict-resolution")
+			if class := netretry.Describe(err); class != string(netretry.ClassTimeout) {
+				t.Fatalf("class=%q err=%v, want a retryable timeout despite argument text", class, err)
+			}
+		})
 	}
 }

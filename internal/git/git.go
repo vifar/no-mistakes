@@ -38,6 +38,8 @@ func (e *CommandError) Error() string {
 
 func (e *CommandError) Unwrap() error { return e.Err }
 
+func (e *CommandError) RetryDiagnostic() string { return e.Stderr }
+
 // refuseStops makes the package's own stop REFUSED. It is a test hook: the
 // refusal is what a stop of an already-gone process group looks like, and
 // the provenance has to be recorded on that path too. The hook exists so the
