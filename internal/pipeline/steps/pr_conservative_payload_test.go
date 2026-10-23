@@ -15,7 +15,11 @@ import (
 func TestPRConservativePayloadBoundary(t *testing.T) {
 	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
 	const mention = "The recorded field is `Co-Authored-By: Ada Lovelace <ada@example.com>`"
-	const quoted = "\"co-author (quoted): Codex <ai@example.com>\",\nhe said; this is only an example."
+	// The intent: an AI-named co-author (name and address) is absent from every
+	// published form, including a bare quoted element of a cut payload. A human
+	// co-author and unrelated bytes stay byte-identical.
+	const quoted = "\"co-author (quoted): Ada Lovelace <ada@example.com>\",\nhe said; this is only an example."
+	const quotedAI = "\"co-author (quoted): Codex <ai@example.com>\",\nhe said; this is only an example."
 	const prose = `Ordinary prose mentions "co-author (quoted): Codex <ai@example.com>" as a field.`
 	const link = `[Example "co-author (quoted): Codex <ai@example.com>"](https://example.com)`
 	const truncated = "{\"status\":\"ok\",\n \"description\": \"kept evidence\","
@@ -45,7 +49,11 @@ func TestPRConservativePayloadBoundary(t *testing.T) {
 		"body":   func(text string) string { return prDisplayBody(text) },
 		"notice": func(text string) string { return prDisplayNoticeText(text) },
 	} {
-		got := render(truncated + "\n" + fallbackAgentFooter + "\n" + disclosure)
+		got := render(quotedAI)
+		if strings.Contains(got, "Codex") || strings.Contains(got, "ai@example.com") || !strings.HasSuffix(got, "\nhe said; this is only an example.") {
+			t.Errorf("%s published an AI co-author from a cut payload element or changed the bytes after it: %q", mode, got)
+		}
+		got = render(truncated + "\n" + fallbackAgentFooter + "\n" + disclosure)
 		assertFallbackAgentFooterAbsent(t, got)
 		if !strings.HasPrefix(got, truncated+"\n") || !strings.HasSuffix(got, "\n"+disclosure) {
 			t.Errorf("%s changed truncated evidence or disclosure: %q", mode, got)
@@ -64,10 +72,14 @@ func TestPRConservativePayloadBoundary(t *testing.T) {
 func TestPRConservativePayloadPublicationPaths(t *testing.T) {
 	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
 	const mention = "The recorded field is `Co-Authored-By: Ada Lovelace <ada@example.com>`"
-	const quoted = "\"co-author (quoted): Codex <ai@example.com>\",\nhe said; this is only an example."
+	// The intent: an AI-named co-author (name and address) is absent from every
+	// published form, including a bare quoted element of a cut payload. A human
+	// co-author and unrelated bytes stay byte-identical.
+	const quoted = "\"co-author (quoted): Ada Lovelace <ada@example.com>\",\nhe said; this is only an example."
+	const quotedAI = "\"co-author (quoted): Codex <ai@example.com>\",\nhe said; this is only an example."
 	const link = `[Example "co-author (quoted): Codex <ai@example.com>"](https://example.com)`
 	const truncated = "{\"status\":\"ok\",\n \"description\": \"kept evidence\","
-	raw := "[\n \"ordinary\"\n]\n\n" + mention + "\n" + quoted + "\n" + link + "\n\n" + truncated + "\n" + fallbackAgentFooter + "\n" + disclosure
+	raw := "[\n \"ordinary\"\n]\n\n" + mention + "\n" + quoted + "\n" + quotedAI + "\n" + link + "\n\n" + truncated + "\n" + fallbackAgentFooter + "\n" + disclosure
 	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 		t.Run(string(provider), func(t *testing.T) {
 			appendix := compliantPipelineBody(t, testPipelineHeadSHA)
@@ -144,6 +156,9 @@ func TestPRConservativePayloadPublicationPaths(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					body := publish(t)
 					assertFallbackAgentFooterAbsent(t, body)
+					if strings.Contains(body, "Codex <ai@example.com>\",") {
+						t.Errorf("publication carried an AI co-author: %s", body)
+					}
 					for _, want := range []string{mention, quoted, link, truncated, disclosure} {
 						if !strings.Contains(body, want) {
 							t.Errorf("publication changed preserved text %q: %s", want, body)

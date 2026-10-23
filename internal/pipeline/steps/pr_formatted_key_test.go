@@ -164,7 +164,7 @@ func assertFormattedKeyPublication(t *testing.T, output, human, prose, disclosur
 func TestPRFormattedKeyPreservesMentions(t *testing.T) {
 	for name, prose := range map[string]string{
 		"quoted-field-name":        `"Co-Authored-By:" is a field name.`,
-		"quoted-field-example":     "\"co-author (quoted): Codex <ai@example.com>\",\nhe said; this is only an example.",
+		"quoted-field-example":     "\"co-author (quoted): Ada Lovelace <ada@example.com>\",\nhe said; this is only an example.",
 		"inline-human-example":     "The recorded field is `Co-Authored-By: Ada Lovelace <quoted-human@example.com>`",
 		"formatted-field-name":     "The field is **Co-Authored-By:** and has no value here.",
 		"quoted-phrase-no-address": "`Co-Authored-By: a quoted phrase`",

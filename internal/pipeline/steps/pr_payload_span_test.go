@@ -41,6 +41,9 @@ func TestPRPayloadSpanPreservesSurroundingProse(t *testing.T) {
 	}
 }
 
+// The intent: a cut payload is filtered like a complete one - the AI value is
+// absent, the human co-author is the labelled field and every other byte is
+// unchanged.
 func TestPRPayloadSpanFiltersOnlyRecordedValues(t *testing.T) {
 	const ai = `"<code>co-author (quoted): <code>Codex</code> <payload-ai@example.com></code>"`
 	const human = `"Co-Authored-By: Ada Lovelace <ada@example.com>"`
@@ -55,7 +58,7 @@ func TestPRPayloadSpanFiltersOnlyRecordedValues(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			input := payload + "\n\n" + prose + "\n" + disclosure
 			want := input
-			if name == "complete" {
+			if name != "cutoff-string" {
 				want = strings.Replace(strings.Replace(input, ai, `""`, 1), human, labelled, 1)
 			}
 			if got := prDisplayBody(input); got != want {
@@ -143,10 +146,13 @@ func TestPRPayloadSpanPublicationPaths(t *testing.T) {
 			for name, publish := range paths {
 				t.Run(name, func(t *testing.T) {
 					body := publish(t)
-					for _, want := range []string{prose, link, disclosure, payload} {
+					for _, want := range []string{prose, link, disclosure} {
 						if !strings.Contains(body, want) {
 							t.Errorf("publication lost %q: %s", want, body)
 						}
+					}
+					if strings.Contains(body, "payload-ai@example.com") {
+						t.Errorf("publication carried an AI co-author from a cut payload: %s", body)
 					}
 					if strings.Count(body, prose) != 2 {
 						t.Errorf("prose before or after a payload changed: %s", body)

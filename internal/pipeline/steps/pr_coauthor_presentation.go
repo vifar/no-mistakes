@@ -121,8 +121,9 @@ func recordedPayloadBlock(lines []string, start int) (string, int, bool) {
 //
 // A fragment is a line of a payload that is not itself a complete document
 // (the evidence was cut, or the document continues on other lines). A bare
-// quoted element there is indistinguishable from a quotation in prose, so one
-// that quotes the published label is a mention of the rendered field and stays.
+// quoted element there that quotes the published label is a mention of the
+// rendered field and stays, unless it is a complete AI entry: an AI co-author
+// is removed from every published form, cut or whole.
 func filterRecordedPayload(line string, notice, fragment bool, configuredTrailers ...string) string {
 	out := []byte(line)
 	for offset := 0; offset < len(out); {
@@ -137,7 +138,7 @@ func filterRecordedPayload(line string, notice, fragment bool, configuredTrailer
 		}
 		literal := string(out[start:end])
 		var value string
-		if err := json.Unmarshal([]byte(literal), &value); err == nil && !(fragment && bareQuotedMention(out, start, end, value)) {
+		if err := json.Unmarshal([]byte(literal), &value); err == nil && !(fragment && bareQuotedMention(out, start, end, value, configuredTrailers)) {
 			if filtered := prDisplayTextMode(value, notice, configuredTrailers...); filtered != value {
 				if encoded, err := json.Marshal(filtered); err == nil {
 					rebuilt := make([]byte, 0, len(out))
@@ -156,9 +157,13 @@ func filterRecordedPayload(line string, notice, fragment bool, configuredTrailer
 }
 
 // bareQuotedMention reports whether the string at out[start:end] is a bare
-// element (neither a key nor a member value) that quotes the published label.
-func bareQuotedMention(out []byte, start, end int, value string) bool {
+// element (neither a key nor a member value) that quotes the published label
+// without being a complete AI attribution entry.
+func bareQuotedMention(out []byte, start, end int, value string, configuredTrailers []string) bool {
 	if !strings.Contains(strings.ToLower(value), PreservedHumanCoauthorLabel) {
+		return false
+	}
+	if _, _, _, ai := reviewAttributionEntry([]string{value}, 0, configuredTrailers); ai {
 		return false
 	}
 	before := bytes.TrimRight(out[:start], " \t")
