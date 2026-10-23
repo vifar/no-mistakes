@@ -174,7 +174,27 @@ func (h *Host) Available(ctx context.Context) error {
 		cmd.Stderr = &stderr
 		authErr := runGHCommand(ctx, cmd, func() error { return shellenv.RunShellCommand(cmd) })
 		if authErr != nil {
-			return struct{}{}, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), authErr)
+			detail := strings.TrimSpace(stderr.String())
+			failure := fmt.Errorf("%s: %w", detail, authErr)
+			credentialProblem := false
+			for _, marker := range []string{"bad credentials", "not logged in", "failed to log in", "token is invalid", "permission"} {
+				credentialProblem = credentialProblem || strings.Contains(strings.ToLower(detail), marker)
+			}
+			if ctx.Err() == nil && !isMissingExecutable(authErr) && !isKeyringTimeout(detail) && !credentialProblem && !netretry.Retryable(failure) {
+				args := []string{"api"}
+				if h.host != "" {
+					args = append(args, "--hostname", h.host)
+				}
+				args = append(args, "-X", "GET", "rate_limit")
+				_, probeDetail, probeErr := h.ghReadAttempt(ctx, "", args)
+				if probeErr != nil {
+					probeErr = fmt.Errorf("gh api rate_limit: %s: %w", probeDetail, probeErr)
+					if netretry.Retryable(probeErr) || ctx.Err() != nil {
+						return struct{}{}, probeErr
+					}
+				}
+			}
+			return struct{}{}, failure
 		}
 		return struct{}{}, nil
 	})
@@ -193,6 +213,9 @@ func (h *Host) Available(ctx context.Context) error {
 		detail := strings.TrimSpace(stderr.String())
 		if isKeyringTimeout(detail) {
 			return fmt.Errorf("gh auth status: %w: %w", scm.ErrTransientTimeout, err)
+		}
+		if netretry.Retryable(err) {
+			return err
 		}
 		if detail != "" {
 			return fmt.Errorf("%w: %s: %w", scm.ErrUnauthenticated, detail, err)
@@ -279,16 +302,15 @@ func stdoutOnly(ctx context.Context, cmd *exec.Cmd) (out []byte, detail string, 
 // retried with bounded backoff.
 func (h *Host) ghStdout(ctx context.Context, operation, stdin string, args ...string) (out []byte, detail string, err error) {
 	_, retryErr := netretry.Do(ctx, h.retryOptions(operation), func() (struct{}, error) {
-		cmd := h.cmd(ctx, "gh", args...)
-		if stdin != "" {
-			cmd.Stdin = strings.NewReader(stdin)
-		}
-		out, detail, err = stdoutOnly(ctx, cmd)
+		out, detail, err = h.ghReadAttempt(ctx, stdin, args)
+		detail = strings.TrimSpace(detail)
 		if err != nil {
-			// stdoutOnly keeps gh's message on stderr; fold it into the error
-			// the retry classifier reads.
+			if detail == "" {
+				detail = strings.TrimSpace(string(out))
+			}
 			return struct{}{}, fmt.Errorf("%s: %w", detail, err)
 		}
+		detail = ""
 		return struct{}{}, nil
 	})
 	return out, detail, retryErr
@@ -303,22 +325,15 @@ func (h *Host) ghCombined(ctx context.Context, operation, stdin string, args ...
 	var out []byte
 	var err error
 	_, retryErr := netretry.Do(ctx, h.retryOptions(operation), func() (struct{}, error) {
-		cmd := h.cmd(ctx, "gh", args...)
-		if stdin != "" {
-			cmd.Stdin = strings.NewReader(stdin)
-		}
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		err = runGHCommand(ctx, cmd, func() error { return shellenv.RunShellCommand(cmd) })
-		out = stdout.Bytes()
+		var detail string
+		out, detail, err = h.ghReadAttempt(ctx, stdin, args)
 		if err != nil {
 			// Keep the diagnostics beside the response so callers report what
 			// GitHub said, but classify only the diagnostics.
-			if stderr.Len() > 0 {
-				out = append(append([]byte{}, out...), stderr.Bytes()...)
+			if detail != "" {
+				out = append(append([]byte{}, out...), detail...)
 			}
-			return struct{}{}, fmt.Errorf("%s: %w", strings.TrimSpace(stderr.String()), err)
+			return struct{}{}, fmt.Errorf("%s: %w", strings.TrimSpace(detail), err)
 		}
 		return struct{}{}, nil
 	})
