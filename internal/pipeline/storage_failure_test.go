@@ -164,6 +164,8 @@ func testExecutorWriterLock(t *testing.T, operation string) {
 			}
 			executor := NewExecutor(database, p, nil, nil, []Step{step}, nil)
 			executor.SetForgeContext(&forgecontext.Context{})
+			// Exercise the outcome once in-place resumes are exhausted.
+			executor.contentionResumes = 0
 			err := executor.Execute(context.Background(), run, repo, workdir)
 			if releaseEarly {
 				if err != nil || run.Status != types.RunCompleted {

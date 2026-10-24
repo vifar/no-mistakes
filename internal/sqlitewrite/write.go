@@ -19,11 +19,25 @@ import (
 
 const (
 	BusyTimeout = 5 * time.Second
-	Budget      = 30 * time.Second
+	// DefaultBudget bounds every state write. The daemon serializes all SQLite
+	// work through one pooled connection, so the wait for that connection
+	// counts against the budget too. On a busy root (about 15 runs) that wait
+	// was observed to exceed two minutes, and a 30-second budget then failed
+	// finished runs on their own bookkeeping writes.
+	DefaultBudget = 5 * time.Minute
+	// HeartbeatBudget bounds best-effort activity telemetry. A heartbeat that
+	// cannot land quickly is skipped: queueing it would only lengthen the wait
+	// of the state writes behind it.
+	HeartbeatBudget = BusyTimeout
 	// ErrorName is also the durable recovery discriminator. Do not change it
 	// without teaching older run records' status recovery about the old name.
 	ErrorName = "SQLITE_WRITE_CONTENTION"
 )
+
+// Budget is the retry budget Do applies. It is a variable only so test
+// binaries can shorten it in TestMain before any test runs; production code
+// never assigns it.
+var Budget = DefaultBudget
 
 // ContentionError is an infrastructure failure, never a verdict on source code.
 // Operation is a static label: SQL arguments (which can contain secrets) are
@@ -134,6 +148,15 @@ func Value[T any](ctx context.Context, operation string, write func(context.Cont
 
 type executor interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+// ExecHeartbeat is Exec for best-effort telemetry such as step activity: it
+// retries only within HeartbeatBudget, and callers must tolerate its error.
+func ExecHeartbeat(ctx context.Context, database executor, operation, query string, args ...any) error {
+	return retry(ctx, operation, HeartbeatBudget, func(ctx context.Context) error {
+		_, err := database.ExecContext(ctx, query, args...)
+		return err
+	})
 }
 
 func Exec(ctx context.Context, database executor, operation, query string, args ...any) (sql.Result, error) {

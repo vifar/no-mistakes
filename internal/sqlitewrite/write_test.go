@@ -358,3 +358,56 @@ func TestFirstAttemptAutomaticRollbackClassification(t *testing.T) {
 		}
 	}
 }
+
+// The daemon's single pooled connection was observed busy for more than two
+// minutes on a root with about 15 runs. A state write queued behind it must
+// land once the connection frees, not fail after the former 30-second budget.
+func TestStateWriteOutlastsPooledConnectionHeldPastFormerBudget(t *testing.T) {
+	t.Parallel()
+	if DefaultBudget < 2*time.Minute {
+		t.Fatalf("DefaultBudget %v cannot outlast an observed busy-root stall", DefaultBudget)
+	}
+	database, release := exclusiveFixture(t, time.Millisecond)
+	release()
+	conn, err := database.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold := 35 * time.Second
+	go func() {
+		time.Sleep(hold)
+		conn.Close()
+	}()
+	start := time.Now()
+	err = retry(context.Background(), "UpdateRunPRState", DefaultBudget, func(ctx context.Context) error {
+		_, err := database.ExecContext(ctx, `INSERT INTO writes VALUES (1)`)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("state write failed after %v: %v", time.Since(start), err)
+	}
+	if time.Since(start) < hold {
+		t.Fatalf("write landed before the connection was released: %v", time.Since(start))
+	}
+}
+
+// A heartbeat queued behind a held connection gives up within its own short
+// budget instead of occupying the queue for the whole state-write budget.
+func TestHeartbeatGivesUpWithinHeartbeatBudget(t *testing.T) {
+	t.Parallel()
+	database, release := exclusiveFixture(t, time.Millisecond)
+	release()
+	conn, err := database.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	start := time.Now()
+	err = ExecHeartbeat(context.Background(), database, "TouchStepActivity", `INSERT INTO writes VALUES (1)`)
+	if !IsContention(err) {
+		t.Fatalf("heartbeat error=%T %v", err, err)
+	}
+	if elapsed := time.Since(start); elapsed < HeartbeatBudget || elapsed > HeartbeatBudget+2*time.Second {
+		t.Fatalf("heartbeat elapsed=%v, want about %v", elapsed, HeartbeatBudget)
+	}
+}

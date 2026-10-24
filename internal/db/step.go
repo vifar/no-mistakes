@@ -549,9 +549,11 @@ func (d *DB) FailStep(id string, errMsg string, durationMS int64) error {
 }
 
 // TouchStepActivity records the latest meaningful activity for an active step
-// without changing its status or current agent pid.
+// without changing its status or current agent pid. It is a best-effort
+// heartbeat with a short budget: under contention it is skipped rather than
+// queued ahead of state writes.
 func (d *DB) TouchStepActivity(id string, text string) error {
-	_, err := sqlitewrite.Exec(context.Background(), d.sql, "TouchStepActivity", `UPDATE step_results SET last_activity_at = ?, last_activity = ? WHERE id = ?`, now(), text, id)
+	err := sqlitewrite.ExecHeartbeat(context.Background(), d.sql, "TouchStepActivity", `UPDATE step_results SET last_activity_at = ?, last_activity = ? WHERE id = ?`, now(), text, id)
 	if err != nil {
 		return fmt.Errorf("touch step activity: %w", err)
 	}
