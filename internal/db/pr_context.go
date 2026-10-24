@@ -76,8 +76,9 @@ func (d *DB) BindRunPRContext(runID string, candidate PRContextCandidate, resetF
 	return d.bindRunPRContext(runID, candidate, resetFrom, false, nil)
 }
 
-// AdvanceRunPRContext records a commit made by the current forward pipeline
-// step. Earlier completed steps keep their own evidence and review anchor.
+// AdvanceRunPRContext records a pipeline-owned commit or a forge-head
+// observation already accounted for by the caller. Earlier completed steps
+// keep their own evidence and review anchor.
 func (d *DB) AdvanceRunPRContext(runID string, candidate PRContextCandidate) (PRContextBindResult, error) {
 	return d.bindRunPRContext(runID, candidate, types.StepReview, true, nil)
 }

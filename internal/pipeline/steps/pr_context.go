@@ -524,8 +524,8 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 	//
 	// The LOCAL commit lineage says nothing about the forge's head. Another
 	// publisher moving the attached PR is not this run's advance, so the
-	// forge identity and head must be unchanged here; a published-head
-	// transition has its own proof below.
+	// forge identity and head must match after the accounted-head
+	// reconciliation above; a published-head transition has its own proof below.
 	if previous != nil && sctx.PRContextAfterStep && !forward &&
 		previous.LocalHeadSHA != candidate.LocalHeadSHA &&
 		previous.TargetSHA == candidate.TargetSHA && sameRewindIdentity(previous, candidate) {
