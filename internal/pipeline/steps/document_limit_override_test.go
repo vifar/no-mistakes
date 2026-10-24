@@ -147,8 +147,8 @@ func TestNewRunStartsWithAFreshDocumentCommitCount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.Findings, "Abort this run and start a new one") || !strings.Contains(out.Findings, "fresh document commit count") {
-		t.Fatalf("cap findings do not tell the operator to start a new run: %s", out.Findings)
+	if !strings.Contains(out.Findings, pipeline.DocumentCapWayForward) {
+		t.Fatalf("cap findings do not tell the operator the way forward: %s", out.Findings)
 	}
 
 	fresh, err := sc.DB.InsertRun(sc.Repo.ID, "refs/heads/feature-next", sc.Run.HeadSHA, sc.Run.BaseSHA)

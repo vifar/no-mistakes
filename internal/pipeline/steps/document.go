@@ -190,14 +190,22 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		sctx.Log("no changes to document")
 		return &pipeline.StepOutcome{}, nil
 	}
+	grace := false
 	if history.commits >= limit {
-		// The cap bounds COMMITS, not the run. The documentation may still be
-		// accurate, and the only way to know is to ask: a read-only gap check
-		// spends no budget and cannot make the documentation worse. Without
-		// it the step parks on a finding no agent can resolve (issue #123),
-		// and strict shipping refuses to approve that finding, so the run
-		// could never finish.
-		return s.runCapGapCheck(sctx, baseSHA, targetBranch)
+		if !documentCapFixGrace(sctx) {
+			// The cap bounds COMMITS, not the run. The documentation may still be
+			// accurate, and the only way to know is to ask: a read-only gap check
+			// spends no budget and cannot make the documentation worse. Without
+			// it the step parks on a finding no agent can resolve (issue #123),
+			// and strict shipping refuses to approve that finding, so the run
+			// could never finish.
+			return s.runCapGapCheck(sctx, baseSHA, targetBranch)
+		}
+		// An explicit fix response at the spent cap earns ONE commit for the
+		// findings it selected (issue #188). See documentCapFixGrace.
+		sctx.Log(fmt.Sprintf("Document commit limit reached (%d of %d); this fix response may land one more Document commit for the selected findings", history.commits, limit))
+		limit = history.commits + 1
+		grace = true
 	}
 
 	if combinedLint {
@@ -281,7 +289,17 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		if proposedErr != nil {
 			return nil, fmt.Errorf("validate document analyzer findings: %w", proposedErr)
 		}
-		for _, prior := range previous.Items {
+		carried := previous.Items
+		if grace {
+			// A discarded grace round did not fix what it was asked to fix:
+			// the selected findings came from the read-only gap check, which
+			// records no pass, so they must be carried here or the gap would
+			// silently vanish from the gate.
+			if selected, err := types.ParseFindingsJSON(sctx.PreviousFindings); err == nil {
+				carried = append(append([]types.Finding(nil), carried...), selected.Items...)
+			}
+		}
+		for _, prior := range carried {
 			found := false
 			for _, current := range proposedDocs.Items {
 				priorKey, currentKey := prior, current
