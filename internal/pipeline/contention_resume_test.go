@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
 	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -15,6 +16,60 @@ import (
 
 func exhaustedStateWrite(operation string) error {
 	return &sqlitewrite.ContentionError{Operation: operation, Attempts: 1, Cause: context.DeadlineExceeded}
+}
+
+func TestCIFixStateWriteContentionDoesNotReplayRepair(t *testing.T) {
+	for _, operation := range []string{"UpdateStepStatus", "UpdateRunPRState"} {
+		t.Run(operation, func(t *testing.T) {
+			t.Parallel()
+			database, p, run, repo := setupTest(t)
+			workdir := completionFixture(t, database, run)
+			step := &contentionStep{shutdownBlockingStep: newShutdownBlockingStep(types.StepCI)}
+			observations, repairs := 0, 0
+			step.execute = func(sctx *StepContext) (*StepOutcome, error) {
+				if !sctx.Fixing {
+					observations++
+					return &StepOutcome{
+						NeedsApproval: true,
+						AutoFixable:   true,
+						Findings:      `{"findings":[{"id":"ci-1","severity":"error","description":"CI check failed","action":"auto-fix"}]}`,
+					}, nil
+				}
+				repairs++
+				if operation == "UpdateRunPRState" {
+					if err := sctx.MarkRunning(); err != nil {
+						return nil, err
+					}
+				}
+				if repairs == 1 {
+					return nil, exhaustedStateWrite(operation)
+				}
+				return &StepOutcome{}, nil
+			}
+			executor := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{CI: 1}}, nil, []Step{step}, nil)
+			executor.SetForgeContext(&forgecontext.Context{})
+			executor.contentionResumeCooldown = time.Millisecond
+			err := executor.Execute(context.Background(), run, repo, workdir)
+			if !sqlitewrite.IsContention(err) {
+				t.Fatalf("lost typed infrastructure error: %T %v", err, err)
+			}
+			if observations != 1 || repairs != 1 {
+				t.Fatalf("observations=%d repairs=%d, want one of each", observations, repairs)
+			}
+			stored, err := database.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Status != types.RunFailed || stored.Error == nil || !sqlitewrite.RecordedContention(*stored.Error) {
+				t.Fatalf("lost named infrastructure outcome: %+v", stored)
+			}
+			for _, state := range step.reported() {
+				if state == "failure" {
+					t.Fatalf("storage contention published a code failure verdict: %v", step.reported())
+				}
+			}
+		})
+	}
 }
 
 func TestDocumentStateWriteContentionDoesNotReplayStep(t *testing.T) {

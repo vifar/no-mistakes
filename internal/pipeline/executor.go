@@ -46,8 +46,9 @@ const (
 	defaultGateReconcileTimeout  = config.DefaultGateReconcileTimeout
 )
 
-// A CI step whose state write exhausted the SQLite retry budget is resumed in
-// place after ContentionResumeCooldown, up to ContentionResumes times, before
+// A non-fixing CI monitoring round whose state write exhausted the SQLite
+// retry budget is resumed in place after ContentionResumeCooldown, up to
+// ContentionResumes times, before
 // the run settles the named infrastructure outcome. These are variables only
 // so test binaries (TestMain) and the e2e build can change them before any
 // executor exists; production code never assigns them.
@@ -2136,9 +2137,9 @@ rounds:
 			return false, "", ErrCIMonitorInterruptedAtShutdown
 		}
 		if sqlitewrite.IsContention(err) {
-			// Only CI resumes by re-observing PR state; other steps may have
-			// unfinished bookkeeping and must settle the infrastructure outcome.
-			if stepName == types.StepCI && contentionResumesLeft > 0 && e.awaitContentionResume(ctx, logFile, stepName, err) {
+			// Only non-fixing CI monitoring resumes by re-observing PR state;
+			// repair and answer rounds settle the infrastructure outcome.
+			if stepName == types.StepCI && !sctx.Fixing && nextTrigger == "initial" && contentionResumesLeft > 0 && e.awaitContentionResume(ctx, logFile, stepName, err) {
 				contentionResumesLeft--
 				roundNum--
 				continue rounds
