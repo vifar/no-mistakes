@@ -7,11 +7,11 @@ import (
 	"testing"
 )
 
-// TestClosingIssueRefsPublishedIntentIsNeutralized drives a real run whose
-// intent carries closing keywords (short, cross-repo, and URL forms) without
-// --closes: the published Intent keeps the text but never a live closing
-// reference, so the PR closes nothing on merge.
-func TestClosingIssueRefsPublishedIntentIsNeutralized(t *testing.T) {
+// Standalone closing declarations request closure; ordinary prose and URL
+// references stay neutralized. The public PR-body contract is documented in
+// reference/pipeline-steps.md. This rejects both dropping requested closures
+// and accidentally promoting a passing reference in prose.
+func TestClosingIssueRefsPublishedIntentPromotesOnlyStandaloneDeclarations(t *testing.T) {
 	h := NewHarness(t, SetupOpts{Agent: "claude"})
 	statePath := setupStatefulGitHub(t, h)
 	if out, err := h.Run("init"); err != nil {
@@ -20,16 +20,19 @@ func TestClosingIssueRefsPublishedIntentIsNeutralized(t *testing.T) {
 	const branch = "feature/closes-neutralize"
 	h.CommitChange(branch, "n.txt", "n\n", "add neutralize fixture")
 	wt := h.AddWorktree(branch)
-	intent := "Refactor the widget\nFixes #12\nResolves: acme/widgets#3\nCloses https://github.com/example/closes/issues/14\nfixed http://github.com/example/closes/pull/15"
+	intent := "Refactor the widget; this fixes #16 partly.\nFixes #12\nResolves: acme/widgets#3\nCloses https://github.com/example/closes/issues/14\nfixed http://github.com/example/closes/pull/15"
 	if out, err := h.RunInDir(wt, "axi", "run", "--intent", intent, "--skip", "ci"); err != nil {
 		t.Fatalf("axi run: %v\n%s", err, out)
 	}
-	waitPublished(t, h, branch, "", "neutralize")
+	waitPublished(t, h, branch, "", "promote standalone declarations")
 	body := livePRBody(t, statePath, branch)
-	saveEvidence(t, "14-neutralized-intent-pr-body.md", body)
+	saveEvidence(t, "14-promoted-intent-pr-body.md", body)
+	assertLinesOnce(t, "standalone declarations", body, "## Issues", "Closes #12", "Closes acme/widgets#3")
+	if !strings.Contains(body, "## Issues\n\nCloses #12\nCloses acme/widgets#3") {
+		t.Errorf("standalone declarations must render as plain Issues lines; body:\n%s", body)
+	}
 	for _, want := range []string{
-		"Fixes `#12`",
-		"Resolves: `acme/widgets#3`",
+		"Refactor the widget; this fixes `#16` partly.",
 		"Closes `https://github.com/example/closes/issues/14`",
 		"fixed `http://github.com/example/closes/pull/15`",
 	} {
@@ -40,12 +43,14 @@ func TestClosingIssueRefsPublishedIntentIsNeutralized(t *testing.T) {
 	for _, live := range []string{
 		"Fixes #12",
 		"Resolves: acme/widgets#3",
+		"Fixes `#12`",
+		"Resolves: `acme/widgets#3`",
+		"Closes #16",
 		"Closes https://github.com/example/closes/issues/14",
 		"fixed http://github.com/example/closes/pull/15",
-		"## Issues",
 	} {
 		if strings.Contains(body, live) {
-			t.Errorf("live closing text %q published without --closes; body:\n%s", live, body)
+			t.Errorf("unrequested or repeated closing text %q published; body:\n%s", live, body)
 		}
 	}
 }
