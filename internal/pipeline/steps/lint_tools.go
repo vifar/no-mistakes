@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path"
@@ -34,12 +35,7 @@ type lintTool struct {
 	PackageKeys []string
 	ConfigFiles []string
 	// CheckArgs is a read-only invocation; the changed files follow it.
-	CheckArgs []string
-	// Extensions limits the files the step's own check passes to the tool;
-	// nil passes every changed file because the tool skips unknown ones
-	// itself. It never limits resolution: a configuration can teach the tool
-	// other file types (ESLint plugins for .vue, Stylelint custom syntaxes),
-	// and the agent, which reads that configuration, decides what to run.
+	CheckArgs  []string
 	Extensions []string
 }
 
@@ -319,9 +315,9 @@ type lintCheckRunner func(ctx context.Context, dir, binary string, args []string
 
 const lintCheckTimeout = 5 * time.Minute
 
-func execLintCheck(sctx *pipeline.StepContext) lintCheckRunner {
+func execLintCheck(sctx *pipeline.StepContext, timeout time.Duration) lintCheckRunner {
 	return func(ctx context.Context, dir, binary string, args []string) (string, int, error) {
-		ctx, cancel := context.WithTimeout(ctx, lintCheckTimeout)
+		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, binary, args...)
 		if ext := strings.ToLower(filepath.Ext(binary)); runtime.GOOS == "windows" && (ext == ".cmd" || ext == ".bat") {
@@ -333,8 +329,14 @@ func execLintCheck(sctx *pipeline.StepContext) lintCheckRunner {
 		cmd.Env = stepEnvironment(sctx)
 		shellenv.ConfigureShellCommand(cmd)
 		output, err := shellenv.CombinedOutputShellCommand(cmd)
+		if ctx.Err() != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return string(output), -1, fmt.Errorf("timed out after %s: %w", timeout, ctx.Err())
+			}
+			return string(output), -1, ctx.Err()
+		}
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && ctx.Err() == nil {
+		if errors.As(err, &exitErr) {
 			return string(output), exitErr.ExitCode(), nil
 		}
 		if err != nil {
@@ -351,7 +353,10 @@ func execLintCheck(sctx *pipeline.StepContext) lintCheckRunner {
 // A claim about a tool that really is unavailable becomes one environment
 // finding with a stable id, so strict shipping can route it (see
 // db.StepResult.StrictApprovalRefusal). Every other finding is untouched.
-func reconcileLintToolFindings(sctx *pipeline.StepContext, findings Findings, plans []lintToolPlan, run lintCheckRunner) Findings {
+func reconcileLintToolFindings(sctx *pipeline.StepContext, findings Findings, plans []lintToolPlan, run lintCheckRunner) (Findings, error) {
+	if err := sctx.Ctx.Err(); err != nil {
+		return Findings{}, err
+	}
 	byTool := map[string][]lintToolPlan{}
 	for _, plan := range plans {
 		byTool[plan.Tool.Name] = append(byTool[plan.Tool.Name], plan)
@@ -386,9 +391,12 @@ func reconcileLintToolFindings(sctx *pipeline.StepContext, findings Findings, pl
 			}
 			checked[key] = true
 			out.Items = append(out.Items, checkLintToolPlan(sctx, plan, run)...)
+			if err := sctx.Ctx.Err(); err != nil {
+				return Findings{}, err
+			}
 		}
 	}
-	return out
+	return out, sctx.Ctx.Err()
 }
 
 func checkLintToolPlan(sctx *pipeline.StepContext, plan lintToolPlan, run lintCheckRunner) []Finding {
@@ -397,8 +405,7 @@ func checkLintToolPlan(sctx *pipeline.StepContext, plan lintToolPlan, run lintCh
 	}
 	files := plan.checkFiles()
 	if len(files) == 0 {
-		sctx.Log(fmt.Sprintf("%s is installed at %s; none of the changed files under %s is a type the step checks natively, so the missing-tool claim is dropped", plan.Tool.Name, plan.Binary, plan.Dir))
-		return nil
+		files = plan.Files
 	}
 	binary := plan.Binary
 	if !filepath.IsAbs(binary) {
@@ -408,7 +415,16 @@ func checkLintToolPlan(sctx *pipeline.StepContext, plan lintToolPlan, run lintCh
 	output, exitCode, err := run(sctx.Ctx, filepath.Join(sctx.WorkDir, filepath.FromSlash(plan.Dir)), binary, args)
 	command := fmt.Sprintf("cd %s && %s %s", plan.Dir, plan.binaryFromDir(), strings.Join(plan.Tool.CheckArgs, " "))
 	if err != nil {
-		return []Finding{lintMissingToolFinding(plan, fmt.Sprintf("%s is present at %s but could not be started: %v", plan.Tool.Name, plan.Binary, err))}
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, fs.ErrNotExist) {
+			return []Finding{lintMissingToolFinding(plan, fmt.Sprintf("%s could not be found at %s: %v", plan.Tool.Name, plan.Binary, err))}
+		}
+		return []Finding{{
+			ID:          lintPlanID("lint-"+plan.Tool.Name+"-check", plan.Dir),
+			Severity:    types.FindingSeverityWarning,
+			Action:      types.ActionAskUser,
+			Category:    types.FindingCategoryLint,
+			Description: fmt.Sprintf("`%s` over the changed files could not be verified: %v\n%s", command, err, tailText(output, 4000)),
+		}}
 	}
 	if exitCode == 0 {
 		sctx.Log(fmt.Sprintf("%s is installed at %s and its check passed from %s over %d changed files; dropping the missing-tool claim", plan.Tool.Name, plan.Binary, plan.Dir, len(files)))

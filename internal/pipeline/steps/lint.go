@@ -153,7 +153,10 @@ Previous lint findings to address:
 		if err := unmarshalRequiredFindings(result.Output, &findings, true); err != nil {
 			return nil, fmt.Errorf("validate lint analyzer findings: %w", err)
 		}
-		findings = reconcileLintToolFindings(sctx, findings, tools, execLintCheck(sctx))
+		findings, err = reconcileLintToolFindings(sctx, findings, tools, execLintCheck(sctx, lintCheckTimeout))
+		if err != nil {
+			return nil, err
+		}
 		summary, err := extractCommitSummary(result, sctx.Config.Commit.Trailers...)
 		if err != nil {
 			if errors.Is(err, errRejectedCommitSummary) {
@@ -265,7 +268,11 @@ func lintOutcomeFromHousekeeping(sctx *pipeline.StepContext, stash pipeline.Hous
 		return nil, fmt.Errorf("validate combined housekeeping lint result: %w", err)
 	}
 	findingsJSON := stash.FindingsJSON
-	if reconciled := reconcileLintToolFindings(sctx, findings, tools, execLintCheck(sctx)); !sameFindingItems(findings, reconciled) {
+	reconciled, err := reconcileLintToolFindings(sctx, findings, tools, execLintCheck(sctx, lintCheckTimeout))
+	if err != nil {
+		return nil, err
+	}
+	if !sameFindingItems(findings, reconciled) {
 		findings = reconciled
 		if findingsJSON, err = types.MarshalFindingsJSON(findings); err != nil {
 			return nil, err

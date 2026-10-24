@@ -3,6 +3,8 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,7 +52,7 @@ func TestExecLintCheck_CancellationReleasesInheritedOutputPipes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	start := time.Now()
-	output, exitCode, err := execLintCheck(&pipeline.StepContext{})(ctx, dir, filepath.Join(dir, "node_modules", ".bin", "biome"), nil)
+	output, exitCode, err := execLintCheck(&pipeline.StepContext{}, lintCheckTimeout)(ctx, dir, filepath.Join(dir, "node_modules", ".bin", "biome"), nil)
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("cancelled check took %s, want under 5s; exit=%d error=%v output=%q", elapsed, exitCode, err, output)
 	}
@@ -522,32 +524,182 @@ func TestLintStep_MissingPackageIsNotMaskedByAnotherPackagesTool(t *testing.T) {
 	}
 }
 
-func TestLintStep_PresentToolWithOnlyNonNativeFilesIsNotReportedMissing(t *testing.T) {
+func TestLintStep_PresentToolChecksConfiguredFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell binaries")
+	}
 	t.Parallel()
-	dir, baseSHA, _ := setupGitRepo(t)
-	writeLintFixture(t, dir, map[string]string{
-		".gitignore":       "node_modules/\n",
-		"web/package.json": `{"devDependencies":{"eslint":"^9"}}`,
-		"web/App.vue":      "<template/>\n",
-	})
-	gitCmd(t, dir, "add", "-A")
-	gitCmd(t, dir, "commit", "-m", "vue")
-	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
-	writeLintFixture(t, dir, map[string]string{"web/node_modules/.bin/eslint": "#!/bin/sh\nexit 1\n"})
-	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-		return &agent.Result{Output: json.RawMessage(`{"findings":[{"id":"lint-missing-eslint","severity":"warning","action":"ask-user","description":"eslint is unavailable"}],"summary":"missing"}`)}, nil
-	}}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = []string{hermeticPath(t)}
+	for _, path := range []string{"agent", "housekeeping"} {
+		for _, exit := range []string{"0", "1"} {
+			t.Run(path+"/exit-"+exit, func(t *testing.T) {
+				t.Parallel()
+				dir, baseSHA, _ := setupGitRepo(t)
+				writeLintFixture(t, dir, map[string]string{
+					".gitignore":       "node_modules/\n",
+					"web/package.json": `{"devDependencies":{"eslint":"^9"}}`,
+					"web/App.vue":      "<template/>\n",
+				})
+				gitCmd(t, dir, "add", "-A")
+				gitCmd(t, dir, "commit", "-m", "vue")
+				headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+				writeLintFixture(t, dir, map[string]string{
+					"web/node_modules/.bin/eslint": "#!/bin/sh\nprintf '%s\\n' \"$@\" > node_modules/.bin/checked-files\necho 'eslint checked configured files'\nexit " + exit + "\n",
+				})
+				payload := `{"findings":[{"id":"lint-missing-eslint","severity":"warning","action":"ask-user","description":"eslint is unavailable"}],"summary":"missing"}`
+				ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					return &agent.Result{Output: json.RawMessage(payload)}, nil
+				}}
+				sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+				sctx.Env = []string{hermeticPath(t)}
+				if path == "housekeeping" {
+					sctx.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{FindingsJSON: payload})
+				}
 
-	outcome, err := (&LintStep{}).Execute(sctx)
+				outcome, err := (&LintStep{}).Execute(sctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				checked, err := os.ReadFile(filepath.Join(dir, "web", "node_modules", ".bin", "checked-files"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(strings.Fields(string(checked)), []string{"App.vue", "package.json"}) {
+					t.Fatalf("checked files = %q, want all configured files", checked)
+				}
+				findings, err := types.ParseFindingsJSON(outcome.Findings)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if exit == "0" {
+					if outcome.NeedsApproval || len(findings.Items) != 0 {
+						t.Fatalf("outcome = %+v, want the verified false claim dropped", outcome)
+					}
+				} else {
+					if !outcome.NeedsApproval || len(findings.Items) != 1 {
+						t.Fatalf("outcome = %+v, want the failed check to park", outcome)
+					}
+					got := findings.Items[0]
+					if got.ID != "lint-eslint-check@web" || got.Category != types.FindingCategoryLint || got.Action != types.ActionAutoFix || !strings.Contains(got.Description, "eslint checked configured files") {
+						t.Fatalf("finding = %+v, want the tool's auto-fix check finding", got)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestLintToolCheck_TimeoutRetainsDiagnosticsWithoutReportingMissing(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell binaries")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	writeLintFixture(t, dir, map[string]string{
+		"web/package.json":             `{"devDependencies":{"eslint":"^9"}}`,
+		"web/App.vue":                  "<template/>\n",
+		"web/node_modules/.bin/eslint": "#!/bin/sh\necho 'checking App.vue'\nsleep 60\n",
+	})
+	sctx := &pipeline.StepContext{Ctx: context.Background(), WorkDir: dir}
+	plans := resolveLintTools(dir, []string{"web/App.vue"}, noLookPath)
+	findings, err := reconcileLintToolFindings(sctx, Findings{Items: []Finding{{ID: "lint-missing-eslint"}}}, plans, execLintCheck(sctx, time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(ag.calls[0].Prompt, "eslint (configured by web/package.json): run from `web` with `./node_modules/.bin/eslint`; files: App.vue") {
-		t.Fatalf("prompt does not name eslint for the .vue file:\n%s", ag.calls[0].Prompt)
+	if len(findings.Items) != 1 {
+		t.Fatalf("findings = %+v, want one failed verification", findings.Items)
 	}
-	if outcome.NeedsApproval || strings.Contains(outcome.Findings, "lint-missing-eslint") {
-		t.Fatalf("outcome = %+v, want the false claim about an installed eslint dropped", outcome)
+	got := findings.Items[0]
+	if got.ID != "lint-eslint-check@web" || got.Category != types.FindingCategoryLint || got.Action != types.ActionAskUser || got.Severity != types.FindingSeverityWarning {
+		t.Fatalf("finding = %+v, want an ask-user lint warning", got)
+	}
+	for _, detail := range []string{"cd web && ./node_modules/.bin/eslint", "timed out after 1s", "checking App.vue"} {
+		if !strings.Contains(got.Description, detail) {
+			t.Fatalf("description = %q, want %q", got.Description, detail)
+		}
+	}
+}
+
+func TestLintToolCheck_OnlyAbsentExecutablesAreEnvironmentFindings(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		err         error
+		environment bool
+	}{
+		{"not-on-path", exec.ErrNotFound, true},
+		{"not-on-disk", &os.PathError{Op: "fork/exec", Path: "eslint", Err: fs.ErrNotExist}, true},
+		{"permission", &os.PathError{Op: "fork/exec", Path: "eslint", Err: fs.ErrPermission}, false},
+		{"output-failure", errors.New("could not collect output"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sctx := &pipeline.StepContext{Ctx: context.Background(), WorkDir: t.TempDir()}
+			plan := lintToolPlan{Tool: knownLintTools[1], Dir: "web", Binary: "web/node_modules/.bin/eslint", Files: []string{"App.vue"}}
+			findings, err := reconcileLintToolFindings(sctx, Findings{Items: []Finding{{ID: "lint-missing-eslint"}}}, []lintToolPlan{plan}, func(context.Context, string, string, []string) (string, int, error) {
+				return strings.Repeat("x", 5000) + "\nlast diagnostic", -1, tc.err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(findings.Items) != 1 {
+				t.Fatalf("findings = %+v, want one warning", findings.Items)
+			}
+			got := findings.Items[0]
+			if got.Action != types.ActionAskUser || got.Severity != types.FindingSeverityWarning || !strings.Contains(got.Description, tc.err.Error()) {
+				t.Fatalf("finding = %+v, want an ask-user warning naming the error", got)
+			}
+			if tc.environment {
+				if got.ID != "lint-missing-eslint@web" || got.Category != types.FindingCategoryLintEnvironment {
+					t.Fatalf("finding = %+v, want a missing-tool environment finding", got)
+				}
+			} else if got.ID != "lint-eslint-check@web" || got.Category != types.FindingCategoryLint || !strings.Contains(got.Description, "cd web && ./node_modules/.bin/eslint") || !strings.HasSuffix(got.Description, "last diagnostic") || strings.Contains(got.Description, strings.Repeat("x", 4001)) {
+				t.Fatalf("finding = %+v, want a lint check warning with bounded output tail", got)
+			}
+		})
+	}
+}
+
+func TestLintStep_CancelledVerificationReturnsAnError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell binaries")
+	}
+	t.Parallel()
+	for _, path := range []string{"agent", "housekeeping"} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA, _ := lintMonorepo(t, false)
+			writeLintFixture(t, dir, map[string]string{
+				"controller/node_modules/.bin/prettier": "#!/bin/sh\necho started > node_modules/.bin/started\nsleep 60\n",
+			})
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: json.RawMessage(falseMissingPrettier)}, nil
+			}}
+			sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			if path == "housekeeping" {
+				sctx.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{FindingsJSON: falseMissingPrettier})
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			sctx.Ctx = ctx
+			go func() {
+				ticker := time.NewTicker(10 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if _, err := os.Stat(filepath.Join(dir, "controller", "node_modules", ".bin", "started")); err == nil {
+							cancel()
+							return
+						}
+					}
+				}
+			}()
+			outcome, err := (&LintStep{}).Execute(sctx)
+			if !errors.Is(err, context.Canceled) || outcome != nil {
+				t.Fatalf("outcome = %+v, error = %v, want cancellation without findings", outcome, err)
+			}
+		})
 	}
 }
