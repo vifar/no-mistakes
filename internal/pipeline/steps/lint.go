@@ -78,6 +78,15 @@ func (s *LintStep) executeRepositoryLint(sctx *pipeline.StepContext) (*pipeline.
 	lintCmd := sctx.Config.Commands.Lint
 
 	if lintCmd == "" {
+		// Tools are resolved from the prepared worktree: a sub-package's
+		// formatter exists only after its dependencies are installed.
+		if err := ensurePrepared(sctx, s.Name()); err != nil {
+			return nil, fmt.Errorf("prepare agent lint dependencies: %w", err)
+		}
+		tools := lintToolsForStep(sctx, baseSHA)
+		if outcome, err := lintEnvironmentRecheck(sctx); err != nil || outcome != nil {
+			return outcome, err
+		}
 		// The combined document+lint housekeeping pass already performed the
 		// agent-driven lint duty for this round; consume its result instead
 		// of paying a second cold agent invocation. Fix rounds and any round
@@ -85,11 +94,8 @@ func (s *LintStep) executeRepositoryLint(sctx *pipeline.StepContext) (*pipeline.
 		// lint responsibility is never silently skipped.
 		if !sctx.Fixing {
 			if stash, ok := sctx.Shared.TakeHousekeepingLint(); ok {
-				return lintOutcomeFromHousekeeping(sctx, stash)
+				return lintOutcomeFromHousekeeping(sctx, stash, tools)
 			}
-		}
-		if err := ensurePrepared(sctx, s.Name()); err != nil {
-			return nil, fmt.Errorf("prepare agent lint dependencies: %w", err)
 		}
 		sctx.Log("no lint command configured, asking agent to lint and fix...")
 		reassessHistory := executionContextPromptSection(sctx.WorkDir) + roundHistoryPromptSection(sctx) + userIntentPromptSection(sctx)
@@ -114,10 +120,11 @@ Rules:
 - Focus on lint, format, and static-analysis issues only.
 - Do not report issues you already fixed.
 - The summary must be one concise sentence fragment suitable for a git commit subject.
-- Keep the summary under 10 words.%s`,
+- Keep the summary under 10 words.%s%s`,
 			sctx.Run.Branch,
 			baseSHA,
 			sctx.Run.HeadSHA,
+			lintToolsPromptSection(tools),
 			reassessHistory,
 		)
 		if sctx.PreviousFindings != "" {
@@ -145,6 +152,10 @@ Previous lint findings to address:
 		}
 		if err := unmarshalRequiredFindings(result.Output, &findings, true); err != nil {
 			return nil, fmt.Errorf("validate lint analyzer findings: %w", err)
+		}
+		findings, err = reconcileLintToolFindings(sctx, findings, tools, execLintCheck(sctx, lintCheckTimeout))
+		if err != nil {
+			return nil, err
 		}
 		summary, err := extractCommitSummary(result, sctx.Config.Commit.Trailers...)
 		if err != nil {
@@ -251,16 +262,33 @@ Previous lint findings to address:
 // document+lint pass produced, with the same gate semantics as the lint
 // step's own agent path: blocking (error/warning) findings park for a
 // decision, info findings pass through.
-func lintOutcomeFromHousekeeping(sctx *pipeline.StepContext, stash pipeline.HousekeepingLintResult) (*pipeline.StepOutcome, error) {
+func lintOutcomeFromHousekeeping(sctx *pipeline.StepContext, stash pipeline.HousekeepingLintResult, tools []lintToolPlan) (*pipeline.StepOutcome, error) {
 	findings, err := types.ParseFindingsJSON(stash.FindingsJSON)
 	if err != nil {
 		return nil, fmt.Errorf("validate combined housekeeping lint result: %w", err)
+	}
+	findingsJSON := stash.FindingsJSON
+	reconciled, err := reconcileLintToolFindings(sctx, findings, tools, execLintCheck(sctx, lintCheckTimeout))
+	if err != nil {
+		return nil, err
+	}
+	if !sameFindingItems(findings, reconciled) {
+		findings = reconciled
+		if findingsJSON, err = types.MarshalFindingsJSON(findings); err != nil {
+			return nil, err
+		}
 	}
 	sctx.Log(fmt.Sprintf("lint assessed in the combined document+lint housekeeping pass: %d unresolved items", len(findings.Items)))
 	return &pipeline.StepOutcome{
 		NeedsApproval: hasBlockingFindings(findings.Items),
 		AutoFixable:   false,
-		Findings:      stash.FindingsJSON,
+		Findings:      findingsJSON,
 		FixSummary:    stash.Summary,
 	}, nil
+}
+
+func sameFindingItems(a, b Findings) bool {
+	left, errA := json.Marshal(a.Items)
+	right, errB := json.Marshal(b.Items)
+	return errA == nil && errB == nil && string(left) == string(right)
 }

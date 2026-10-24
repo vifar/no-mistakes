@@ -89,6 +89,12 @@ const (
 	FindingCategoryLint          = "lint"
 )
 
+// FindingCategoryLintEnvironment marks a Lint finding about the run's
+// environment, not the code: a lint or format tool that is unavailable in the
+// run worktree. No code change can resolve it, so strict shipping points it at
+// a fix round, which re-checks the environment without an agent pass.
+const FindingCategoryLintEnvironment = "lint-environment"
+
 // Finding category constants for the CI step's check findings. The CI step
 // turns each settled issue on the pull request into one finding and the fix
 // half routes by this category: a check finding names its provider check in
