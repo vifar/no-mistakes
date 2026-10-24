@@ -290,3 +290,52 @@ func TestDocumentCapWayForwardNamesTheFixResponse(t *testing.T) {
 		t.Fatalf("the way forward does not name the fix response: %s", pipeline.DocumentCapWayForward)
 	}
 }
+
+// Review of #188's first cut: the grace raised the budget but left repeat
+// suppression on. A pass that committed README.md and still reported a gap
+// there, at an unchanged head, made the human-requested repair of README.md
+// look like a repeat of that pass, so it was discarded and the gate parked
+// again: the same deadlock through a different door. An explicit fix
+// response is not a repeat loop - the one-commit bound already bounds it.
+func TestDocumentCapFixResponseIsNotDiscardedAsARepeat(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	const gap = `{"id":"document-1","severity":"warning","file":"README.md","description":"the rollout guide is still stale","action":"ask-user"}`
+	phase := "spend"
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		switch phase {
+		case "spend":
+			// The spending pass commits README.md and reports a gap in it.
+			if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("half-updated guide\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return &agent.Result{Output: json.RawMessage(`{"findings":[` + gap + `],"summary":"partial update"}`)}, nil
+		default:
+			if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("current rollout guide\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"finish the rollout guide"}`)}, nil
+		}
+	}}
+	sc := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Lint: "true"})
+	sc.Config.Document.MaxCommitsPerRun = 1
+	sc.Run.Shipping = &types.ShippingOptions{Mode: types.ShippingFull}
+
+	out, err := (&DocumentStep{}).Execute(sc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.NeedsApproval {
+		t.Fatalf("the spending pass did not park on its gap: %s", out.Findings)
+	}
+	s := &capGapScenario{limit: 1, sc: sc, dir: dir, parked: out}
+	phase = "fix"
+	headBefore := sc.Run.HeadSHA
+	fixed, err := s.respondFix(t, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.assertGraceCommitLanded(t, fixed, headBefore)
+	if got, err := os.ReadFile(filepath.Join(dir, "README.md")); err != nil || string(got) != "current rollout guide\n" {
+		t.Fatalf("the repair was not applied: %q, %v", got, err)
+	}
+}

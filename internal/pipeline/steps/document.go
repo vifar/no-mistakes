@@ -264,9 +264,16 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 	if combinedLint {
 		proposedDocs, _ = splitHousekeepingFindings(proposed)
 	}
-	repeated, err := documentRepeatsUnchangedInputs(sctx, history.last, headBefore, paths)
-	if err != nil {
-		return nil, err
+	// Repeat suppression stops the pipeline re-applying its own repair in a
+	// loop. A grace round is not that loop: a fix response asked for this
+	// repair, and the one-commit bound already bounds it. Suppressing it
+	// would discard the only round that can land the fix (issue #188).
+	repeated := false
+	if !grace {
+		repeated, err = documentRepeatsUnchangedInputs(sctx, history.last, headBefore, paths)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// The prospective-commit count excludes recognized tool scratch: a test
 	// harness's live database left behind by an earlier step is not this
