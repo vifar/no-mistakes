@@ -296,8 +296,6 @@ func isLintEnvironmentFinding(f Finding) bool {
 	return f.Category == types.FindingCategoryLintEnvironment
 }
 
-var lintUnavailablePhrases = []string{"unavailable", "not installed", "not available", "not on path", "not found", "could not find", "cannot find", "cannot be resolved", "could not be resolved"}
-
 // lintMissingToolClaim reports the tool a finding claims is unavailable,
 // and the package directory its id names ("." when it names none).
 func lintMissingToolClaim(f Finding) (tool, dir string, ok bool) {
@@ -309,20 +307,6 @@ func lintMissingToolClaim(f Finding) (tool, dir string, ok bool) {
 			dir = "."
 		}
 		return strings.ToLower(tool), dir, true
-	}
-	desc := strings.ToLower(f.Description)
-	for _, tool := range knownLintTools {
-		if strings.Contains(id, "missing") && strings.Contains(id, tool.Name) {
-			return tool.Name, ".", true
-		}
-		if !strings.Contains(desc, tool.Name) {
-			continue
-		}
-		for _, phrase := range lintUnavailablePhrases {
-			if strings.Contains(desc, phrase) {
-				return tool.Name, ".", true
-			}
-		}
 	}
 	return "", "", false
 }

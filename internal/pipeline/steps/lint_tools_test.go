@@ -236,6 +236,58 @@ func TestLintStep_HousekeepingFalseMissingClaimIsChecked(t *testing.T) {
 	}
 }
 
+func TestLintStep_RuleFindingWithMissingToolLanguageStaysBlocked(t *testing.T) {
+	t.Parallel()
+	for _, housekeeping := range []bool{false, true} {
+		name := "agent"
+		if housekeeping {
+			name = "housekeeping"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, _ := setupGitRepo(t)
+			writeLintFixture(t, dir, map[string]string{
+				".gitignore":       "node_modules/\n",
+				"web/package.json": `{"devDependencies":{"eslint":"^9"}}`,
+				"web/app.js":       "const x = 1\n",
+			})
+			gitCmd(t, dir, "add", "-A")
+			gitCmd(t, dir, "commit", "-m", "eslint package")
+			headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+			writeLintFixture(t, dir, map[string]string{"web/node_modules/.bin/eslint": "#!/bin/sh\nexit 0\n"})
+			want := Finding{
+				ID: "eslint-missing-rule", Severity: types.FindingSeverityWarning,
+				Action: types.ActionAskUser, Category: types.FindingCategoryLint,
+				Description: "eslint rule not found",
+			}
+			payload, err := types.MarshalFindingsJSON(Findings{Items: []Finding{want}, Summary: "missing required rule"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: json.RawMessage(payload)}, nil
+			}}
+			sctx := newHousekeepingContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Env = []string{hermeticPath(t)}
+			if housekeeping {
+				sctx.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{FindingsJSON: payload})
+			}
+
+			outcome, err := (&LintStep{}).Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !outcome.NeedsApproval || !reflect.DeepEqual(got.Items, []Finding{want}) {
+				t.Fatalf("outcome = %+v, findings = %+v, want the unchanged rule finding to park lint", outcome, got.Items)
+			}
+		})
+	}
+}
+
 func TestLintStep_GenuinelyMissingToolStillReported(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA, _ := lintMonorepo(t, false)
