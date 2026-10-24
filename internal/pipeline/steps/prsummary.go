@@ -1761,17 +1761,18 @@ func renderInlineCoAuthorKeys(s string, notice bool, configuredTrailers ...strin
 			}
 			identity := strings.TrimRight(value, " \t\r.,;:!?\"')]}”’")
 			claim := "Co-Authored-By: " + identity
+			_, _, _, ai := publishedAttributionEntry([]string{claim}, 0, configuredTrailers)
 			name, _, complete := strings.Cut(strings.TrimSpace(identity), "<")
 			name = strings.TrimSpace(name)
 			if !complete || strings.Count(identity, "<") != 1 || strings.Count(identity, ">") != 1 ||
-				!strings.HasPrefix(name, `"`) && strings.ContainsAny(name, ";,") {
+				!ai && !strings.HasPrefix(name, `"`) && strings.ContainsAny(name, ";,") {
 				continue
 			}
 			address, err := git.ParseAttributionAddress(identity)
 			if err != nil || address.Name == "" || !strings.HasSuffix(identity, ">") {
 				continue
 			}
-			if _, _, _, ai := publishedAttributionEntry([]string{claim}, 0, configuredTrailers); ai {
+			if ai {
 				replacement := ""
 				if notice {
 					replacement = prAIAttributionNotice

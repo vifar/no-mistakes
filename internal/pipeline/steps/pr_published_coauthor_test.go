@@ -381,45 +381,58 @@ func TestPRInlineClaimsOwnedUpdateAndRestamp(t *testing.T) {
 }
 
 func TestPRConfiguredInlineClaimsAtSharedDisplayBoundary(t *testing.T) {
-	const configured = "Co-Authored-By: private:writer <opaque@example.com>"
-	for _, prefix := range []string{"Recorded ", "Mention co-author (quoted): field\nRecorded "} {
-		for _, notice := range []bool{false, true} {
-			want := prefix
-			if notice {
-				want += prAIAttributionNotice
+	for _, configured := range []string{
+		"Co-Authored-By: private:writer <opaque@example.com>",
+		"Co-Authored-By: Example, Inc. Bot <opaque@example.com>",
+	} {
+		for _, prefix := range []string{"Recorded ", "Mention co-author (quoted): field\nRecorded "} {
+			for _, notice := range []bool{false, true} {
+				want := prefix
+				if notice {
+					want += prAIAttributionNotice
+				}
+				raw := prefix + configured
+				if got := prDisplayTextMode(raw, notice, configured); got != want {
+					t.Errorf("plain notice=%t: got %q, want %q", notice, got, want)
+				}
+				encoded, err := marshalJSONString(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expected, err := marshalJSONString(want)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, wrappers := range [][2]string{
+					{`{ "summary": `, `, "escape": "A\u0042\/C", "number": 1.200e+3 }`},
+					{"", ","},
+				} {
+					input := wrappers[0] + string(encoded) + wrappers[1]
+					output := wrappers[0] + string(expected) + wrappers[1]
+					if got := prDisplayTextMode(input, notice, configured); got != output {
+						t.Errorf("recorded notice=%t: got %q, want %q", notice, got, output)
+					}
+				}
 			}
-			raw := prefix + configured
-			if got := prDisplayTextMode(raw, notice, configured); got != want {
-				t.Errorf("plain notice=%t: got %q, want %q", notice, got, want)
-			}
-			encoded, err := marshalJSONString(raw)
-			if err != nil {
-				t.Fatal(err)
-			}
-			expected, err := marshalJSONString(want)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, wrappers := range [][2]string{
-				{`{ "summary": `, `, "escape": "A\u0042\/C", "number": 1.200e+3 }`},
-				{"", ","},
-			} {
-				input := wrappers[0] + string(encoded) + wrappers[1]
-				output := wrappers[0] + string(expected) + wrappers[1]
-				if got := prDisplayTextMode(input, notice, configured); got != output {
-					t.Errorf("recorded notice=%t: got %q, want %q", notice, got, output)
+		}
+		for _, raw := range []string{
+			"Recorded `" + configured + "`",
+			`The field "Co-Authored-By:" identifies ` + strings.TrimPrefix(configured, "Co-Authored-By: "),
+		} {
+			for _, notice := range []bool{false, true} {
+				if got := prDisplayTextMode(raw, notice, configured); got != raw {
+					t.Errorf("configured mention changed: got %q, want %q", got, raw)
 				}
 			}
 		}
 	}
-	for _, raw := range []string{
-		"Recorded `Co-Authored-By: private:writer <opaque@example.com>`",
-		`The field "Co-Authored-By:" identifies private:writer <opaque@example.com>`,
-	} {
-		for _, notice := range []bool{false, true} {
-			if got := prDisplayTextMode(raw, notice, configured); got != raw {
-				t.Errorf("configured mention changed: got %q, want %q", got, raw)
-			}
+}
+
+func TestPRUnconfiguredCommaNameRemainsProse(t *testing.T) {
+	const raw = "Recorded Co-Authored-By: Example, Inc. Bot <opaque@example.com>"
+	for _, notice := range []bool{false, true} {
+		if got := prDisplayTextMode(raw, notice); got != raw {
+			t.Errorf("unconfigured prose changed: got %q, want %q", got, raw)
 		}
 	}
 }
