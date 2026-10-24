@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"html"
 	"os"
 	"path/filepath"
@@ -42,10 +43,11 @@ func TestInlineCoAuthorPublicationPaths(t *testing.T) {
 					} {
 						t.Run(name+"/"+assembly, func(t *testing.T) {
 							view := html.UnescapeString(body)
-							if strings.Contains(view, "Co-Authored-By:") || strings.Contains(view, "Codex") || strings.Contains(view, "bot@example.invalid") || !strings.Contains(view, prAIAttributionNotice) {
-								t.Fatalf("publication retained an inline AI claim or lost its notice: %q", body)
+							narrativeOnly := mode == config.PRAppendixMinimal && name == "backticks" && assembly != "evidence"
+							if strings.Contains(view, "Co-Authored-By:") || strings.Contains(view, "Codex") || strings.Contains(view, "bot@example.invalid") || strings.Contains(view, prAIAttributionNotice) == narrativeOnly {
+								t.Fatalf("publication retained an inline AI claim or used the wrong display mode: %q", body)
 							}
-							if name == "backticks" && !strings.Contains(view, prefix) {
+							if name == "backticks" && !strings.Contains(view, strings.TrimSpace(prefix)) {
 								t.Fatalf("publication changed the completed code span: %q", body)
 							}
 							if name == "payload" && !strings.Contains(view, `"escape": "A\u0042\/C", "number": 1.200e+3`) {
@@ -141,7 +143,7 @@ func TestRenderInlineCoAuthorKeys(t *testing.T) {
 		{"field then claim", `The field "Co-Authored-By:" records Co-Authored-By: Ada <ada@example.com>.`, `The field "Co-Authored-By:" records co-author (quoted): Ada <ada@example.com>.`},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := renderInlineCoAuthorKeys(tt.text); got != tt.want {
+			if got := renderInlineCoAuthorKeys(tt.text, true); got != tt.want {
 				t.Fatalf("inline claim rendering = %q, want %q", got, tt.want)
 			}
 		})
@@ -295,4 +297,83 @@ func TestPublishedBodyKeepsAnOrdinaryEmoji(t *testing.T) {
 // test measures the text a consumer of the pull request reads.
 func publishedBody(body, risk, testing string, provider scm.Provider) string {
 	return appendGeneratedSectionsToCleanBodyWithinLimit(body, risk, testing, "", 64*1024, provider)
+}
+
+func TestPRInlineClaimsAtSharedDisplayBoundary(t *testing.T) {
+	for _, tt := range []struct{ raw, body, notice string }{
+		{"Recorded Co-Authored-By: Codex <bot@example.invalid>.", "Recorded .", "Recorded " + prAIAttributionNotice + "."},
+		{"Recorded Co-Authored-By: acp:cursor <ai@example.com>.", "Recorded .", "Recorded " + prAIAttributionNotice + "."},
+		{"Recorded Co-Authored-By: Ada:Dev <ada@example.com>.", "Recorded co-author (quoted): Ada:Dev <ada@example.com>.", "Recorded co-author (quoted): Ada:Dev <ada@example.com>."},
+		{`The field "Co-Authored-By:" identifies acp:cursor <ai@example.com>`, `The field "Co-Authored-By:" identifies acp:cursor <ai@example.com>`, `The field "Co-Authored-By:" identifies acp:cursor <ai@example.com>`},
+		{"Recorded `Co-Authored-By: acp:cursor <ai@example.com>`", "Recorded `Co-Authored-By: acp:cursor <ai@example.com>`", "Recorded `Co-Authored-By: acp:cursor <ai@example.com>`"},
+		{"Recorded Co-Authored-By: Ada; contact <ada@example.com>", "Recorded Co-Authored-By: Ada; contact <ada@example.com>", "Recorded Co-Authored-By: Ada; contact <ada@example.com>"},
+	} {
+		for _, notice := range []bool{false, true} {
+			want := tt.body
+			if notice {
+				want = tt.notice
+			}
+			if got := prDisplayTextMode(tt.raw, notice); got != want {
+				t.Errorf("notice=%t: got %q, want %q", notice, got, want)
+			}
+			encoded, err := marshalJSONString(tt.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected, err := marshalJSONString(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prefix, suffix := `{ "summary": `, `, "escape": "A\u0042\/C", "number": 1.200e+3 }`
+			if got := prDisplayTextMode(prefix+string(encoded)+suffix, notice); got != prefix+string(expected)+suffix {
+				t.Errorf("recorded notice=%t: got %q", notice, got)
+			}
+		}
+	}
+}
+
+func TestPRInlineClaimsOwnedUpdateAndRestamp(t *testing.T) {
+	const raw = "Recorded risk Co-Authored-By: Codex <bot@example.invalid>\nRecorded tool Co-Authored-By: acp:cursor <ai@example.com>\nRecorded helper Co-Authored-By: Ada <ada@example.com>.\n"
+	const want = "Recorded risk \nRecorded tool \nRecorded helper co-author (quoted): Ada <ada@example.com>.\n"
+	const payload = `{ "summary": "Recorded tool Co-Authored-By: acp:cursor \u003cai@example.com\u003e", "escape": "A\u0042\/C" }`
+	const wantPayload = `{ "summary": "Recorded tool ", "escape": "A\u0042\/C" }`
+	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+		t.Run(string(provider), func(t *testing.T) {
+			appendix := compliantPipelineBody(t, testPipelineHeadSHA)
+			author := raw + payload + "\n"
+			parts := prOwnedBody{before: author, after: "\n" + author}
+			created, err := composeOwnedPRContent(parts, "fix: publication", appendix+"\n"+author, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check := func(body string, owned bool) {
+				t.Helper()
+				if strings.Contains(body, "Co-Authored-By:") || strings.Contains(body, "Codex") || strings.Contains(body, "acp:cursor") || strings.Contains(body, "ai@example.com") || strings.Contains(body, "bot@example.invalid") {
+					t.Fatalf("publication retained AI attribution: %q", body)
+				}
+				if !strings.Contains(body, want+wantPayload) {
+					t.Fatalf("publication lost human identity or unrelated bytes: %q", body)
+				}
+				if owned {
+					if _, err := parsePROwnedBody(body); err != nil {
+						t.Fatalf("invalid ownership integrity: %v", err)
+					}
+				}
+			}
+			check(created.Body, true)
+			old := author + wrapPRAppendix(appendix+"\n"+author) + "\n" + author
+			host := &attestationTestHost{provider: provider, body: old}
+			if err := updateOwnedPR(&pipeline.StepContext{Ctx: context.Background()}, host, &scm.PR{Number: "42"}, scm.PRContent{Body: old}, "", "", appendix+"\n"+author, 0, nil); err != nil {
+				t.Fatal(err)
+			}
+			check(host.body, true)
+			for _, prior := range []string{old, author + appendix + "\n" + author} {
+				updated, rebound, err := rebindOwnedPRAttestation(prior, strings.Repeat("b", 40), nil, pipelineAttestationPolicy{}, provider)
+				if err != nil || !rebound {
+					t.Fatalf("restamp: rebound=%t err=%v", rebound, err)
+				}
+				check(updated, hasPRAppendixMarkers(prior))
+			}
+		})
+	}
 }

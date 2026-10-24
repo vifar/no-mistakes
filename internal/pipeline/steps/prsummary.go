@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
-	"net/mail"
 	"net/url"
 	"os"
 	"path"
@@ -17,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -1723,14 +1723,8 @@ func escapePipelineFoldMarkers(s string) string {
 // labelled key while their names and addresses remain visible as evidence.
 // prDisplayNoticeText owns AI neutralization and human presentation; a sentence
 // that merely names the field stays the sentence it was.
-//
-// The filter renders an entry that starts a line. A co-author can also close a
-// line that starts with something else - a recorded risk rationale such as
-// "Low: ... Co-Authored-By: Name <addr>" - and a raw-text scanner reads that
-// key as a claim too, so renderInlineCoAuthorKeys renders it after the filter
-// has classified the line.
 func renderCoAuthorAsLabelledField(s string) string {
-	return renderInlineCoAuthorKeys(prDisplayNoticeText(s))
+	return prDisplayNoticeText(s)
 }
 
 // publishedCoAuthorKey matches the co-author key wherever it sits in a line.
@@ -1741,7 +1735,7 @@ var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)
 // in a co-author claim. A key that only names the field, and a key quoted in an
 // inline code span, stay as they are: neither is a claim, and the code span is
 // evidence the body preserves byte for byte.
-func renderInlineCoAuthorKeys(s string) string {
+func renderInlineCoAuthorKeys(s string, notice bool) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
 		spans := inlineCodeSpans(line)
@@ -1767,12 +1761,22 @@ func renderInlineCoAuthorKeys(s string) string {
 			}
 			identity := strings.TrimRight(value, " \t\r.,;:!?\"')]}”’")
 			claim := "Co-Authored-By: " + identity
-			address, err := mail.ParseAddress(strings.TrimSpace(identity))
+			name, _, complete := strings.Cut(strings.TrimSpace(identity), "<")
+			name = strings.TrimSpace(name)
+			if !complete || strings.Count(identity, "<") != 1 || strings.Count(identity, ">") != 1 ||
+				!strings.HasPrefix(name, `"`) && strings.ContainsAny(name, ";,") {
+				continue
+			}
+			address, err := git.ParseAttributionAddress(identity)
 			if err != nil || address.Name == "" || !strings.HasSuffix(identity, ">") {
 				continue
 			}
 			if _, _, _, ai := publishedAttributionEntry([]string{claim}, 0, nil); ai {
-				line = line[:start] + prAIAttributionNotice + value[len(identity):]
+				replacement := ""
+				if notice {
+					replacement = prAIAttributionNotice
+				}
+				line = line[:start] + replacement + value[len(identity):]
 			} else {
 				line = line[:start] + "co-author (quoted)" + sep + line[end:]
 			}

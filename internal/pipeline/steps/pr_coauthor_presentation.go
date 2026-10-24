@@ -82,7 +82,9 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 				lines[start] = lines[start][:cut] + filterRecordedPayload(lines[start][cut:], notice, true, configuredTrailers...)
 			}
 		}
-		kept = append(kept, lines[start:end]...)
+		for _, line := range lines[start:end] {
+			kept = append(kept, renderInlineCoAuthorKeys(line, notice))
+		}
 		start = end
 	}
 	return strings.Join(kept, "\n")
@@ -216,8 +218,10 @@ func filterRecordedPayload(line string, notice, fragment bool, configuredTrailer
 			filtered := value
 			if !(fragment && bareQuotedMention(out, start, end, value, configuredTrailers)) {
 				filtered = prDisplayTextMode(value, notice, configuredTrailers...)
+			} else {
+				filtered = renderInlineCoAuthorKeys(value, notice)
 			}
-			if filtered = renderInlineCoAuthorKeys(filtered); filtered != value {
+			if filtered != value {
 				if encoded, err := marshalJSONString(filtered); err == nil {
 					rebuilt := make([]byte, 0, len(out))
 					rebuilt = append(rebuilt, out[:start]...)

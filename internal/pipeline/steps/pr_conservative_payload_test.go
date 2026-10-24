@@ -32,8 +32,12 @@ func TestPRRecordedInlineClaimsPreserveUnrelatedBytes(t *testing.T) {
 					suffix += "\r\n}"
 				}
 				for _, notice := range []bool{false, true} {
-					if got := filterRecordedPayload(prefix+tt.raw+suffix, notice, fragment); got != prefix+tt.want+suffix {
-						t.Errorf("notice=%t fragment=%t: recorded output = %q, want %q", notice, fragment, got, prefix+tt.want+suffix)
+					want := tt.want
+					if !notice {
+						want = strings.ReplaceAll(want, prAIAttributionNotice, "")
+					}
+					if got := filterRecordedPayload(prefix+tt.raw+suffix, notice, fragment); got != prefix+want+suffix {
+						t.Errorf("notice=%t fragment=%t: recorded output = %q, want %q", notice, fragment, got, prefix+want+suffix)
 					}
 				}
 			}
