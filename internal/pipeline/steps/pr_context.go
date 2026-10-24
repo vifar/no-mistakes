@@ -272,7 +272,9 @@ func refreshPRHeadBeforeRetarget(sctx *pipeline.StepContext, reader scm.PRFactsR
 		return selection, nil
 	}
 	refreshed, err := resolvePRTargetWithReader(sctx, reader, allowTerminal)
-	if err != nil {
+	// Only a transient read failure earns one more refresh. Authentication,
+	// permission and validation failures return on the first attempt.
+	if err != nil && errors.Is(err, scm.ErrTransientTimeout) && sctx.Ctx.Err() == nil {
 		refreshed, err = resolvePRTargetWithReader(sctx, reader, allowTerminal)
 	}
 	if err != nil {
