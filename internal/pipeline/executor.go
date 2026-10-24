@@ -38,8 +38,7 @@ type EventFunc func(ipc.Event)
 
 // DocumentCapWayForward is the operator instruction when this run has spent
 // its documentation commit budget. A fix response that selects the remaining
-// findings may land one more Document commit for them (issue #188); aborting
-// does not help, because a new run with the same gap reaches the same cap.
+// findings may land one more Document commit for them (issue #188).
 const DocumentCapWayForward = "To resolve a remaining documentation finding, respond with --action fix and select it: each fix response may land one more Document commit."
 
 // documentCapLegacyWayForward is the way forward earlier versions recorded in

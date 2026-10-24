@@ -12,9 +12,9 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// The Document commit cap is a BOUND on how many commits the step may make in
-// one run. It is not a verdict on the documentation, and it must never be the
-// reason a run cannot finish.
+// The Document commit cap bounds automatic commits in one run; an explicit
+// fix response can authorize one more via documentCapFixGrace. It is not a
+// verdict on the documentation, and must never prevent a run from finishing.
 //
 // Issue #123: the cap was checked BEFORE the agent ran, so the step emitted an
 // `ask-user` finding on every round without ever asking whether the
@@ -32,9 +32,9 @@ import (
 //
 // The fix has two halves:
 //
-//  1. The cap still runs the READ-ONLY gap check. It asks what gaps remain
-//     and applies nothing, so it spends no budget. With no gap remaining the
-//     step completes and the run continues.
+//  1. At the cap, rounds without explicit repair grace run the READ-ONLY gap
+//     check. It asks what gaps remain and applies nothing, so it spends no
+//     budget. With no gap remaining the step completes and the run continues.
 //
 //  2. The cap notice itself is INFORMATIONAL (no-op), never an actionable
 //     finding. A finding no agent and no human response can resolve must not
@@ -46,8 +46,7 @@ import (
 // Issue #188: with the cap spent and a REAL gap remaining, every disposition
 // of a strict gate was refused. `approve` and `skip` are refused by strict
 // shipping, and `fix` re-ran the read-only gap check, which cannot land the
-// fix and so re-reported the same gap. The only way out was to abort the run,
-// and a new run with the same gap reaches the same wall.
+// fix and so re-reported the same gap. The only way out was to abort the run.
 //
 // A fix response is the one disposition that can resolve a gap, so it is the
 // one that earns a commit. The grace is bounded:

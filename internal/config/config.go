@@ -499,8 +499,8 @@ type RepoConfig struct {
 
 // DocumentRaw is the YAML representation of document-step settings.
 type DocumentRaw struct {
-	// MaxCommitsPerRun caps all accepted Document commits in one run,
-	// including agent-created commits. Zero disables Document commits.
+	// MaxCommitsPerRun bounds automatic Document commits, including
+	// agent-created commits; explicit fix responses can exceed it.
 	MaxCommitsPerRun *int `yaml:"max_commits_per_run"`
 	// Instructions augment (never replace) the built-in documentation
 	// placement policy with the repository's ownership map or extra
