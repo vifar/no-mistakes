@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/netretry"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -222,8 +224,9 @@ func resolveAndApplyPRTarget(sctx *pipeline.StepContext, reader scm.PRFactsReade
 	if err != nil {
 		return pipeline.PRTargetSelection{}, false, fmt.Errorf("read local head before PR retarget: %w", err)
 	}
-	if selection.ForgeHeadSHA != localHead {
-		return pipeline.PRTargetSelection{}, false, fmt.Errorf("recorded pull request head differs from local head before retarget")
+	selection, err = refreshPRHeadBeforeRetarget(sctx, reader, allowTerminal, selection, localHead)
+	if err != nil {
+		return pipeline.PRTargetSelection{}, false, err
 	}
 	freshRetarget := selection.TargetBranch == requested
 	if selection.TargetBranch != requested {
@@ -241,8 +244,15 @@ func resolveAndApplyPRTarget(sctx *pipeline.StepContext, reader scm.PRFactsReade
 		if err != nil {
 			return pipeline.PRTargetSelection{}, false, fmt.Errorf("read back retargeted pull request: %w", err)
 		}
-		if selection.TargetBranch != requested || selection.ForgeHeadSHA != localHead {
-			return pipeline.PRTargetSelection{}, false, fmt.Errorf("retargeted pull request base or head differs on read-back")
+		if selection.TargetBranch != requested {
+			return pipeline.PRTargetSelection{}, false, fmt.Errorf("retargeted pull request base differs on read-back")
+		}
+		accounted, err := runAccountsForPRHead(sctx, selection.ForgeHeadSHA, localHead)
+		if err != nil {
+			return pipeline.PRTargetSelection{}, false, err
+		}
+		if !accounted {
+			return pipeline.PRTargetSelection{}, false, fmt.Errorf("pull request head %s differs from local head %s on retarget read-back", selection.ForgeHeadSHA, localHead)
 		}
 		freshRetarget = true
 	}
@@ -251,6 +261,58 @@ func resolveAndApplyPRTarget(sctx *pipeline.StepContext, reader scm.PRFactsReade
 	}
 	sctx.Run.PRBaseBranchRequested = false
 	return selection, freshRetarget, nil
+}
+
+// refreshPRHeadBeforeRetarget re-reads the PR when its forge head differs
+// from the local head, so a head that legitimately moved (the forge's PR
+// record lagging a push, the run's own push, a pushed ancestor) does not
+// block a fresh retarget. The refreshed selection is what gets recorded.
+// Only a head this run accounts for is accepted; a foreign head still fails
+// closed, and a refresh that cannot be read fails rather than passing.
+func refreshPRHeadBeforeRetarget(sctx *pipeline.StepContext, reader scm.PRFactsReader, allowTerminal bool, selection pipeline.PRTargetSelection, localHead string) (pipeline.PRTargetSelection, error) {
+	if selection.ForgeHeadSHA == localHead {
+		return selection, nil
+	}
+	refreshed, err := resolvePRTargetWithReader(sctx, reader, allowTerminal)
+	// Only a transient read failure earns one more refresh. Authentication,
+	// permission and validation failures return on the first attempt.
+	if err != nil && sctx.Ctx.Err() == nil &&
+		!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
+		(errors.Is(err, scm.ErrTransientTimeout) || netretry.Retryable(err)) {
+		refreshed, err = resolvePRTargetWithReader(sctx, reader, allowTerminal)
+	}
+	if err != nil {
+		return pipeline.PRTargetSelection{}, fmt.Errorf("refresh pull request head before retarget (pull request head %s, local head %s): %w", selection.ForgeHeadSHA, localHead, err)
+	}
+	accounted, err := runAccountsForPRHead(sctx, refreshed.ForgeHeadSHA, localHead)
+	if err != nil {
+		return pipeline.PRTargetSelection{}, err
+	}
+	if !accounted {
+		return pipeline.PRTargetSelection{}, fmt.Errorf("pull request head %s differs from local head %s before retarget", refreshed.ForgeHeadSHA, localHead)
+	}
+	return refreshed, nil
+}
+
+// runAccountsForPRHead reports whether a forge head that differs from the
+// local head is one this run explains: its own durable last push, or a head
+// the local head already contains (its later push fast-forwards the PR).
+func runAccountsForPRHead(sctx *pipeline.StepContext, forgeHead, localHead string) (bool, error) {
+	if forgeHead == "" {
+		return false, nil
+	}
+	if forgeHead == localHead {
+		return true, nil
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		return false, fmt.Errorf("read run publication before retarget: %w", err)
+	}
+	if run != nil && run.LastPushedSHA != nil && *run.LastPushedSHA == forgeHead {
+		return true, nil
+	}
+	_, err = git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", forgeHead, localHead)
+	return err == nil, nil
 }
 
 func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName, selection pipeline.PRTargetSelection, freshRetarget bool) (decision pipeline.PRContextDecision, err error) {
