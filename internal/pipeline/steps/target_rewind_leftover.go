@@ -206,9 +206,8 @@ func commitPredecessorValidationEdits(c *pipeline.StepContext) (bool, error) {
 		return false, err
 	}
 	if !allowed {
-		// The budget is spent: this run already preserved one predecessor's
-		// edits and sent them through re-review. Another one is refused
-		// rather than looped on.
+		// The budget is spent: leave the edits for the caller's clean-entry
+		// handling in documentDirtyEntryOutcome.
 		return false, nil
 	}
 	head, err := git.HeadSHA(c.Ctx, c.WorkDir)
