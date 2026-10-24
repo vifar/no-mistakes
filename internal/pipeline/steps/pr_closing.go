@@ -378,7 +378,39 @@ func appendIssuesSection(body, section string) string {
 	if strings.TrimSpace(body) == "" {
 		return section
 	}
-	return mdfence.Close(body) + "\n\n" + section
+	return closePRBodyFence(body) + "\n\n" + section
+}
+
+// scanPRBodyFence uses the closing-reference scanner's HTML context: fence
+// markers inside <pre>/<code> are literal content, and HTML inside a Markdown
+// fence cannot change that context.
+func scanPRBodyFence(body string) mdfence.Fence {
+	var fence mdfence.Fence
+	var htmlCode string
+	for _, raw := range strings.Split(mdfence.NormalizeLineEndings(body), "\n") {
+		if htmlCode == "" {
+			inFence := fence.Open()
+			fence.Consume(raw)
+			if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+				continue
+			}
+		}
+		outsideInlineCode(raw, func(text string) string {
+			return outsideHTMLCode(text, &htmlCode, func(text string) string { return text })
+		})
+	}
+	return fence
+}
+
+func closePRBodyFence(body string) string {
+	closer := scanPRBodyFence(body).Closer()
+	if closer == "" {
+		return body
+	}
+	if !strings.HasSuffix(body, "\n") && !strings.HasSuffix(body, "\r") {
+		body += "\n"
+	}
+	return body + closer
 }
 
 // claimClosingIssueRefs samples the run's --closes references for this PR
@@ -611,10 +643,10 @@ func fenceClosedWithin(budget int, units func(string) int, build func(budget int
 	var closed string
 	for attempt := 0; attempt < maxFenceRebuilds; attempt++ {
 		body := build(budget - reserve)
-		if mdfence.Scan(body).Closer() == "" {
+		if scanPRBodyFence(body).Closer() == "" {
 			return body
 		}
-		closed = mdfence.Close(body)
+		closed = closePRBodyFence(body)
 		overshoot := units(closed) - budget
 		if overshoot <= 0 {
 			return closed
@@ -651,9 +683,9 @@ func logClosingRejection(sctx *pipeline.StepContext, body, missing string) {
 	if closingGrammarFor(resolvedProviderForBody(sctx)).codeAware {
 		issuesOpen := false
 		if anchor >= 0 {
-			issuesOpen = mdfence.Scan(body[:anchor]).Open()
+			issuesOpen = scanPRBodyFence(body[:anchor]).Open()
 		}
-		fenceState = fmt.Sprintf("ended inside an open fence: %t; Issues section started inside an open fence: %t (this provider ignores references inside fences)", mdfence.Scan(body).Open(), issuesOpen)
+		fenceState = fmt.Sprintf("ended inside an open fence: %t; Issues section started inside an open fence: %t (this provider ignores references inside fences)", scanPRBodyFence(body).Open(), issuesOpen)
 	} else {
 		fenceState = "this provider applies its closing pattern to the raw text, so fences do not matter; the reference was not found in the body"
 	}

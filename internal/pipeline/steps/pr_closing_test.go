@@ -231,6 +231,40 @@ func TestClosingReferencesResumeAfterHTMLCode(t *testing.T) {
 	}
 }
 
+// A fence marker inside an HTML code example is literal content. The public
+// intent-closing contract still requires the declaration after the example to
+// be published and verified. This exercises full PR composition, where a
+// fence repair must not put the Issues section inside a newly opened fence.
+func TestPRStep_IntentClosingDeclarationAfterHTMLCodeWithFence(t *testing.T) {
+	t.Parallel()
+	for _, tag := range []string{"pre", "code"} {
+		for _, marker := range []string{"```", "~~~"} {
+			t.Run(tag+"/"+marker, func(t *testing.T) {
+				t.Parallel()
+				dir, base, head := setupGitRepo(t)
+				env, _ := fakeGH(t, "")
+				ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					return &agent.Result{Output: json.RawMessage(`{"title":"fix: update widget","body":"## What Changed\n\nUpdate widget."}`)}, nil
+				}}
+				sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+				sctx.Env = env
+				sctx.UserIntent = "Document this example:\n<" + tag + ">\n" + marker + "\nCloses #12\n </" + tag + ">\n\nCloses #95"
+
+				if _, err := (&PRStep{}).Execute(sctx); err != nil {
+					t.Fatalf("literal HTML code example prevented requested closure publication: %v", err)
+				}
+				if got := strings.Join(sctx.ClosingIssueRefs, ","); got != "95" {
+					t.Fatalf("claimed references = %q, want only 95", got)
+				}
+				body := readPRBodyFile(t, envEntry(env, "FAKE_CLI_PR_BODY_FILE"))
+				if !strings.Contains(body, "Closes #12") || !strings.Contains(body, "## Issues\n\nCloses #95") {
+					t.Fatalf("published body lost the literal example or requested closure:\n%s", body)
+				}
+			})
+		}
+	}
+}
+
 func TestIntentClosingReferencesRedactSecrets(t *testing.T) {
 	t.Parallel()
 	const secret = "sk-abcdefghijklmnopqrstuvwx"
