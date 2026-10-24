@@ -67,7 +67,7 @@ func TestPublishedBodyRendersACoAuthorOnEveryAssemblyPath(t *testing.T) {
 			ctx := &pipeline.StepContext{Config: &config.Config{}}
 			ctx.Config.PR.Appendix = mode
 			narrative := "## What Changed\n\nCo-Authored-By: Claude Smith <code@example.com>\n"
-			risk := "Low: Recorded risk Co-Authored-By: Claude <risk@example.com>\n"
+			risk := "Low: Recorded risk\nCo-Authored-By: Claude <risk@example.com>\n"
 			testingMD := "## Testing\n\nCo-Authored-By: Claude <artifact@example.com>\n"
 			pipelineMD := "## Pipeline\n\nCo-Authored-By: Claude <pipeline@example.com>\n"
 			bodyIdentities := []string{"Claude Smith <code@example.com>", "Claude <risk@example.com>"}

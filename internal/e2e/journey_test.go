@@ -1280,11 +1280,14 @@ func assertNonEmptyDiffAfterRebaseRun(t *testing.T, h *Harness) {
 	if run.HeadSHA == branchHead {
 		t.Fatalf("expected rebase to rewrite head SHA, still %s", run.HeadSHA)
 	}
-	mergeBase, err := h.runGit(ctx, h.UpstreamDir, "merge-base", "refs/heads/non-empty-after-rebase", "refs/heads/main")
+	// The pipeline wait can outlast the setup command budget.
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer verifyCancel()
+	mergeBase, err := h.runGit(verifyCtx, h.UpstreamDir, "merge-base", "refs/heads/non-empty-after-rebase", "refs/heads/main")
 	if err != nil {
 		t.Fatalf("resolve non-empty-after-rebase merge-base: %v\n%s", err, mergeBase)
 	}
-	mainSHA, err := h.runGit(ctx, h.UpstreamDir, "rev-parse", "refs/heads/main")
+	mainSHA, err := h.runGit(verifyCtx, h.UpstreamDir, "rev-parse", "refs/heads/main")
 	if err != nil {
 		t.Fatalf("resolve upstream main SHA: %v\n%s", err, mainSHA)
 	}
