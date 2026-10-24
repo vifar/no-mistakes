@@ -27,14 +27,19 @@ import (
 // and there is deliberately no output filter or prose scanner to catch that.
 // Review, test, document, lint, and CI-fix prompts keep the full intent
 // under either signal.
-func publicPRIntent(sctx *pipeline.StepContext) string {
+func publicPRIntent(sctx *pipeline.StepContext, configuredTrailers ...string) string {
 	if sctx != nil && sctx.Config != nil && !sctx.Config.PR.PublishesIntent() {
 		return ""
 	}
 	if runOmitsIntent(sctx) {
 		return ""
 	}
-	return cleanedUserIntent(sctx)
+	if sctx == nil {
+		return ""
+	}
+	display := *sctx
+	display.UserIntent = prDisplayText(sctx.UserIntent, configuredTrailers...)
+	return cleanedUserIntent(&display)
 }
 
 // runOmitsIntent reports whether this run was started with the caller-side,

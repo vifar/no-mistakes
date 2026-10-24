@@ -30,7 +30,7 @@ type pipelineAttestationAcceptedGaps struct {
 	CoveredByDigest string   `json:"covered_by_sha256"`
 }
 
-func attestedAcceptedGaps(sr *db.StepResult) *pipelineAttestationAcceptedGaps {
+func attestedAcceptedGaps(sr *db.StepResult, configuredTrailers ...string) *pipelineAttestationAcceptedGaps {
 	if sr == nil || sr.StepName != types.StepTest {
 		return nil
 	}
@@ -38,20 +38,20 @@ func attestedAcceptedGaps(sr *db.StepResult) *pipelineAttestationAcceptedGaps {
 	if err != nil || gaps == nil {
 		return nil
 	}
-	return &pipelineAttestationAcceptedGaps{FindingIDs: gaps.FindingIDs, ReasonDigest: acceptedGapTextDigest(gaps.Reason), CoveredByDigest: acceptedGapTextDigest(gaps.CoveredBy)}
+	return &pipelineAttestationAcceptedGaps{FindingIDs: gaps.FindingIDs, ReasonDigest: acceptedGapTextDigest(gaps.Reason, configuredTrailers...), CoveredByDigest: acceptedGapTextDigest(gaps.CoveredBy, configuredTrailers...)}
 }
 
-// canonicalAcceptedGapText redacts the reason and covering tests before both
-// digesting and rendering them, so the digest never binds text publication
-// would redact. Redaction is idempotent, so later whole-body redaction cannot
-// change it. Rendering also escapes text and neutralizes reserved markers and
-// closing references; those presentation rewrites are not part of the digest.
-func canonicalAcceptedGapText(text string) string {
-	return safepath.RedactText(text)
+// canonicalAcceptedGapText applies attribution filtering, human-coauthor
+// presentation, and home-path redaction before both digesting and rendering,
+// so the digest binds the same canonical text as the published audit.
+// Rendering also escapes text and neutralizes reserved markers and closing
+// references; those presentation rewrites are not part of the digest.
+func canonicalAcceptedGapText(text string, configuredTrailers ...string) string {
+	return safepath.RedactText(prDisplayText(text, configuredTrailers...))
 }
 
-func acceptedGapTextDigest(text string) string {
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(canonicalAcceptedGapText(text))))
+func acceptedGapTextDigest(text string, configuredTrailers ...string) string {
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(canonicalAcceptedGapText(text, configuredTrailers...))))
 }
 
 func acceptedGapAuditBlock(pipelineMD string) string {
@@ -94,9 +94,9 @@ func preserveAcceptedGapAudit(body, prefix, pipelineMD string, limit int, units 
 }
 
 // buildAcceptedGapsBlock renders each accepted finding with its description,
-// plus the approval reason and the covering tests verbatim. It returns "" when
-// no completed Test step carries a recorded gap.
-func buildAcceptedGapsBlock(steps []*db.StepResult, provider scm.Provider) string {
+// plus the approval reason and covering tests through canonicalAcceptedGapText.
+// It returns "" when no completed Test step carries a recorded gap.
+func buildAcceptedGapsBlock(steps []*db.StepResult, provider scm.Provider, configuredTrailers ...string) string {
 	flavor := prBodyFlavorFor(provider)
 	for _, sr := range steps {
 		if sr == nil || sr.StepName != types.StepTest || sr.Status != types.StepStatusCompleted {
@@ -112,7 +112,7 @@ func buildAcceptedGapsBlock(steps []*db.StepResult, provider scm.Provider) strin
 			// crosses the same publication redaction boundary as the reason.
 			// A restamp writes this block through UpdatePR without the draft
 			// path's whole-body redaction, so it must already be redacted.
-			descriptions[f.ID] = canonicalAcceptedGapText(f.Description)
+			descriptions[f.ID] = canonicalAcceptedGapText(f.Description, configuredTrailers...)
 		}
 		var b strings.Builder
 		b.WriteString(acceptedGapsHeading)
@@ -127,8 +127,8 @@ func buildAcceptedGapsBlock(steps []*db.StepResult, provider scm.Provider) strin
 			}
 			b.WriteString("\n")
 		}
-		fmt.Fprintf(&b, "- Approved: %s\n", escapePRText(canonicalAcceptedGapText(gaps.Reason), flavor))
-		fmt.Fprintf(&b, "- Covered by: %s", escapePRText(canonicalAcceptedGapText(gaps.CoveredBy), flavor))
+		fmt.Fprintf(&b, "- Approved: %s\n", escapePRText(canonicalAcceptedGapText(gaps.Reason, configuredTrailers...), flavor))
+		fmt.Fprintf(&b, "- Covered by: %s", escapePRText(canonicalAcceptedGapText(gaps.CoveredBy, configuredTrailers...), flavor))
 		return acceptedGapsStart + "\n" + neutralizeAttestationMarkers(provider, b.String()) + "\n" + acceptedGapsEnd
 	}
 	return ""
@@ -143,8 +143,8 @@ func singleLineText(s string, maxRunes int) string {
 	return s
 }
 
-func rebindAcceptedGapAudit(body string, steps []*db.StepResult, provider scm.Provider) (string, error) {
-	block := buildAcceptedGapsBlock(steps, provider)
+func rebindAcceptedGapAudit(body string, steps []*db.StepResult, provider scm.Provider, configuredTrailers ...string) (string, error) {
+	block := buildAcceptedGapsBlock(steps, provider, configuredTrailers...)
 	starts, ends := strings.Count(body, acceptedGapsStart), strings.Count(body, acceptedGapsEnd)
 	if starts == 0 && ends == 0 {
 		if block == "" {

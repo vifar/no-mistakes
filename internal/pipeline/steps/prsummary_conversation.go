@@ -37,7 +37,7 @@ const (
 // completes on its own while one is open, but a human may approve the gate over
 // it, and that is exactly the case a reader of the PR needs to see. It is
 // listed as unanswered rather than quietly omitted.
-func buildReviewConversationSection(sctx *pipeline.StepContext) string {
+func buildReviewConversationSection(sctx *pipeline.StepContext, configuredTrailers ...string) string {
 	// Keyed on the setting, not on this run's evidence directory: a repository
 	// that turned the conversation off must publish the body it published
 	// before the feature existed, even where an earlier run left answers in the
@@ -63,12 +63,12 @@ func buildReviewConversationSection(sctx *pipeline.StepContext) string {
 			continue
 		}
 		shown++
-		fmt.Fprintf(&b, "- **Q:** %s\n", publishedConversationText(a.Question))
-		who := publishedConversationText(a.AnsweredBy)
+		fmt.Fprintf(&b, "- **Q:** %s\n", publishedConversationText(a.Question, configuredTrailers...))
+		who := publishedConversationText(a.AnsweredBy, configuredTrailers...)
 		if who == "" {
 			who = "unattributed"
 		}
-		fmt.Fprintf(&b, "  **A** (%s)**:** %s\n", who, publishedConversationText(a.Answer))
+		fmt.Fprintf(&b, "  **A** (%s)**:** %s\n", who, publishedConversationText(a.Answer, configuredTrailers...))
 	}
 	// Unanswered before withdrawn: a question someone approved past is the
 	// most consequential line in this section, so a length bound must not be
@@ -79,7 +79,7 @@ func buildReviewConversationSection(sctx *pipeline.StepContext) string {
 			continue
 		}
 		shown++
-		fmt.Fprintf(&b, "- **Q:** %s\n  **Unanswered:** the review gate was resolved with this question still open.\n", publishedConversationText(q.Question.Question))
+		fmt.Fprintf(&b, "- **Q:** %s\n  **Unanswered:** the review gate was resolved with this question still open.\n", publishedConversationText(q.Question.Question, configuredTrailers...))
 	}
 	for _, q := range withdrawn {
 		if shown >= maxPublishedConversationEntries {
@@ -87,7 +87,7 @@ func buildReviewConversationSection(sctx *pipeline.StepContext) string {
 			continue
 		}
 		shown++
-		fmt.Fprintf(&b, "- **Q:** %s\n  **Withdrawn by the reviewer:** %s\n", publishedConversationText(q.Question.Question), publishedConversationText(q.Reason))
+		fmt.Fprintf(&b, "- **Q:** %s\n  **Withdrawn by the reviewer:** %s\n", publishedConversationText(q.Question.Question, configuredTrailers...), publishedConversationText(q.Reason, configuredTrailers...))
 	}
 	if omitted > 0 {
 		fmt.Fprintf(&b, "\n%d further review question(s) omitted for length.\n", omitted)
@@ -146,8 +146,8 @@ func publishedRunConversation(sctx *pipeline.StepContext) reviewqa.Conversation 
 // is ordinary prose, so a byte cut falls inside a multi-byte rune on nothing
 // more exotic than a typographic quote or an em dash and publishes invalid
 // UTF-8. This is the same shape as internal/cli's truncate.
-func publishedConversationText(s string) string {
-	s = sanitizePromptText(s)
+func publishedConversationText(s string, configuredTrailers ...string) string {
+	s = sanitizePromptText(prDisplayText(s, configuredTrailers...))
 	runes := []rune(s)
 	if len(runes) <= maxPublishedConversationChars {
 		return s

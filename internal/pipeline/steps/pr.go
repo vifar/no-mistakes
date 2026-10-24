@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/conventional"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -166,7 +167,11 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				if err != nil {
 					return nil, err
 				}
-				emptyNarrative = neutralizeAttestationMarkers(provider, draft.Body)
+				configuredTrailers, err := configuredAttributionTrailers(sctx)
+				if err != nil {
+					return nil, fmt.Errorf("prepare PR attribution filtering: %w", err)
+				}
+				emptyNarrative = neutralizeAttestationMarkers(provider, prDisplayText(draft.Body, configuredTrailers...))
 				title = draft.Title
 			} else if sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
 				title, err = s.draftConfiguredPRTitle(sctx, branch, baseBranch, baseSHA)
@@ -375,13 +380,17 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		if err != nil {
 			return prContent{}, err
 		}
+		configuredTrailers, err := configuredAttributionTrailers(sctx)
+		if err != nil {
+			return prContent{}, fmt.Errorf("prepare PR attribution filtering: %w", err)
+		}
 		appendix, err := s.buildPRAppendix(sctx, provider)
 		if err != nil {
 			return prContent{}, err
 		}
-		narrative := neutralizeAttestationMarkers(provider, content.Body)
+		narrative := neutralizeAttestationMarkers(provider, prDisplayText(content.Body, configuredTrailers...))
 		appendix = appendIssuesSection(appendix, issuesSection(sctx, narrative))
-		return composeOwnedPRContent(prOwnedBody{before: narrative}, content.Title, appendix, bodyLimit)
+		return composeOwnedPRContent(prOwnedBody{before: narrative}, content.Title, appendix, bodyLimit, configuredTrailers...)
 	}
 	content, err := s.draftPRContent(sctx, branch, baseBranch, baseSHA, provider, bodyLimit)
 	if err != nil {
@@ -397,8 +406,8 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 // to be published. Ordinary drafts call it after length caps; the placeholder
 // never grows a path. Owned composition calls it before its integrity guard
 // and non-truncating size check so publication cannot invalidate that guard.
-func redactPRContent(content prContent) prContent {
-	content.Title = safepath.RedactText(content.Title)
+func redactPRContent(content prContent, configuredTrailers ...string) prContent {
+	content.Title = safepath.RedactText(prDisplayText(content.Title, configuredTrailers...))
 	content.Body = safepath.RedactText(content.Body)
 	return content
 }
@@ -414,10 +423,6 @@ func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		return prContent{}, fmt.Errorf("read final branch diff: %w", err)
 	}
 	inventory := prPromptInventory(sctx, finalDiff, baseSHA)
-	pipelineMD, riskLine, testingMD := s.buildPipelineSection(sctx, provider)
-	if err := validateAcceptedGapAuditBudget(pipelineMD, bodyLimit); err != nil {
-		return prContent{}, err
-	}
 
 	titleRules := prTitlePromptRules(sctx)
 	scopeRules := prTitleScopeRules(sctx)
@@ -452,9 +457,17 @@ Final diff paths and statuses:
 		JSONSchema: prContentSchema,
 		OnChunk:    sctx.LogChunk,
 	})
+	pipelineMD, riskLine, testingMD := s.buildPipelineSection(sctx, provider)
+	if err := validateAcceptedGapAuditBudget(pipelineMD, bodyLimit); err != nil {
+		return prContent{}, err
+	}
+	configuredTrailers, displayErr := configuredAttributionTrailers(sctx)
+	if displayErr != nil {
+		return prContent{}, fmt.Errorf("prepare PR attribution filtering: %w", displayErr)
+	}
 	if err != nil {
 		slog.Warn("agent failed for PR content, using fallback", "error", err)
-		fallback, fallbackErr := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit, provider)
+		fallback, fallbackErr := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit, provider, configuredTrailers...)
 		return fallback, fallbackErr
 	}
 
@@ -464,7 +477,7 @@ Final diff paths and statuses:
 			content.Title = strings.TrimSpace(content.Title)
 			content.Body = strings.TrimSpace(content.Body)
 			content.Body = unwrapNestedPRBody(content.Body)
-			content.Body = stripGeneratedSections(content.Body)
+			content.Body = stripGeneratedSections(prDisplayText(content.Body, configuredTrailers...))
 			content.Body = neutralizeAttestationMarkers(provider, content.Body)
 			if content.Title != "" && content.Body != "" {
 				originalTitle := content.Title
@@ -475,13 +488,13 @@ Final diff paths and statuses:
 				if content.Title != originalTitle {
 					slog.Warn("normalized agent PR title", "from", originalTitle, "to", content.Title)
 				}
-				content.Body = assembleDraftPRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit, provider)
+				content.Body = assembleDraftPRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit, provider, configuredTrailers...)
 				return content, nil
 			}
 		}
 	}
 
-	return fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit, provider)
+	return fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit, provider, configuredTrailers...)
 }
 
 func (s *PRStep) draftConfiguredPRTitle(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string) (string, error) {
@@ -665,6 +678,14 @@ func prTitleScopeRules(sctx *pipeline.StepContext) string {
 }
 
 func renderPRTitle(sctx *pipeline.StepContext, title string) (string, error) {
+	trailers, err := configuredAttributionTrailers(sctx)
+	if err != nil {
+		return "", fmt.Errorf("prepare PR title attribution filtering: %w", err)
+	}
+	title = strings.TrimSpace(prDisplayText(title, trailers...))
+	if title == "" {
+		return "", fmt.Errorf("PR title contains no publishable text")
+	}
 	if sctx == nil || sctx.Config == nil || sctx.Config.PR.TitleFormat == "" {
 		return conventional.TightenTitle(title), nil
 	}
@@ -708,11 +729,17 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	if sctx.Config != nil {
 		policy.AllowTestCommandOverride = strings.TrimSpace(sctx.Config.Test.AllowApproveOverFailure)
 	}
-	pipelineMD, riskLine = buildPipelineSummaryFor(steps, rounds, sctx.Run.HeadSHA, provider, policy)
+	trailers, err := recordedAttributionTrailers(sctx, steps, rounds)
+	if err != nil {
+		slog.Warn("failed to prepare Review attribution filtering for pipeline summary")
+		return "", "", ""
+	}
+	policy.ConfiguredTrailers = trailers
+	pipelineMD, riskLine = buildPipelineSummaryFor(steps, rounds, sctx.Run.HeadSHA, provider, policy, trailers...)
 	// The review conversation rides inside the Pipeline section as an ordinary
 	// `### ` group, so the existing body-budget logic can drop it whole rather
 	// than competing with the attestation it must never displace.
-	if conversationMD := buildReviewConversationSection(sctx); conversationMD != "" && pipelineMD != "" {
+	if conversationMD := buildReviewConversationSection(sctx, trailers...); conversationMD != "" && pipelineMD != "" {
 		pipelineMD += "\n\n" + conversationMD
 	}
 	// Ordinary Bitbucket descriptions keep their existing Markdown-only skin.
@@ -721,7 +748,7 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	if owned && provider == scm.ProviderBitbucket && pipelineMD != "" {
 		pipelineMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, rounds, sctx.Run.HeadSHA, policy) + "\n```"
 	}
-	testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds))
+	testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds), trailers...)
 	// The sections render a co-author's trailer key as a labelled field.
 	//
 	// This is their single source, so every publication path gets it: the
@@ -730,6 +757,105 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	// body that fits the budget before the rendering is not over it after
 	// it.
 	return renderCoAuthorAsLabelledField(pipelineMD), renderCoAuthorAsLabelledField(riskLine), renderCoAuthorAsLabelledField(testingMD)
+}
+
+func configuredAttributionTrailers(sctx *pipeline.StepContext, producers ...*agent.Result) ([]string, error) {
+	if sctx == nil {
+		return nil, nil
+	}
+	var steps []*db.StepResult
+	rounds := map[string][]*db.StepRound{}
+	if sctx.DB != nil && sctx.Run != nil {
+		var err error
+		steps, err = sctx.DB.GetStepsByRun(sctx.Run.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, step := range steps {
+			rounds[step.ID], err = sctx.DB.GetRoundsByStep(step.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	trailers, err := recordedAttributionTrailers(sctx, steps, rounds)
+	if err != nil {
+		return nil, err
+	}
+	for _, producer := range producers {
+		rendered, err := renderCommitTrailers(sctx, producer)
+		if err != nil {
+			return nil, err
+		}
+		trailers = append(trailers, rendered...)
+	}
+	return trailers, nil
+}
+
+func recordedAttributionTrailers(sctx *pipeline.StepContext, steps []*db.StepResult, rounds map[string][]*db.StepRound) ([]string, error) {
+	var invocations []db.AgentInvocation
+	if sctx.DB != nil && sctx.Run != nil {
+		var err error
+		invocations, err = sctx.DB.GetAgentInvocationsByRun(sctx.Run.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	var trailers []string
+	appendRendered := func(commit config.Commit, stepName string, round int) error {
+		literal := commit
+		literal.Trailers = nil
+		for _, source := range commit.Trailers {
+			if !strings.Contains(source, "{{") {
+				literal.Trailers = append(literal.Trailers, source)
+			}
+		}
+		lines, err := literal.RenderTrailers(config.TrailerData{})
+		if err != nil {
+			return err
+		}
+		trailers = append(trailers, lines...)
+		for _, invocation := range invocations {
+			if (stepName != "" && invocation.StepName != stepName) || (round != 0 && invocation.Round != round) {
+				continue
+			}
+			lines, err := commit.RenderTrailers(config.TrailerData{Agent: invocation.Agent, Model: invocation.Model})
+			if err != nil {
+				return err
+			}
+			trailers = append(trailers, lines...)
+		}
+		return nil
+	}
+	if sctx.Config != nil {
+		if err := appendRendered(sctx.Config.Commit, "", 0); err != nil {
+			return nil, err
+		}
+	}
+	for _, step := range steps {
+		for _, round := range rounds[step.ID] {
+			if len(round.GlobalConfigYAML) == 0 || len(round.RepoConfigYAML) == 0 {
+				continue
+			}
+			global, err := config.LoadGlobalFromBytes(round.GlobalConfigYAML)
+			if err != nil {
+				return nil, err
+			}
+			repo, err := config.LoadRepoFromBytes(round.RepoConfigYAML)
+			if err != nil {
+				return nil, err
+			}
+			remote := ""
+			if sctx.Repo != nil {
+				remote = sctx.Repo.UpstreamURL
+			}
+			cfg := config.MergeForRemote(global, repo, remote)
+			if err := appendRendered(cfg.Commit, string(step.StepName), round.Round); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return trailers, nil
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a
@@ -770,24 +896,24 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 // log dumps while keeping its Intent, What Changed, Risk, and Pipeline
 // narrative intact. prependIntentSectionWithinLimit is the final backstop
 // when even that core overruns.
-func assemblePRBodyFull(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) string {
+func assemblePRBodyFull(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider, configuredTrailers ...string) string {
 	sections := appendGeneratedSections(whatChanged, riskLine, testingMD, pipelineMD, provider)
-	full := prependIntentSection(sections, sctx)
+	full := prependIntentSection(sections, sctx, configuredTrailers...)
 	if bodyLimit <= 0 || scm.PRBodyLen(full) <= bodyLimit {
 		return full
 	}
 	if testingMD != "" {
 		sections = appendGeneratedSections(whatChanged, riskLine, "", pipelineMD, provider)
-		core := prependIntentSection(sections, sctx)
+		core := prependIntentSection(sections, sctx, configuredTrailers...)
 		if scm.PRBodyLen(core) <= bodyLimit {
 			return core
 		}
 	}
-	return assemblePRBodyCoreWithinLimit(sctx, whatChanged, riskLine, pipelineMD, bodyLimit, provider)
+	return assemblePRBodyCoreWithinLimit(sctx, whatChanged, riskLine, pipelineMD, bodyLimit, provider, configuredTrailers...)
 }
 
-func assemblePRBodyCoreWithinLimit(sctx *pipeline.StepContext, whatChanged, riskLine, pipelineMD string, bodyLimit int, provider scm.Provider) string {
-	prefix := prependIntentSection(appendGeneratedSections(whatChanged, riskLine, "", "", provider), sctx)
+func assemblePRBodyCoreWithinLimit(sctx *pipeline.StepContext, whatChanged, riskLine, pipelineMD string, bodyLimit int, provider scm.Provider, configuredTrailers ...string) string {
+	prefix := prependIntentSection(appendGeneratedSections(whatChanged, riskLine, "", "", provider), sctx, configuredTrailers...)
 	if pipelineMD == "" {
 		return scm.ClampPRBody(prefix, bodyLimit)
 	}
@@ -837,12 +963,12 @@ func appendGeneratedSections(body, riskLine, testingMD, pipelineMD string, provi
 	return appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD, provider)
 }
 
-func buildPRBodyFull(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, maxBytes int, provider scm.Provider) string {
+func buildPRBodyFull(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, maxBytes int, provider scm.Provider, configuredTrailers ...string) string {
 	body = stripGeneratedSections(body)
 	sections := appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD, maxBytes, provider)
 	// Neutralized for the same reason as in prependIntentSection: intent is
 	// agent-extracted text placed ahead of the pipeline section.
-	cleaned := neutralizeAttestationMarkers(provider, publicPRIntent(sctx))
+	cleaned := prDisplayText(neutralizeAttestationMarkers(provider, publicPRIntent(sctx, configuredTrailers...)), configuredTrailers...)
 	if cleaned == "" {
 		return sections
 	}
@@ -1634,11 +1760,11 @@ func isGeneratedSectionHeading(line string) bool {
 // the same secret/adversarial scrubbing the agent prompt path applies)
 // rather than being paraphrased by the agent. Returns body unchanged when
 // no intent is available or publication is disabled.
-func prependIntentSection(body string, sctx *pipeline.StepContext) string {
+func prependIntentSection(body string, sctx *pipeline.StepContext, configuredTrailers ...string) string {
 	// Intent is agent-extracted text that lands ahead of the pipeline section,
 	// so it can shadow the real attestation the same way the Testing section
 	// can. See appendGeneratedSectionsToCleanBodyWithinLimit.
-	cleaned := neutralizeAttestationMarkers(resolvedProviderForBody(sctx), publicPRIntent(sctx))
+	cleaned := prDisplayText(neutralizeAttestationMarkers(resolvedProviderForBody(sctx), publicPRIntent(sctx, configuredTrailers...)), configuredTrailers...)
 	if cleaned == "" {
 		return body
 	}
@@ -1649,7 +1775,7 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 	return section + "\n\n" + body
 }
 
-func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) (prContent, error) {
+func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider, configuredTrailers ...string) (prContent, error) {
 	if err := validateAcceptedGapAuditBudget(pipelineMD, bodyLimit); err != nil {
 		return prContent{}, err
 	}
@@ -1663,7 +1789,7 @@ func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingM
 		body = "## What Changed\n\nFinal diff unavailable; no complete scope summary was generated."
 	}
 	body = neutralizeAttestationMarkers(provider, body)
-	body = assembleDraftPRBody(sctx, body, riskLine, testingMD, pipelineMD, bodyLimit, provider)
+	body = assembleDraftPRBody(sctx, body, riskLine, testingMD, pipelineMD, bodyLimit, provider, configuredTrailers...)
 	if err := validateOwnedPRBudget(body, bodyLimit); err != nil {
 		return prContent{}, err
 	}

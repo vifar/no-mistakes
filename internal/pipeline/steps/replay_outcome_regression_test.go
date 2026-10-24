@@ -332,6 +332,11 @@ func testRepairOutcomeExecutor(t *testing.T, capture bool, description string, c
 			want := description
 			if !change {
 				want = NoChangesAppliedSummary
+			} else if description == NoChangesAppliedSummary {
+				// A round that committed a change while summarising itself as a
+				// no-op keeps the canonical subject-free form, so the summary
+				// cannot be mistaken for the no-op marker itself.
+				want = "Fixer summary: " + NoChangesAppliedSummary
 			}
 			if round.FixSummary == nil || *round.FixSummary != want {
 				t.Errorf("persisted direct repair summary = %v", round.FixSummary)

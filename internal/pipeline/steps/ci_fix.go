@@ -1023,7 +1023,18 @@ func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*d
 			attestationSteps[i] = testStepWithRoundEvidence(sr, rounds)
 		}
 	}
-	if err := restampPRAttestationWithSteps(sctx.Ctx, host, pr, headSHA, attestationSteps, sctx.Log, attestationPolicyFrom(sctx), func() error {
+	policy := attestationPolicyFrom(sctx)
+	policy.ConfiguredTrailers, err = configuredAttributionTrailers(sctx)
+	if err != nil {
+		return fmt.Errorf("%w: prepare PR attribution filtering: %w", errAttestationWriteFailed, err)
+	}
+	if steps == nil && len(policy.ConfiguredTrailers) > 0 && sctx.DB != nil {
+		policy.acceptedGapSteps, err = sctx.DB.GetStepsByRun(sctx.Run.ID)
+		if err != nil {
+			return fmt.Errorf("%w: read accepted-gap display records: %w", errAttestationWriteFailed, err)
+		}
+	}
+	if err := restampPRAttestationWithSteps(sctx.Ctx, host, pr, headSHA, attestationSteps, sctx.Log, policy, func() error {
 		return verifyPRMutationComparison(sctx, host, pr, headSHA, true)
 	}); err != nil {
 		return fmt.Errorf("%w: %w", errAttestationWriteFailed, err)

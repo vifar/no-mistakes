@@ -363,8 +363,15 @@ func commitPipelineCorrectionWithCleanup(
 }
 
 func withCommitTrailers(sctx *pipeline.StepContext, message string, producer *agent.Result) (string, error) {
+	if _, err := renderCommitTrailers(sctx, producer); err != nil {
+		return "", err
+	}
+	return git.StripAIAttributionTrailers(message, sctx.Config.Commit.Trailers...), nil
+}
+
+func renderCommitTrailers(sctx *pipeline.StepContext, producer *agent.Result) ([]string, error) {
 	if producer == nil || len(sctx.Config.Commit.Trailers) == 0 {
-		return git.StripAIAttributionTrailers(message, sctx.Config.Commit.Trailers...), nil
+		return nil, nil
 	}
 	// A fallback chain reports the agent that actually ran in Provider; a bare
 	// adapter leaves it empty, and then the step agent is the one that ran.
@@ -372,11 +379,7 @@ func withCommitTrailers(sctx *pipeline.StepContext, message string, producer *ag
 	if agentName == "" && sctx.Agent != nil {
 		agentName = sctx.Agent.Name()
 	}
-	_, err := sctx.Config.Commit.RenderTrailers(config.TrailerData{Agent: agentName, Model: producer.Model})
-	if err != nil {
-		return "", err
-	}
-	return git.StripAIAttributionTrailers(message, sctx.Config.Commit.Trailers...), nil
+	return sctx.Config.Commit.RenderTrailers(config.TrailerData{Agent: agentName, Model: producer.Model})
 }
 
 // stagedChangesPresent is the handoff between catch-all staging and commit.
@@ -425,6 +428,15 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 		return committed, nil
 	}
 	summary = git.StripAIAttributionTrailers(summary, sctx.Config.Commit.Trailers...)
+	var reviewBody string
+	var reviewTrailers []string
+	if stepName == types.StepReview {
+		reviewTrailers, err = configuredAttributionTrailers(sctx, producer)
+		if err != nil {
+			return false, fmt.Errorf("render %s fix commit trailers: %w", stepName, err)
+		}
+		summary, reviewBody = reviewFixCommitSummary(summary, producer, reviewTrailers)
+	}
 	if summary == "" {
 		summary = fallbackSummary
 	}
@@ -435,9 +447,14 @@ func commitAgentFixesWithResult(sctx *pipeline.StepContext, stepName types.StepN
 	if err != nil {
 		return false, fmt.Errorf("render %s fix commit message: %w", stepName, err)
 	}
-	commitMessage, err = withCommitTrailers(sctx, commitMessage, producer)
-	if err != nil {
-		return false, fmt.Errorf("render %s fix commit trailers: %w", stepName, err)
+	if stepName == types.StepReview {
+		commitMessage += "\n\n" + reviewFixCommitBody(reviewBody, sctx.PreviousFindings, reviewTrailers)
+		commitMessage = stripReviewAIAttribution(commitMessage, reviewTrailers)
+	} else {
+		commitMessage, err = withCommitTrailers(sctx, commitMessage, producer)
+		if err != nil {
+			return false, fmt.Errorf("render %s fix commit trailers: %w", stepName, err)
+		}
 	}
 	if err := stagePipelineChanges(sctx); err != nil {
 		return false, fmt.Errorf("stage %s changes: %w", stepName, err)
@@ -656,8 +673,13 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 	}
 	committed := sctx.Run.HeadSHA != startingHead
 	sctx.FixApplied = &committed
-	if committed && stepName == types.StepReview && summary != "" {
-		return summary, nil
+	if committed && stepName == types.StepReview {
+		trailers, err := configuredAttributionTrailers(sctx, result)
+		if err != nil {
+			return "", fmt.Errorf("render %s fix summary trailers: %w", stepName, err)
+		}
+		_, bodySummary := reviewFixCommitSummary(summary, result, trailers)
+		return bodySummary, nil
 	}
 	return fixResultSummary(committed), nil
 }

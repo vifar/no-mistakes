@@ -94,15 +94,24 @@ func wrapPRAppendix(appendix string) string {
 // publication fails. That includes suffix text/closing lines added after the
 // generated block. Model-authored copies of ownership markers in evidence are
 // escaped before the actual delimiters are inserted, like foreign attestations.
-func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit int) (prContent, error) {
-	before := redactPRContent(prContent{Body: parts.before}).Body
-	after := redactPRContent(prContent{Body: parts.after}).Body
-	appendix = escapePRAppendixMarkers(appendix)
+func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit int, configuredTrailers ...string) (prContent, error) {
+	// The owned body is assembled from several owners and a preserved human
+	// co-author, an already labelled value, or an exactly configured trailer can
+	// reach any of them. The text is therefore filtered as one text block on its
+	// ORIGINAL bytes, BEFORE path redaction rewrites them - otherwise a
+	// configured trailer whose home path redaction changes no longer matches -
+	// and before the appendix digest is stamped, so the published copy is
+	// normalised and the digest still binds the bytes that are published.
+	before := prDisplayBody(parts.before, configuredTrailers...)
+	after := prDisplayBody(parts.after, configuredTrailers...)
+	appendix = escapePRAppendixMarkers(prDisplayBody(appendix, configuredTrailers...))
+	before = redactPRContent(prContent{Body: before}).Body
+	after = redactPRContent(prContent{Body: after}).Body
 	appendix = redactPRContent(prContent{Body: appendix}).Body
 	if !parts.managed && before != "" {
 		before += "\n\n"
 	}
-	content := prContent{Title: redactPRContent(prContent{Title: title}).Title, Body: before + wrapPRAppendix(appendix) + after}
+	content := prContent{Title: redactPRContent(prContent{Title: title}, configuredTrailers...).Title, Body: before + wrapPRAppendix(appendix) + after}
 	if err := validateOwnedPRBudget(content.Body, bodyLimit); err != nil {
 		return prContent{}, err
 	}
@@ -128,6 +137,14 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 	if !ok {
 		return fmt.Errorf("provider cannot read PR content; author-safe template updates are unsupported")
 	}
+	// The body that is republished is the one a previous publication left
+	// behind, so the configured trailers have to be known here as well: the
+	// published copy of a preserved human co-author becomes a labelled field
+	// and the exactly configured trailers are removed from it.
+	configuredTrailers, err := configuredAttributionTrailers(sctx)
+	if err != nil {
+		return err
+	}
 	current := initial
 	for attempt := 0; attempt < 3; attempt++ {
 		parts, err := parsePROwnedBody(current.Body)
@@ -137,10 +154,12 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		if current.Body == "" && !parts.managed {
 			parts.before = emptyNarrative
 		}
-		// The author text around the appendix is kept verbatim, so only
+		// The author text around the appendix is kept as written, except that
+		// composeOwnedPRContent renders a raw co-author trailer as the
+		// labelled field and removes an AI attribution line, so only
 		// references it does not already close are added.
 		authorText := parts.before + "\n" + parts.after
-		content, err := composeOwnedPRContent(parts, title, appendIssuesSection(appendix, issuesSection(sctx, authorText)), bodyLimit)
+		content, err := composeOwnedPRContent(parts, title, appendIssuesSection(appendix, issuesSection(sctx, authorText)), bodyLimit, configuredTrailers...)
 		if err != nil {
 			return err
 		}
@@ -178,22 +197,37 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 }
 
 // Restamping is also an owner-authorized appendix edit. Recompute its integrity
-// guard without touching author text, while refusing evidence edited by anyone
-// else. Legacy unmarked bodies retain the existing restamp contract.
+// guard after whole-body attribution filtering, while refusing evidence edited
+// by anyone else. Legacy unmarked bodies retain the existing restamp contract.
 func rebindOwnedPRAttestation(body, head string, steps []*db.StepResult, policy pipelineAttestationPolicy, provider scm.Provider) (string, bool, error) {
+	configuredTrailers := policy.ConfiguredTrailers
+	auditSteps := steps
+	if auditSteps == nil {
+		auditSteps = policy.acceptedGapSteps
+	}
 	if !hasPRAppendixMarkers(body) {
 		updated, rebound := rebindPipelineAttestationWithSteps(body, head, steps, policy)
 		// The accepted-gap audit is independent of the attestation: a provider
 		// whose ordinary bodies carry no HTML attestation (Bitbucket) still has
 		// to gain, change or lose the block when the gap state changes. It is
 		// applied to any body that is recognizably ours, never to a foreign PR.
-		if steps != nil && (rebound || acceptedGapAuditApplicable(updated)) {
+		if auditSteps != nil && (rebound || acceptedGapAuditApplicable(updated)) {
 			var err error
-			updated, err = rebindAcceptedGapAudit(updated, steps, provider)
+			updated, err = rebindAcceptedGapAudit(updated, auditSteps, provider, configuredTrailers...)
 			if err != nil {
 				return "", false, err
 			}
 			rebound = true
+		}
+		if rebound {
+			// A restamp republishes the body a previous publication left
+			// behind, so the published copy of a preserved human co-author is
+			// normalised here as well: it becomes a labelled field instead of a
+			// raw trailer line.
+			updated = prDisplayBody(updated, configuredTrailers...)
+			if len(updated) > maxPullRequestBodyBytes {
+				return "", false, fmt.Errorf("restamped PR body exceeds the publication budget")
+			}
 		}
 		return updated, rebound, nil
 	}
@@ -202,19 +236,28 @@ func rebindOwnedPRAttestation(body, head string, steps []*db.StepResult, policy 
 		return "", false, err
 	}
 	appendix, rebound := rebindPipelineAttestationWithSteps(parts.appendix, head, steps, policy)
-	if !rebound && !(steps != nil && acceptedGapAuditApplicable(appendix)) {
+	if !rebound && !(auditSteps != nil && acceptedGapAuditApplicable(appendix)) {
 		return "", false, fmt.Errorf("cannot rebind the owned PR attestation")
 	}
-	if steps != nil {
-		appendix, err = rebindAcceptedGapAudit(appendix, steps, provider)
+	if auditSteps != nil {
+		appendix, err = rebindAcceptedGapAudit(appendix, auditSteps, provider, configuredTrailers...)
 		if err != nil {
 			return "", false, err
 		}
 	}
 	// Restamps reach UpdatePR without the draft path's redaction. The generated
-	// appendix is ours, so route it through the same publication redaction before
-	// the integrity guard is recomputed; author text outside it is untouched.
+	// appendix is ours, so route it through the same publication filtering on
+	// its ORIGINAL bytes before path redaction rewrites them, then recompute the
+	// integrity guard; author text outside it is kept as written, except that
+	// the whole body is filtered below.
+	appendix = prDisplayBody(appendix, configuredTrailers...)
 	appendix = safepath.RedactText(appendix)
+	// The body that is restamped is the one a previous publication left behind,
+	// so it is normalised as one text block before the integrity guard is
+	// stamped: a preserved human co-author is published as a labelled field and
+	// an already labelled AI value is removed.
+	parts.before = prDisplayBody(parts.before, configuredTrailers...)
+	parts.after = prDisplayBody(parts.after, configuredTrailers...)
 	updated := parts.before + wrapPRAppendix(appendix) + parts.after
 	if len(updated) > maxPullRequestBodyBytes {
 		return "", false, fmt.Errorf("restamped PR body exceeds the publication budget")

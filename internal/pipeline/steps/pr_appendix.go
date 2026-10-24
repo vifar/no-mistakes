@@ -109,28 +109,30 @@ func joinBlocks(parts ...string) string {
 	return strings.Join(out, "\n\n")
 }
 
-func narrativeWithIntent(sctx *pipeline.StepContext, whatChanged string) string {
+func narrativeWithIntent(sctx *pipeline.StepContext, whatChanged string, configuredTrailers ...string) string {
 	narrative := neutralizeAttestationMarkers(resolvedProviderForBody(sctx), stripGeneratedSections(whatChanged))
-	return prependIntentSection(narrative, sctx)
+	return prependIntentSection(narrative, sctx, configuredTrailers...)
 }
 
-func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) (body string) {
+func assemblePRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider, configuredTrailers ...string) (body string) {
+	whatChanged = prDisplayText(whatChanged, configuredTrailers...)
+	riskLine = prDisplayText(riskLine, configuredTrailers...)
 	defer func() {
-		body = preserveAcceptedGapAudit(body, narrativeWithIntent(sctx, whatChanged), pipelineMD, bodyLimit, scm.PRBodyLen, scm.ClampPRBody)
+		body = preserveAcceptedGapAudit(body, narrativeWithIntent(sctx, whatChanged, configuredTrailers...), pipelineMD, bodyLimit, scm.PRBodyLen, scm.ClampPRBody)
 	}()
 	switch appendixMode(sctx) {
 	case config.PRAppendixMinimal:
-		return assembleMinimalPRBody(sctx, whatChanged, riskLine, pipelineMD, bodyLimit, provider)
+		return assembleMinimalPRBody(sctx, whatChanged, riskLine, pipelineMD, bodyLimit, provider, configuredTrailers...)
 	case config.PRAppendixCollapsed:
 		if prBodyFlavorFor(provider) == prBodyHTML {
-			return assembleCollapsedPRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit, provider)
+			return assembleCollapsedPRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit, provider, configuredTrailers...)
 		}
 	}
-	return assemblePRBodyFull(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit, provider)
+	return assemblePRBodyFull(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit, provider, configuredTrailers...)
 }
 
-func assembleMinimalPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, pipelineMD string, bodyLimit int, provider scm.Provider) string {
-	prefix := narrativeWithIntent(sctx, whatChanged)
+func assembleMinimalPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, pipelineMD string, bodyLimit int, provider scm.Provider, configuredTrailers ...string) string {
+	prefix := narrativeWithIntent(sctx, whatChanged, configuredTrailers...)
 	// The components are rendered before the body is budgeted: the
 	// rendering grows the text, and a body that fits the budget before
 	// it would exceed it after it.
@@ -144,8 +146,8 @@ func assembleMinimalPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, pi
 	return shrinkMeasuredKeepingTail(full, tail, bodyLimit, scm.PRBodyLen, scm.ClampPRBody)
 }
 
-func assembleCollapsedPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) string {
-	prefix := narrativeWithIntent(sctx, whatChanged)
+func assembleCollapsedPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider, configuredTrailers ...string) string {
+	prefix := narrativeWithIntent(sctx, whatChanged, configuredTrailers...)
 	// The components are rendered before the body is budgeted: the
 	// rendering grows the text, and a body that fits the budget before
 	// it would exceed it after it.
@@ -158,29 +160,31 @@ func assembleCollapsedPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, 
 	return fitCollapsed(prefix, riskLine, testingMD, pipelineMD, bodyLimit, scm.PRBodyLen, scm.ClampPRBody, provider)
 }
 
-func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, provider scm.Provider) string {
-	return buildPRBodyWithin(body, riskLine, testingMD, pipelineMD, sctx, provider, maxPullRequestBodyBytes)
+func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, provider scm.Provider, configuredTrailers ...string) string {
+	return buildPRBodyWithin(body, riskLine, testingMD, pipelineMD, sctx, provider, maxPullRequestBodyBytes, configuredTrailers...)
 }
 
 // buildPRBodyWithin is buildPRBody under a byte budget below the default,
 // which the Issues section uses to reserve its own room.
-func buildPRBodyWithin(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, provider scm.Provider, maxBytes int) (assembled string) {
+func buildPRBodyWithin(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, provider scm.Provider, maxBytes int, configuredTrailers ...string) (assembled string) {
+	body = prDisplayText(body, configuredTrailers...)
+	riskLine = prDisplayText(riskLine, configuredTrailers...)
 	defer func() {
-		assembled = preserveAcceptedGapAudit(assembled, narrativeWithIntent(sctx, body), pipelineMD, maxBytes, func(s string) int { return len(s) }, clampPRBytes)
+		assembled = preserveAcceptedGapAudit(assembled, narrativeWithIntent(sctx, body, configuredTrailers...), pipelineMD, maxBytes, func(s string) int { return len(s) }, clampPRBytes)
 	}()
 	switch appendixMode(sctx) {
 	case config.PRAppendixMinimal:
-		return buildMinimalPRBody(body, riskLine, pipelineMD, sctx, maxBytes, provider)
+		return buildMinimalPRBody(body, riskLine, pipelineMD, sctx, maxBytes, provider, configuredTrailers...)
 	case config.PRAppendixCollapsed:
 		if prBodyFlavorFor(provider) == prBodyHTML {
-			return buildCollapsedPRBody(body, riskLine, testingMD, pipelineMD, sctx, maxBytes, provider)
+			return buildCollapsedPRBody(body, riskLine, testingMD, pipelineMD, sctx, maxBytes, provider, configuredTrailers...)
 		}
 	}
-	return buildPRBodyFull(body, riskLine, testingMD, pipelineMD, sctx, maxBytes, provider)
+	return buildPRBodyFull(body, riskLine, testingMD, pipelineMD, sctx, maxBytes, provider, configuredTrailers...)
 }
 
-func buildMinimalPRBody(body, riskLine, pipelineMD string, sctx *pipeline.StepContext, maxBytes int, provider scm.Provider) string {
-	prefix := narrativeWithIntent(sctx, body)
+func buildMinimalPRBody(body, riskLine, pipelineMD string, sctx *pipeline.StepContext, maxBytes int, provider scm.Provider, configuredTrailers ...string) string {
+	prefix := narrativeWithIntent(sctx, body, configuredTrailers...)
 	tail := minimalTail(riskLine, pipelineMD, provider)
 	full := joinBlocks(prefix, tail)
 	if len(full) <= maxBytes {
@@ -189,8 +193,8 @@ func buildMinimalPRBody(body, riskLine, pipelineMD string, sctx *pipeline.StepCo
 	return shrinkMeasuredKeepingTail(full, tail, maxBytes, func(s string) int { return len(s) }, clampPRBytes)
 }
 
-func buildCollapsedPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, maxBytes int, provider scm.Provider) string {
-	prefix := narrativeWithIntent(sctx, body)
+func buildCollapsedPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.StepContext, maxBytes int, provider scm.Provider, configuredTrailers ...string) string {
+	prefix := narrativeWithIntent(sctx, body, configuredTrailers...)
 	return fitCollapsed(prefix, riskLine, testingMD, pipelineMD, maxBytes, func(s string) int { return len(s) }, clampPRBytes, provider)
 }
 

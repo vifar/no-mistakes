@@ -892,8 +892,11 @@ func TestCommitAgentFixes_BypassesLegacyHuskyPrepareCommitMsgHook(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := gitCmd(t, dir, "log", "-1", "--format=%B"); got != wantMessage {
-		t.Fatalf("commit message = %q, want %q", got, wantMessage)
+	if got := gitCmd(t, dir, "log", "-1", "--format=%s"); got != wantMessage {
+		t.Fatalf("commit subject = %q, want %q", got, wantMessage)
+	}
+	if got := gitCmd(t, dir, "log", "-1", "--format=%b"); !strings.Contains(got, "apply review fix") {
+		t.Fatalf("commit body lost the fix summary: %q", got)
 	}
 	if got := gitCmd(t, dir, "show", "--format=", "--name-only", "HEAD"); got != "agent-fix.txt" {
 		t.Fatalf("committed files = %q, want agent-fix.txt", got)
@@ -1189,7 +1192,73 @@ func TestExecuteFixMode_NoWorktreeChangesCanonicalizesAgentSummary(t *testing.T)
 	}
 }
 
-func TestExecuteFixMode_WorktreeChangesCanonicalizesMisleadingAgentSummary(t *testing.T) {
+func TestExecuteFixMode_ReviewCommitReportsRoundSummary(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, input, wantSummary string
+		change                   bool
+	}{
+		{"descriptive repair", "guard unsafe value", "guard unsafe value", true},
+		{"canonical collision after commit", "no changes applied", "Fixer summary: no changes applied", true},
+		{"genuine no change", "no changes applied", "no changes applied", false},
+		{"genuine no change with descriptive prose", "guard unsafe value", "no changes applied", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			output, err := json.Marshal(map[string]string{"summary": tc.input, "verification": "passed"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				if tc.change {
+					writeAgentChange(t, dir)
+				}
+				return &agent.Result{Output: output}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+			sctx.Fixing = true
+			findings := `{"findings":[{"id":"review-1","severity":"warning","description":"unsafe value"}]}`
+			sctx.PreviousFindings = findings
+			summary, err := executeFixMode(sctx, types.StepReview, fixExecutionOptions{FallbackSummary: "apply review fix", RequireVerification: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if summary != tc.wantSummary {
+				t.Fatalf("fix summary = %q, want %q", summary, tc.wantSummary)
+			}
+			if advanced := gitCmd(t, dir, "rev-parse", "HEAD") != head; advanced != tc.change {
+				t.Fatalf("HEAD advanced = %v, want %v", advanced, tc.change)
+			}
+			if tc.change {
+				if subject := lastCommitMessage(t, dir); subject != "no-mistakes(review): "+tc.input {
+					t.Errorf("subject = %q, want unchanged fixer subject", subject)
+				}
+				if body := gitCmd(t, dir, "show", "-s", "--format=%b"); body != tc.wantSummary+"\n\nRound findings:\n- unsafe value" {
+					t.Fatalf("commit body = %q", body)
+				}
+			}
+			step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", &findings, nil, 0); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := sctx.DB.InsertStepRound(step.ID, 2, "auto_fix", nil, &summary, 0); err != nil {
+				t.Fatal(err)
+			}
+			rounds, err := sctx.DB.GetRoundsByStep(step.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rounds) != 2 || rounds[1].FixSummary == nil || *rounds[1].FixSummary != tc.wantSummary {
+				t.Fatalf("persisted Review summary differs from the expected outcome: %+v", rounds)
+			}
+		})
+	}
+}
+
+func TestExecuteFixMode_NonReviewChangesCanonicalizeMisleadingAgentSummary(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "--detach", headSHA)
@@ -1206,26 +1275,26 @@ func TestExecuteFixMode_WorktreeChangesCanonicalizesMisleadingAgentSummary(t *te
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Fixing = true
 
-	summary, err := executeFixMode(sctx, types.StepReview, fixExecutionOptions{FallbackSummary: "apply review fix"})
+	summary, err := executeFixMode(sctx, types.StepLint, fixExecutionOptions{FallbackSummary: "apply lint fix"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary != "no changes applied: checked formatting" {
-		t.Fatalf("fix summary = %q, want %q", summary, "no changes applied: checked formatting")
+	if summary != "changes applied" {
+		t.Fatalf("fix summary = %q, want %q", summary, "changes applied")
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got == headSHA {
 		t.Fatal("expected committed fix to advance HEAD")
 	}
 	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"fixable warning"}],"summary":"1 warning"}`
 	md, _ := BuildPipelineSummary(
-		[]*db.StepResult{{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted}},
+		[]*db.StepResult{{ID: "s1", StepName: types.StepLint, Status: types.StepStatusCompleted}},
 		map[string][]*db.StepRound{"s1": {
 			{Round: 1, Trigger: "initial", FindingsJSON: &findings},
 			{Round: 2, Trigger: "auto_fix", FixSummary: &summary, FixApplied: sctx.FixApplied},
 		}},
 		testPipelineHeadSHA,
 	)
-	if !strings.Contains(md, "🔧 **Review** - 1 issue found → auto-fixed ✅") {
+	if !strings.Contains(md, "🔧 **Lint** - 1 issue found → auto-fixed ✅") {
 		t.Fatalf("expected committed fix in PR summary, got:\n%s", md)
 	}
 	if strings.Contains(md, "no changes applied") {
@@ -1306,17 +1375,23 @@ func TestCommitAgentFixes_OversizedRenderedMessageDoesNotStageChanges(t *testing
 
 	ag := &mockAgent{name: "test"}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Config.Commit = config.Commit{FixMessage: "{{.Summary}}{{.Summary}}"}
+	sctx.Config.Commit = config.Commit{FixMessage: strings.Repeat("{{.Summary}}", 16)}
+	if _, err := sctx.Config.Commit.RenderFixMessage(types.StepReview, "x"); err != nil {
+		t.Fatalf("invalid size regression template: %v", err)
+	}
 
 	if err := os.WriteFile(filepath.Join(dir, "agent-change.txt"), []byte("change"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	summary := strings.Repeat("x", 2049)
-	if err := commitAgentFixes(sctx, types.StepReview, summary, "fallback"); err == nil {
-		t.Fatal("commitAgentFixes() accepted an oversized rendered message")
+	summary := strings.Repeat("界", 100)
+	if err := commitAgentFixes(sctx, types.StepReview, summary, "fallback"); err == nil || !strings.Contains(err.Error(), "must not render to more than 4096 bytes") {
+		t.Fatalf("commitAgentFixes() error = %v, want rendered-size rejection", err)
 	}
 	if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "" {
 		t.Fatalf("staged files after rendered message error = %q, want none", got)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("HEAD after rendered message error = %q, want %q", got, headSHA)
 	}
 }
 

@@ -196,13 +196,17 @@ func templateStructureLines(text string) []string {
 }
 
 func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provider) (string, error) {
+	configuredTrailers, err := configuredAttributionTrailers(sctx)
+	if err != nil {
+		return "", fmt.Errorf("prepare PR attribution filtering: %w", err)
+	}
 	pipelineMD, risk, testing := s.buildPipelineSectionFor(sctx, provider, true)
 	if strings.Count(pipelineMD, pipelineAttestationCommentPrefix) != 1 {
 		return "", fmt.Errorf("cannot publish template narrative without recorded pipeline evidence and attestation")
 	}
 	parts := []string{}
-	if intent := publicPRIntent(sctx); intent != "" {
-		parts = append(parts, "## Intent\n\n"+neutralizeAttestationMarkers(provider, intent))
+	if intent := publicPRIntent(sctx, configuredTrailers...); intent != "" {
+		parts = append(parts, "## Intent\n\n"+neutralizeAttestationMarkers(provider, prDisplayText(intent, configuredTrailers...)))
 	}
 	if evidence := appendixEvidence(appendixMode(sctx), prBodyFlavorFor(provider), risk, testing, pipelineMD, provider); evidence != "" {
 		// The appendix's evidence is published text like any other: a

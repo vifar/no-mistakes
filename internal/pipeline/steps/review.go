@@ -178,8 +178,13 @@ Rules:
 - Report the outcome in the "verification" field: "passed" only when that verification ran and passed; "blocked" when it could not run, for example because a dependency or tool is missing; "failed" when it ran and did not pass; "not_needed" only when you changed no files. The pipeline commits your changes only when verification is "passed"; any other outcome discards them and stops the run, so report it exactly.
 - Do NOT run the complete repository test suite or lint suite during this fix round. The pipeline has dedicated test and lint steps after review that are the authoritative test and lint gates; their coverage may itself be focused on the changed area when the repository has no configured test or lint commands.
 - Return JSON with "summary" and "verification" fields when you are done.
-- The summary must be one concise sentence fragment suitable for a git commit subject.
-- Keep the summary under 10 words.%s
+- The first line of the summary becomes the git commit subject, so make it one concise sentence fragment.
+- Keep the summary concise.%s
+
+The summary is preserved in this round's commit body and fix_summary record.
+Explain what changed and why, including any required disclosure or verification evidence.
+If that needs more detail, put it in subsequent paragraphs of the summary; keep the first sentence concise.
+Do not include generated-with lines, AI co-author trailers, or session attribution.
 
 Previous review findings to address:
 %s`,

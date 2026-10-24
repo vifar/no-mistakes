@@ -111,7 +111,7 @@ func scenarioResultEmoji(result string) string {
 // an untested scenario's reason: a reader wants one column answering "on what
 // basis?", and for an untested scenario the unavailable capability or absence
 // of a live product surface is that basis.
-func renderScenarioTable(scenarios []types.TestScenario, flavor prBodyFlavor) string {
+func renderScenarioTable(scenarios []types.TestScenario, flavor prBodyFlavor, configuredTrailers ...string) string {
 	if len(scenarios) == 0 {
 		return ""
 	}
@@ -119,7 +119,7 @@ func renderScenarioTable(scenarios []types.TestScenario, flavor prBodyFlavor) st
 	b.WriteString("| Scenario | Result | Live | Evidence |\n")
 	b.WriteString("| --- | --- | --- | --- |\n")
 	rows := 0
-	for _, scenario := range scenarios {
+	for _, scenario := range prDisplayFindings(types.Findings{Scenarios: scenarios}, configuredTrailers...).Scenarios {
 		name := scenarioCell(scenario.Name, flavor)
 		if name == "" {
 			continue

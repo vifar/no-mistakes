@@ -459,7 +459,7 @@ func verifyClosingIssuesInBody(body string, sctx *pipeline.StepContext) error {
 // assembleDraftPRBody assembles an ordinary drafted body and appends the
 // Issues section last, reserving its room up front so body-limit truncation
 // sheds generated evidence rather than a closing reference.
-func assembleDraftPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider) string {
+func assembleDraftPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, testingMD, pipelineMD string, bodyLimit int, provider scm.Provider, configuredTrailers ...string) string {
 	section := issuesSection(sctx, "")
 	reserve := 0
 	if section != "" {
@@ -473,14 +473,14 @@ func assembleDraftPRBody(sctx *pipeline.StepContext, whatChanged, riskLine, test
 			// The section alone does not fit. Omit it rather than pass a
 			// non-positive (unlimited) budget; the pre-publication check then
 			// refuses a body that would drop a closing reference.
-			return assemblePRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit, provider)
+			return assemblePRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, bodyLimit, provider, configuredTrailers...)
 		}
 		return appendIssuesSection(fenceClosedWithin(bodyLimit-reserve, scm.PRBodyLen, func(budget int) string {
-			return assemblePRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, budget, provider)
+			return assemblePRBody(sctx, whatChanged, riskLine, testingMD, pipelineMD, budget, provider, configuredTrailers...)
 		}), section)
 	}
 	return appendIssuesSection(fenceClosedWithin(maxPullRequestBodyBytes-reserve, func(s string) int { return len(s) }, func(budget int) string {
-		return buildPRBodyWithin(whatChanged, riskLine, testingMD, pipelineMD, sctx, provider, budget)
+		return buildPRBodyWithin(whatChanged, riskLine, testingMD, pipelineMD, sctx, provider, budget, configuredTrailers...)
 	}), section)
 }
 
