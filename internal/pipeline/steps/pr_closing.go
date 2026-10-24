@@ -543,9 +543,10 @@ func claimClosingIssueRefs(sctx *pipeline.StepContext, host scm.Host, provider s
 
 // intentClosingRefs returns the references closed by the standalone
 // closing-keyword lines of the run intent, localized to the PR's repository.
-// Unlike --closes they never fail the run: on a provider that cannot publish
-// and verify a closing reference, or for a reference shape it would misread,
-// the line is left in the intent, neutralized like any other text.
+// Unlike --closes, unsupported targets are ignored rather than failing the
+// claim. Supported targets on the same line still join the claimed references
+// and must pass body verification. A line with any unclaimed target stays in
+// the published intent, neutralized like any other text.
 func intentClosingRefs(sctx *pipeline.StepContext, host scm.Host, provider scm.Provider) []string {
 	if host == nil || !host.Capabilities().ClosingReferences {
 		return nil

@@ -6,10 +6,11 @@ import (
 )
 
 // publicPRIntent returns the intent text published on the PR body, or "" when
-// publication is suppressed. It is the single publication gate: every PR-body
-// render path (ordinary drafting, fallback content, and template appendix)
-// goes through it, so caller-side omission and the repository's trusted
-// policy compose here and nowhere else.
+// publication is suppressed. Every Intent-section render path (ordinary
+// drafting, fallback content, and template appendix) goes through it.
+// publicPRIntentSource owns the shared publication gate for this rendering
+// and intent-derived closing references, composing caller-side omission with
+// the repository's trusted policy.
 //
 // The control is tighten-only in both directions:
 //
