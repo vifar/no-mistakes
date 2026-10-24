@@ -17,14 +17,13 @@ import (
 // temp base.
 var testDirPrefixes = []string{"nm-cli-test-", "nm-cli-home-"}
 
-// staleTestDirAge is how old a leftover test directory must be before the
-// next run removes it. It is far longer than any CLI test run, so a
-// concurrent run's directories are never touched.
+// staleTestDirAge is the minimum age for removing a leftover test directory.
+// Younger directories are left alone because a concurrent run may own them.
 const staleTestDirAge = 6 * time.Hour
 
 // sweepStaleTestDirs removes test directories under base that a killed run
 // left behind: directories (not symlinks) matching testDirPrefixes, owned by
-// the running account, and last modified more than maxAge before now. It
+// the running account, and last modified at least maxAge before now. It
 // returns the directories it removed.
 func sweepStaleTestDirs(base string, now time.Time, maxAge time.Duration) []string {
 	var removed []string
