@@ -82,6 +82,11 @@ func TestMain(m *testing.M) {
 	if runtime.GOOS != "windows" {
 		base = "/tmp"
 	}
+	// Clean up after earlier runs that were killed before their own cleanup,
+	// and keep this run's Go caches out of the temporary HOME so a kill
+	// cannot leak them (see testenv_cleanup_test.go).
+	sweepStaleTestDirs(base, time.Now(), staleTestDirAge)
+	pinGoCaches()
 	root, err := os.MkdirTemp(base, "nm-cli-test-")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create test NM_HOME: %v\n", err)
@@ -120,9 +125,9 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// removeTestDir removes dir even when it holds read-only directories. Child
-// go commands run with the test HOME and write their module cache under it
-// read-only, which a plain os.RemoveAll cannot delete.
+// removeTestDir removes dir even when it holds read-only directories, such as
+// a Go module cache a child go command wrote under a test HOME, which a plain
+// os.RemoveAll cannot delete.
 func removeTestDir(dir string) error {
 	_ = filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err == nil && d.IsDir() {
