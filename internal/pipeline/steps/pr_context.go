@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/netretry"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -274,7 +276,9 @@ func refreshPRHeadBeforeRetarget(sctx *pipeline.StepContext, reader scm.PRFactsR
 	refreshed, err := resolvePRTargetWithReader(sctx, reader, allowTerminal)
 	// Only a transient read failure earns one more refresh. Authentication,
 	// permission and validation failures return on the first attempt.
-	if err != nil && errors.Is(err, scm.ErrTransientTimeout) && sctx.Ctx.Err() == nil {
+	if err != nil && sctx.Ctx.Err() == nil &&
+		!errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
+		(errors.Is(err, scm.ErrTransientTimeout) || netretry.Retryable(err)) {
 		refreshed, err = resolvePRTargetWithReader(sctx, reader, allowTerminal)
 	}
 	if err != nil {

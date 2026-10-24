@@ -202,44 +202,77 @@ func TestFreshRetargetKeepsFailingOnForeignPRHead(t *testing.T) {
 }
 
 func TestFreshRetargetRefreshRetriesOnlyTransientReadFailures(t *testing.T) {
-	transient := fmt.Errorf("gh api: HTTP 502: %w", scm.ErrTransientTimeout)
-	// Each refresh read already backs off over three attempts on a transient
-	// failure; an exhausted refresh earns exactly one more refresh.
-	t.Run("transient retry recovers", func(t *testing.T) {
-		f := retargetRefreshFixture(t)
-		f.reader.heads = []string{f.foreign, f.foreign, f.foreign, f.foreign, f.local}
-		f.reader.errs = []error{nil, transient, transient, transient}
-		if _, err := f.run(); err != nil {
-			t.Fatalf("an exhausted transient refresh must be retried once: %v", err)
-		}
-	})
-	t.Run("transient retry fails", func(t *testing.T) {
-		f := retargetRefreshFixture(t)
-		f.reader.heads = []string{f.foreign}
-		f.reader.errs = []error{nil, transient, transient, transient, transient, transient, transient}
-		_, err := f.run()
-		if err == nil {
-			t.Fatal("a failed refresh must never pass silently")
-		}
-		if !strings.Contains(err.Error(), "refresh pull request head before retarget") || !errors.Is(err, scm.ErrTransientTimeout) ||
-			!strings.Contains(err.Error(), f.foreign) || !strings.Contains(err.Error(), f.local) {
-			t.Fatalf("error %q must say the refresh failed and name both heads", err)
-		}
-		if f.reader.readCalls != 7 {
-			t.Fatalf("read calls = %d, want the first read plus two exhausted refreshes", f.reader.readCalls)
-		}
-	})
-	t.Run("permanent failure is not retried", func(t *testing.T) {
-		f := retargetRefreshFixture(t)
-		denied := errors.New("gh api: HTTP 403: Resource not accessible by integration")
-		f.reader.heads = []string{f.foreign, f.local}
-		f.reader.errs = []error{nil, denied}
-		_, err := f.run()
-		if err == nil || !errors.Is(err, denied) || !strings.Contains(err.Error(), "refresh pull request head before retarget") {
-			t.Fatalf("error %v must fail the refresh on the first permanent failure", err)
-		}
-		if f.reader.readCalls != 2 {
-			t.Fatalf("read calls = %d, a permanent failure must not be retried", f.reader.readCalls)
-		}
-	})
+	for _, tc := range []struct {
+		name     string
+		err      error
+		failures int
+	}{
+		{"HTTP 502", errors.New("gh api pull request facts: HTTP 502: Bad Gateway: exit status 1"), 1},
+		{"connection", errors.New("gh api pull request facts: connection reset by peer: exit status 1"), 1},
+		{"DNS", errors.New("gh api pull request facts: no such host: exit status 1"), 1},
+		{"timeout", errors.New("gh api pull request facts: TLS handshake timeout: exit status 1"), 1},
+		{"keyring", fmt.Errorf("gh api: Timeout trying to log in to github.com (keyring): %w", scm.ErrTransientTimeout), 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("retry recovers", func(t *testing.T) {
+				f := retargetRefreshFixture(t)
+				f.reader.heads = []string{f.foreign}
+				f.reader.errs = []error{nil}
+				for i := 0; i < tc.failures; i++ {
+					f.reader.heads = append(f.reader.heads, f.foreign)
+					f.reader.errs = append(f.reader.errs, tc.err)
+				}
+				f.reader.heads = append(f.reader.heads, f.local)
+				got, err := f.run()
+				if err != nil || got != f.local {
+					t.Fatalf("an exhausted transient refresh must recover and record local head %s: got=%s err=%v", f.local, got, err)
+				}
+				if f.reader.readCalls != tc.failures+3 {
+					t.Fatalf("read calls = %d, want %d including initial read, exhausted refresh, retry and read-back", f.reader.readCalls, tc.failures+3)
+				}
+			})
+			t.Run("retry fails", func(t *testing.T) {
+				f := retargetRefreshFixture(t)
+				f.reader.heads = []string{f.foreign}
+				f.reader.errs = []error{nil}
+				for i := 0; i < 2*tc.failures; i++ {
+					f.reader.errs = append(f.reader.errs, tc.err)
+				}
+				_, err := f.run()
+				if err == nil || !errors.Is(err, tc.err) ||
+					!strings.Contains(err.Error(), "refresh pull request head before retarget") ||
+					!strings.Contains(err.Error(), f.foreign) || !strings.Contains(err.Error(), f.local) {
+					t.Fatalf("error %v must retain the refresh failure and name both heads", err)
+				}
+				if f.reader.readCalls != 1+2*tc.failures {
+					t.Fatalf("read calls = %d, want %d for the initial read plus two exhausted refreshes", f.reader.readCalls, 1+2*tc.failures)
+				}
+			})
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"permission denied", errors.New("gh api: HTTP 403: Resource not accessible by integration")},
+		{"bad credentials", errors.New("gh api: HTTP 401: Bad credentials")},
+		{"validation", errors.New("gh api: HTTP 422: Validation Failed")},
+		{"canceled network read", errors.Join(context.Canceled, errors.New("gh api: HTTP 502: Bad Gateway"))},
+		{"deadline network read", errors.Join(context.DeadlineExceeded, errors.New("gh api: HTTP 502: Bad Gateway"))},
+		{"canceled keyring read", errors.Join(context.Canceled, scm.ErrTransientTimeout)},
+		{"deadline keyring read", errors.Join(context.DeadlineExceeded, scm.ErrTransientTimeout)},
+	} {
+		t.Run(tc.name+" is not retried", func(t *testing.T) {
+			f := retargetRefreshFixture(t)
+			f.reader.heads = []string{f.foreign, f.local}
+			f.reader.errs = []error{nil, tc.err}
+			_, err := f.run()
+			if err == nil || !errors.Is(err, tc.err) || !strings.Contains(err.Error(), "refresh pull request head before retarget") {
+				t.Fatalf("error %v must fail the refresh on the first permanent or canceled failure", err)
+			}
+			if f.reader.readCalls != 2 {
+				t.Fatalf("read calls = %d, a permanent or canceled failure must not be retried", f.reader.readCalls)
+			}
+		})
+	}
 }
