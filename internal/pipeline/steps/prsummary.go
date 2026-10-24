@@ -9,12 +9,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -1723,6 +1725,111 @@ func escapePipelineFoldMarkers(s string) string {
 // that merely names the field stays the sentence it was.
 func renderCoAuthorAsLabelledField(s string) string {
 	return prDisplayNoticeText(s)
+}
+
+// publishedCoAuthorKey matches the co-author key wherever it sits in a line.
+var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)`)
+
+// renderInlineCoAuthorKeys renders a co-author key inside a line when the rest
+// of the line is a complete identity (a name and an address), so the line ends
+// in a co-author claim. A key that only names the field, and a key quoted in an
+// inline code span, stay as they are: neither is a claim, and the code span is
+// evidence the body preserves byte for byte.
+func renderInlineCoAuthorKeys(s string, notice bool, configuredTrailers ...string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		spans := inlineCodeSpans(line)
+		matches := publishedCoAuthorKey.FindAllStringSubmatchIndex(line, -1)
+		for k := len(matches) - 1; k >= 0; k-- {
+			start, end, sep := matches[k][0], matches[k][1], line[matches[k][2]:matches[k][3]]
+			inCode := false
+			for _, span := range spans {
+				if start >= span[0] && start < span[1] {
+					inCode = true
+					break
+				}
+			}
+			if inCode {
+				continue
+			}
+			prefix, value := html.UnescapeString(line[:start]), html.UnescapeString(line[end:])
+			if strings.HasSuffix(prefix, `"`) && strings.HasPrefix(value, `"`) ||
+				strings.HasSuffix(prefix, "'") && strings.HasPrefix(value, "'") ||
+				strings.HasSuffix(prefix, "“") && strings.HasPrefix(value, "”") ||
+				strings.HasSuffix(prefix, "‘") && strings.HasPrefix(value, "’") {
+				continue
+			}
+			identity := strings.TrimRight(value, " \t\r.,;:!?\"')]}”’")
+			claim := "Co-Authored-By: " + identity
+			_, _, _, ai := publishedAttributionEntry([]string{claim}, 0, configuredTrailers)
+			name, _, complete := strings.Cut(strings.TrimSpace(identity), "<")
+			name = strings.TrimSpace(name)
+			if !complete || strings.Count(identity, "<") != 1 || strings.Count(identity, ">") != 1 ||
+				!ai && !strings.HasPrefix(name, `"`) && strings.ContainsAny(name, ";,") {
+				continue
+			}
+			address, err := git.ParseAttributionAddress(identity)
+			if err != nil || address.Name == "" || !strings.HasSuffix(identity, ">") {
+				continue
+			}
+			if ai {
+				replacement := ""
+				if notice {
+					replacement = prAIAttributionNotice
+				}
+				line = line[:start] + replacement + value[len(identity):]
+			} else {
+				line = line[:start] + "co-author (quoted)" + sep + line[end:]
+			}
+		}
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
+}
+
+func inlineCodeSpans(text string) [][2]int {
+	trimmed := strings.TrimLeft(text, " ")
+	if len(text)-len(trimmed) <= 3 && (strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")) {
+		width := 3
+		for width < len(trimmed) && trimmed[width] == trimmed[0] {
+			width++
+		}
+		if trimmed[0] == '~' || !strings.Contains(trimmed[width:], "`") {
+			return nil
+		}
+	}
+	var spans [][2]int
+	for i := 0; i < len(text); {
+		if text[i] == '\\' && i+1 < len(text) {
+			i += 2
+			continue
+		}
+		if text[i] != '`' {
+			i++
+			continue
+		}
+		start := i
+		for i < len(text) && text[i] == '`' {
+			i++
+		}
+		width := i - start
+		for j := i; j < len(text); {
+			if text[j] != '`' {
+				j++
+				continue
+			}
+			closeStart := j
+			for j < len(text) && text[j] == '`' {
+				j++
+			}
+			if j-closeStart == width {
+				spans = append(spans, [2]int{start, j})
+				i = j
+				break
+			}
+		}
+	}
+	return spans
 }
 
 // neutralizeAttestationMarkers breaks every attestation comment prefix in

@@ -1,13 +1,154 @@
 package steps
 
 import (
+	"context"
+	"html"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestInlineCoAuthorPublicationPaths(t *testing.T) {
+	const prefix = "Low: handle ``literal ` tick``; "
+	const payload = `{ "summary" : "Recorded risk Co-Authored-By: Codex \u003cbot@example.invalid\u003e", "escape": "A\u0042\/C", "number": 1.200e+3 }`
+	root := t.TempDir()
+	path := filepath.Join(root, "capture.json")
+	if err := os.WriteFile(path, []byte(payload), 0600); err != nil {
+		t.Fatal(err)
+	}
+	captured, ok := embeddedArtifactText(types.TestArtifact{Path: path}, testingSummaryOptions{evidenceRoot: root}, &testingArtifactRenderState{remainingEmbeddedBytes: maxEmbeddedArtifactsTotalBytes})
+	if !ok {
+		t.Fatal("captured evidence omitted")
+	}
+	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+		for _, mode := range []string{config.PRAppendixFull, config.PRAppendixMinimal, config.PRAppendixCollapsed} {
+			t.Run(string(provider)+"/"+mode, func(t *testing.T) {
+				ctx := &pipeline.StepContext{Config: &config.Config{}}
+				ctx.Config.PR.Appendix = mode
+				for name, raw := range map[string]string{
+					"backticks": prefix + "Co-Authored-By: Codex <bot@example.invalid>",
+					"payload":   captured,
+				} {
+					for assembly, body := range map[string]string{
+						"assemble": assemblePRBody(ctx, "## What Changed\n\n"+raw, raw, "## Testing\n\n"+raw, "## Pipeline\n\n"+raw, 0, provider),
+						"build":    buildPRBodyWithin("## What Changed\n\n"+raw, raw, "## Testing\n\n"+raw, "## Pipeline\n\n"+raw, ctx, provider, maxPullRequestBodyBytes),
+						"evidence": appendixEvidence(mode, prBodyFlavorFor(provider), raw, "## Testing\n\n"+raw, "## Pipeline\n\n"+raw, provider),
+					} {
+						t.Run(name+"/"+assembly, func(t *testing.T) {
+							view := html.UnescapeString(body)
+							narrativeOnly := mode == config.PRAppendixMinimal && name == "backticks" && assembly != "evidence"
+							if strings.Contains(view, "Co-Authored-By:") || strings.Contains(view, "Codex") || strings.Contains(view, "bot@example.invalid") || strings.Contains(view, prAIAttributionNotice) == narrativeOnly {
+								t.Fatalf("publication retained an inline AI claim or used the wrong display mode: %q", body)
+							}
+							if name == "backticks" && !strings.Contains(view, strings.TrimSpace(prefix)) {
+								t.Fatalf("publication changed the completed code span: %q", body)
+							}
+							if name == "payload" && !strings.Contains(view, `"escape": "A\u0042\/C", "number": 1.200e+3`) {
+								t.Fatalf("publication changed unrelated recorded bytes: %q", body)
+							}
+						})
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestCapturedTextCoAuthorInFencedTestingPublication(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "capture.txt")
+	const raw = "Recorded risk Co-Authored-By: Codex <bot@example.invalid>\nRecorded helper Co-Authored-By: Ada <ada@example.com>\n"
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	artifact := types.TestArtifact{Kind: "command-output", Label: "Captured command", Path: path}
+	findings := findingsJSON(t, types.Findings{Artifacts: []types.TestArtifact{artifact}})
+	steps := []*db.StepResult{{ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings}}
+	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+		t.Run(string(provider), func(t *testing.T) {
+			opts := testingSummaryOptions{flavor: prBodyFlavorFor(provider), repoRoot: root, evidenceRoot: root}
+			if text, ok := embeddedArtifactText(artifact, opts, &testingArtifactRenderState{remainingEmbeddedBytes: maxEmbeddedArtifactsTotalBytes}); !ok || !strings.Contains(text, "Recorded risk") {
+				t.Fatal("captured text evidence omitted")
+			}
+			testingMD := buildTestingSummary(steps, nil, opts)
+			ctx := &pipeline.StepContext{Config: &config.Config{}}
+			ctx.Config.PR.Appendix = config.PRAppendixFull
+			for name, body := range map[string]string{
+				"testing":  testingMD,
+				"assemble": assemblePRBody(ctx, "## What Changed\n\nKeep captured evidence.", "Low risk", testingMD, "", 0, provider),
+				"build":    buildPRBodyWithin("## What Changed\n\nKeep captured evidence.", "Low risk", testingMD, "", ctx, provider, maxPullRequestBodyBytes),
+			} {
+				t.Run(name, func(t *testing.T) {
+					view := html.UnescapeString(body)
+					if strings.Contains(view, "Co-Authored-By:") || strings.Contains(view, "Codex") || strings.Contains(view, "bot@example.invalid") {
+						t.Fatalf("fenced captured text published an AI claim: %q", body)
+					}
+					for _, want := range []string{"```text", "Recorded risk " + prAIAttributionNotice, "Recorded helper co-author (quoted): Ada <ada@example.com>"} {
+						if !strings.Contains(view, want) {
+							t.Errorf("fenced captured text lost %q: %q", want, body)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestInlineCodeSpansExcludeFenceDelimiters(t *testing.T) {
+	for _, line := range []string{"```text", "   ````text", "```", "   ````", "~~~text `literal`", "   ~~~~text `literal`"} {
+		if spans := inlineCodeSpans(line); len(spans) != 0 {
+			t.Errorf("fence delimiter %q produced inline spans: %v", line, spans)
+		}
+	}
+}
+
+func TestRenderInlineCoAuthorKeys(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{"AI claim", "Recorded risk Co-Authored-By: Codex <bot@example.invalid>", "Recorded risk " + prAIAttributionNotice},
+		{"AI sentence", "Recorded risk Co-Authored-By: Codex <bot@example.invalid>.", "Recorded risk " + prAIAttributionNotice + "."},
+		{"escaped AI claim", "Recorded risk Co-Authored-By: Codex &lt;bot@example.invalid&gt;.", "Recorded risk " + prAIAttributionNotice + "."},
+		{"human sentence", "Recorded risk Co-Authored-By: Ada <ada@example.com>.", "Recorded risk co-author (quoted): Ada <ada@example.com>."},
+		{"escaped human sentence", "Recorded risk Co-Authored-By: Ada &lt;ada@example.com&gt;.", "Recorded risk co-author (quoted): Ada &lt;ada@example.com&gt;."},
+		{"closing punctuation", "Recorded risk (Co-Authored-By: Ada <ada@example.com>);", "Recorded risk (co-author (quoted): Ada <ada@example.com>);"},
+		{"quoted field", `The field "Co-Authored-By:" identifies Ada <ada@example.com>`, `The field "Co-Authored-By:" identifies Ada <ada@example.com>`},
+		{"single quoted field", "The field 'Co-Authored-By:' identifies Ada <ada@example.com>", "The field 'Co-Authored-By:' identifies Ada <ada@example.com>"},
+		{"curly quoted field", "The field “Co-Authored-By:” identifies Ada <ada@example.com>", "The field “Co-Authored-By:” identifies Ada <ada@example.com>"},
+		{"escaped quoted field", "The field &quot;Co-Authored-By:&quot; identifies Ada &lt;ada@example.com&gt;", "The field &quot;Co-Authored-By:&quot; identifies Ada &lt;ada@example.com&gt;"},
+		{"code span", "Recorded `Co-Authored-By: Codex <bot@example.invalid>`", "Recorded `Co-Authored-By: Codex <bot@example.invalid>`"},
+		{"completed double backticks", "Low: handle ``literal ` tick``; Co-Authored-By: Codex <bot@example.invalid>", "Low: handle ``literal ` tick``; " + prAIAttributionNotice},
+		{"escaped backtick", "Low: handle \\`; Co-Authored-By: Codex <bot@example.invalid>", "Low: handle \\`; " + prAIAttributionNotice},
+		{"unmatched backtick", "Low: handle `; Co-Authored-By: Codex <bot@example.invalid>", "Low: handle `; " + prAIAttributionNotice},
+		{"double backtick span", "Recorded ``literal ` Co-Authored-By: Codex <bot@example.invalid>``", "Recorded ``literal ` Co-Authored-By: Codex <bot@example.invalid>``"},
+		{"cross-line backticks", "Recorded ``literal\nCo-Authored-By: Codex <bot@example.invalid>\n``", "Recorded ``literal\n" + prAIAttributionNotice + "\n``"},
+		{"backtick fence", "```text\nRecorded risk Co-Authored-By: Codex <bot@example.invalid>\n```", "```text\nRecorded risk " + prAIAttributionNotice + "\n```"},
+		{"tilde fence", "   ~~~~text\nRecorded risk Co-Authored-By: Ada <ada@example.com>\n   ~~~~", "   ~~~~text\nRecorded risk co-author (quoted): Ada <ada@example.com>\n   ~~~~"},
+		{"escaped closing backtick", "Recorded `literal \\` Co-Authored-By: Codex <bot@example.invalid>", "Recorded `literal \\` " + prAIAttributionNotice},
+		{"unequal delimiter lengths", "Recorded ``literal ` Co-Authored-By: Codex <bot@example.invalid>", "Recorded ``literal ` " + prAIAttributionNotice},
+		{"field prose", "The Co-Authored-By: field identifies contributors.", "The Co-Authored-By: field identifies contributors."},
+		{"multiple addresses", "Recorded Co-Authored-By: Ada <ada@example.com> and Bob <bob@example.com>", "Recorded Co-Authored-By: Ada <ada@example.com> and Bob <bob@example.com>"},
+		{"missing name", "Recorded Co-Authored-By: <ada@example.com>", "Recorded Co-Authored-By: <ada@example.com>"},
+		{"incomplete address", "Recorded Co-Authored-By: Ada <ada>", "Recorded Co-Authored-By: Ada <ada>"},
+		{"non-name prose", "Recorded Co-Authored-By: Ada; contact <ada@example.com>", "Recorded Co-Authored-By: Ada; contact <ada@example.com>"},
+		{"field then claim", `The field "Co-Authored-By:" records Co-Authored-By: Ada <ada@example.com>.`, `The field "Co-Authored-By:" records co-author (quoted): Ada <ada@example.com>.`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := renderInlineCoAuthorKeys(tt.text, true); got != tt.want {
+				t.Fatalf("inline claim rendering = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
 
 // A co-author the body QUOTES is rendered as a labelled field.
 //
@@ -156,4 +297,142 @@ func TestPublishedBodyKeepsAnOrdinaryEmoji(t *testing.T) {
 // test measures the text a consumer of the pull request reads.
 func publishedBody(body, risk, testing string, provider scm.Provider) string {
 	return appendGeneratedSectionsToCleanBodyWithinLimit(body, risk, testing, "", 64*1024, provider)
+}
+
+func TestPRInlineClaimsAtSharedDisplayBoundary(t *testing.T) {
+	for _, tt := range []struct{ raw, body, notice string }{
+		{"Recorded Co-Authored-By: Codex <bot@example.invalid>.", "Recorded .", "Recorded " + prAIAttributionNotice + "."},
+		{"Recorded Co-Authored-By: acp:cursor <ai@example.com>.", "Recorded .", "Recorded " + prAIAttributionNotice + "."},
+		{"Recorded Co-Authored-By: Ada:Dev <ada@example.com>.", "Recorded co-author (quoted): Ada:Dev <ada@example.com>.", "Recorded co-author (quoted): Ada:Dev <ada@example.com>."},
+		{`The field "Co-Authored-By:" identifies acp:cursor <ai@example.com>`, `The field "Co-Authored-By:" identifies acp:cursor <ai@example.com>`, `The field "Co-Authored-By:" identifies acp:cursor <ai@example.com>`},
+		{"Recorded `Co-Authored-By: acp:cursor <ai@example.com>`", "Recorded `Co-Authored-By: acp:cursor <ai@example.com>`", "Recorded `Co-Authored-By: acp:cursor <ai@example.com>`"},
+		{"```literal``` documents `Co-Authored-By:` Ada <ada@example.com>", "```literal``` documents `Co-Authored-By:` Ada <ada@example.com>", "```literal``` documents `Co-Authored-By:` Ada <ada@example.com>"},
+		{"   ````literal```` documents `Co-Authored-By:` Ada <ada@example.com>", "   ````literal```` documents `Co-Authored-By:` Ada <ada@example.com>", "   ````literal```` documents `Co-Authored-By:` Ada <ada@example.com>"},
+		{"Recorded Co-Authored-By: Ada; contact <ada@example.com>", "Recorded Co-Authored-By: Ada; contact <ada@example.com>", "Recorded Co-Authored-By: Ada; contact <ada@example.com>"},
+	} {
+		for _, notice := range []bool{false, true} {
+			want := tt.body
+			if notice {
+				want = tt.notice
+			}
+			if got := prDisplayTextMode(tt.raw, notice); got != want {
+				t.Errorf("notice=%t: got %q, want %q", notice, got, want)
+			}
+			encoded, err := marshalJSONString(tt.raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected, err := marshalJSONString(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prefix, suffix := `{ "summary": `, `, "escape": "A\u0042\/C", "number": 1.200e+3 }`
+			if got := prDisplayTextMode(prefix+string(encoded)+suffix, notice); got != prefix+string(expected)+suffix {
+				t.Errorf("recorded notice=%t: got %q", notice, got)
+			}
+		}
+	}
+}
+
+func TestPRInlineClaimsOwnedUpdateAndRestamp(t *testing.T) {
+	const raw = "Recorded risk Co-Authored-By: Codex <bot@example.invalid>\nRecorded tool Co-Authored-By: acp:cursor <ai@example.com>\nRecorded helper Co-Authored-By: Ada <ada@example.com>.\n"
+	const want = "Recorded risk \nRecorded tool \nRecorded helper co-author (quoted): Ada <ada@example.com>.\n"
+	const payload = `{ "summary": "Recorded tool Co-Authored-By: acp:cursor \u003cai@example.com\u003e", "escape": "A\u0042\/C" }`
+	const wantPayload = `{ "summary": "Recorded tool ", "escape": "A\u0042\/C" }`
+	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+		t.Run(string(provider), func(t *testing.T) {
+			appendix := compliantPipelineBody(t, testPipelineHeadSHA)
+			author := raw + payload + "\n"
+			parts := prOwnedBody{before: author, after: "\n" + author}
+			created, err := composeOwnedPRContent(parts, "fix: publication", appendix+"\n"+author, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			check := func(body string, owned bool) {
+				t.Helper()
+				if strings.Contains(body, "Co-Authored-By:") || strings.Contains(body, "Codex") || strings.Contains(body, "acp:cursor") || strings.Contains(body, "ai@example.com") || strings.Contains(body, "bot@example.invalid") {
+					t.Fatalf("publication retained AI attribution: %q", body)
+				}
+				if !strings.Contains(body, want+wantPayload) {
+					t.Fatalf("publication lost human identity or unrelated bytes: %q", body)
+				}
+				if owned {
+					if _, err := parsePROwnedBody(body); err != nil {
+						t.Fatalf("invalid ownership integrity: %v", err)
+					}
+				}
+			}
+			check(created.Body, true)
+			old := author + wrapPRAppendix(appendix+"\n"+author) + "\n" + author
+			host := &attestationTestHost{provider: provider, body: old}
+			if err := updateOwnedPR(&pipeline.StepContext{Ctx: context.Background()}, host, &scm.PR{Number: "42"}, scm.PRContent{Body: old}, "", "", appendix+"\n"+author, 0, nil); err != nil {
+				t.Fatal(err)
+			}
+			check(host.body, true)
+			for _, prior := range []string{old, author + appendix + "\n" + author} {
+				updated, rebound, err := rebindOwnedPRAttestation(prior, strings.Repeat("b", 40), nil, pipelineAttestationPolicy{}, provider)
+				if err != nil || !rebound {
+					t.Fatalf("restamp: rebound=%t err=%v", rebound, err)
+				}
+				check(updated, hasPRAppendixMarkers(prior))
+			}
+		})
+	}
+}
+
+func TestPRConfiguredInlineClaimsAtSharedDisplayBoundary(t *testing.T) {
+	for _, configured := range []string{
+		"Co-Authored-By: private:writer <opaque@example.com>",
+		"Co-Authored-By: Example, Inc. Bot <opaque@example.com>",
+	} {
+		for _, prefix := range []string{"Recorded ", "Mention co-author (quoted): field\nRecorded "} {
+			for _, notice := range []bool{false, true} {
+				want := prefix
+				if notice {
+					want += prAIAttributionNotice
+				}
+				raw := prefix + configured
+				if got := prDisplayTextMode(raw, notice, configured); got != want {
+					t.Errorf("plain notice=%t: got %q, want %q", notice, got, want)
+				}
+				encoded, err := marshalJSONString(raw)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expected, err := marshalJSONString(want)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, wrappers := range [][2]string{
+					{`{ "summary": `, `, "escape": "A\u0042\/C", "number": 1.200e+3 }`},
+					{"", ","},
+				} {
+					input := wrappers[0] + string(encoded) + wrappers[1]
+					output := wrappers[0] + string(expected) + wrappers[1]
+					if got := prDisplayTextMode(input, notice, configured); got != output {
+						t.Errorf("recorded notice=%t: got %q, want %q", notice, got, output)
+					}
+				}
+			}
+		}
+		for _, raw := range []string{
+			"Recorded `" + configured + "`",
+			`The field "Co-Authored-By:" identifies ` + strings.TrimPrefix(configured, "Co-Authored-By: "),
+		} {
+			for _, notice := range []bool{false, true} {
+				if got := prDisplayTextMode(raw, notice, configured); got != raw {
+					t.Errorf("configured mention changed: got %q, want %q", got, raw)
+				}
+			}
+		}
+	}
+}
+
+func TestPRUnconfiguredCommaNameRemainsProse(t *testing.T) {
+	const raw = "Recorded Co-Authored-By: Example, Inc. Bot <opaque@example.com>"
+	for _, notice := range []bool{false, true} {
+		if got := prDisplayTextMode(raw, notice); got != raw {
+			t.Errorf("unconfigured prose changed: got %q, want %q", got, raw)
+		}
+	}
 }

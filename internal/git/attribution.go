@@ -35,7 +35,7 @@ func IsAIAttributionTrailer(line string) bool {
 	case "claude-session", "codex-session":
 		return true
 	case "co-authored-by":
-		address, err := attributionAddress(value)
+		address, err := ParseAttributionAddress(value)
 		if err != nil {
 			return false
 		}
@@ -46,7 +46,7 @@ func IsAIAttributionTrailer(line string) bool {
 		}
 		return aiAttributionIdentity(address.Name)
 	case "assisted-by":
-		address, err := attributionAddress(value)
+		address, err := ParseAttributionAddress(value)
 		if err == nil && address.Name != "" {
 			if strings.EqualFold(address.Name, "Claude") {
 				return strings.EqualFold(address.Address, "noreply@anthropic.com")
@@ -86,7 +86,7 @@ func aiAttributionIdentity(name string) bool {
 	return false
 }
 
-func attributionAddress(value string) (*mail.Address, error) {
+func ParseAttributionAddress(value string) (*mail.Address, error) {
 	value = strings.TrimSpace(value)
 	if i := strings.LastIndex(value, " <"); i >= 0 && strings.HasSuffix(value, ">") {
 		name := value[:i]

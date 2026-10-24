@@ -32,7 +32,8 @@ const prAIAttributionNotice = "<no-mistakes: AI attribution line neutralized>"
 //
 // A recorded payload keeps its line breaks as the two-character escape, so its
 // entries are one line to a line-based scanner. Such a line is filtered through
-// its own string values, and the payload keeps the bytes it was recorded with.
+// its own string values. Only changed strings are re-encoded; unrelated payload
+// bytes stay as recorded.
 func prDisplayText(text string, configuredTrailers ...string) string {
 	return prDisplayTextMode(text, false, configuredTrailers...)
 }
@@ -82,7 +83,9 @@ func prDisplayTextMode(text string, notice bool, configuredTrailers ...string) s
 				lines[start] = lines[start][:cut] + filterRecordedPayload(lines[start][cut:], notice, true, configuredTrailers...)
 			}
 		}
-		kept = append(kept, lines[start:end]...)
+		for _, line := range lines[start:end] {
+			kept = append(kept, renderInlineCoAuthorKeys(line, notice, configuredTrailers...))
+		}
 		start = end
 	}
 	return strings.Join(kept, "\n")
@@ -212,8 +215,14 @@ func filterRecordedPayload(line string, notice, fragment bool, configuredTrailer
 		}
 		literal := string(out[start:end])
 		var value string
-		if err := json.Unmarshal([]byte(literal), &value); err == nil && !(fragment && bareQuotedMention(out, start, end, value, configuredTrailers)) {
-			if filtered := prDisplayTextMode(value, notice, configuredTrailers...); filtered != value {
+		if err := json.Unmarshal([]byte(literal), &value); err == nil {
+			filtered := value
+			if !(fragment && bareQuotedMention(out, start, end, value, configuredTrailers)) {
+				filtered = prDisplayTextMode(value, notice, configuredTrailers...)
+			} else {
+				filtered = renderInlineCoAuthorKeys(value, notice, configuredTrailers...)
+			}
+			if filtered != value {
 				if encoded, err := marshalJSONString(filtered); err == nil {
 					rebuilt := make([]byte, 0, len(out))
 					rebuilt = append(rebuilt, out[:start]...)

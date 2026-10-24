@@ -1,7 +1,6 @@
 package pipeline
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -25,8 +24,9 @@ func TestExecutor_AcceptedGapCertificate(t *testing.T) {
 				workDir := completionFixture(t, database, run)
 				cfg := config.Merge(config.DefaultGlobalConfig(), &config.RepoConfig{})
 				executor := NewExecutor(database, p, cfg, nil, nil, nil)
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				defer cancel()
+				// These scenarios test proof eligibility, not fixture speed. Keep
+				// every validation step live until the test itself ends.
+				ctx := t.Context()
 				logDir := p.RunLogDir(run.ID)
 				if err := os.MkdirAll(logDir, 0700); err != nil {
 					t.Fatal(err)
