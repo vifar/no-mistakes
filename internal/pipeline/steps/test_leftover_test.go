@@ -110,6 +110,106 @@ func TestTestStep_ReportsLeftoverEditsOnceTheBudgetIsSpent(t *testing.T) {
 	}
 }
 
+func TestTestStep_ReportsPreExistingLeftoversOnceTheBudgetIsSpent(t *testing.T) {
+	for _, origin := range []string{"pre-existing", "configured-command", "document-cap"} {
+		t.Run(origin, func(t *testing.T) {
+			c := documentFixture(t)
+			head := c.Run.HeadSHA
+			spendLeftoverBudget(t, c)
+			c.Agent = leftoverEvidenceAgent(c.WorkDir, "")
+			if origin == "configured-command" {
+				c.Config.Commands.Test = "echo command-edits > feature.txt"
+			} else if err := os.WriteFile(filepath.Join(c.WorkDir, "feature.txt"), []byte("inherited edit\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(c.WorkDir, "pending.txt"), []byte("inherited proposal\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			scratch := filepath.Join(c.WorkDir, ".journal-live")
+			if err := os.MkdirAll(scratch, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(scratch, "postgres.log"), []byte("scratch\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if origin == "document-cap" {
+				outcome, err := (&DocumentStep{}).runCapGapCheck(c, c.Run.BaseSHA, "main")
+				if err != nil || outcome == nil || outcome.RestartFrom != types.StepTest {
+					t.Fatalf("Document cap did not return the edits to Test: %+v %v", outcome, err)
+				}
+			}
+
+			outcome, err := (&TestStep{}).Execute(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome == nil || outcome.RestartFrom != "" || !outcome.NeedsApproval || !outcome.AutoFixable {
+				t.Fatalf("Test completed over inherited edits: %+v", outcome)
+			}
+			findings, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var repair *types.Finding
+			for i := range findings.Items {
+				if findings.Items[i].ID == FindingIDTestLeftoverEdits {
+					repair = &findings.Items[i]
+				}
+			}
+			if repair == nil || repair.Action != types.ActionAutoFix {
+				t.Fatalf("inherited edits have no repair finding: %+v", findings.Items)
+			}
+			for _, path := range []string{"feature.txt", "pending.txt"} {
+				if !strings.Contains(repair.Description, path) {
+					t.Fatalf("repair omitted %s: %+v", path, repair)
+				}
+			}
+			if strings.Contains(repair.Description, ".journal-live") || !pipeline.HasUnvalidatedWorkRefusal(outcome.Findings) {
+				t.Fatalf("repair included scratch or allowed approval: %+v", findings.Items)
+			}
+			if got := gitCmd(t, c.WorkDir, "rev-parse", "HEAD"); got != head {
+				t.Fatalf("Test committed inherited edits past the budget: %s", got)
+			}
+		})
+	}
+}
+
+func TestTestStep_LeavesPreExistingWorkWhenTheBudgetIsAvailableOrRunIsAbsent(t *testing.T) {
+	for _, recordedRun := range []bool{false, true} {
+		name := "missing-run"
+		if recordedRun {
+			name = "budget-available"
+		}
+		t.Run(name, func(t *testing.T) {
+			var c *pipeline.StepContext
+			if recordedRun {
+				c = documentFixture(t)
+			} else {
+				dir, base, head := setupGitRepo(t)
+				c = newTestContext(t, nil, dir, base, head, config.Commands{})
+			}
+			head := c.Run.HeadSHA
+			c.Agent = leftoverEvidenceAgent(c.WorkDir, "")
+			if err := os.WriteFile(filepath.Join(c.WorkDir, "feature.txt"), []byte("pre-existing work\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			outcome, err := (&TestStep{}).Execute(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome == nil || outcome.NeedsApproval || outcome.RestartFrom != "" {
+				t.Fatalf("Test claimed pre-existing work: %+v", outcome)
+			}
+			if got := gitCmd(t, c.WorkDir, "rev-parse", "HEAD"); got != head {
+				t.Fatalf("Test committed pre-existing work: %s", got)
+			}
+			if got := readFile(t, filepath.Join(c.WorkDir, "feature.txt")); got != "pre-existing work\n" {
+				t.Fatalf("Test changed pre-existing work: %q", got)
+			}
+		})
+	}
+}
+
 // TestTestStep_RepairCommitsTheReportedLeftoverEdits proves the way forward:
 // the fix round for the reported edit commits it through the normal Test fix
 // path, validation re-runs on that head, and the worktree is clean.
@@ -191,6 +291,14 @@ func TestDocumentStep_SendsTestLeftoversBackToTestOnceTheBudgetIsSpent(t *testin
 	}
 	if got, err := os.ReadFile(filepath.Join(c.WorkDir, "feature.txt")); err != nil || string(got) != "left by test\n" {
 		t.Fatalf("the edit was lost: %q %v", got, err)
+	}
+	c.Agent = leftoverEvidenceAgent(c.WorkDir, "")
+	outcome, err = (&TestStep{}).Execute(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome == nil || outcome.RestartFrom != "" || !outcome.NeedsApproval || !outcome.AutoFixable || !pipeline.HasUnvalidatedWorkRefusal(outcome.Findings) {
+		t.Fatalf("Test did not park for the returned edit: %+v", outcome)
 	}
 }
 

@@ -320,8 +320,6 @@ Rules:
 		reassessHistory,
 		agent.MemoryFilesRule,
 	)
-	// Test owns only what its evidence turn leaves behind: a configured
-	// command's output or work already in the worktree is not its edit.
 	dirtyBeforeEvidence, dirtyBeforeErr := worktreeDirtyPathsOutsideScratch(sctx)
 	findings, err := runTestAnalyzer(sctx, evidencePrompt)
 	if err != nil {

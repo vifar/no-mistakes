@@ -1,6 +1,8 @@
 package steps
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -38,11 +40,6 @@ const FindingIDTestLeftoverEdits = "test-leftover-edits"
 //
 // A gate that already blocks with budget left is unchanged: its fix round
 // commits the edits, and an approval still meets Document's boundary commit.
-//
-// Test claims the worktree only when its evidence turn dirtied a path that was
-// clean before the turn (dirtyBefore). Output from a configured command and
-// work already present when Test started are not its edits, and stay with
-// Document's boundary as before.
 func settleTestLeftoverEdits(sctx *pipeline.StepContext, findings *Findings, needsApproval bool, dirtyBefore []string) (*pipeline.StepOutcome, bool, error) {
 	if sctx == nil || sctx.DB == nil || sctx.Run == nil {
 		return nil, false, nil
@@ -51,15 +48,19 @@ func settleTestLeftoverEdits(sctx *pipeline.StepContext, findings *Findings, nee
 	if err != nil {
 		return nil, false, err
 	}
-	if !slices.ContainsFunc(dirty, func(path string) bool { return !slices.Contains(dirtyBefore, path) }) {
+	if len(dirty) == 0 {
 		return nil, false, nil
 	}
+	newEdits := slices.ContainsFunc(dirty, func(path string) bool { return !slices.Contains(dirtyBefore, path) })
 	allowed, err := sctx.DB.CanCommitLeftoverValidationEdits(sctx.Run.ID)
 	if err != nil {
+		if !newEdits && errors.Is(err, sql.ErrNoRows) {
+			return nil, false, nil
+		}
 		return nil, false, err
 	}
 	if allowed {
-		if needsApproval {
+		if !newEdits || needsApproval {
 			return nil, false, nil
 		}
 		head, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
@@ -88,7 +89,7 @@ func settleTestLeftoverEdits(sctx *pipeline.StepContext, findings *Findings, nee
 		return &pipeline.StepOutcome{RestartFrom: types.StepReview}, false, nil
 	}
 	named := namedPaths(dirty)
-	sctx.Log(fmt.Sprintf("the Test agents left uncommitted edits to %s and this run's leftover correction is spent; reporting them", named))
+	sctx.Log(fmt.Sprintf("Test ended with uncommitted edits to %s and this run's leftover correction is spent; reporting them", named))
 	findings.Items = append(findings.Items,
 		Finding{
 			ID:       FindingIDTestLeftoverEdits,
@@ -96,7 +97,7 @@ func settleTestLeftoverEdits(sctx *pipeline.StepContext, findings *Findings, nee
 			Action:   types.ActionAutoFix,
 			File:     dirty[0],
 			Description: fmt.Sprintf(
-				"The Test agents left uncommitted edits to %s, and this run already committed one set of leftover Test edits, so they are not committed again automatically. "+
+				"Test ended with uncommitted edits to %s, and this run already committed one set of leftover validation edits, so they are not committed again automatically. "+
 					"If validation needs them, keep them so this repair commits them and Test re-validates the new head; otherwise revert them.",
 				named),
 		},
