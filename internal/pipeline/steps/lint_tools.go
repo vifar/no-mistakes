@@ -16,8 +16,8 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/types"
-	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
 // lintTool is a JavaScript lint or format tool the Lint step can resolve
@@ -330,8 +330,8 @@ func execLintCheck(sctx *pipeline.StepContext) lintCheckRunner {
 		}
 		cmd.Dir = dir
 		cmd.Env = stepEnvironment(sctx)
-		winproc.Harden(cmd)
-		output, err := cmd.CombinedOutput()
+		shellenv.ConfigureShellCommand(cmd)
+		output, err := shellenv.CombinedOutputShellCommand(cmd)
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && ctx.Err() == nil {
 			return string(output), exitErr.ExitCode(), nil

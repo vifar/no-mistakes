@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -36,6 +37,27 @@ func writeLintFixture(t *testing.T, root string, files map[string]string) {
 }
 
 func noLookPath(string) string { return "" }
+
+func TestExecLintCheck_CancellationReleasesInheritedOutputPipes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a Unix shell")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	writeLintFixture(t, dir, map[string]string{
+		"node_modules/.bin/biome": "#!/bin/sh\nsleep 60 &\nsleep 60\n",
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	output, exitCode, err := execLintCheck(&pipeline.StepContext{})(ctx, dir, filepath.Join(dir, "node_modules", ".bin", "biome"), nil)
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("cancelled check took %s, want under 5s; exit=%d error=%v output=%q", elapsed, exitCode, err, output)
+	}
+	if err == nil && exitCode == 0 {
+		t.Fatalf("cancelled check succeeded; output=%q", output)
+	}
+}
 
 func TestResolveLintTools_SubPackagePrettierResolvesFromThatPackage(t *testing.T) {
 	t.Parallel()
