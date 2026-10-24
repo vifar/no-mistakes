@@ -350,7 +350,7 @@ Rules:
 	findings.Items = append(findings.Items, ownerResults...)
 	findings.Items = append(findings.Items, unselectedTestFindings(sctx, findings.Items)...)
 
-	needsApproval := hasBlockingFindings(findings.Items)
+	needsApproval := hasBlockingFindings(findings.Items) || types.HasAskUserFindings(findings)
 	autoFixable := needsApproval
 
 	// Record any new test files the agent wrote as informational (no-op)

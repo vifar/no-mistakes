@@ -272,6 +272,82 @@ func TestTestStep_BlockingGateLeavesLeftoverEditsToItsFixRound(t *testing.T) {
 	}
 }
 
+func TestTestStep_AskUserGatePreservesEvidenceEditsWithoutAutomaticCorrection(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		carried bool
+		action  string
+	}{
+		{"reported", false, types.ActionAskUser},
+		{"carried", true, types.ActionAskUser},
+		{"carried-default-action", true, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := documentFixture(t)
+			head := c.Run.HeadSHA
+			question := Finding{
+				ID:          "intent-question",
+				Severity:    types.FindingSeverityInfo,
+				Action:      tc.action,
+				Description: "Should this check preserve the existing behavior?",
+			}
+			evidence := map[string]json.RawMessage{}
+			if err := json.Unmarshal([]byte(passingScenarioFindingsJSON), &evidence); err != nil {
+				t.Fatal(err)
+			}
+			if !tc.carried {
+				reported, err := json.Marshal([]Finding{question})
+				if err != nil {
+					t.Fatal(err)
+				}
+				evidence["findings"] = reported
+			} else {
+				c.Fixing, c.AutoFixRound = true, true
+				c.PreviousFindings = `{"findings":[{"id":"selected-fix","severity":"error","action":"auto-fix","description":"fix the failing check"}]}`
+				deferred, err := json.Marshal(Findings{Items: []Finding{question}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				c.DeferredFindings = string(deferred)
+			}
+			c.Agent = &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				if opts.Purpose == "test-fix" {
+					return &agent.Result{Output: json.RawMessage(`{"summary":"no code changes needed"}`)}, nil
+				}
+				if err := os.WriteFile(filepath.Join(c.WorkDir, "feature.txt"), []byte("evidence edit\n"), 0o600); err != nil {
+					return nil, err
+				}
+				output, err := json.Marshal(evidence)
+				return &agent.Result{Output: output}, err
+			}}
+
+			outcome, err := (&TestStep{}).Execute(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome == nil || !outcome.NeedsApproval || outcome.RestartFrom != "" {
+				t.Fatalf("Test bypassed the question: %+v", outcome)
+			}
+			findings, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(findings.Items) != 1 || findings.Items[0].Description != question.Description || findings.Items[0].ActionOrDefault() != types.ActionAskUser {
+				t.Fatalf("Test lost or changed the unanswered question: %+v", findings.Items)
+			}
+			if got := gitCmd(t, c.WorkDir, "rev-parse", "HEAD"); got != head || c.Run.HeadSHA != head {
+				t.Fatalf("Test committed despite the question: git=%s run=%s", got, c.Run.HeadSHA)
+			}
+			if allowed, err := c.DB.CanCommitLeftoverValidationEdits(c.Run.ID); err != nil || !allowed {
+				t.Fatalf("Test spent the correction budget: allowed=%v err=%v", allowed, err)
+			}
+			if got := readFile(t, filepath.Join(c.WorkDir, "feature.txt")); got != "evidence edit\n" {
+				t.Fatalf("Test lost the evidence edit: %q", got)
+			}
+		})
+	}
+}
+
 // TestDocumentStep_SendsTestLeftoversBackToTestOnceTheBudgetIsSpent is the
 // defence in depth: edits that still reach Document from Test after the
 // run's correction is spent go back to Test, which owns them, instead of
