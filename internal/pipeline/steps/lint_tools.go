@@ -315,15 +315,24 @@ type lintCheckRunner func(ctx context.Context, dir, binary string, args []string
 
 const lintCheckTimeout = 5 * time.Minute
 
+func lintWindowsShimCommandLine(binary string, args []string) (string, error) {
+	quoted := append([]string{binary}, args...)
+	for i, arg := range quoted {
+		if strings.ContainsAny(arg, "&|<>^%!\"()\r\n") {
+			return "", fmt.Errorf("could not safely verify %q on Windows because file path %q contains shell metacharacters; run the check by hand", binary, arg)
+		}
+		quoted[i] = `"` + arg + `"`
+	}
+	return `cmd.exe /d /s /c "` + strings.Join(quoted, " ") + `"`, nil
+}
+
 func execLintCheck(sctx *pipeline.StepContext, timeout time.Duration) lintCheckRunner {
 	return func(ctx context.Context, dir, binary string, args []string) (string, int, error) {
 		ctx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, binary, args...)
-		if ext := strings.ToLower(filepath.Ext(binary)); runtime.GOOS == "windows" && (ext == ".cmd" || ext == ".bat") {
-			// A package manager's command shim is a batch script, which
-			// Windows starts only through its command interpreter.
-			cmd = exec.CommandContext(ctx, "cmd.exe", append([]string{"/c", binary}, args...)...)
+		cmd, err := lintCheckCommand(ctx, binary, args)
+		if err != nil {
+			return "", -1, err
 		}
 		cmd.Dir = dir
 		cmd.Env = stepEnvironment(sctx)

@@ -40,6 +40,43 @@ func writeLintFixture(t *testing.T, root string, files map[string]string) {
 
 func noLookPath(string) string { return "" }
 
+func TestLintWindowsShimCommandLine_RefusesShellMetacharacters(t *testing.T) {
+	t.Parallel()
+	for _, unsafe := range []string{"a&whoami&b.js", "a|b.js", "a<b.js", "a>b.js", "a^b.js", "a%b.js", "a!b.js", "a\"b.js", "a(b.js", "a)b.js", "a\nb.js", "a\rb.js"} {
+		t.Run(unsafe, func(t *testing.T) {
+			t.Parallel()
+			for _, args := range [][]string{
+				{unsafe, "--check", "plain.js"},
+				{"eslint.cmd", "--check", unsafe},
+				{"eslint.cmd", unsafe, "plain.js"},
+			} {
+				line, err := lintWindowsShimCommandLine(args[0], args[1:])
+				if err == nil || line != "" || !strings.Contains(err.Error(), "shell metacharacters") || !strings.Contains(err.Error(), "run the check by hand") {
+					t.Fatalf("arguments %q: line = %q, error = %v; want refusal without a command line", args, line, err)
+				}
+			}
+		})
+	}
+}
+
+func TestLintWindowsShimCommandLine_QuotesLiteralArguments(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		binary string
+		args   []string
+		want   string
+	}{
+		{"eslint.cmd", []string{"plain.js"}, `cmd.exe /d /s /c ""eslint.cmd" "plain.js""`},
+		{`C:\repo with spaces\eslint.cmd`, []string{"--check", `src\a file.js`}, `cmd.exe /d /s /c ""C:\repo with spaces\eslint.cmd" "--check" "src\a file.js""`},
+		{"stylelint.bat", []string{"", "日本語.css"}, `cmd.exe /d /s /c ""stylelint.bat" "" "日本語.css""`},
+	} {
+		line, err := lintWindowsShimCommandLine(tc.binary, tc.args)
+		if err != nil || line != tc.want {
+			t.Fatalf("binary %q, arguments %q: line = %q, error = %v; want %q", tc.binary, tc.args, line, err, tc.want)
+		}
+	}
+}
+
 func TestExecLintCheck_CancellationReleasesInheritedOutputPipes(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("requires a Unix shell")
