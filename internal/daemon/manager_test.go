@@ -266,6 +266,11 @@ func TestProofLaunchReceiptPushCrashWindowConcurrentClaimsAndImmutableReplay(t *
 		t.Fatalf("created receipts = %d, want 1", created)
 	}
 
+	// Simulate a later pipeline head only after the executor has finished
+	// verifying its own head; changing the record mid-completion races it.
+	if run := waitForRunTerminalState(t, d, pushed.RunID); run.Status != types.RunCompleted {
+		t.Fatalf("run status = %q, error = %v, want completed", run.Status, run.Error)
+	}
 	gitCmd(t, repo.WorkingPath, "commit", "--allow-empty", "-m", "advance gate")
 	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main")
 	if err := d.UpdateRunHeadSHA(pushed.RunID, "pipeline-fix-head"); err != nil {
