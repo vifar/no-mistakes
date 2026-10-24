@@ -320,6 +320,9 @@ Rules:
 		reassessHistory,
 		agent.MemoryFilesRule,
 	)
+	// Test owns only what its evidence turn leaves behind: a configured
+	// command's output or work already in the worktree is not its edit.
+	dirtyBeforeEvidence, dirtyBeforeErr := worktreeDirtyPathsOutsideScratch(sctx)
 	findings, err := runTestAnalyzer(sctx, evidencePrompt)
 	if err != nil {
 		if errors.Is(err, errTestAgentTimeout) {
@@ -363,6 +366,24 @@ Rules:
 			File:        f,
 			Description: fmt.Sprintf("new test file written by agent: %s", f),
 		})
+	}
+
+	// The step that made an edit owns it: Test never hands the next step a
+	// worktree holding edits its own agents left uncommitted.
+	var restart *pipeline.StepOutcome
+	reported := false
+	if dirtyBeforeErr == nil {
+		restart, reported, err = settleTestLeftoverEdits(sctx, &findings, needsApproval, dirtyBeforeEvidence)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if restart != nil {
+		restart.FixSummary = fixSummary
+		return restart, nil
+	}
+	if reported {
+		needsApproval, autoFixable = true, true
 	}
 
 	findingsJSON, _ := json.Marshal(findings)
