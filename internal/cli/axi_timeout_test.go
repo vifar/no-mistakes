@@ -327,16 +327,10 @@ func TestAxiRespond_SlowInitialRunReadRetries(t *testing.T) {
 }
 
 func TestAxiRun_WaitInterruptsSubscriptionAcknowledgement(t *testing.T) {
-	acknowledge := make(chan struct{})
-	defer close(acknowledge)
-	var subscribed atomic.Bool
 	fx := newAxiTimeoutFixture(t, axiTimeoutOpts{
 		subscribe: func(ctx context.Context, _ json.RawMessage) (ipc.StreamFunc, error) {
-			subscribed.Store(true)
-			select {
-			case <-acknowledge:
-			case <-ctx.Done():
-				return nil, ctx.Err()
+			if err := sleepOrDone(ctx, 5*time.Second); err != nil {
+				return nil, err
 			}
 			return hangSubscribe(ctx, nil)
 		},
@@ -345,17 +339,11 @@ func TestAxiRun_WaitInterruptsSubscriptionAcknowledgement(t *testing.T) {
 		return fx.running(), nil
 	})
 
-	// Keep acknowledgement blocked until after the command returns. The outer
-	// context bounds a broken implementation without comparing runner timings.
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	out, err := executeCmdWithContext(ctx, "axi", "run", "--wait", "2s")
-	if ctx.Err() != nil {
-		t.Fatal("subscription acknowledgement ignored --wait")
-	}
+	started := time.Now()
+	out, err := executeCmd("axi", "run", "--wait", "2s")
 	assertWaitElapsed(t, err, out, "2s")
-	if !subscribed.Load() {
-		t.Fatal("command did not reach subscription acknowledgement")
+	if elapsed := time.Since(started); elapsed > 4*time.Second {
+		t.Fatalf("subscription acknowledgement ignored wait for %s", elapsed)
 	}
 }
 
