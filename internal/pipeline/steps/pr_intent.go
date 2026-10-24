@@ -1,6 +1,7 @@
 package steps
 
 import (
+	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
@@ -28,18 +29,19 @@ import (
 // Review, test, document, lint, and CI-fix prompts keep the full intent
 // under either signal.
 func publicPRIntent(sctx *pipeline.StepContext, configuredTrailers ...string) string {
-	if sctx != nil && sctx.Config != nil && !sctx.Config.PR.PublishesIntent() {
-		return ""
-	}
-	if runOmitsIntent(sctx) {
-		return ""
-	}
 	if sctx == nil {
 		return ""
 	}
 	display := *sctx
-	display.UserIntent = prDisplayText(sctx.UserIntent, configuredTrailers...)
-	return withoutPromotedClosingLines(cleanedUserIntent(&display), sctx)
+	display.UserIntent = withoutPromotedClosingLines(publicPRIntentSource(sctx, configuredTrailers...), sctx)
+	return cleanedUserIntent(&display)
+}
+
+func publicPRIntentSource(sctx *pipeline.StepContext, configuredTrailers ...string) string {
+	if sctx == nil || (sctx.Config != nil && !sctx.Config.PR.PublishesIntent()) || runOmitsIntent(sctx) {
+		return ""
+	}
+	return intent.RedactSecrets(intent.StripAdversarial(prDisplayText(sctx.UserIntent, configuredTrailers...)))
 }
 
 // runOmitsIntent reports whether this run was started with the caller-side,

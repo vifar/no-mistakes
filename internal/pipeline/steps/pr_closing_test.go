@@ -106,6 +106,137 @@ func TestPRStep_IntentClosingLineRendersLiveInIssuesSection(t *testing.T) {
 	}
 }
 
+func TestPRStep_IntentClosingReferencesRespectPublicationPolicy(t *testing.T) {
+	t.Parallel()
+	for _, template := range []bool{false, true} {
+		for _, repoSuppresses := range []bool{false, true} {
+			for _, explicit := range []bool{false, true} {
+				t.Run(fmt.Sprintf("template=%v/repoSuppresses=%v/explicit=%v", template, repoSuppresses, explicit), func(t *testing.T) {
+					t.Parallel()
+					var sctx *pipeline.StepContext
+					if template {
+						sctx, _, _ = templateTestContext(t)
+					} else {
+						dir, base, head := setupGitRepo(t)
+						sctx = newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+					}
+					env, _ := fakeGH(t, "")
+					sctx.Env = env
+					sctx.UserIntent = "Closes private/security#42"
+					sctx.Run.OmitIntent = !repoSuppresses
+					publish := !repoSuppresses
+					sctx.Config.PR.PublishIntent = &publish
+					if explicit {
+						if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"95"}); err != nil {
+							t.Fatal(err)
+						}
+					}
+					if _, err := (&PRStep{}).Execute(sctx); err != nil {
+						t.Fatal(err)
+					}
+					body := readPRBodyFile(t, envEntry(env, "FAKE_CLI_PR_BODY_FILE"))
+					if strings.Contains(body, "private/security") || strings.Contains(body, "## Intent") {
+						t.Fatalf("withheld intent published:\n%s", body)
+					}
+					if strings.Contains(body, "## Issues\n\nCloses #95") != explicit {
+						t.Fatalf("explicit closing reference presence != %v:\n%s", explicit, body)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestIntentClosingReferencesPreserveCodeExamples(t *testing.T) {
+	t.Parallel()
+	host := closesBoundaryHost{caps: scm.Capabilities{ClosingReferences: true}}
+	for _, example := range []string{
+		" Closes #12", "    Closes #12", "\tCloses #12",
+		"```text\nCloses #12\n```", "~~~\nCloses #12\n~~~",
+		"<pre>\nCloses #12\n</pre>", "<CODE>\nCloses #12\n</CODE>",
+	} {
+		t.Run(example, func(t *testing.T) {
+			sctx := &pipeline.StepContext{UserIntent: "Document this example:\n" + example}
+			if refs := intentClosingRefs(sctx, host, scm.ProviderGitHub); len(refs) != 0 {
+				t.Fatalf("example promoted to closing references: %v", refs)
+			}
+			sctx.UserIntent += "\nCloses #95"
+			if refs := intentClosingRefs(sctx, host, scm.ProviderGitHub); strings.Join(refs, ",") != "95" {
+				t.Fatalf("closing references = %v, want only 95", refs)
+			}
+			sctx.ClosingIssueRefs = []string{"12", "95"}
+			got := publicPRIntent(sctx)
+			if !strings.Contains(got, "Closes #12") || strings.Contains(got, "Closes #95") {
+				t.Fatalf("example removed or promoted declaration retained: %q", got)
+			}
+			body := assembleDraftPRBody(sctx, "Document an example", "", "", "", 0, scm.ProviderGitHub)
+			if !strings.Contains(body, "## Issues\n\nCloses #12\nCloses #95") || !strings.Contains(body, "## Intent") {
+				t.Fatalf("body lost intent or explicit closing references:\n%s", body)
+			}
+		})
+	}
+	for _, tag := range []string{"pre", "code"} {
+		sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"12"}}
+		if err := verifyClosingIssuesInBody("<"+tag+">\nCloses #12\n</"+tag+">", sctx); err == nil {
+			t.Fatalf("HTML %s example incorrectly verified as a live closing declaration", tag)
+		}
+		if section := issuesSection(sctx, "<"+tag+">\nCloses #12\n</"+tag+">"); section != "## Issues\n\nCloses #12" {
+			t.Fatalf("HTML %s example suppressed Issues section: %q", tag, section)
+		}
+	}
+}
+
+func TestIntentClosingReferencesRedactSecrets(t *testing.T) {
+	t.Parallel()
+	const secret = "sk-abcdefghijklmnopqrstuvwx"
+	sctx := &pipeline.StepContext{UserIntent: "Closes " + secret + "/repo#12\nCloses #95"}
+	refs := intentClosingRefs(sctx, closesBoundaryHost{caps: scm.Capabilities{ClosingReferences: true}}, scm.ProviderGitHub)
+	if strings.Join(refs, ",") != "95" {
+		t.Fatalf("secret-bearing target was promoted: %v", refs)
+	}
+	sctx.ClosingIssueRefs = refs
+	if got := publicPRIntent(sctx); strings.Contains(got, secret) || !strings.Contains(got, "[REDACTED]") {
+		t.Fatalf("intent lost credential redaction: %q", got)
+	}
+}
+
+func TestClaimClosingIssueRefsKeepsValidTargetsBesideUnsupportedOnes(t *testing.T) {
+	t.Parallel()
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("explicit=%v", explicit), func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+			sctx.Repo.UpstreamURL = "https://gitlab.com/test/repo.git"
+			sctx.UserIntent = "Closes #95\nFixes project#7\nFixes #96 and project#8\n<pre>\nCloses #97\n</pre>"
+			want := "95,96,97"
+			if explicit {
+				if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, []string{"42"}); err != nil {
+					t.Fatal(err)
+				}
+				want = "42," + want
+			}
+			if err := claimClosingIssueRefs(sctx, closesBoundaryHost{caps: scm.Capabilities{ClosingReferences: true}}, scm.ProviderGitLab); err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Join(sctx.ClosingIssueRefs, ","); got != want {
+				t.Fatalf("claimed refs = %q, want %q", got, want)
+			}
+			body := assembleDraftPRBody(sctx, "Fix the widget", "", "", "", 0, scm.ProviderGitLab)
+			for _, preserved := range []string{"Fixes&#32;project#7", "Fixes&#32;#96 and project#8"} {
+				if !strings.Contains(body, preserved) {
+					t.Fatalf("body lost unsupported declaration %q:\n%s", preserved, body)
+				}
+			}
+			if !strings.Contains(body, "Closes #95\nCloses #96\nCloses #97") {
+				t.Fatalf("body lost valid declarations:\n%s", body)
+			}
+			if err := verifyClosingIssuesInBody(strings.ReplaceAll(body, "Closes #95", "removed"), sctx); err == nil {
+				t.Fatal("verification accepted a body missing a valid intent reference")
+			}
+		})
+	}
+}
+
 // A provider that cannot close issues from the body does not fail a run whose
 // intent names one: only an explicit --closes is fail-closed there.
 func TestClaimClosingIssueRefsIntentNeverFailsTheRun(t *testing.T) {

@@ -128,19 +128,9 @@ func closingGrammarFor(provider scm.Provider) closingGrammar {
 func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 	seen := map[string]struct{}{}
 	var lines []string
-	var fence mdfence.Fence
-	for _, raw := range strings.Split(mdfence.NormalizeLineEndings(body), "\n") {
-		if grammar.codeAware {
-			inFence := fence.Open()
-			fence.Consume(raw)
-			if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
-				continue
-			}
-		}
-		line := strings.TrimSpace(raw)
-		if !grammar.keywordLine.MatchString(line) {
-			continue
-		}
+	rawLines := strings.Split(mdfence.NormalizeLineEndings(body), "\n")
+	for _, i := range closingKeywordLineIndexes(body, grammar) {
+		line := strings.TrimSpace(rawLines[i])
 		key := strings.ToLower(line)
 		if _, exists := seen[key]; exists {
 			continue
@@ -149,6 +139,44 @@ func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+func closingKeywordLineIndexes(body string, grammar closingGrammar) []int {
+	var indexes []int
+	var fence mdfence.Fence
+	var htmlCode string
+	for i, raw := range strings.Split(mdfence.NormalizeLineEndings(body), "\n") {
+		if grammar.codeAware {
+			inFence := fence.Open()
+			fence.Consume(raw)
+			if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+				continue
+			}
+			inHTML := htmlCode != ""
+			outsideInlineCode(raw, func(text string) string {
+				return outsideHTMLCode(text, &htmlCode, func(text string) string { return text })
+			})
+			if inHTML || htmlCode != "" {
+				continue
+			}
+		}
+		if grammar.keywordLine.MatchString(strings.TrimSpace(raw)) {
+			indexes = append(indexes, i)
+		}
+	}
+	return indexes
+}
+
+func intentClosingLineIndexes(intent string, grammar closingGrammar) []int {
+	lines := strings.Split(mdfence.NormalizeLineEndings(intent), "\n")
+	var indexes []int
+	for _, i := range closingKeywordLineIndexes(intent, grammar) {
+		if grammar.codeAware && (strings.HasPrefix(lines[i], " ") || strings.HasPrefix(lines[i], "\t")) {
+			continue
+		}
+		indexes = append(indexes, i)
+	}
+	return indexes
 }
 
 // neutralizeGitHubClosingReferences puts every closing-keyword reference in
@@ -420,19 +448,23 @@ func intentClosingRefs(sctx *pipeline.StepContext, host scm.Host, provider scm.P
 	grammar := closingGrammarFor(provider)
 	repo := prRepository(sctx, provider)
 	var refs []string
-	for _, line := range extractClosingKeywordLines(cleanedUserIntent(sctx), grammar) {
+	intent := publicPRIntentSource(sctx)
+	lines := strings.Split(mdfence.NormalizeLineEndings(intent), "\n")
+	for _, i := range intentClosingLineIndexes(intent, grammar) {
+		line := lines[i]
 		for _, target := range grammar.reference.FindAllString(line, -1) {
 			ref := closingissues.Localize(strings.TrimPrefix(target, "#"), repo)
 			if provider != scm.ProviderGitLab && strings.Count(ref, "/") > 1 {
 				continue
 			}
-			refs = append(refs, ref)
+			normalized, err := closingissues.Normalize([]string{ref})
+			if err != nil {
+				continue
+			}
+			refs = append(refs, normalized...)
 		}
 	}
-	refs, err := closingissues.Normalize(refs)
-	if err != nil {
-		return nil
-	}
+	refs, _ = closingissues.Normalize(refs)
 	return refs
 }
 
@@ -451,29 +483,19 @@ func withoutPromotedClosingLines(intent string, sctx *pipeline.StepContext) stri
 	for _, ref := range sctx.ClosingIssueRefs {
 		claimed[strings.ToLower(ref)] = struct{}{}
 	}
-	var kept []string
-	var fence mdfence.Fence
-	for _, raw := range strings.Split(mdfence.NormalizeLineEndings(intent), "\n") {
-		inCode := false
-		if grammar.codeAware {
-			inFence := fence.Open()
-			fence.Consume(raw)
-			inCode = inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ")
-		}
-		if !inCode && grammar.keywordLine.MatchString(strings.TrimSpace(raw)) {
-			covered := true
-			for target := range closingTargets([]string{strings.TrimSpace(raw)}, repo, grammar) {
-				if _, ok := claimed[target]; !ok {
-					covered = false
-				}
-			}
-			if covered {
-				continue
+	lines := strings.Split(mdfence.NormalizeLineEndings(intent), "\n")
+	for _, i := range intentClosingLineIndexes(intent, grammar) {
+		covered := true
+		for target := range closingTargets([]string{lines[i]}, repo, grammar) {
+			if _, ok := claimed[target]; !ok {
+				covered = false
 			}
 		}
-		kept = append(kept, raw)
+		if covered {
+			lines[i] = ""
+		}
 	}
-	return strings.TrimSpace(strings.Join(kept, "\n"))
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 // refuseSkipWithClosingIssues fails a PR step that would be skipped while the
