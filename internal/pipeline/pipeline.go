@@ -187,7 +187,8 @@ type StepContext struct {
 	// Eval uses it to relabel auto-fix/shipped-unfixed gold; nil is a no-op.
 	OnPRMerged func(ctx context.Context, runID string)
 	// ClosingIssueRefs are the explicit --closes values claimed from the DB at
-	// PR-step start. Steps read this snapshot instead of mutable run state.
+	// PR-step start, plus the run intent's standalone closing-keyword lines.
+	// Steps read this snapshot instead of mutable run state.
 	ClosingIssueRefs []string
 
 	// AgentAttempts records that a configured agent route can land on a fallback

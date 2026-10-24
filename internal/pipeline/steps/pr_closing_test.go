@@ -37,23 +37,88 @@ func TestPRStep_NeverInfersClosingReferenceFromIntent(t *testing.T) {
 	}
 }
 
-// The pipeline publishes a closing reference in the intent neutralized, so
-// without --closes the PR closes nothing.
-func TestPRStep_NeutralizesClosingReferenceInPublishedIntent(t *testing.T) {
+// A standalone closing-keyword line in the run intent is an explicit closing
+// declaration: it is published once, as plain live text in the Issues section,
+// and never as a code span. Its intent copy is not repeated, a closing
+// reference inside intent prose stays neutralized, and other code spans in the
+// intent are kept.
+func TestPRStep_IntentClosingLineRendersLiveInIssuesSection(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		intent    string
+		closes    []string
+		wantLines string
+		wantText  []string
+	}{
+		{
+			name:      "bare number",
+			intent:    "Refactor `fooBar` in X\nFixes #12",
+			wantLines: "Closes #12",
+			wantText:  []string{"`fooBar`", "## Issues\n\nCloses #12"},
+		},
+		{
+			name:      "with --closes for the same issue",
+			intent:    "Ship the widget\n\nCloses #8986",
+			closes:    []string{"8986"},
+			wantLines: "Closes #8986",
+			wantText:  []string{"## Issues\n\nCloses #8986"},
+		},
+		{
+			name:      "owner/repo form",
+			intent:    "Port the parser; this fixes #4 partly.\nResolves other/repo#5\nCloses test/repo#6",
+			wantLines: "Closes #6|Closes other/repo#5",
+			wantText:  []string{"fixes `#4` partly", "## Issues\n\nCloses #6\nCloses other/repo#5"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			env, _ := fakeGH(t, "")
+			bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Env = env
+			sctx.UserIntent = tc.intent
+			if len(tc.closes) > 0 {
+				if err := sctx.DB.UpdateRunClosingIssueRefs(sctx.Run.ID, tc.closes); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if _, err := (&PRStep{}).Execute(sctx); err != nil {
+				t.Fatal(err)
+			}
+			body := readPRBodyFile(t, bodyFile)
+			if got := strings.Join(extractClosingKeywordLines(body, githubClosingGrammar), "|"); got != tc.wantLines {
+				t.Fatalf("closing lines = %q, want %q:\n%s", got, tc.wantLines, body)
+			}
+			for _, want := range tc.wantText {
+				if !strings.Contains(body, want) {
+					t.Fatalf("body missing %q:\n%s", want, body)
+				}
+			}
+			for _, ref := range []string{"`#12`", "`#8986`", "`other/repo#5`", "`#6`", "`test/repo#6`"} {
+				if strings.Contains(body, ref) {
+					t.Fatalf("closing reference %s published in a code span:\n%s", ref, body)
+				}
+			}
+		})
+	}
+}
+
+// A provider that cannot close issues from the body does not fail a run whose
+// intent names one: only an explicit --closes is fail-closed there.
+func TestClaimClosingIssueRefsIntentNeverFailsTheRun(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
-	env, _ := fakeGH(t, "")
-	bodyFile := envEntry(env, "FAKE_CLI_PR_BODY_FILE")
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = env
-	sctx.UserIntent = "Refactor X\nFixes #12"
-
-	if _, err := (&PRStep{}).Execute(sctx); err != nil {
-		t.Fatal(err)
+	sctx.Repo.UpstreamURL = "https://bitbucket.org/test/repo.git"
+	sctx.UserIntent = "Fix it\nCloses #42"
+	if err := claimClosingIssueRefs(sctx, closesBoundaryHost{}, scm.ProviderBitbucket); err != nil {
+		t.Fatalf("claimClosingIssueRefs() error = %v", err)
 	}
-	body := readPRBodyFile(t, bodyFile)
-	if !strings.Contains(body, "Fixes `#12`") || strings.Contains(body, "## Issues") || len(extractClosingKeywordLines(body, githubClosingGrammar)) != 0 {
-		t.Fatalf("intent's Fixes #12 must be published neutralized:\n%s", body)
+	if len(sctx.ClosingIssueRefs) != 0 {
+		t.Fatalf("refs = %v, want none on a provider without closing references", sctx.ClosingIssueRefs)
 	}
 }
 

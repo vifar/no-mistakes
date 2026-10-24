@@ -39,7 +39,7 @@ func publicPRIntent(sctx *pipeline.StepContext, configuredTrailers ...string) st
 	}
 	display := *sctx
 	display.UserIntent = prDisplayText(sctx.UserIntent, configuredTrailers...)
-	return cleanedUserIntent(&display)
+	return withoutPromotedClosingLines(cleanedUserIntent(&display), sctx)
 }
 
 // runOmitsIntent reports whether this run was started with the caller-side,

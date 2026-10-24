@@ -15,13 +15,17 @@ import (
 )
 
 // The pipeline adds closing references to a PR body from exactly one place:
-// explicit `axi run --closes` values, persisted on the run and claimed once by
-// the PR step (sctx.ClosingIssueRefs). They render in one stable `## Issues`
-// section. An author-preserving (pr.template) body keeps its author text
-// verbatim, so only the references the author text does not already close
-// are added to its generated appendix. Closure is never inferred from intent,
-// commits, or branch names: pipeline-generated text is published with its
-// closing references neutralized by the provider's closingGrammar.
+// the references claimed once by the PR step (sctx.ClosingIssueRefs). They are
+// the explicit `axi run --closes` values persisted on the run, plus the
+// standalone closing-keyword lines of the run intent ("Closes #12" alone on its
+// line), which are just as explicit a closing declaration. They render in one
+// stable `## Issues` section, as plain text. An author-preserving (pr.template)
+// body keeps its author text verbatim, so only the references the author text
+// does not already close are added to its generated appendix. Closure is never
+// inferred from intent prose, commits, or branch names: pipeline-generated text
+// is published with its closing references neutralized by the provider's
+// closingGrammar, and an intent closing line promoted to the Issues section is
+// not repeated in the published intent.
 
 const issuesSectionHeading = "## Issues"
 
@@ -368,7 +372,7 @@ func claimClosingIssueRefs(sctx *pipeline.StepContext, host scm.Host, provider s
 		return fmt.Errorf("resolve closing issue references: %w", err)
 	}
 	if len(refs) == 0 {
-		sctx.ClosingIssueRefs = nil
+		sctx.ClosingIssueRefs = intentClosingRefs(sctx, host, provider)
 		return nil
 	}
 	// A nested project path is a GitLab subgroup reference. Publishing one for
@@ -393,8 +397,83 @@ func claimClosingIssueRefs(sctx *pipeline.StepContext, host scm.Host, provider s
 	}
 	// Assigned only once every gate has passed, so a refusal never leaves the
 	// step holding references it will not publish.
+	refs, err = closingissues.Normalize(append(refs, intentClosingRefs(sctx, host, provider)...))
+	if err != nil {
+		return fmt.Errorf("resolve closing issue references: %w", err)
+	}
 	sctx.ClosingIssueRefs = refs
 	return nil
+}
+
+// intentClosingRefs returns the references closed by the standalone
+// closing-keyword lines of the run intent, localized to the PR's repository.
+// Unlike --closes they never fail the run: on a provider that cannot publish
+// and verify a closing reference, or for a reference shape it would misread,
+// the line is left in the intent, neutralized like any other text.
+func intentClosingRefs(sctx *pipeline.StepContext, host scm.Host, provider scm.Provider) []string {
+	if host == nil || !host.Capabilities().ClosingReferences {
+		return nil
+	}
+	if _, ok := host.(scm.PRContentReader); !ok {
+		return nil
+	}
+	grammar := closingGrammarFor(provider)
+	repo := prRepository(sctx, provider)
+	var refs []string
+	for _, line := range extractClosingKeywordLines(cleanedUserIntent(sctx), grammar) {
+		for _, target := range grammar.reference.FindAllString(line, -1) {
+			ref := closingissues.Localize(strings.TrimPrefix(target, "#"), repo)
+			if provider != scm.ProviderGitLab && strings.Count(ref, "/") > 1 {
+				continue
+			}
+			refs = append(refs, ref)
+		}
+	}
+	refs, err := closingissues.Normalize(refs)
+	if err != nil {
+		return nil
+	}
+	return refs
+}
+
+// withoutPromotedClosingLines drops from intent the standalone closing-keyword
+// lines whose every target is already published in the Issues section, so the
+// published intent never repeats them (neutralized, as a code span) beside the
+// live line.
+func withoutPromotedClosingLines(intent string, sctx *pipeline.StepContext) string {
+	if sctx == nil || len(sctx.ClosingIssueRefs) == 0 || intent == "" {
+		return intent
+	}
+	provider := resolvedProviderForBody(sctx)
+	grammar := closingGrammarFor(provider)
+	repo := prRepository(sctx, provider)
+	claimed := map[string]struct{}{}
+	for _, ref := range sctx.ClosingIssueRefs {
+		claimed[strings.ToLower(ref)] = struct{}{}
+	}
+	var kept []string
+	var fence mdfence.Fence
+	for _, raw := range strings.Split(mdfence.NormalizeLineEndings(intent), "\n") {
+		inCode := false
+		if grammar.codeAware {
+			inFence := fence.Open()
+			fence.Consume(raw)
+			inCode = inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ")
+		}
+		if !inCode && grammar.keywordLine.MatchString(strings.TrimSpace(raw)) {
+			covered := true
+			for target := range closingTargets([]string{strings.TrimSpace(raw)}, repo, grammar) {
+				if _, ok := claimed[target]; !ok {
+					covered = false
+				}
+			}
+			if covered {
+				continue
+			}
+		}
+		kept = append(kept, raw)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n"))
 }
 
 // refuseSkipWithClosingIssues fails a PR step that would be skipped while the
