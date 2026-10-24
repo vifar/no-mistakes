@@ -40,6 +40,10 @@ type Host struct {
 	// zero uses the netretry defaults. Tests set them short.
 	retryBase time.Duration
 	retryMax  time.Duration
+	// rateLimitWait and rateLimitNow replace the rate-limit wait's timer and
+	// clock in tests; nil uses the real ones.
+	rateLimitWait func(ctx context.Context, d time.Duration) error
+	rateLimitNow  func() time.Time
 }
 
 // New builds a Host. cliAvailable reports whether the gh binary is
@@ -341,9 +345,17 @@ func (h *Host) ghCombined(ctx context.Context, operation, stdin string, args ...
 }
 
 // retryOptions uses the shared classifier, including typed rate-limit evidence
-// from the GET-only header probe rather than response data.
+// from the GET-only header probe rather than response data. A rate limit is
+// waited out (see netretry) with its reset read from `gh api rate_limit`.
 func (h *Host) retryOptions(operation string) netretry.Options {
-	return netretry.Options{Operation: operation, Base: h.retryBase, Max: h.retryMax}
+	return netretry.Options{
+		Operation:      operation,
+		Base:           h.retryBase,
+		Max:            h.retryMax,
+		ProbeRateLimit: h.probeRateLimit,
+		Wait:           h.rateLimitWait,
+		Now:            h.rateLimitNow,
+	}
 }
 
 func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error) {
@@ -527,7 +539,9 @@ func (h *Host) SetPRBaseBranch(ctx context.Context, pr *scm.PR, baseBranch strin
 	return nil
 }
 
-func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
+// identityPRSelector is the selector for a read whose answer must belong to
+// the recorded PR and repository.
+func (h *Host) identityPRSelector(pr *scm.PR) (string, error) {
 	selector, err := prSelector(pr)
 	if err != nil {
 		return "", err
@@ -538,11 +552,24 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 		}
 		// A number is only unique within one repository. Validate against the
 		// actual host target, then query the recorded URL even if Number is set.
-		selector = strings.TrimSpace(pr.URL)
+		return strings.TrimSpace(pr.URL), nil
 	} else if h.repo == "" {
 		// A legacy number-only receipt is safe only within the repository
 		// already recorded on this host, never gh's ambient repository.
 		return "", fmt.Errorf("%w: number-only PR has no recorded repository", scm.ErrPRIdentity)
+	}
+	return selector, nil
+}
+
+func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) {
+	if view, ok, err := h.prViewSnapshot(ctx, pr); err != nil {
+		return "", err
+	} else if ok {
+		return normalizePRState(view.State), nil
+	}
+	selector, err := h.identityPRSelector(pr)
+	if err != nil {
+		return "", err
 	}
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "state", "--jq", ".state")
@@ -553,10 +580,69 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	return normalizePRState(strings.TrimSpace(string(out))), nil
 }
 
+// prSnapshotFields are the PR fields one CI poll reads. Under a
+// scm.WithPRViewSnapshot context they come from one `gh pr view` instead of
+// one call per field.
+const prSnapshotFields = "baseRefName,headRefOid,mergeable,mergeStateStatus,state"
+
+type prView struct {
+	BaseRefName      string `json:"baseRefName"`
+	HeadRefOid       string `json:"headRefOid"`
+	Mergeable        string `json:"mergeable"`
+	MergeStateStatus string `json:"mergeStateStatus"`
+	State            string `json:"state"`
+}
+
+// prViewSnapshot reads every prSnapshotFields field once per
+// scm.WithPRViewSnapshot context. It selects the PR the way GetPRState does,
+// so the shared view is the recorded PR's even when a caller holds only its
+// number. ok is false without a snapshot or when the combined read failed:
+// the caller then makes its own per-field read, exactly as without a
+// snapshot, so one unreadable field never takes the others down with it. A
+// rate limit that outlasted its wait or a cancellation is returned instead:
+// a per-field read would only wait for it again.
+func (h *Host) prViewSnapshot(ctx context.Context, pr *scm.PR) (prView, bool, error) {
+	if !scm.HasPRViewSnapshot(ctx) {
+		return prView{}, false, nil
+	}
+	selector, err := h.identityPRSelector(pr)
+	if err != nil {
+		return prView{}, false, nil
+	}
+	view, err := scm.RememberPRView(ctx, "github "+h.host+" "+h.repoSlug()+" "+selector, func() (prView, error) {
+		args := append([]string{"pr", "view", selector}, h.repoArgs()...)
+		args = append(args, "--json", prSnapshotFields)
+		out, detail, err := h.ghStdout(ctx, "gh pr view", "", args...)
+		if err != nil {
+			return prView{}, prReadError(ctx, "gh pr view", detail, err)
+		}
+		var view prView
+		if err := json.Unmarshal(out, &view); err != nil {
+			return prView{}, fmt.Errorf("parse gh pr view: %w", err)
+		}
+		if strings.TrimSpace(view.State) == "" {
+			return prView{}, errors.New("parse gh pr view: missing state")
+		}
+		return view, nil
+	})
+	if err != nil {
+		if ctx.Err() != nil || netretry.RateLimitClass(err) != "" {
+			return prView{}, false, err
+		}
+		return prView{}, false, nil
+	}
+	return view, true, nil
+}
+
 func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) {
 	selector, err := prSelector(pr)
 	if err != nil {
 		return "", err
+	}
+	if view, ok, err := h.prViewSnapshot(ctx, pr); err != nil {
+		return "", err
+	} else if ok {
+		return strings.TrimSpace(view.BaseRefName), nil
 	}
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "baseRefName", "--jq", ".baseRefName")
@@ -574,9 +660,18 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 	}
 	headSHA := ""
 	if strings.TrimSpace(pr.HeadSHA) != "" {
-		headSHA, err = h.getPRHeadSHA(ctx, selector)
-		if err != nil {
-			return nil, err
+		// The first head read may come from the poll's snapshot; the closing
+		// re-read below never does, so a head that moved at any point since
+		// the snapshot is still caught.
+		if view, ok, viewErr := h.prViewSnapshot(ctx, pr); viewErr != nil {
+			return nil, fmt.Errorf("gh pr view head commit: %w", viewErr)
+		} else if ok && strings.TrimSpace(view.HeadRefOid) != "" {
+			headSHA = strings.TrimSpace(view.HeadRefOid)
+		} else {
+			headSHA, err = h.getPRHeadSHA(ctx, selector)
+			if err != nil {
+				return nil, err
+			}
 		}
 	}
 	var checks []scm.Check
@@ -1610,6 +1705,11 @@ func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.Mergeable
 	selector, err := prSelector(pr)
 	if err != nil {
 		return "", err
+	}
+	if view, ok, err := h.prViewSnapshot(ctx, pr); err != nil {
+		return "", err
+	} else if ok {
+		return parseMergeableState(view.Mergeable + " " + view.MergeStateStatus), nil
 	}
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "mergeable,mergeStateStatus", "--jq", `.mergeable + " " + .mergeStateStatus`)

@@ -3,6 +3,8 @@ package steps
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -26,6 +28,36 @@ func pollInterval(elapsed time.Duration) time.Duration {
 	default:
 		return 120 * time.Second
 	}
+}
+
+// ciUnchangedPollMax caps the backed-off wait between polls that observe
+// nothing new. It matches the strict-shipping cadence (ciPollInterval).
+const ciUnchangedPollMax = 5 * time.Minute
+
+// unchangedPollInterval doubles the poll interval for each consecutive poll
+// that observed exactly what the previous one did, up to ciUnchangedPollMax.
+// A PR whose checks run for an hour, or that sits green waiting for a merge,
+// otherwise costs a full set of forge reads every 30-120s and, across many
+// runs on one account, spends GitHub's rate limits. Any change resets it.
+func unchangedPollInterval(interval time.Duration, unchangedPolls int) time.Duration {
+	if interval >= ciUnchangedPollMax {
+		return interval
+	}
+	for i := 0; i < unchangedPolls && interval < ciUnchangedPollMax; i++ {
+		interval *= 2
+	}
+	return min(interval, ciUnchangedPollMax)
+}
+
+// checksObservation fingerprints the checks a poll read: any check that
+// appears, disappears, moves bucket or state, or completes again changes it.
+func checksObservation(checks []scm.Check) string {
+	parts := make([]string, 0, len(checks))
+	for _, c := range checks {
+		parts = append(parts, fmt.Sprintf("%s|%s|%s|%s|%d|%s|%s|%t", c.Name, c.ProviderID, c.Bucket, c.State, c.CompletedAt.UnixNano(), c.ExecutionID, c.Link, c.ExpectedMissing))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "\n")
 }
 
 // hasFailingChecks returns true if any CI check is in the fail bucket.

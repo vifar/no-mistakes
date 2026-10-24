@@ -177,7 +177,10 @@ Run the pipeline and decide on its findings as they come up:
    ` + "`auto-fix 1/3`" + `, or ` + "`fix 2`" + `. If ` + "`last_activity`" + ` is prefixed with
    ` + "`quiet`" + `, no step log or native-agent lifecycle activity has arrived for
    longer than ` + "`step_quiet_warning`" + `. Treat that as a liveness clue, not as
-   permission to cancel, rerun, or edit the worktree yourself.
+   permission to cancel, rerun, or edit the worktree yourself. A ` + "`last_activity`" + ` of
+   ` + "`waiting for GitHub rate limit until <time>`" + ` means the step is parked on a
+   GitHub API rate limit and resumes by itself at that time; do not cancel or
+   rerun the run for it.
 2. If the output contains a ` + "`gate:`" + ` object, the pipeline is waiting on you.
    Read its ` + "`findings`" + ` table. Each finding has an ` + "`id`" + `, ` + "`severity`" + `,
    ` + "`file`" + `, ` + "`description`" + `, and an ` + "`action`" + ` that tells you how the

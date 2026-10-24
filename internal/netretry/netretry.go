@@ -5,7 +5,12 @@
 // i/o timeout or 5xx otherwise fails the whole run and throws away completed
 // review, test and lint work, so every one of those calls goes through Do.
 //
-// Only a transient network failure is retried. Authentication and permission
+// Only a transient network failure is retried. A GitHub rate limit is
+// transient too, but it is not spent from the attempt budget: Do waits it out
+// (until the primary limit's reset, or a secondary limit's Retry-After or a
+// backoff from DefaultRateLimitBackoff), bounded in total by
+// DefaultRateLimitBudget, and reports the wait through the context's
+// WaitNotifier so a parked run says what it is waiting for. Authentication and permission
 // failures, a rejected or non-fast-forward push, a merge conflict and a
 // validation error are returned to the caller on the first attempt: retrying
 // them changes nothing and can mask the real cause. A caller that replays a
@@ -16,6 +21,7 @@ package netretry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"math/rand/v2"
 	"regexp"
@@ -49,9 +55,55 @@ const (
 	ClassDNS Class = "dns"
 	// ClassHTTP5xx covers a 5xx response from the GitHub API.
 	ClassHTTP5xx Class = "http_5xx"
-	// ClassRateLimit covers a secondary rate limit with Retry-After.
+	// ClassRateLimit covers GitHub's secondary rate limit: too many requests
+	// or points per minute, or too much concurrency. Its own Retry-After is
+	// honored; without one the wait backs off from DefaultRateLimitBackoff.
 	ClassRateLimit Class = "secondary_rate_limit"
+	// ClassPrimaryRateLimit covers the hourly primary rate limit ("API rate
+	// limit exceeded"). The wait lasts until the limit resets.
+	ClassPrimaryRateLimit Class = "primary_rate_limit"
 )
+
+const (
+	// DefaultRateLimitBudget caps the total time one call waits for rate
+	// limits. It covers a full hourly primary window plus slack.
+	DefaultRateLimitBudget = 65 * time.Minute
+	// DefaultRateLimitBackoff is the first wait for a rate limit whose clear
+	// time is unknown; it doubles from there up to DefaultRateLimitMaxBackoff.
+	DefaultRateLimitBackoff = 60 * time.Second
+	// DefaultRateLimitMaxBackoff caps one unknown-clear-time wait.
+	DefaultRateLimitMaxBackoff = 15 * time.Minute
+	// rateLimitResetSpread spreads the retries of every run that waited for
+	// the same reset, so they do not exhaust the fresh window together.
+	rateLimitResetSpread = 30 * time.Second
+	// rateLimitHeartbeat re-announces a long wait so the step's last activity
+	// keeps saying why it is quiet.
+	rateLimitHeartbeat = 5 * time.Minute
+)
+
+// RateLimited is implemented by an error that carries GitHub's own word on
+// when a rate limit clears. A zero value means unknown.
+type RateLimited interface {
+	RateLimitResetAt() time.Time
+	RateLimitRetryAfter() time.Duration
+}
+
+type waitNotifierKey struct{}
+
+// WithWaitNotifier returns a context whose rate-limit waits are reported to
+// notify, one line per wait and heartbeat. The pipeline installs the step's
+// log here, so the wait is the step's visible last activity.
+func WithWaitNotifier(ctx context.Context, notify func(string)) context.Context {
+	if notify == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, waitNotifierKey{}, notify)
+}
+
+func waitNotifier(ctx context.Context) func(string) {
+	notify, _ := ctx.Value(waitNotifierKey{}).(func(string))
+	return notify
+}
 
 // Options configures one retried call. The zero value retries transient
 // network failures up to DefaultAttempts with exponential backoff.
@@ -79,17 +131,35 @@ type Options struct {
 	// Exhausted wraps the last error once every attempt has failed. It must
 	// not change the cause: wrap with %w.
 	Exhausted func(attempts int, err error) error
+	// RateLimitBudget caps the total rate-limit wait; zero means
+	// DefaultRateLimitBudget and negative returns a rate limit at once.
+	RateLimitBudget time.Duration
+	// ProbeRateLimit may enrich a rate-limit failure with its clear time (for
+	// example from `gh api rate_limit`) or reclassify it. It returns the error
+	// to wait on; it must keep the cause with %w.
+	ProbeRateLimit func(ctx context.Context, err error) error
+	// Wait and Now are test hooks for the rate-limit wait; nil uses a timer
+	// and time.Now.
+	Wait func(ctx context.Context, d time.Duration) error
+	Now  func() time.Time
 }
 
+// ErrRateLimitBudgetSpent marks a rate limit that outlasted the wait budget.
+var ErrRateLimitBudgetSpent = errors.New("GitHub rate limit did not clear within the wait budget")
+
 // Do calls call until it succeeds, the failure is not transient, or the
-// attempt budget is spent. A cancelled context stops the call at once,
-// including during a backoff wait, and is returned as its own cause.
+// attempt budget is spent. A rate limit is waited out without spending an
+// attempt, within the rate-limit budget. A cancelled context stops the call at
+// once, including during a backoff or rate-limit wait, and is returned as its
+// own cause.
 func Do[T any](ctx context.Context, opts Options, call func() (T, error)) (T, error) {
 	var zero T
 	attempts := opts.attempts()
 	var last T
 	var err error
-	for attempt := 1; attempt <= attempts; attempt++ {
+	var rateLimitWaited time.Duration
+	rateLimitWaits := 0
+	for attempt := 1; attempt <= attempts; {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return zero, ctxErr
 		}
@@ -100,6 +170,32 @@ func Do[T any](ctx context.Context, opts Options, call func() (T, error)) (T, er
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return last, errors.Join(err, ctxErr)
+		}
+		if opts.Retryable == nil && RateLimitClass(err) != "" {
+			if opts.ProbeRateLimit != nil {
+				err = opts.ProbeRateLimit(ctx, err)
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return last, errors.Join(err, ctxErr)
+				}
+			}
+			if class := RateLimitClass(err); class != "" {
+				delay, until := opts.rateLimitDelay(err, rateLimitWaits)
+				budget := opts.rateLimitBudget()
+				if budget < 0 || rateLimitWaited+delay > budget {
+					return last, fmt.Errorf("%w (%s waited): %w", ErrRateLimitBudgetSpent, rateLimitWaited.Round(time.Second), err)
+				}
+				if deadline, ok := ctx.Deadline(); ok && opts.now().Add(delay).After(deadline) {
+					// The caller's own bound ends before the limit clears:
+					// waiting would only turn the rate limit into a timeout.
+					return last, err
+				}
+				if waitErr := opts.waitForRateLimit(ctx, class, delay, until, err); waitErr != nil {
+					return zero, waitErr
+				}
+				rateLimitWaited += delay
+				rateLimitWaits++
+				continue
+			}
 		}
 		if !opts.retryable(err) {
 			// A failure a retry cannot fix is the caller's answer on the first
@@ -118,11 +214,121 @@ func Do[T any](ctx context.Context, opts Options, call func() (T, error)) (T, er
 			return zero, ctx.Err()
 		case <-timer.C:
 		}
+		attempt++
 	}
 	if opts.Exhausted != nil {
 		return last, opts.Exhausted(attempts, err)
 	}
 	return last, err
+}
+
+// RateLimitClass returns ClassPrimaryRateLimit or ClassRateLimit when err is a
+// GitHub rate limit, and "" otherwise.
+func RateLimitClass(err error) Class {
+	switch class := Class(Describe(err)); class {
+	case ClassRateLimit, ClassPrimaryRateLimit:
+		return class
+	}
+	return ""
+}
+
+func (o Options) now() time.Time {
+	if o.Now != nil {
+		return o.Now()
+	}
+	return time.Now()
+}
+
+func (o Options) rateLimitBudget() time.Duration {
+	if o.RateLimitBudget == 0 {
+		return DefaultRateLimitBudget
+	}
+	return o.RateLimitBudget
+}
+
+// rateLimitDelay returns how long to wait for a rate limit and the moment it
+// is expected to clear. A known reset wins; otherwise the wait starts at the
+// Retry-After (or DefaultRateLimitBackoff) and doubles while the limit holds,
+// never shorter than a later Retry-After.
+func (o Options) rateLimitDelay(err error, waits int) (time.Duration, time.Time) {
+	now := o.now()
+	var limited RateLimited
+	if errors.As(err, &limited) {
+		if reset := limited.RateLimitResetAt(); !reset.IsZero() {
+			delay := reset.Sub(now)
+			if delay < time.Second {
+				delay = time.Second
+			}
+			delay += time.Duration(rand.Int64N(int64(rateLimitResetSpread)))
+			return delay, now.Add(delay)
+		}
+	}
+	// GitHub's guidance for a secondary limit: wait at least Retry-After (or a
+	// minute without one), and wait exponentially longer while it persists.
+	delay := DefaultRateLimitBackoff
+	if limited != nil {
+		if after := limited.RateLimitRetryAfter(); after > 0 {
+			delay = after
+		}
+	}
+	for i := 0; i < waits && delay < DefaultRateLimitMaxBackoff; i++ {
+		delay *= 2
+	}
+	if delay > DefaultRateLimitMaxBackoff {
+		delay = DefaultRateLimitMaxBackoff
+	}
+	delay += time.Duration(float64(delay) * DefaultJitter * rand.Float64())
+	return delay, now.Add(delay)
+}
+
+// waitForRateLimit sleeps for delay, announcing the wait when it starts and
+// again every rateLimitHeartbeat so a parked step keeps saying why it is quiet.
+func (o Options) waitForRateLimit(ctx context.Context, class Class, delay time.Duration, until time.Time, err error) error {
+	operation := o.Operation
+	if operation == "" {
+		operation = "network call"
+	}
+	announce := func(prefix string) {
+		line := prefix + " for GitHub rate limit until " + until.Format("2006-01-02 15:04:05 MST") +
+			" (class=" + string(class) + "; " + operation + "): " + err.Error()
+		if notify := waitNotifier(ctx); notify != nil {
+			notify(line)
+			return
+		}
+		if o.Log != nil {
+			o.Log(line)
+			return
+		}
+		log.Printf("no-mistakes network retry: %s", line)
+	}
+	wait := o.Wait
+	if wait == nil {
+		wait = func(ctx context.Context, d time.Duration) error {
+			timer := time.NewTimer(d)
+			defer timer.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-timer.C:
+				return nil
+			}
+		}
+	}
+	announce("waiting")
+	for remaining := delay; remaining > 0; {
+		chunk := min(remaining, rateLimitHeartbeat)
+		if waitErr := wait(ctx, chunk); waitErr != nil {
+			return waitErr
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		remaining -= chunk
+		if remaining > 0 {
+			announce("still waiting")
+		}
+	}
+	return nil
 }
 
 // Delay returns the wait before the retry that follows the given 1-based
@@ -269,14 +475,14 @@ func ClassifyText(text string) Class {
 			return ""
 		}
 	}
-	rateLimited := secondaryRateLimit(lower)
+	rateLimit := rateLimitText(lower)
 	for _, status := range http4xx.FindAllStringSubmatch(lower, -1) {
-		if !rateLimited || status[1] != "403" && status[1] != "429" {
+		if rateLimit == "" || status[1] != "403" && status[1] != "429" {
 			return ""
 		}
 	}
-	if rateLimited {
-		return ClassRateLimit
+	if rateLimit != "" {
+		return rateLimit
 	}
 	switch {
 	case curlTimeout.MatchString(lower),
@@ -315,6 +521,22 @@ func ClassifyText(text string) Class {
 	return ""
 }
 
-func secondaryRateLimit(lower string) bool {
-	return strings.Contains(lower, "secondary rate limit") && strings.Contains(lower, "retry-after")
+var primaryRateLimit = regexp.MustCompile(`\bapi rate limit (?:already )?exceeded\b`)
+var tooManyRequests = regexp.MustCompile(`\b(?:http(?:/[0-9.]+)?|status|status code)[:= ]+429\b|\b429 too many requests\b`)
+
+// rateLimitText classifies GitHub's own rate-limit messages. "secondary rate
+// limit" and abuse detection are the secondary limit, as is a bare 429. "API
+// rate limit (already) exceeded" names the primary limit, but GitHub also
+// returns it for a secondary limit while the hourly budget still has room;
+// the GitHub host's probe of `gh api rate_limit` reclassifies that case.
+func rateLimitText(lower string) Class {
+	switch {
+	case strings.Contains(lower, "secondary rate limit"),
+		strings.Contains(lower, "abuse detection mechanism"),
+		tooManyRequests.MatchString(lower):
+		return ClassRateLimit
+	case primaryRateLimit.MatchString(lower):
+		return ClassPrimaryRateLimit
+	}
+	return ""
 }

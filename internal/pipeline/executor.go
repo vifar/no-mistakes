@@ -23,6 +23,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/gateguidance"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/netretry"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
@@ -1907,7 +1908,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		return nil
 	}
 	sctx := &StepContext{
-		Ctx:                   ctx,
+		// A GitHub rate-limit wait parks the step inside the forge call;
+		// reporting it through the step log makes it the step's visible last
+		// activity ("waiting for GitHub rate limit until ...") in axi status.
+		Ctx:                   netretry.WithWaitNotifier(ctx, writeLog),
 		Run:                   run,
 		Repo:                  repo,
 		WorkDir:               workDir,

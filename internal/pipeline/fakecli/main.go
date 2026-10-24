@@ -77,6 +77,9 @@ func handleFakeCLI(mode string) {
 			f.Close()
 		}
 	}
+	if fakePRViewSnapshot(args) {
+		return
+	}
 	if len(args) >= 2 && args[0] == "auth" && args[1] == "status" {
 		if marker := os.Getenv("FAKE_CLI_AUTH_TIMEOUT_MARKER"); marker != "" {
 			if err := os.Remove(marker); err == nil {
@@ -1726,4 +1729,66 @@ func printFakeAttemptJobs() {
 		}
 	}
 	fmt.Printf(`[{"total_count":%d,"jobs":[%s]}]`, len(jobs), strings.Join(jobs, ","))
+}
+
+// prViewSnapshotFields mirrors the GitHub host's prSnapshotFields: the one
+// `gh pr view` a CI poll makes for the PR's state, base, mergeability and head.
+const prViewSnapshotFields = "baseRefName,headRefOid,mergeable,mergeStateStatus,state"
+
+// fakePRViewSnapshot answers the combined CI-poll view by asking this same
+// fake, unlogged, for each field the way the per-field reads do, so every mode
+// keeps its own answers (and failures) for state, base, mergeability and head.
+func fakePRViewSnapshot(args []string) bool {
+	if len(args) < 2 || args[0] != "pr" || args[1] != "view" {
+		return false
+	}
+	jsonAt := -1
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--json" && args[i+1] == prViewSnapshotFields {
+			jsonAt = i
+		}
+	}
+	if jsonAt < 0 {
+		return false
+	}
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	read := func(fields, jq string) string {
+		sub := append(append([]string{}, args[:jsonAt]...), "--json", fields, "--jq", jq)
+		sub = append(sub, args[jsonAt+2:]...)
+		cmd := exec.Command(self, sub...)
+		cmd.Args[0] = os.Args[0]
+		cmd.Env = append(os.Environ(), "FAKE_CLI_LOG=")
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			fmt.Fprint(os.Stderr, stderr.String())
+			code := 1
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				code = exitErr.ExitCode()
+			}
+			os.Exit(code)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	view := map[string]string{
+		"state":       read("state", ".state"),
+		"baseRefName": read("baseRefName", ".baseRefName"),
+		"headRefOid":  read("headRefOid", ".headRefOid"),
+	}
+	mergeable := strings.Fields(read("mergeable,mergeStateStatus", `.mergeable + " " + .mergeStateStatus`))
+	view["mergeable"], view["mergeStateStatus"] = "", ""
+	if len(mergeable) > 0 {
+		view["mergeable"] = mergeable[0]
+	}
+	if len(mergeable) > 1 {
+		view["mergeStateStatus"] = mergeable[1]
+	}
+	encoded, _ := json.Marshal(view)
+	fmt.Println(string(encoded))
+	return true
 }
