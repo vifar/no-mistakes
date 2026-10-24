@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -1721,8 +1722,41 @@ func escapePipelineFoldMarkers(s string) string {
 // labelled key while their names and addresses remain visible as evidence.
 // prDisplayNoticeText owns AI neutralization and human presentation; a sentence
 // that merely names the field stays the sentence it was.
+//
+// The filter renders an entry that starts a line. A co-author can also close a
+// line that starts with something else - a recorded risk rationale such as
+// "Low: ... Co-Authored-By: Name <addr>" - and a raw-text scanner reads that
+// key as a claim too, so renderInlineCoAuthorKeys renders it after the filter
+// has classified the line.
 func renderCoAuthorAsLabelledField(s string) string {
-	return prDisplayNoticeText(s)
+	return renderInlineCoAuthorKeys(prDisplayNoticeText(s))
+}
+
+// publishedCoAuthorKey matches the co-author key wherever it sits in a line.
+var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)`)
+
+// renderInlineCoAuthorKeys renders a co-author key inside a line when the rest
+// of the line is a complete identity (a name and an address), so the line ends
+// in a co-author claim. A key that only names the field, and a key quoted in an
+// inline code span, stay as they are: neither is a claim, and the code span is
+// evidence the body preserves byte for byte.
+func renderInlineCoAuthorKeys(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		matches := publishedCoAuthorKey.FindAllStringSubmatchIndex(line, -1)
+		for k := len(matches) - 1; k >= 0; k-- {
+			start, end, sep := matches[k][0], matches[k][1], line[matches[k][2]:matches[k][3]]
+			if strings.Count(line[:start], "`")%2 == 1 {
+				continue
+			}
+			if !reviewAttributionAddressComplete("Co-Authored-By:" + html.UnescapeString(line[end:])) {
+				continue
+			}
+			line = line[:start] + "co-author (quoted)" + sep + line[end:]
+		}
+		lines[i] = line
+	}
+	return strings.Join(lines, "\n")
 }
 
 // neutralizeAttestationMarkers breaks every attestation comment prefix in
