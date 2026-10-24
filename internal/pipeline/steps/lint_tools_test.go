@@ -260,7 +260,7 @@ func TestLintStep_GenuinelyMissingToolStillReported(t *testing.T) {
 		t.Fatalf("outcome = %+v, want one missing-tool finding", outcome)
 	}
 	got := findings.Items[0]
-	if got.ID != "lint-missing-prettier" || got.Category != types.FindingCategoryLintEnvironment || got.Action != types.ActionAskUser {
+	if got.ID != "lint-missing-prettier@controller" || got.Category != types.FindingCategoryLintEnvironment || got.Action != types.ActionAskUser {
 		t.Fatalf("finding = %+v, want an ask-user environment finding", got)
 	}
 }
@@ -282,7 +282,7 @@ func TestLintStep_FailingCheckOfPresentToolBecomesAutoFixFinding(t *testing.T) {
 		t.Fatal(err)
 	}
 	findings, _ := types.ParseFindingsJSON(outcome.Findings)
-	if len(findings.Items) != 1 || findings.Items[0].ID != "lint-prettier-check-controller" || findings.Items[0].Action != types.ActionAutoFix || !strings.Contains(findings.Items[0].Description, "[warn] src/a.ts") {
+	if len(findings.Items) != 1 || findings.Items[0].ID != "lint-prettier-check@controller" || findings.Items[0].Action != types.ActionAutoFix || !strings.Contains(findings.Items[0].Description, "[warn] src/a.ts") {
 		t.Fatalf("findings = %+v, want prettier's own failure", findings.Items)
 	}
 }
@@ -298,7 +298,7 @@ func TestLintStep_EnvironmentOnlyFixRoundRechecksWithoutAgent(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = []string{hermeticPath(t)}
 	previous, _ := types.MarshalFindingsJSON(Findings{Items: []Finding{{
-		ID: "lint-missing-prettier", Severity: "warning", Action: types.ActionAskUser,
+		ID: "lint-missing-prettier@controller", Severity: "warning", Action: types.ActionAskUser,
 		Category: types.FindingCategoryLintEnvironment, Description: "prettier is not installed",
 	}}})
 	sctx.Fixing = true
@@ -359,16 +359,121 @@ func TestHousekeepingLintDutyNamesResolvedSubPackageTool(t *testing.T) {
 	}
 }
 
-func TestResolveLintTools_ToolIsPlannedOnlyForFilesItHandles(t *testing.T) {
+func TestResolveLintTools_ResolvesEveryChangedFileSoConfiguredTypesAreNotLost(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeLintFixture(t, root, map[string]string{
-		"package.json": `{"devDependencies":{"eslint":"^9","stylelint":"^16"}}`,
-		"README.md":    "x\n",
-		"src/a.css":    "x\n",
+		"web/package.json":      `{"devDependencies":{"eslint":"^9"}}`,
+		"web/eslint.config.mjs": "export default []\n",
+		"web/App.vue":           "<template/>\n",
 	})
-	got := resolveLintTools(root, []string{"README.md", "src/a.css"}, noLookPath)
-	if len(got) != 1 || got[0].Tool.Name != "stylelint" || !reflect.DeepEqual(got[0].Files, []string{"src/a.css"}) {
-		t.Fatalf("plans = %+v, want stylelint over the CSS file only and no eslint plan", got)
+	got := resolveLintTools(root, []string{"web/App.vue"}, noLookPath)
+	if len(got) != 1 || got[0].Tool.Name != "eslint" || got[0].Dir != "web" || !reflect.DeepEqual(got[0].Files, []string{"App.vue"}) {
+		t.Fatalf("plans = %+v, want eslint planned for the .vue file its configuration may support", got)
+	}
+	if files := got[0].checkFiles(); len(files) != 0 {
+		t.Fatalf("native check files = %v, want none for a non-JS extension", files)
+	}
+}
+
+func TestLintPromptListsEveryPlannedFile(t *testing.T) {
+	t.Parallel()
+	var files []string
+	for i := 0; i < 30; i++ {
+		files = append(files, "f"+string(rune('a'+i%26))+strings.Repeat("x", i)+".ts")
+	}
+	section := lintToolsPromptSection([]lintToolPlan{{Tool: knownLintTools[0], Dir: "pkg", ConfiguredBy: "pkg/package.json", Binary: "pkg/node_modules/.bin/prettier", Files: files}})
+	if !strings.Contains(section, files[29]) || strings.Contains(section, "more)") {
+		t.Fatalf("prompt truncated the file list:\n%s", section)
+	}
+}
+
+func TestLintStep_AgentFindingsSharingAnIDAreBothKept(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA, _ := lintMonorepo(t, true)
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: json.RawMessage(`{"findings":[{"id":"l1","severity":"info","action":"no-op","description":"note"},{"id":"l1","severity":"warning","action":"ask-user","description":"real lint error"}],"summary":"two findings"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = []string{hermeticPath(t)}
+
+	outcome, err := (&LintStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.NeedsApproval || !strings.Contains(outcome.Findings, "real lint error") {
+		t.Fatalf("outcome = %+v, want the blocking finding kept", outcome)
+	}
+}
+
+func TestLintStep_MissingPackageIsNotMaskedByAnotherPackagesTool(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := setupGitRepo(t)
+	writeLintFixture(t, dir, map[string]string{
+		".gitignore":     "node_modules/\n",
+		"a/package.json": `{"devDependencies":{"prettier":"^3"}}`,
+		"a/x.ts":         "x\n",
+		"b/package.json": `{"devDependencies":{"prettier":"^3"}}`,
+		"b/y.ts":         "y\n",
+	})
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "two packages")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	writeLintFixture(t, dir, map[string]string{"a/node_modules/.bin/prettier": "#!/bin/sh\nexit 0\n"})
+	calls := 0
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		calls++
+		return &agent.Result{Output: json.RawMessage(`{"findings":[{"id":"lint-missing-prettier","severity":"warning","action":"ask-user","description":"prettier is unavailable"}],"summary":"missing"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = []string{hermeticPath(t)}
+
+	outcome, err := (&LintStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, _ := types.ParseFindingsJSON(outcome.Findings)
+	if len(findings.Items) != 1 || findings.Items[0].ID != "lint-missing-prettier@b" {
+		t.Fatalf("findings = %+v, want only b's prettier reported missing", findings.Items)
+	}
+
+	sctx.Fixing = true
+	sctx.PreviousFindings = outcome.Findings
+	outcome, err = (&LintStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || !outcome.NeedsApproval || !strings.Contains(outcome.Findings, "lint-missing-prettier@b") {
+		t.Fatalf("calls=%d outcome=%+v, want a re-park without an agent pass while b still lacks prettier", calls, outcome)
+	}
+}
+
+func TestLintStep_PresentToolWithOnlyNonNativeFilesIsNotReportedMissing(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, _ := setupGitRepo(t)
+	writeLintFixture(t, dir, map[string]string{
+		".gitignore":       "node_modules/\n",
+		"web/package.json": `{"devDependencies":{"eslint":"^9"}}`,
+		"web/App.vue":      "<template/>\n",
+	})
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "vue")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	writeLintFixture(t, dir, map[string]string{"web/node_modules/.bin/eslint": "#!/bin/sh\nexit 1\n"})
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: json.RawMessage(`{"findings":[{"id":"lint-missing-eslint","severity":"warning","action":"ask-user","description":"eslint is unavailable"}],"summary":"missing"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = []string{hermeticPath(t)}
+
+	outcome, err := (&LintStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ag.calls[0].Prompt, "eslint (configured by web/package.json): run from `web` with `./node_modules/.bin/eslint`; files: App.vue") {
+		t.Fatalf("prompt does not name eslint for the .vue file:\n%s", ag.calls[0].Prompt)
+	}
+	if outcome.NeedsApproval || strings.Contains(outcome.Findings, "lint-missing-eslint") {
+		t.Fatalf("outcome = %+v, want the false claim about an installed eslint dropped", outcome)
 	}
 }

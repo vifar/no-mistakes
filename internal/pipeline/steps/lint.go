@@ -84,7 +84,7 @@ func (s *LintStep) executeRepositoryLint(sctx *pipeline.StepContext) (*pipeline.
 			return nil, fmt.Errorf("prepare agent lint dependencies: %w", err)
 		}
 		tools := lintToolsForStep(sctx, baseSHA)
-		if outcome, err := lintEnvironmentRecheck(sctx, tools); err != nil || outcome != nil {
+		if outcome, err := lintEnvironmentRecheck(sctx); err != nil || outcome != nil {
 			return outcome, err
 		}
 		// The combined document+lint housekeeping pass already performed the

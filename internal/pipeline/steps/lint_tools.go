@@ -35,8 +35,11 @@ type lintTool struct {
 	ConfigFiles []string
 	// CheckArgs is a read-only invocation; the changed files follow it.
 	CheckArgs []string
-	// Extensions limits the files the tool is resolved for; nil takes every
-	// changed file because the tool skips unknown ones itself.
+	// Extensions limits the files the step's own check passes to the tool;
+	// nil passes every changed file because the tool skips unknown ones
+	// itself. It never limits resolution: a configuration can teach the tool
+	// other file types (ESLint plugins for .vue, Stylelint custom syntaxes),
+	// and the agent, which reads that configuration, decides what to run.
 	Extensions []string
 }
 
@@ -69,8 +72,19 @@ var knownLintTools = []lintTool{
 }
 
 // lintMissingIDPrefix is the finding id prefix of a lint tool that is not
-// available in the run's environment.
+// available in the run's environment. The step's own ids add "@<dir>" for a
+// tool configured below the repository root, so each package's finding is
+// distinct and names where availability must be re-checked.
 const lintMissingIDPrefix = "lint-missing-"
+
+// lintPlanID is the id of a step-generated finding for one tool in one
+// package directory.
+func lintPlanID(base, dir string) string {
+	if dir == "." {
+		return base
+	}
+	return base + "@" + dir
+}
 
 // lintToolPlan is one tool resolved for the changed files of one package.
 // Paths are slash-separated and relative to the repository root, except
@@ -128,9 +142,6 @@ func resolveLintTools(workDir string, changed []string, lookPath func(string) st
 			continue
 		}
 		for _, tool := range knownLintTools {
-			if !tool.handles(file) {
-				continue
-			}
 			for dir := path.Dir(file); ; dir = path.Dir(dir) {
 				if by, ok := configured(dir)[tool.Name]; ok {
 					k := key{tool.Name, dir}
@@ -245,13 +256,16 @@ func lintToolsForStep(sctx *pipeline.StepContext, baseSHA string) []lintToolPlan
 	if out == "" {
 		return nil
 	}
-	return resolveLintTools(sctx.WorkDir, changedPathList(out), func(name string) string {
-		env := stepEnvironment(sctx)
-		if env == nil {
-			env = os.Environ()
-		}
-		return findInCustomPath(sctx.WorkDir, env, name)
-	})
+	return resolveLintTools(sctx.WorkDir, changedPathList(out), stepLookPath(sctx))
+}
+
+// stepLookPath resolves a program on the step environment's PATH.
+func stepLookPath(sctx *pipeline.StepContext) func(string) string {
+	env := stepEnvironment(sctx)
+	if env == nil {
+		env = os.Environ()
+	}
+	return func(name string) string { return findInCustomPath(sctx.WorkDir, env, name) }
 }
 
 // lintToolsPromptSection tells the agent which repository-local binary to run
@@ -265,16 +279,12 @@ func lintToolsPromptSection(plans []lintToolPlan) string {
 	var b strings.Builder
 	b.WriteString("\n\nResolved lint tools (no-mistakes resolved each tool from the package that configures it; run each from its package directory, not the repository root, over its listed files, whose paths are relative to that directory):")
 	for _, plan := range plans {
-		files := plan.Files
-		suffix := ""
-		if len(files) > 20 {
-			files, suffix = files[:20], fmt.Sprintf(" (and %d more)", len(plan.Files)-20)
-		}
+		files := sanitizePromptText(strings.Join(plan.Files, ", "))
 		if plan.missing() {
-			fmt.Fprintf(&b, "\n- %s (configured by %s): not installed in %s/node_modules/.bin or any parent package, and not on PATH. Report it with id %q and action \"ask-user\".", plan.Tool.Name, sanitizePromptText(plan.ConfiguredBy), sanitizePromptText(plan.Dir), lintMissingIDPrefix+plan.Tool.Name)
+			fmt.Fprintf(&b, "\n- %s (configured by %s): not installed in %s/node_modules/.bin or any parent package, and not on PATH; files: %s. If these files need it, report it with id %q and action \"ask-user\".", plan.Tool.Name, sanitizePromptText(plan.ConfiguredBy), sanitizePromptText(plan.Dir), files, sanitizePromptText(lintPlanID(lintMissingIDPrefix+plan.Tool.Name, plan.Dir)))
 			continue
 		}
-		fmt.Fprintf(&b, "\n- %s (configured by %s): run from `%s` with `%s`; files: %s%s", plan.Tool.Name, sanitizePromptText(plan.ConfiguredBy), sanitizePromptText(plan.Dir), sanitizePromptText(plan.binaryFromDir()), sanitizePromptText(strings.Join(files, ", ")), suffix)
+		fmt.Fprintf(&b, "\n- %s (configured by %s): run from `%s` with `%s`; files: %s", plan.Tool.Name, sanitizePromptText(plan.ConfiguredBy), sanitizePromptText(plan.Dir), sanitizePromptText(plan.binaryFromDir()), files)
 	}
 	b.WriteString("\n- A tool listed with a binary is installed: never report it as missing or unavailable. If another tool you need is unavailable, report it with id \"" + lintMissingIDPrefix + "<tool>\" and action \"ask-user\".\n")
 	return b.String()
@@ -288,27 +298,33 @@ func isLintEnvironmentFinding(f Finding) bool {
 
 var lintUnavailablePhrases = []string{"unavailable", "not installed", "not available", "not on path", "not found", "could not find", "cannot find", "cannot be resolved", "could not be resolved"}
 
-// lintMissingToolClaim reports the tool a finding claims is unavailable.
-func lintMissingToolClaim(f Finding) (string, bool) {
-	id := strings.ToLower(strings.TrimSpace(f.ID))
+// lintMissingToolClaim reports the tool a finding claims is unavailable,
+// and the package directory its id names ("." when it names none).
+func lintMissingToolClaim(f Finding) (tool, dir string, ok bool) {
+	raw := strings.TrimSpace(f.ID)
+	id := strings.ToLower(raw)
 	if strings.HasPrefix(id, lintMissingIDPrefix) {
-		return strings.TrimPrefix(id, lintMissingIDPrefix), true
+		tool, dir, _ = strings.Cut(raw[len(lintMissingIDPrefix):], "@")
+		if dir == "" {
+			dir = "."
+		}
+		return strings.ToLower(tool), dir, true
 	}
 	desc := strings.ToLower(f.Description)
 	for _, tool := range knownLintTools {
 		if strings.Contains(id, "missing") && strings.Contains(id, tool.Name) {
-			return tool.Name, true
+			return tool.Name, ".", true
 		}
 		if !strings.Contains(desc, tool.Name) {
 			continue
 		}
 		for _, phrase := range lintUnavailablePhrases {
 			if strings.Contains(desc, phrase) {
-				return tool.Name, true
+				return tool.Name, ".", true
 			}
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // lintCheckRunner runs a resolved tool's read-only check from dir. It returns
@@ -323,6 +339,11 @@ func execLintCheck(sctx *pipeline.StepContext) lintCheckRunner {
 		ctx, cancel := context.WithTimeout(ctx, lintCheckTimeout)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, binary, args...)
+		if ext := strings.ToLower(filepath.Ext(binary)); runtime.GOOS == "windows" && (ext == ".cmd" || ext == ".bat") {
+			// A package manager's command shim is a batch script, which
+			// Windows starts only through its command interpreter.
+			cmd = exec.CommandContext(ctx, "cmd.exe", append([]string{"/c", binary}, args...)...)
+		}
 		cmd.Dir = dir
 		cmd.Env = stepEnvironment(sctx)
 		winproc.Harden(cmd)
@@ -351,18 +372,15 @@ func reconcileLintToolFindings(sctx *pipeline.StepContext, findings Findings, pl
 		byTool[plan.Tool.Name] = append(byTool[plan.Tool.Name], plan)
 	}
 	out := Findings{Items: []Finding{}, Summary: findings.Summary}
-	seen := map[string]bool{}
-	add := func(f Finding) {
-		if f.ID != "" && seen[f.ID] {
-			return
-		}
-		seen[f.ID] = true
-		out.Items = append(out.Items, f)
-	}
+	// Only the step's own findings are deduplicated: each is keyed by tool
+	// and package, so two claims about one tool yield one check. The
+	// agent's findings pass through as reported; duplicate ids among them
+	// are the executor's to normalize, never a reason to drop one.
+	checked := map[string]bool{}
 	for _, item := range findings.Items {
-		tool, ok := lintMissingToolClaim(item)
+		tool, _, ok := lintMissingToolClaim(item)
 		if !ok {
-			add(item)
+			out.Items = append(out.Items, item)
 			continue
 		}
 		toolPlans := byTool[tool]
@@ -373,13 +391,16 @@ func reconcileLintToolFindings(sctx *pipeline.StepContext, findings Findings, pl
 			if item.Action == "" || item.Action == types.ActionAutoFix {
 				item.Action = types.ActionAskUser
 			}
-			add(item)
+			out.Items = append(out.Items, item)
 			continue
 		}
 		for _, plan := range toolPlans {
-			for _, f := range checkLintToolPlan(sctx, plan, run) {
-				add(f)
+			key := plan.Tool.Name + "@" + plan.Dir
+			if checked[key] {
+				continue
 			}
+			checked[key] = true
+			out.Items = append(out.Items, checkLintToolPlan(sctx, plan, run)...)
 		}
 	}
 	return out
@@ -389,7 +410,11 @@ func checkLintToolPlan(sctx *pipeline.StepContext, plan lintToolPlan, run lintCh
 	if plan.missing() {
 		return []Finding{lintMissingToolFinding(plan, "")}
 	}
-	files := plan.Files
+	files := plan.checkFiles()
+	if len(files) == 0 {
+		sctx.Log(fmt.Sprintf("%s is installed at %s; none of the changed files under %s is a type the step checks natively, so the missing-tool claim is dropped", plan.Tool.Name, plan.Binary, plan.Dir))
+		return nil
+	}
 	binary := plan.Binary
 	if !filepath.IsAbs(binary) {
 		binary = filepath.Join(sctx.WorkDir, filepath.FromSlash(binary))
@@ -405,7 +430,7 @@ func checkLintToolPlan(sctx *pipeline.StepContext, plan lintToolPlan, run lintCh
 		return nil
 	}
 	return []Finding{{
-		ID:          "lint-" + plan.Tool.Name + "-check-" + lintPlanSlug(plan.Dir),
+		ID:          lintPlanID("lint-"+plan.Tool.Name+"-check", plan.Dir),
 		Severity:    types.FindingSeverityWarning,
 		Action:      types.ActionAutoFix,
 		Category:    types.FindingCategoryLint,
@@ -418,7 +443,7 @@ func lintMissingToolFinding(plan lintToolPlan, detail string) Finding {
 		detail = fmt.Sprintf("%s configures %s, but it is not installed in %s/node_modules/.bin or any parent package and is not on PATH", plan.ConfiguredBy, plan.Tool.Name, plan.Dir)
 	}
 	return Finding{
-		ID:          lintMissingIDPrefix + plan.Tool.Name,
+		ID:          lintPlanID(lintMissingIDPrefix+plan.Tool.Name, plan.Dir),
 		Severity:    types.FindingSeverityWarning,
 		Action:      types.ActionAskUser,
 		Category:    types.FindingCategoryLintEnvironment,
@@ -426,24 +451,21 @@ func lintMissingToolFinding(plan lintToolPlan, detail string) Finding {
 	}
 }
 
-func (t lintTool) handles(file string) bool {
-	if t.Extensions == nil {
-		return true
+func (p lintToolPlan) checkFiles() []string {
+	if p.Tool.Extensions == nil {
+		return append([]string{}, p.Files...)
 	}
-	ext := strings.ToLower(path.Ext(file))
-	for _, want := range t.Extensions {
-		if ext == want {
-			return true
+	var files []string
+	for _, file := range p.Files {
+		ext := strings.ToLower(path.Ext(file))
+		for _, want := range p.Tool.Extensions {
+			if ext == want {
+				files = append(files, file)
+				break
+			}
 		}
 	}
-	return false
-}
-
-func lintPlanSlug(dir string) string {
-	if dir == "." {
-		return "root"
-	}
-	return strings.ReplaceAll(dir, "/", "-")
+	return files
 }
 
 func tailText(text string, limit int) string {
@@ -456,10 +478,12 @@ func tailText(text string, limit int) string {
 
 // lintEnvironmentRecheck handles a fix round whose every selected finding is
 // an environment finding. Code changes cannot fix an unavailable tool, so no
-// agent runs: the step re-resolves the tools, and the outcome is nil (run the
-// normal lint pass) once any of them is available, or the same findings again
-// so the gate re-parks without failing the run.
-func lintEnvironmentRecheck(sctx *pipeline.StepContext, plans []lintToolPlan) (*pipeline.StepOutcome, error) {
+// agent runs: the step re-checks each finding's tool in the package directory
+// the finding names. The outcome is nil (run the normal lint pass) once one
+// of them is available there, or the same findings again so the gate
+// re-parks without failing the run. Another package having the tool does not
+// count: the package that lacked it has gained nothing.
+func lintEnvironmentRecheck(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	if !sctx.Fixing || sctx.PreviousFindings == "" {
 		return nil, nil
 	}
@@ -472,20 +496,20 @@ func lintEnvironmentRecheck(sctx *pipeline.StepContext, plans []lintToolPlan) (*
 			return nil, nil
 		}
 	}
-	present := map[string]bool{}
-	for _, plan := range plans {
-		if !plan.missing() {
-			present[plan.Tool.Name] = true
-		}
-	}
-	env := stepEnvironment(sctx)
-	if env == nil {
-		env = os.Environ()
-	}
+	lookPath := stepLookPath(sctx)
 	for _, item := range previous.Items {
-		tool, _ := lintMissingToolClaim(item)
-		if present[tool] || tool != "" && findInCustomPath(sctx.WorkDir, env, tool) != "" {
-			sctx.Log(fmt.Sprintf("lint tool %s is now available; re-running the lint pass", tool))
+		tool, dir, ok := lintMissingToolClaim(item)
+		if !ok || tool == "" {
+			continue
+		}
+		bin := tool
+		for _, known := range knownLintTools {
+			if known.Name == tool {
+				bin = known.Bin
+			}
+		}
+		if resolveLintBinary(sctx.WorkDir, path.Clean(filepath.ToSlash(dir)), bin, lookPath) != "" {
+			sctx.Log(fmt.Sprintf("lint tool %s is now available for %s; re-running the lint pass", tool, dir))
 			return nil, nil
 		}
 	}
