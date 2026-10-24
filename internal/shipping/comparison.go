@@ -32,7 +32,7 @@ func (e *remoteObservationError) Unwrap() error { return e.cause }
 func (*remoteObservationError) AddsMeaning() bool { return true }
 
 func RemoteHead(ctx context.Context, dir, remote, branch string) (string, error) {
-	out, err := git.Run(ctx, dir, "ls-remote", "--exit-code", remote, "refs/heads/"+branch)
+	out, err := git.RunNetwork(ctx, dir, "ls-remote", "--exit-code", remote, "refs/heads/"+branch)
 	if err != nil {
 		return "", &remoteObservationError{cause: err}
 	}
@@ -61,7 +61,7 @@ func Capture(ctx context.Context, database *db.DB, repo *db.Repo, run *db.Run, d
 	if err != nil {
 		return nil, err
 	}
-	if _, err := git.Run(ctx, dir, "fetch", "--no-tags", "--no-write-fetch-head", upstreamURL, tip); err != nil {
+	if _, err := git.RunNetwork(ctx, dir, "fetch", "--no-tags", "--no-write-fetch-head", upstreamURL, tip); err != nil {
 		return nil, fmt.Errorf("fetch shipping comparison objects: %w", err)
 	}
 	head, err := git.HeadSHA(ctx, dir)

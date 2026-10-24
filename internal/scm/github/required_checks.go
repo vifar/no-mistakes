@@ -145,7 +145,7 @@ func (h *Host) apiGET(ctx context.Context, endpoint string, extra ...string) ([]
 	}
 	args = append(args, "--method", "GET", endpoint)
 	args = append(args, extra...)
-	out, err := h.cmd(ctx, "gh", args...).CombinedOutput()
+	out, err := h.ghCombined(ctx, "gh api branch protection", "", args...)
 	if err != nil {
 		text := string(out)
 		if strings.Contains(text, "HTTP 404") || strings.Contains(text, "HTTP 403") {

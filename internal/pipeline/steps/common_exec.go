@@ -12,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/execpath"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/netretry"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -176,27 +177,37 @@ func stepGitRunRaw(sctx *pipeline.StepContext, args ...string) (string, error) {
 // stepGitRunInput is stepGitRunRaw with stdin, for plumbing such as
 // `cat-file --batch-check` that reads its object list from input.
 func stepGitRunInput(sctx *pipeline.StepContext, input string, args ...string) (string, error) {
-	cmd := stepCmd(sctx, "git", args...)
-	if input != "" {
-		cmd.Stdin = strings.NewReader(input)
-	}
-	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
-	if len(args) > 0 && (args[0] == "commit" || args[0] == "merge" || args[0] == "rebase" || args[0] == "cherry-pick" || args[0] == "am") {
-		var err error
-		cmd.Env, err = sctx.CommitAttributionEnv(cmd.Env, func(args ...string) (string, error) { return stepGitRun(sctx, args...) })
+	run := func() ([]byte, error) {
+		cmd := stepCmd(sctx, "git", args...)
+		if input != "" {
+			cmd.Stdin = strings.NewReader(input)
+		}
+		cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
+		if len(args) > 0 && (args[0] == "commit" || args[0] == "merge" || args[0] == "rebase" || args[0] == "cherry-pick" || args[0] == "am") {
+			var err error
+			cmd.Env, err = sctx.CommitAttributionEnv(cmd.Env, func(args ...string) (string, error) { return stepGitRun(sctx, args...) })
+			if err != nil {
+				return nil, err
+			}
+		}
+		out, err := cmd.Output()
 		if err != nil {
-			return "", err
+			stderr := ""
+			if ee, ok := err.(*exec.ExitError); ok {
+				stderr = strings.TrimSpace(string(ee.Stderr))
+			}
+			return nil, &git.CommandError{Command: safeurl.RedactText(strings.Join(args, " ")), Stderr: safeurl.RedactText(stderr), Err: err}
 		}
+		return out, nil
 	}
-	out, err := cmd.Output()
-	if err != nil {
-		stderr := ""
-		if ee, ok := err.(*exec.ExitError); ok {
-			stderr = strings.TrimSpace(string(ee.Stderr))
-		}
-		return "", fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(stderr))
+	// A read that talks to the remote retries a transient network failure.
+	// Push is never retried here: it re-checks the remote head first.
+	if len(args) > 0 && (args[0] == "fetch" || args[0] == "ls-remote") {
+		out, err := netretry.Do(sctx.Ctx, netretry.Options{Operation: "git " + args[0]}, func() ([]byte, error) { return run() })
+		return string(out), err
 	}
-	return string(out), nil
+	out, err := run()
+	return string(out), err
 }
 
 func stepGitHeadSHA(sctx *pipeline.StepContext) (string, error) {
@@ -213,17 +224,7 @@ func stepGitHeadSHA(sctx *pipeline.StepContext) (string, error) {
 }
 
 func stepGitPush(sctx *pipeline.StepContext, remote, ref, expectedSHA string, forceWithLease bool) error {
-	args := []string{"push", remote}
-	if forceWithLease {
-		if expectedSHA != "" {
-			args = append(args, fmt.Sprintf("--force-with-lease=%s:%s", ref, expectedSHA))
-		} else {
-			args = append(args, "--force-with-lease")
-		}
-	}
-	args = append(args, "HEAD:"+ref)
-	_, err := stepGitRun(sctx, args...)
-	return err
+	return stepGitPushSource(sctx, remote, "HEAD", ref, expectedSHA, forceWithLease)
 }
 
 // stepGitPushCommit pushes an explicit commit to a remote ref with the
@@ -231,6 +232,14 @@ func stepGitPush(sctx *pipeline.StepContext, remote, ref, expectedSHA string, fo
 // explicit source SHA (rather than HEAD) is what lets a caller publish exactly
 // the commit it verified, even if the worktree moves underneath it.
 func stepGitPushCommit(sctx *pipeline.StepContext, remote, commitSHA, ref, expectedSHA string, forceWithLease bool) error {
+	return stepGitPushSource(sctx, remote, commitSHA, ref, expectedSHA, forceWithLease)
+}
+
+// stepGitPushSource publishes one commit, replaying a transient network failure
+// only after re-reading the remote ref: a push whose response was lost may
+// already have landed, and a lease that moved must refuse rather than become a
+// force push.
+func stepGitPushSource(sctx *pipeline.StepContext, remote, source, ref, expectedSHA string, forceWithLease bool) error {
 	args := []string{"push", remote}
 	if forceWithLease {
 		if expectedSHA != "" {
@@ -239,8 +248,23 @@ func stepGitPushCommit(sctx *pipeline.StepContext, remote, commitSHA, ref, expec
 			args = append(args, "--force-with-lease")
 		}
 	}
-	args = append(args, commitSHA+":"+ref)
-	_, err := stepGitRun(sctx, args...)
+	args = append(args, source+":"+ref)
+	run := func(args ...string) (string, error) { return stepGitRun(sctx, args...) }
+	attempts := 0
+	_, err := netretry.Do(sctx.Ctx, netretry.Options{Operation: "git push"}, func() (struct{}, error) {
+		attempts++
+		if attempts > 1 {
+			landed, err := git.PushLanded(sctx.Ctx, run, remote, ref, source, expectedSHA, forceWithLease)
+			if err != nil {
+				return struct{}{}, err
+			}
+			if landed {
+				return struct{}{}, nil
+			}
+		}
+		_, err := run(args...)
+		return struct{}{}, err
+	})
 	return err
 }
 

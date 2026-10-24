@@ -118,6 +118,12 @@ func handleFakeCLI(mode string) {
 
 	switch mode {
 	case "pr-context-read":
+		if marker := os.Getenv("FAKE_CLI_TRANSIENT_FAILURE_FILE"); marker != "" {
+			if err := os.Remove(marker); err == nil {
+				fmt.Fprint(os.Stderr, os.Getenv("FAKE_CLI_TRANSIENT_FAILURE"))
+				os.Exit(128)
+			}
+		}
 		fmt.Fprint(os.Stdout, os.Getenv("FAKE_CLI_STDOUT"))
 		fmt.Fprint(os.Stderr, os.Getenv("FAKE_CLI_STDERR"))
 		code, _ := strconv.Atoi(os.Getenv("FAKE_CLI_EXIT_CODE"))
@@ -1011,6 +1017,9 @@ func fakeCIGHHandler(args []string) {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "api") && strings.Contains(joined, "actions/runs") {
+		if fakeCIGHRerunAttempt(args) {
+			return
+		}
 		printFakeWorkflowRuns()
 		os.Exit(0)
 	}
@@ -1026,6 +1035,22 @@ func fakeCIGHHandler(args []string) {
 		os.Exit(0)
 	}
 	os.Exit(1)
+}
+
+func fakeCIGHRerunAttempt(args []string) bool {
+	for _, arg := range args {
+		_, id, ok := strings.Cut(arg, "/actions/runs/")
+		if !ok {
+			continue
+		}
+		runID, err := strconv.ParseInt(id, 10, 64)
+		if err != nil || runID <= 0 {
+			continue
+		}
+		fmt.Printf(`{"id":%d,"run_attempt":1,"status":"completed"}`+"\n", runID)
+		return true
+	}
+	return false
 }
 
 // fakeCIGHRerun answers `gh run rerun`, failing when FAKE_CLI_RERUN_ERR asks it
@@ -1142,6 +1167,9 @@ func fakeCIGHSequenceHandler(args []string) {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "api") && strings.Contains(joined, "actions/runs") {
+		if fakeCIGHRerunAttempt(args) {
+			return
+		}
 		printFakeWorkflowRuns()
 		os.Exit(0)
 	}
@@ -1385,6 +1413,9 @@ func fakeCIGHNoChecksHandler(args []string) {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "api") && strings.Contains(joined, "actions/runs") {
+		if fakeCIGHRerunAttempt(args) {
+			return
+		}
 		printFakeWorkflowRuns()
 		os.Exit(0)
 	}

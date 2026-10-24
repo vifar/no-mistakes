@@ -10,7 +10,7 @@ import (
 	"syscall"
 )
 
-// processWasCancelled reports whether a process exit is the exit of a
+// ProcessWasCancelled reports whether a process exit is the exit of a
 // subprocess THIS command's context stopped.
 //
 // ConfigureShellCommand replaces the standard library's kill with a
@@ -26,7 +26,7 @@ import (
 //
 // An exit that is not signalled at all is not the context's either: a child
 // that exited 1 on its own kept its own outcome.
-func processWasCancelled(err *exec.ExitError) bool {
+func ProcessWasCancelled(err *exec.ExitError) bool {
 	if err == nil {
 		return false
 	}

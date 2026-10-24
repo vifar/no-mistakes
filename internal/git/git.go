@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/execpath"
+	"github.com/kunchenguid/no-mistakes/internal/netretry"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
@@ -36,6 +37,8 @@ func (e *CommandError) Error() string {
 }
 
 func (e *CommandError) Unwrap() error { return e.Err }
+
+func (e *CommandError) RetryDiagnostic() string { return e.Stderr }
 
 // refuseStops makes the package's own stop REFUSED. It is a test hook: the
 // refusal is what a stop of an already-gone process group looks like, and
@@ -120,6 +123,38 @@ func RunRaw(ctx context.Context, dir string, args ...string) ([]byte, error) {
 		return runInDirWithEnvRaw(ctx, dir, nil, append([]string{"--git-dir=" + dir}, args...)...)
 	}
 	return runInDirWithEnvRaw(ctx, dir, nil, args...)
+}
+
+// RunNetwork executes a Git command that talks to a remote, retrying a
+// transient network failure (a timeout, a reset or refused connection, a DNS
+// failure, a 5xx response) with bounded exponential backoff. Authentication,
+// permission, rejected-publication and conflict failures are returned on the
+// first attempt: no retry can fix them. A cancelled context stops the retry at
+// once, including during the backoff wait.
+func RunNetwork(ctx context.Context, dir string, args ...string) (string, error) {
+	return netretry.Do(ctx, netretry.Options{
+		Operation: "git " + networkVerb(args),
+		Base:      networkRetryBase,
+		Max:       networkRetryMax,
+	}, func() (string, error) {
+		return Run(ctx, dir, args...)
+	})
+}
+
+// networkRetryBase and networkRetryMax shorten the backoff in tests; zero uses
+// the netretry defaults.
+var (
+	networkRetryBase time.Duration
+	networkRetryMax  time.Duration
+)
+
+// networkVerb names the remote operation in retry log lines without echoing
+// its arguments, which can carry a credential or a URL.
+func networkVerb(args []string) string {
+	if len(args) == 0 {
+		return "remote call"
+	}
+	return args[0]
 }
 
 // RunAllowingFailure executes a git command and returns its trimmed stdout even
@@ -301,7 +336,7 @@ func runInDirWithEnvAndInputRawCaptured(ctx context.Context, dir string, extraEn
 				// provenance says so.
 				if recorded := refusal.Load(); recorded != nil {
 					err = &CancelledExitError{ExitError: exit, Refused: *recorded}
-				} else if processWasCancelled(exit) {
+				} else if ProcessWasCancelled(exit) {
 					err = &CancelledExitError{ExitError: exit}
 				}
 			default:
@@ -780,7 +815,7 @@ func IsDetachedHEAD(ctx context.Context, dir string) (bool, error) {
 // Uses git ls-remote --symref to read the remote's HEAD symref.
 // Falls back to "main" if detection fails (e.g. empty remote, unreachable).
 func DefaultBranch(ctx context.Context, dir, remote string) string {
-	out, err := Run(ctx, dir, "ls-remote", "--symref", remote, "HEAD")
+	out, err := RunNetwork(ctx, dir, "ls-remote", "--symref", remote, "HEAD")
 	if err != nil {
 		return "main"
 	}
@@ -802,13 +837,13 @@ func DefaultBranch(ctx context.Context, dir, remote string) string {
 // a force push on the remote) are accepted instead of silently rejected.
 func FetchRemoteBranch(ctx context.Context, dir, remote, branch string) error {
 	refspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/%s/%s", branch, remote, branch)
-	_, err := Run(ctx, dir, "fetch", "--no-tags", remote, refspec)
+	_, err := RunNetwork(ctx, dir, "fetch", "--no-tags", remote, refspec)
 	return err
 }
 
 func FetchRemoteBranchToRef(ctx context.Context, dir, remote, branch, localRef string) error {
 	refspec := fmt.Sprintf("+refs/heads/%s:%s", branch, localRef)
-	_, err := Run(ctx, dir, "fetch", "--no-tags", remote, refspec)
+	_, err := RunNetwork(ctx, dir, "fetch", "--no-tags", remote, refspec)
 	return err
 }
 
@@ -816,7 +851,7 @@ func FetchRemoteBranchToRef(ctx context.Context, dir, remote, branch, localRef s
 // ref without touching FETCH_HEAD or ordinary remote-tracking refs.
 func FetchRemoteBranchToPrivateRef(ctx context.Context, dir, remote, branch, localRef string) error {
 	refspec := fmt.Sprintf("+refs/heads/%s:%s", branch, localRef)
-	_, err := Run(ctx, dir, "fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", remote, refspec)
+	_, err := RunNetwork(ctx, dir, "fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", remote, refspec)
 	return err
 }
 
@@ -830,7 +865,7 @@ func FetchRemoteRef(ctx context.Context, dir, remote, remoteRef, expectedCommit 
 		_, _ = Run(context.WithoutCancel(ctx), dir, "update-ref", "--no-deref", "-d", temporaryRef)
 	}()
 	refspec := fmt.Sprintf("+%s:%s", remoteRef, temporaryRef)
-	if _, err := Run(ctx, dir, "fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", remote, refspec); err != nil {
+	if _, err := RunNetwork(ctx, dir, "fetch", "--no-tags", "--no-write-fetch-head", "--refmap=", remote, refspec); err != nil {
 		return err
 	}
 	fetched, err := Run(ctx, dir, "rev-parse", "--verify", temporaryRef+"^{commit}")
@@ -906,8 +941,67 @@ func pushSourceWithOptions(ctx context.Context, dir, remote, source, ref, expect
 		}
 	}
 	args = append(args, source+":"+ref)
-	_, err := Run(ctx, dir, args...)
+	return pushWithNetworkRetry(ctx, dir, remote, ref, source, expectedSHA, forceWithLease, args)
+}
+
+// pushWithNetworkRetry replays the same non-force push after a transient
+// network failure, but only once it has re-read the remote ref: a push whose
+// response was lost may already have landed, and a lease that moved under the
+// retry must refuse rather than become a force push.
+func pushWithNetworkRetry(ctx context.Context, dir, remote, ref, source, expectedSHA string, forceWithLease bool, args []string) error {
+	attempts := 0
+	_, err := netretry.Do(ctx, netretry.Options{Operation: "git push"}, func() (struct{}, error) {
+		attempts++
+		if attempts > 1 {
+			landed, err := pushAlreadyLanded(ctx, dir, remote, ref, source, expectedSHA, forceWithLease)
+			if err != nil {
+				return struct{}{}, err
+			}
+			if landed {
+				return struct{}{}, nil
+			}
+		}
+		_, err := Run(ctx, dir, args...)
+		return struct{}{}, err
+	})
 	return err
+}
+
+// pushAlreadyLanded reports whether the remote already carries the commit a
+// retried push was sending. See PushLanded.
+func pushAlreadyLanded(ctx context.Context, dir, remote, ref, source, expectedSHA string, forceWithLease bool) (bool, error) {
+	return PushLanded(ctx, func(args ...string) (string, error) {
+		return RunNetwork(ctx, dir, args...)
+	}, remote, ref, source, expectedSHA, forceWithLease)
+}
+
+// PushLanded decides whether a failed push attempt has to be replayed. It is
+// never a force: a lease that no longer matches the expected remote head is
+// refused, so a concurrent advance is reported to the caller instead of being
+// overwritten. A caller that replays a push must ask this first, because the
+// lost response of an attempt that landed looks exactly like a failure.
+func PushLanded(ctx context.Context, run func(args ...string) (string, error), remote, ref, source, expectedSHA string, forceWithLease bool) (bool, error) {
+	commit, err := run("rev-parse", "--verify", source+"^{commit}")
+	if err != nil {
+		return false, err
+	}
+	out, err := run("ls-remote", remote, ref)
+	if err != nil {
+		return false, err
+	}
+	remoteSHA := ""
+	for _, line := range strings.Split(out, "\n") {
+		if sha, name, ok := strings.Cut(line, "\t"); ok && name == ref {
+			remoteSHA = sha
+		}
+	}
+	if remoteSHA == commit {
+		return true, nil
+	}
+	if forceWithLease && expectedSHA != "" && remoteSHA != expectedSHA {
+		return false, fmt.Errorf("remote %s moved to %q during a retried push (expected %s); refusing to retry rather than force", ref, remoteSHA, expectedSHA)
+	}
+	return false, nil
 }
 
 // remoteRefAt reports whether remote's exact ref already points at source's
@@ -917,7 +1011,7 @@ func remoteRefAt(ctx context.Context, dir, remote, ref, source string) bool {
 	if err != nil {
 		return false
 	}
-	out, err := Run(ctx, dir, "ls-remote", remote, ref)
+	out, err := RunNetwork(ctx, dir, "ls-remote", remote, ref)
 	if err != nil {
 		return false
 	}
@@ -931,7 +1025,7 @@ func remoteRefAt(ctx context.Context, dir, remote, ref, source string) bool {
 
 // LsRemote returns the SHA of a ref on a remote. Returns empty string if the ref doesn't exist.
 func LsRemote(ctx context.Context, dir, remote, ref string) (string, error) {
-	out, err := Run(ctx, dir, "ls-remote", remote, ref)
+	out, err := RunNetwork(ctx, dir, "ls-remote", remote, ref)
 	if err != nil {
 		return "", err
 	}

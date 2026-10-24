@@ -34,8 +34,8 @@ func TestProcessWasCancelledAcceptsOnlyTerminationSignals(t *testing.T) {
 			if !errors.As(err, &exit) {
 				t.Fatalf("expected subprocess exit, got %v", err)
 			}
-			if got := processWasCancelled(exit); got != tc.want {
-				t.Fatalf("processWasCancelled(%v) = %v, want %v", err, got, tc.want)
+			if got := ProcessWasCancelled(exit); got != tc.want {
+				t.Fatalf("ProcessWasCancelled(%v) = %v, want %v", err, got, tc.want)
 			}
 		})
 	}

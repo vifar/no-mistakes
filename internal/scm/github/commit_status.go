@@ -3,7 +3,6 @@ package github
 import (
 	"context"
 	"fmt"
-	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 	"strings"
 )
 
@@ -24,11 +23,9 @@ func (h *Host) PostCommitStatus(ctx context.Context, sha, state, description, ta
 	if targetURL != "" {
 		args = append(args, "-f", "target_url="+targetURL)
 	}
-	cmd := h.cmd(ctx, "gh", args...)
-	shellenv.ConfigureShellCommand(cmd)
-	out, err := shellenv.CombinedOutputShellCommand(cmd)
+	_, err := h.ghCombined(ctx, "post GitHub commit status", "", args...)
 	if err != nil {
-		return fmt.Errorf("post GitHub commit status: %s: %w", strings.TrimSpace(string(out)), err)
+		return fmt.Errorf("post GitHub commit status: %w", err)
 	}
 	return nil
 }

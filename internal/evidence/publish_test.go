@@ -2,9 +2,11 @@ package evidence
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -486,5 +488,62 @@ func TestPublish_RedactsHomePathsInTextEvidence(t *testing.T) {
 	}
 	if local, err := os.ReadFile(filepath.Join(source, "logs", "run.txt")); err != nil || string(local) != text {
 		t.Errorf("local evidence = %q (%v), want it untouched", local, err)
+	}
+}
+
+func TestPublish_LostPushResponseReusesTheLandedEvidenceCommit(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires a POSIX shell executable on PATH")
+	}
+	remote, work := newRepoWithRemote(t)
+	source := writeEvidence(t, t.TempDir(), map[string]string{"proof.txt": "ok\n"})
+	realGit, err := testgit.RealGit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	trace := filepath.Join(bin, "trace")
+	script := `#!/bin/sh
+printf '%s\n' "$1" >> "$EVIDENCE_TEST_TRACE"
+"$EVIDENCE_TEST_REAL_GIT" "$@"
+code=$?
+if [ "$code" -eq 0 ] && [ "$1" = push ]; then
+    printf '%s\n' 'fatal: connection reset by peer' >&2
+    exit 128
+fi
+exit "$code"
+`
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EVIDENCE_TEST_TRACE", trace)
+	t.Setenv("EVIDENCE_TEST_REAL_GIT", realGit)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	result, err := Publish(context.Background(), baseRequest(remote, work, source))
+	if err != nil || result == nil {
+		t.Fatalf("result=%+v err=%v, want successful publication after a lost response", result, err)
+	}
+	raw, err := os.ReadFile(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operations := strings.Fields(string(raw))
+	pushes, checkedAfterPush := 0, false
+	for _, op := range operations {
+		if op == "push" {
+			pushes++
+		}
+		if op == "ls-remote" && pushes > 0 {
+			checkedAfterPush = true
+		}
+	}
+	if pushes != 1 || !checkedAfterPush {
+		t.Fatalf("operations=%v, want one push and a subsequent remote check", operations)
+	}
+	cmd := exec.Command(realGit, "show", fmt.Sprintf("%s:%s/proof.txt", result.CommitSHA, result.Dir))
+	cmd.Dir = remote
+	out, err := cmd.Output()
+	if err != nil || string(out) != "ok\n" {
+		t.Fatalf("published proof=%q err=%v", out, err)
 	}
 }

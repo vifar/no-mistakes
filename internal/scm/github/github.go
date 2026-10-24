@@ -15,7 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/netretry"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
 // CmdFactory builds an exec.Cmd in the caller's workdir with the caller's env.
@@ -34,6 +36,10 @@ type Host struct {
 	// http.DefaultClient against uploads.github.com (or uploads.<ghec-host>).
 	assetHTTP         *http.Client
 	assetUploadPrefix string
+	// retryBase and retryMax bound the backoff before a retried network call;
+	// zero uses the netretry defaults. Tests set them short.
+	retryBase time.Duration
+	retryMax  time.Duration
 }
 
 // New builds a Host. cliAvailable reports whether the gh binary is
@@ -161,17 +167,45 @@ func (h *Host) Available(ctx context.Context) error {
 	if h.host != "" {
 		authArgs = append(authArgs, "--hostname", h.host)
 	}
-	cmd := h.cmd(ctx, "gh", authArgs...)
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	_, retryErr := netretry.Do(ctx, h.retryOptions("gh auth status"), func() (struct{}, error) {
+		cmd := h.cmd(ctx, "gh", authArgs...)
+		stderr.Reset()
+		cmd.Stderr = &stderr
+		authErr := runGHCommand(ctx, cmd, func() error { return shellenv.RunShellCommand(cmd) })
+		if authErr != nil {
+			detail := strings.TrimSpace(stderr.String())
+			failure := fmt.Errorf("%s: %w", detail, authErr)
+			credentialProblem := false
+			for _, marker := range []string{"bad credentials", "not logged in", "failed to log in", "token is invalid", "permission"} {
+				credentialProblem = credentialProblem || strings.Contains(strings.ToLower(detail), marker)
+			}
+			if ctx.Err() == nil && !isMissingExecutable(authErr) && !isKeyringTimeout(detail) && !credentialProblem && !netretry.Retryable(failure) {
+				args := []string{"api"}
+				if h.host != "" {
+					args = append(args, "--hostname", h.host)
+				}
+				args = append(args, "-X", "GET", "rate_limit")
+				_, probeDetail, probeErr := h.ghReadAttempt(ctx, "", args)
+				if probeErr != nil {
+					probeErr = fmt.Errorf("gh api rate_limit: %s: %w", probeDetail, probeErr)
+					if netretry.Retryable(probeErr) || ctx.Err() != nil {
+						return struct{}{}, probeErr
+					}
+				}
+			}
+			return struct{}{}, failure
+		}
+		return struct{}{}, nil
+	})
+	if err := retryErr; err != nil {
 		// Keep timeout / missing-binary failures distinct from auth failure so a
 		// cancelled reconcile context is not reported as "log in again".
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return fmt.Errorf("gh auth status timed out: %w", ctx.Err())
+			return fmt.Errorf("gh auth status timed out: %w", errors.Join(err, ctx.Err()))
 		}
 		if ctx.Err() != nil {
-			return fmt.Errorf("gh auth status interrupted: %w", ctx.Err())
+			return fmt.Errorf("gh auth status interrupted: %w", errors.Join(err, ctx.Err()))
 		}
 		if isMissingExecutable(err) {
 			return fmt.Errorf("gh CLI is not on PATH: %w", err)
@@ -179,6 +213,9 @@ func (h *Host) Available(ctx context.Context) error {
 		detail := strings.TrimSpace(stderr.String())
 		if isKeyringTimeout(detail) {
 			return fmt.Errorf("gh auth status: %w: %w", scm.ErrTransientTimeout, err)
+		}
+		if netretry.Retryable(err) {
+			return err
 		}
 		if detail != "" {
 			return fmt.Errorf("%w: %s: %w", scm.ErrUnauthenticated, detail, err)
@@ -242,19 +279,71 @@ func parsePullRequestURL(raw, expectedHost, expectedRepo string) (int, error) {
 // stdoutOnly runs cmd and returns its stdout alone, so notices a gh wrapper
 // writes to stderr never become part of the data. On failure, detail carries
 // the trimmed stderr, or stdout when stderr is empty.
-func stdoutOnly(cmd *exec.Cmd) (out []byte, detail string, err error) {
-	out, err = cmd.Output()
+func stdoutOnly(ctx context.Context, cmd *exec.Cmd) (out []byte, detail string, err error) {
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err = runGHCommand(ctx, cmd, func() error {
+		var callErr error
+		out, callErr = shellenv.OutputShellCommand(cmd)
+		return callErr
+	})
 	if err == nil {
 		return out, "", nil
 	}
 	detail = strings.TrimSpace(string(out))
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
-			detail = stderr
-		}
+	if text := strings.TrimSpace(stderr.String()); text != "" {
+		detail = text
 	}
 	return out, detail, err
+}
+
+// ghStdout runs one gh command and returns its stdout, with the trimmed stderr
+// (or stdout) detail a failure reported. A transient network failure is
+// retried with bounded backoff.
+func (h *Host) ghStdout(ctx context.Context, operation, stdin string, args ...string) (out []byte, detail string, err error) {
+	_, retryErr := netretry.Do(ctx, h.retryOptions(operation), func() (struct{}, error) {
+		out, detail, err = h.ghReadAttempt(ctx, stdin, args)
+		detail = strings.TrimSpace(detail)
+		if err != nil {
+			if detail == "" {
+				detail = strings.TrimSpace(string(out))
+			}
+			return struct{}{}, fmt.Errorf("%s: %w", detail, err)
+		}
+		detail = ""
+		return struct{}{}, nil
+	})
+	return out, detail, retryErr
+}
+
+// ghCombined runs one gh command and returns the output callers report. The
+// command's response data is never part of the retry classification: only its
+// stderr diagnostics are, because a response can legitimately contain words
+// like "permission denied" or "timeout" (a check named after a test, an issue
+// body) and would otherwise veto a real retry.
+func (h *Host) ghCombined(ctx context.Context, operation, stdin string, args ...string) ([]byte, error) {
+	var out []byte
+	var err error
+	_, retryErr := netretry.Do(ctx, h.retryOptions(operation), func() (struct{}, error) {
+		var detail string
+		out, detail, err = h.ghReadAttempt(ctx, stdin, args)
+		if err != nil {
+			// Keep the diagnostics beside the response so callers report what
+			// GitHub said, but classify only the diagnostics.
+			if detail != "" {
+				out = append(append([]byte{}, out...), detail...)
+			}
+			return struct{}{}, fmt.Errorf("%s: %w", strings.TrimSpace(detail), err)
+		}
+		return struct{}{}, nil
+	})
+	return out, retryErr
+}
+
+// retryOptions uses the shared classifier, including typed rate-limit evidence
+// from the GET-only header probe rather than response data.
+func (h *Host) retryOptions(operation string) netretry.Options {
+	return netretry.Options{Operation: operation, Base: h.retryBase, Max: h.retryMax}
 }
 
 func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error) {
@@ -268,8 +357,7 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 		jsonFields = "number,url,baseRefName,headRefName,headRepositoryOwner"
 	}
 	args = append(args, "--state", "open", "--json", jsonFields)
-	cmd := h.cmd(ctx, "gh", args...)
-	out, detail, err := stdoutOnly(cmd)
+	out, detail, err := h.ghStdout(ctx, "gh pr list", "", args...)
 	if err != nil {
 		return nil, prReadError(ctx, "gh pr list", detail, err)
 	}
@@ -355,18 +443,33 @@ func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PR
 		args = append(args, "--draft")
 	}
 	args = append(args, "--title", content.Title, "--body-file", "-")
-	cmd := h.cmd(ctx, "gh", args...)
-	cmd.Stdin = strings.NewReader(content.Body)
-	out, detail, err := stdoutOnly(cmd)
-	if err != nil {
-		return nil, fmt.Errorf("gh pr create: %s: %w", detail, err)
-	}
-	url := strings.TrimSpace(string(out))
-	pr := &scm.PR{URL: url}
-	if num, nerr := scm.ExtractPRNumber(url); nerr == nil {
-		pr.Number = num
-	}
-	return pr, nil
+	attempts := 0
+	return netretry.Do(ctx, h.retryOptions("gh pr create"), func() (*scm.PR, error) {
+		attempts++
+		if attempts > 1 {
+			// A lost response from an earlier attempt may have opened the PR
+			// already. Reuse that PR instead of opening a duplicate.
+			existing, findErr := h.FindPR(ctx, branch, "")
+			if findErr != nil {
+				return nil, findErr
+			}
+			if existing != nil {
+				return existing, nil
+			}
+		}
+		cmd := h.cmd(ctx, "gh", args...)
+		cmd.Stdin = strings.NewReader(content.Body)
+		out, detail, err := stdoutOnly(ctx, cmd)
+		if err != nil {
+			return nil, fmt.Errorf("gh pr create: %s: %w", detail, err)
+		}
+		url := strings.TrimSpace(string(out))
+		pr := &scm.PR{URL: url}
+		if num, nerr := scm.ExtractPRNumber(url); nerr == nil {
+			pr.Number = num
+		}
+		return pr, nil
+	})
 }
 
 func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
@@ -379,9 +482,7 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		args = append(args, "--title", content.Title)
 	}
 	args = append(args, "--body-file", "-")
-	cmd := h.cmd(ctx, "gh", args...)
-	cmd.Stdin = strings.NewReader(content.Body)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := h.ghCombined(ctx, "gh pr edit", content.Body, args...); err != nil {
 		return nil, fmt.Errorf("gh pr edit: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return pr, nil
@@ -396,7 +497,7 @@ func (h *Host) GetPRContent(ctx context.Context, pr *scm.PR) (scm.PRContent, err
 	}
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "title,body")
-	out, err := h.cmd(ctx, "gh", args...).Output()
+	out, _, err := h.ghStdout(ctx, "gh pr view", "", args...)
 	if err != nil {
 		return scm.PRContent{}, fmt.Errorf("gh pr view: %w", err)
 	}
@@ -420,8 +521,7 @@ func (h *Host) SetPRBaseBranch(ctx context.Context, pr *scm.PR, baseBranch strin
 	}
 	args := append([]string{"pr", "edit", selector}, h.repoArgs()...)
 	args = append(args, "--base", baseBranch)
-	cmd := h.cmd(ctx, "gh", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := h.ghCombined(ctx, "gh pr edit --base", "", args...); err != nil {
 		return fmt.Errorf("gh pr edit --base: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	return nil
@@ -446,8 +546,7 @@ func (h *Host) GetPRState(ctx context.Context, pr *scm.PR) (scm.PRState, error) 
 	}
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "state", "--jq", ".state")
-	cmd := h.cmd(ctx, "gh", args...)
-	out, detail, err := stdoutOnly(cmd)
+	out, detail, err := h.ghStdout(ctx, "gh pr view state", "", args...)
 	if err != nil {
 		return "", prReadError(ctx, "gh pr view state", detail, err)
 	}
@@ -461,7 +560,7 @@ func (h *Host) GetPRBaseBranch(ctx context.Context, pr *scm.PR) (string, error) 
 	}
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "baseRefName", "--jq", ".baseRefName")
-	out, detail, err := stdoutOnly(h.cmd(ctx, "gh", args...))
+	out, detail, err := h.ghStdout(ctx, "gh pr view base branch", "", args...)
 	if err != nil {
 		return "", prReadError(ctx, "gh pr view base branch", detail, err)
 	}
@@ -520,8 +619,7 @@ func (h *Host) GetChecks(ctx context.Context, pr *scm.PR) ([]scm.Check, error) {
 func (h *Host) getPRChecks(ctx context.Context, selector string) ([]scm.Check, error) {
 	args := append([]string{"pr", "checks", selector}, h.repoArgs()...)
 	args = append(args, "--json", "name,state,bucket,completedAt,link")
-	cmd := h.cmd(ctx, "gh", args...)
-	out, detail, err := stdoutOnly(cmd)
+	out, detail, err := h.ghStdout(ctx, "gh pr checks", "", args...)
 	if err != nil {
 		if strings.Contains(detail, "no checks reported") {
 			out = []byte("[]")
@@ -584,7 +682,7 @@ func (h *Host) getCommitChecks(ctx context.Context, headSHA string) ([]scm.Check
 		if cursor != "" {
 			args = append(args, "-F", "cursor="+cursor)
 		}
-		out, err := h.cmd(ctx, "gh", args...).CombinedOutput()
+		out, err := h.ghCombined(ctx, "gh api checks for head commit", "", args...)
 		if err != nil {
 			return nil, fmt.Errorf("gh api checks for head commit: %s: %w", strings.TrimSpace(string(out)), err)
 		}
@@ -901,7 +999,7 @@ func (h *Host) currentAttemptJobs(ctx context.Context, runs []scm.Check) (map[in
 		}
 		args = append(args, "--method", "GET", fmt.Sprintf("repos/%s/actions/runs/%d/attempts/%d/jobs", repo, run.RunID, run.RunAttempt),
 			"-f", "per_page=100", "--paginate", "--slurp")
-		out, err := h.cmd(ctx, "gh", args...).CombinedOutput()
+		out, err := h.ghCombined(ctx, "gh api run attempt jobs", "", args...)
 		if err != nil {
 			return nil, fmt.Errorf("gh api jobs for run %d attempt %d: %s: %w", run.RunID, run.RunAttempt, strings.TrimSpace(string(out)), err)
 		}
@@ -1066,7 +1164,7 @@ func (h *Host) checkStartedAfter(a, b scm.Check) (bool, bool) {
 func (h *Host) getPRHeadSHA(ctx context.Context, selector string) (string, error) {
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "headRefOid", "--jq", ".headRefOid")
-	out, err := h.cmd(ctx, "gh", args...).Output()
+	out, _, err := h.ghStdout(ctx, "gh pr view head commit", "", args...)
 	if err != nil {
 		return "", fmt.Errorf("gh pr view head commit: %w", err)
 	}
@@ -1092,7 +1190,7 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 		"-f", "per_page=100",
 		"--paginate", "--slurp",
 	)
-	out, err := h.cmd(ctx, "gh", args...).CombinedOutput()
+	out, err := h.ghCombined(ctx, "gh api workflow runs for head commit", "", args...)
 	if err != nil {
 		return nil, fmt.Errorf("gh api workflow runs for head commit: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -1237,11 +1335,78 @@ func (h *Host) RerunCheck(ctx context.Context, _ *scm.PR, check scm.Check) error
 	}
 	args := append([]string{"run", "rerun"}, rerunArgs...)
 	args = append(args, h.repoArgs()...)
-	cmd := h.cmd(ctx, "gh", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("gh run rerun: %s: %w", strings.TrimSpace(string(out)), err)
+	runID, _, _ := h.actionsRerunTarget(check.Link)
+	baseline := check.RunAttempt
+	if baseline <= 0 {
+		attempt, _, err := h.rerunAttempt(ctx, runID)
+		if err != nil {
+			return err
+		}
+		baseline = attempt
 	}
-	return nil
+	attempts := 0
+	var rerunErr error
+	_, err := netretry.Do(ctx, h.retryOptions("gh run rerun"), func() (struct{}, error) {
+		attempts++
+		if attempts > 1 {
+			attempt, status, err := h.rerunAttempt(ctx, runID)
+			if err != nil {
+				return struct{}{}, err
+			}
+			if attempt < baseline {
+				return struct{}{}, fmt.Errorf("workflow run %s attempt moved backwards", runID)
+			}
+			if attempt > baseline || status != "completed" {
+				return struct{}{}, rerunErr
+			}
+		}
+		cmd := h.cmd(ctx, "gh", args...)
+		var out []byte
+		err := runGHCommand(ctx, cmd, func() error {
+			var callErr error
+			out, callErr = shellenv.CombinedOutputShellCommand(cmd)
+			return callErr
+		})
+		if err != nil {
+			rerunErr = fmt.Errorf("gh run rerun: %s: %w", strings.TrimSpace(string(out)), err)
+			return struct{}{}, rerunErr
+		}
+		return struct{}{}, nil
+	})
+	return err
+}
+
+func (h *Host) rerunAttempt(ctx context.Context, runID string) (int, string, error) {
+	repo := h.repoSlug()
+	if repo == "" {
+		repo = "{owner}/{repo}"
+	}
+	args := []string{"api"}
+	if h.host != "" {
+		args = append(args, "--hostname", h.host)
+	}
+	args = append(args, "--method", "GET", "repos/"+repo+"/actions/runs/"+runID)
+	out, _, err := h.ghStdout(ctx, "gh api workflow rerun attempt", "", args...)
+	if err != nil {
+		return 0, "", err
+	}
+	var run struct {
+		ID      int64  `json:"id"`
+		Attempt int    `json:"run_attempt"`
+		Status  string `json:"status"`
+	}
+	if err := json.Unmarshal(out, &run); err != nil {
+		return 0, "", fmt.Errorf("parse workflow rerun attempt: %w", err)
+	}
+	if strconv.FormatInt(run.ID, 10) != runID || run.Attempt <= 0 {
+		return 0, "", errors.New("invalid workflow rerun attempt")
+	}
+	switch run.Status {
+	case "completed", "queued", "in_progress", "waiting", "pending", "requested":
+		return run.Attempt, run.Status, nil
+	default:
+		return 0, "", fmt.Errorf("unrecognized workflow rerun status %q", run.Status)
+	}
 }
 
 // rerunTargetArgs turns a check into the `gh run rerun` arguments that re-run
@@ -1369,7 +1534,7 @@ func (h *Host) PreRunFailures(ctx context.Context, checks []scm.Check) ([]bool, 
 func (h *Host) runJobs(ctx context.Context, runID string) (jobs []githubRunJob, present bool, err error) {
 	viewArgs := append([]string{"run", "view", runID}, h.repoArgs()...)
 	viewArgs = append(viewArgs, "--json", "jobs")
-	out, err := h.cmd(ctx, "gh", viewArgs...).Output()
+	out, _, err := h.ghStdout(ctx, "gh run view jobs", "", viewArgs...)
 	if err != nil {
 		return nil, false, fmt.Errorf("gh run view %s: %w", runID, err)
 	}
@@ -1448,8 +1613,7 @@ func (h *Host) GetMergeableState(ctx context.Context, pr *scm.PR) (scm.Mergeable
 	}
 	args := append([]string{"pr", "view", selector}, h.repoArgs()...)
 	args = append(args, "--json", "mergeable,mergeStateStatus", "--jq", `.mergeable + " " + .mergeStateStatus`)
-	cmd := h.cmd(ctx, "gh", args...)
-	out, detail, err := stdoutOnly(cmd)
+	out, detail, err := h.ghStdout(ctx, "gh pr view mergeable", "", args...)
 	if err != nil {
 		return "", prReadError(ctx, "gh pr view mergeable", detail, err)
 	}
@@ -1513,8 +1677,7 @@ func (h *Host) FetchFailedCheckTargetLogs(ctx context.Context, _ *scm.PR, branch
 		"--limit", "20",
 		"--json", "databaseId,headSha,name,displayTitle,workflowName",
 	)
-	listCmd := h.cmd(ctx, "gh", args...)
-	listOut, err := listCmd.Output()
+	listOut, _, err := h.ghStdout(ctx, "gh run list", "", args...)
 	if err != nil {
 		return nil, fmt.Errorf("list GitHub runs for selected logs: %w", err)
 	}
@@ -1534,7 +1697,7 @@ func (h *Host) FetchFailedCheckTargetLogs(ctx context.Context, _ *scm.PR, branch
 		if exactWorkflow || nameMatch {
 			viewArgs := append([]string{"run", "view", fmt.Sprintf("%d", run.DatabaseID)}, h.repoArgs()...)
 			viewArgs = append(viewArgs, "--log-failed")
-			out, fetchErr := h.cmd(ctx, "gh", viewArgs...).Output()
+			out, _, fetchErr := h.ghStdout(ctx, "gh run view failed log", "", viewArgs...)
 			for i, target := range checkTargets {
 				matches := target.ProviderID == workflowID
 				if target.ProviderID == "" && nameMatch {
@@ -1558,7 +1721,7 @@ func (h *Host) FetchFailedCheckTargetLogs(ctx context.Context, _ *scm.PR, branch
 			jobProviderID := fmt.Sprintf("github-check-run:%d", jobID)
 			viewArgs := append([]string{"run", "view", fmt.Sprintf("%d", run.DatabaseID)}, h.repoArgs()...)
 			viewArgs = append(viewArgs, "--job", strconv.Itoa(jobID), "--log")
-			out, fetchErr := h.cmd(ctx, "gh", viewArgs...).Output()
+			out, _, fetchErr := h.ghStdout(ctx, "gh run view job log", "", viewArgs...)
 			for i, target := range checkTargets {
 				if target.ProviderID != jobProviderID {
 					continue
@@ -1627,7 +1790,7 @@ func selectedRunJobIDs(ctx context.Context, h *Host, run githubRun, targets map[
 	}
 	viewArgs := append([]string{"run", "view", fmt.Sprintf("%d", run.DatabaseID)}, h.repoArgs()...)
 	viewArgs = append(viewArgs, "--json", "jobs")
-	out, err := h.cmd(ctx, "gh", viewArgs...).Output()
+	out, _, err := h.ghStdout(ctx, "gh run view jobs", "", viewArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("list GitHub run %d jobs for selected logs: %w", run.DatabaseID, err)
 	}
@@ -1658,8 +1821,7 @@ func runMatchesTargets(ctx context.Context, h *Host, run githubRun, targets map[
 	}
 	viewArgs := append([]string{"run", "view", fmt.Sprintf("%d", run.DatabaseID)}, h.repoArgs()...)
 	viewArgs = append(viewArgs, "--json", "jobs")
-	viewCmd := h.cmd(ctx, "gh", viewArgs...)
-	out, err := viewCmd.Output()
+	out, _, err := h.ghStdout(ctx, "gh run view jobs", "", viewArgs...)
 	if err != nil {
 		return false
 	}
@@ -1783,7 +1945,7 @@ func (h *Host) GetReviewComments(ctx context.Context, pr *scm.PR) ([]scm.ReviewC
 		if cursor != "" {
 			args = append(args, "-F", "cursor="+cursor)
 		}
-		out, commandErr := h.cmd(ctx, "gh", args...).CombinedOutput()
+		out, commandErr := h.ghCombined(ctx, "gh api PR review comments", "", args...)
 		if commandErr != nil {
 			return nil, fmt.Errorf("gh api PR review comments: %s: %w", strings.TrimSpace(string(out)), commandErr)
 		}

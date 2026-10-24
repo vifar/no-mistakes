@@ -1820,7 +1820,7 @@ func (m *RunManager) startFreshLaunchLocked(ctx context.Context, repo *db.Repo, 
 			if remote != headSHA {
 				return "", fmt.Errorf("immutable published source differs from submitted head")
 			}
-			if _, err := git.Run(ctx, gateDir, "fetch", "--no-tags", "--no-write-fetch-head", sourceURL, headSHA); err != nil {
+			if _, err := git.RunNetwork(ctx, gateDir, "fetch", "--no-tags", "--no-write-fetch-head", sourceURL, headSHA); err != nil {
 				return "", fmt.Errorf("fetch immutable source objects: %w", err)
 			}
 		}
@@ -2490,7 +2490,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			// Import it before cancellation so a missing object cannot supersede
 			// a healthy run. This fetch writes no branch or FETCH_HEAD refs.
 			if _, err := git.Run(ctx, repoDir, "cat-file", "-e", headSHA+"^{commit}"); err != nil {
-				if _, err := git.Run(ctx, repoDir, "fetch", "--no-tags", "--no-write-fetch-head", sourceURL, headSHA); err != nil {
+				if _, err := git.RunNetwork(ctx, repoDir, "fetch", "--no-tags", "--no-write-fetch-head", sourceURL, headSHA); err != nil {
 					return "", fmt.Errorf("fetch immutable source objects: %w", err)
 				}
 			}

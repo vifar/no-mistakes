@@ -43,7 +43,7 @@ func readReviewActivity[T any](ctx context.Context, h *Host, endpoint string) ([
 		args = append(args, "--hostname", h.host)
 	}
 	args = append(args, "--method", "GET", endpoint, "--paginate", "--slurp")
-	out, detail, err := stdoutOnly(h.cmd(ctx, "gh", args...))
+	out, detail, err := h.ghStdout(ctx, "read review completion", "", args...)
 	if err != nil {
 		return nil, fmt.Errorf("read review completion: %s: %w", detail, err)
 	}
