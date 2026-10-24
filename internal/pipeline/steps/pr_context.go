@@ -226,7 +226,6 @@ func resolveAndApplyPRTarget(sctx *pipeline.StepContext, reader scm.PRFactsReade
 	if err != nil {
 		return pipeline.PRTargetSelection{}, false, err
 	}
-	acceptedHead := selection.ForgeHeadSHA
 	freshRetarget := selection.TargetBranch == requested
 	if selection.TargetBranch != requested {
 		if retargeter == nil {
@@ -243,8 +242,15 @@ func resolveAndApplyPRTarget(sctx *pipeline.StepContext, reader scm.PRFactsReade
 		if err != nil {
 			return pipeline.PRTargetSelection{}, false, fmt.Errorf("read back retargeted pull request: %w", err)
 		}
-		if selection.TargetBranch != requested || selection.ForgeHeadSHA != acceptedHead {
-			return pipeline.PRTargetSelection{}, false, fmt.Errorf("retargeted pull request base or head differs on read-back")
+		if selection.TargetBranch != requested {
+			return pipeline.PRTargetSelection{}, false, fmt.Errorf("retargeted pull request base differs on read-back")
+		}
+		accounted, err := runAccountsForPRHead(sctx, selection.ForgeHeadSHA, localHead)
+		if err != nil {
+			return pipeline.PRTargetSelection{}, false, err
+		}
+		if !accounted {
+			return pipeline.PRTargetSelection{}, false, fmt.Errorf("pull request head %s differs from local head %s on retarget read-back", selection.ForgeHeadSHA, localHead)
 		}
 		freshRetarget = true
 	}
@@ -272,9 +278,6 @@ func refreshPRHeadBeforeRetarget(sctx *pipeline.StepContext, reader scm.PRFactsR
 	if err != nil {
 		return pipeline.PRTargetSelection{}, fmt.Errorf("refresh pull request head before retarget (pull request head %s, local head %s): %w", selection.ForgeHeadSHA, localHead, err)
 	}
-	if refreshed.ForgeHeadSHA == localHead {
-		return refreshed, nil
-	}
 	accounted, err := runAccountsForPRHead(sctx, refreshed.ForgeHeadSHA, localHead)
 	if err != nil {
 		return pipeline.PRTargetSelection{}, err
@@ -291,6 +294,9 @@ func refreshPRHeadBeforeRetarget(sctx *pipeline.StepContext, reader scm.PRFactsR
 func runAccountsForPRHead(sctx *pipeline.StepContext, forgeHead, localHead string) (bool, error) {
 	if forgeHead == "" {
 		return false, nil
+	}
+	if forgeHead == localHead {
+		return true, nil
 	}
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {

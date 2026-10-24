@@ -139,6 +139,52 @@ func TestFreshRetargetAcceptsTheRunsOwnLastPush(t *testing.T) {
 	}
 }
 
+func TestFreshRetargetReadBackAcceptsAccountedHeadChanges(t *testing.T) {
+	for _, name := range []string{"local", "ancestor", "last push"} {
+		t.Run(name, func(t *testing.T) {
+			f := retargetRefreshFixture(t)
+			var want string
+			switch name {
+			case "local":
+				want = f.local
+				f.reader.heads = []string{f.sctx.Run.BaseSHA, f.sctx.Run.BaseSHA, want}
+			case "ancestor":
+				want = f.sctx.Run.BaseSHA
+				f.reader.heads = []string{f.local, want}
+			case "last push":
+				want = f.foreign
+				if err := f.sctx.DB.UpdateRunPushBinding(f.sctx.Run.ID, db.PushBinding{HeadSHA: want, TargetKind: "origin", Ref: "refs/heads/feature"}); err != nil {
+					t.Fatal(err)
+				}
+				f.reader.heads = []string{f.sctx.Run.BaseSHA, f.sctx.Run.BaseSHA, want}
+			}
+			got, err := f.run()
+			if err != nil {
+				t.Fatalf("accounted read-back head blocked the retarget: %v", err)
+			}
+			if got != want {
+				t.Fatalf("recorded forge head = %s, want read-back head %s", got, want)
+			}
+		})
+	}
+}
+
+func TestFreshRetargetReadBackRejectsForeignHead(t *testing.T) {
+	f := retargetRefreshFixture(t)
+	f.reader.heads = []string{f.sctx.Run.BaseSHA, f.sctx.Run.BaseSHA, f.foreign}
+	_, _, err := resolveAndApplyPRTarget(f.sctx, f.reader, f.reader, false)
+	if err == nil || !strings.Contains(err.Error(), f.foreign) || !strings.Contains(err.Error(), f.local) || !strings.Contains(err.Error(), "read-back") {
+		t.Fatalf("error %v must name the foreign head %s and local head %s on read-back", err, f.foreign, f.local)
+	}
+	if len(f.reader.retargets) != 1 || !f.sctx.Run.PRBaseBranchRequested {
+		t.Fatalf("retargets=%v requested=%v", f.reader.retargets, f.sctx.Run.PRBaseBranchRequested)
+	}
+	receipt, err := f.sctx.DB.GetRunPRContext(f.sctx.Run.ID)
+	if err != nil || receipt != nil {
+		t.Fatalf("refused read-back must not record a receipt: receipt=%+v err=%v", receipt, err)
+	}
+}
+
 func TestFreshRetargetKeepsFailingOnForeignPRHead(t *testing.T) {
 	f := retargetRefreshFixture(t)
 	f.reader.heads = []string{f.foreign}
