@@ -125,7 +125,8 @@ func TestDocumentStep_RefusesWhenTheLeftoverEditsCannotBeCommitted(t *testing.T)
 
 // TestDocumentStep_RefusesASecondLeftoverCommit proves the loop is bounded:
 // a run preserves ONE predecessor's leftover edits and sends them through
-// re-review. A second one is refused rather than looped on forever.
+// re-review. A second one is not committed: Test's edits go back to Test,
+// which reports them for a repair (see test_leftover_test.go).
 func TestDocumentStep_RefusesASecondLeftoverCommit(t *testing.T) {
 	c := documentFixture(t)
 	// The first leftover edit is preserved.
@@ -140,12 +141,13 @@ func TestDocumentStep_RefusesASecondLeftoverCommit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(c.WorkDir, "feature.txt"), []byte("and again\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	_, err = (&DocumentStep{}).Execute(c)
-	if err == nil {
-		t.Fatal("a second leftover commit was allowed")
+	headAfterFirst := gitCmd(t, c.WorkDir, "rev-parse", "HEAD")
+	outcome, err = (&DocumentStep{}).Execute(c)
+	if err != nil || outcome == nil || outcome.RestartFrom != types.StepTest {
+		t.Fatalf("the second set was not returned to Test: %+v %v", outcome, err)
 	}
-	if !strings.Contains(err.Error(), "Document requires a clean worktree") {
-		t.Fatalf("the second refusal lost its wording: %v", err)
+	if got := gitCmd(t, c.WorkDir, "rev-parse", "HEAD"); got != headAfterFirst {
+		t.Fatalf("a second leftover commit was allowed: %s", got)
 	}
 	// The budget is spent exactly once.
 	allowed, err := c.DB.CanCommitLeftoverValidationEdits(c.Run.ID)

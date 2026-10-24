@@ -140,7 +140,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		if restart {
 			return &pipeline.StepOutcome{RestartFrom: types.StepReview}, nil
 		}
-		return nil, fmt.Errorf("Document requires a clean worktree so convergence can safely discard only its own edits: %s", strings.Join(dirtyPaths, ", "))
+		return documentDirtyEntryOutcome(sctx, dirtyPaths)
 	}
 	var entryPaths []string
 	for _, args := range [][]string{

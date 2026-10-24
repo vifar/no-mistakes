@@ -137,7 +137,7 @@ func (s *DocumentStep) runCapGapCheckAttempt(sctx *pipeline.StepContext, baseSHA
 		return nil, err
 	}
 	if len(dirtyPaths) > 0 {
-		return nil, fmt.Errorf("Document requires a clean worktree so convergence can safely discard only its own edits: %s", strings.Join(dirtyPaths, ", "))
+		return documentDirtyEntryOutcome(sctx, dirtyPaths)
 	}
 	entryPaths, err := documentEntryPaths(sctx)
 	if err != nil {

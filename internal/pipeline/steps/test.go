@@ -320,6 +320,7 @@ Rules:
 		reassessHistory,
 		agent.MemoryFilesRule,
 	)
+	dirtyBeforeEvidence, dirtyBeforeErr := worktreeDirtyPathsOutsideScratch(sctx)
 	findings, err := runTestAnalyzer(sctx, evidencePrompt)
 	if err != nil {
 		if errors.Is(err, errTestAgentTimeout) {
@@ -349,7 +350,7 @@ Rules:
 	findings.Items = append(findings.Items, ownerResults...)
 	findings.Items = append(findings.Items, unselectedTestFindings(sctx, findings.Items)...)
 
-	needsApproval := hasBlockingFindings(findings.Items)
+	needsApproval := hasBlockingFindings(findings.Items) || types.HasAskUserFindings(findings)
 	autoFixable := needsApproval
 
 	// Record any new test files the agent wrote as informational (no-op)
@@ -363,6 +364,24 @@ Rules:
 			File:        f,
 			Description: fmt.Sprintf("new test file written by agent: %s", f),
 		})
+	}
+
+	// Settle newly dirty evidence paths before passing work to the next step.
+	// Once the shared correction is spent, inherited edits need a repair too.
+	var restart *pipeline.StepOutcome
+	reported := false
+	if dirtyBeforeErr == nil {
+		restart, reported, err = settleTestLeftoverEdits(sctx, &findings, needsApproval, dirtyBeforeEvidence)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if restart != nil {
+		restart.FixSummary = fixSummary
+		return restart, nil
+	}
+	if reported {
+		needsApproval, autoFixable = true, true
 	}
 
 	findingsJSON, _ := json.Marshal(findings)
