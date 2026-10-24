@@ -210,3 +210,51 @@ func TestWriteAndNestedReadsShareRateLimitBudget(t *testing.T) {
 		})
 	}
 }
+
+func TestPRSnapshotBudgetExhaustionNeverFallsBack(t *testing.T) {
+	readers := []struct {
+		name string
+		read func(*Host, context.Context, *scm.PR) error
+	}{
+		{"state", func(h *Host, ctx context.Context, pr *scm.PR) error {
+			_, err := h.GetPRState(ctx, pr)
+			return err
+		}},
+		{"base", func(h *Host, ctx context.Context, pr *scm.PR) error {
+			_, err := h.GetPRBaseBranch(ctx, pr)
+			return err
+		}},
+		{"head checks", func(h *Host, ctx context.Context, pr *scm.PR) error {
+			_, err := h.GetChecks(ctx, pr)
+			return err
+		}},
+		{"mergeability", func(h *Host, ctx context.Context, pr *scm.PR) error {
+			_, err := h.GetMergeableState(ctx, pr)
+			return err
+		}},
+	}
+	for _, first := range readers {
+		t.Run(first.name, func(t *testing.T) {
+			script := &rateLimitScript{steps: []ghScriptStep{{stderr: ghSecondaryLimit, code: 1}}}
+			host, waits := rateLimitHost(t, script, time.Unix(1_800_000_000, 0))
+			host.repo = "test/repo"
+			ctx := scm.WithPRViewSnapshot(context.Background())
+			pr := &scm.PR{Number: "42", HeadSHA: "expected-head"}
+			if err := first.read(host, ctx, pr); !errors.Is(err, netretry.ErrRateLimitBudgetSpent) {
+				t.Fatalf("first read err=%v, want terminal budget exhaustion", err)
+			}
+			waited, calls := totalWait(*waits), len(script.args)
+			if waited <= 0 || waited > 65*time.Minute {
+				t.Fatalf("waited=%v, want at most 65 minutes across snapshot and fallback", waited)
+			}
+			for _, next := range readers {
+				if err := next.read(host, ctx, pr); !errors.Is(err, netretry.ErrRateLimitBudgetSpent) {
+					t.Fatalf("cached %s read err=%v, want terminal budget exhaustion", next.name, err)
+				}
+				if len(script.args) != calls || totalWait(*waits) != waited {
+					t.Fatalf("cached %s read restarted API calls or waits", next.name)
+				}
+			}
+		})
+	}
+}

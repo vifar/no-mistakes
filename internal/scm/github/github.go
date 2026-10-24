@@ -627,7 +627,7 @@ func (h *Host) prViewSnapshot(ctx context.Context, pr *scm.PR) (prView, bool, er
 		return view, nil
 	})
 	if err != nil {
-		if ctx.Err() != nil || netretry.RateLimitClass(err) != "" {
+		if ctx.Err() != nil || errors.Is(err, netretry.ErrRateLimitBudgetSpent) || netretry.RateLimitClass(err) != "" {
 			return prView{}, false, err
 		}
 		return prView{}, false, nil

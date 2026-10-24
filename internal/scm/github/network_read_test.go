@@ -91,7 +91,7 @@ func TestAPIReadHeaderEvidence(t *testing.T) {
 				case "exhausted":
 					// A secondary limit is waited out, not spent from the three
 					// attempts, and the wait backs off until its budget is gone.
-					if err == nil || reads < 4 || reads > 8 || reads != probes || !errors.Is(err, netretry.ErrRateLimitBudgetSpent) || netretry.Describe(err) != string(netretry.ClassRateLimit) {
+					if err == nil || reads < 4 || reads > 8 || reads != probes || !errors.Is(err, netretry.ErrRateLimitBudgetSpent) || netretry.Retryable(err) {
 						t.Fatalf("reads=%d probes=%d err=%v, want a secondary-limit wait bounded by its budget", reads, probes, err)
 					}
 				default:
