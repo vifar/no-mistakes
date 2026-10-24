@@ -210,6 +210,73 @@ func TestTestStep_LeavesPreExistingWorkWhenTheBudgetIsAvailableOrRunIsAbsent(t *
 	}
 }
 
+func TestTestStep_MixedLeftoverEditsStayWithDocument(t *testing.T) {
+	for _, origin := range []string{"pre-existing", "staged", "configured-command"} {
+		t.Run(origin, func(t *testing.T) {
+			c := documentFixture(t)
+			head := c.Run.HeadSHA
+			const inherited = "inherited work\n"
+			const evidence = "evidence work\n"
+			if origin == "configured-command" {
+				c.Config.Commands.Test = "echo 'inherited work' > base.txt"
+			} else {
+				if err := os.WriteFile(filepath.Join(c.WorkDir, "base.txt"), []byte(inherited), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if origin == "staged" {
+					gitCmd(t, c.WorkDir, "add", "base.txt")
+				}
+			}
+			c.Agent = leftoverEvidenceAgent(c.WorkDir, evidence)
+
+			outcome, err := (&TestStep{}).Execute(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome == nil || outcome.NeedsApproval || outcome.RestartFrom != "" {
+				t.Fatalf("Test did not leave mixed edits to Document: %+v", outcome)
+			}
+			if got := gitCmd(t, c.WorkDir, "rev-parse", "HEAD"); got != head || c.Run.HeadSHA != head {
+				t.Fatalf("Test committed mixed edits: head=%s run=%s", got, c.Run.HeadSHA)
+			}
+			if allowed, err := c.DB.CanCommitLeftoverValidationEdits(c.Run.ID); err != nil || !allowed {
+				t.Fatalf("Test spent the correction budget: allowed=%v err=%v", allowed, err)
+			}
+			for path, want := range map[string]string{"base.txt": inherited, "feature.txt": evidence} {
+				if got := readFile(t, filepath.Join(c.WorkDir, path)); got != want {
+					t.Fatalf("Test lost %s: %q", path, got)
+				}
+			}
+
+			c.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				t.Fatal("Document invoked its agent before preserving mixed edits")
+				return nil, nil
+			}}
+			outcome, err = (&DocumentStep{}).Execute(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if outcome == nil || outcome.RestartFrom != types.StepReview {
+				t.Fatalf("Document did not return mixed edits to Review: %+v", outcome)
+			}
+			if got := gitCmd(t, c.WorkDir, "rev-parse", "HEAD"); got == head || c.Run.HeadSHA != got {
+				t.Fatalf("Document did not record its boundary commit: head=%s run=%s", got, c.Run.HeadSHA)
+			}
+			for path, want := range map[string]string{"base.txt": strings.TrimSpace(inherited), "feature.txt": strings.TrimSpace(evidence)} {
+				if got := gitCmd(t, c.WorkDir, "show", "HEAD:"+path); got != want {
+					t.Fatalf("Document did not commit %s: %q", path, got)
+				}
+			}
+			if dirty, err := worktreeDirtyPathsOutsideScratch(c); err != nil || len(dirty) != 0 {
+				t.Fatalf("Document left mixed edits uncommitted: %q %v", dirty, err)
+			}
+			if allowed, err := c.DB.CanCommitLeftoverValidationEdits(c.Run.ID); err != nil || allowed {
+				t.Fatalf("Document did not spend the correction budget: allowed=%v err=%v", allowed, err)
+			}
+		})
+	}
+}
+
 // TestTestStep_RepairCommitsTheReportedLeftoverEdits proves the way forward:
 // the fix round for the reported edit commits it through the normal Test fix
 // path, validation re-runs on that head, and the worktree is clean.

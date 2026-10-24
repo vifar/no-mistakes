@@ -22,10 +22,10 @@ const FindingIDTestLeftoverEdits = "test-leftover-edits"
 // completes, so repeated evidence edits cannot exhaust Document's boundary
 // correction and then fail its clean-entry check.
 //
-// With budget available, dirtyBefore prevents Test from claiming work solely
-// because it predates the evidence turn. A newly dirty path permits a shared
-// correction of all worktree edits when no gate already blocks. With budget
-// spent, dirtyBefore must not filter the repair finding: Document can return
+// With budget available, Test commits only when every dirty non-scratch path
+// is new since before the evidence turn and no gate already blocks. Otherwise
+// all edits stay with Document's boundary handling. With budget spent,
+// dirtyBefore must not filter the repair finding: Document can return
 // edits already present at Test entry, and filtering them would loop between
 // the two steps instead of reaching the repair gate.
 func settleTestLeftoverEdits(sctx *pipeline.StepContext, findings *Findings, needsApproval bool, dirtyBefore []string) (*pipeline.StepOutcome, bool, error) {
@@ -48,7 +48,7 @@ func settleTestLeftoverEdits(sctx *pipeline.StepContext, findings *Findings, nee
 		return nil, false, err
 	}
 	if allowed {
-		if !newEdits || needsApproval {
+		if needsApproval || slices.ContainsFunc(dirty, func(path string) bool { return slices.Contains(dirtyBefore, path) }) {
 			return nil, false, nil
 		}
 		head, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
