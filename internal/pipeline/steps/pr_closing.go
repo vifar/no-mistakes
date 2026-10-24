@@ -151,24 +151,25 @@ func closingKeywordLineIndexes(body string, grammar closingGrammar, rendered boo
 	var htmlCode string
 	for i, raw := range strings.Split(mdfence.NormalizeLineEndings(body), "\n") {
 		if grammar.codeAware {
-			if rendered && bodyFence.Consume(raw) {
-				// A block boundary ends any preceding inline HTML context.
-				htmlCode = ""
-				continue
-			}
-			inHTML := htmlCode != ""
-			if !rendered && !inHTML {
-				inFence := fence.Open()
-				fence.Consume(raw)
-				if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+			if rendered {
+				if bodyFence.Consume(raw) {
 					continue
 				}
-			}
-			outsideInlineCode(raw, func(text string) string {
-				return outsideHTMLCode(text, &htmlCode, func(text string) string { return text })
-			})
-			if inHTML || htmlCode != "" {
-				continue
+			} else {
+				inHTML := htmlCode != ""
+				if !inHTML {
+					inFence := fence.Open()
+					fence.Consume(raw)
+					if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+						continue
+					}
+				}
+				outsideInlineCode(raw, func(text string) string {
+					return outsideHTMLCode(text, &htmlCode, func(text string) string { return text })
+				})
+				if inHTML || htmlCode != "" {
+					continue
+				}
 			}
 			if strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
 				continue
@@ -381,8 +382,8 @@ func issuesSection(sctx *pipeline.StepContext, authorText string) string {
 
 // appendIssuesSection appends section to body as its final block. The section
 // must be live Markdown outside any code, so a body that ends inside an open
-// fence has the fence closed first. On providers that ignore references inside
-// code, leaving the fence open would make closing-reference verification fail.
+// fence has the fence and any surrounding HTML code element closed first.
+// Providers that ignore references inside code require both contexts closed.
 func appendIssuesSection(body, section string) string {
 	if section == "" {
 		return body
@@ -397,16 +398,16 @@ var htmlPreBlockStartPattern = regexp.MustCompile(`(?i)^ {0,3}<pre(?:[\t >]|$)`)
 var htmlCodeBlockStartPattern = regexp.MustCompile(`(?i)^ {0,3}</?code(?:[\t ][^>]*)?>[\t ]*$`)
 var markdownHeadingPattern = regexp.MustCompile(`^ {0,3}#{1,6}(?:[\t ]|$)`)
 
-// scanPRBodyFence distinguishes HTML blocks from inline elements. CommonMark
+// scanPRBodyCode distinguishes HTML blocks from inline elements. CommonMark
 // <pre> blocks may interrupt paragraphs and end at </pre>. A standalone <code>
 // tag starts a type-7 block only outside a paragraph, and that block ends at a
 // blank line, not its closing tag. Inline elements cannot suppress fences.
-func scanPRBodyFence(body string) mdfence.Fence {
+func scanPRBodyCode(body string) prBodyFenceScanner {
 	var scanner prBodyFenceScanner
 	for _, raw := range strings.Split(mdfence.NormalizeLineEndings(body), "\n") {
 		scanner.Consume(raw)
 	}
-	return scanner.fence
+	return scanner
 }
 
 type prBodyFenceScanner struct {
@@ -414,10 +415,24 @@ type prBodyFenceScanner struct {
 	pre       bool
 	codeBlock bool
 	paragraph bool
+	htmlCode  string
 }
 
-// Consume reports whether raw belongs to a fenced or HTML code block.
+// Consume reports whether raw belongs to fenced or HTML code. HTML tags inside
+// a Markdown fence are literal text and cannot close a surrounding element.
 func (s *prBodyFenceScanner) Consume(raw string) bool {
+	inFence := s.fence.Open()
+	inHTML := s.htmlCode != ""
+	blocked := s.consumeBlock(raw)
+	if !inFence && !s.fence.Open() {
+		outsideInlineCode(raw, func(text string) string {
+			return outsideHTMLCode(text, &s.htmlCode, func(text string) string { return text })
+		})
+	}
+	return blocked || inHTML || s.htmlCode != ""
+}
+
+func (s *prBodyFenceScanner) consumeBlock(raw string) bool {
 	if s.pre {
 		s.pre = !strings.Contains(strings.ToLower(raw), "</pre>")
 		return true
@@ -453,7 +468,14 @@ func (s *prBodyFenceScanner) Consume(raw string) bool {
 }
 
 func closePRBodyFence(body string) string {
-	closer := scanPRBodyFence(body).Closer()
+	state := scanPRBodyCode(body)
+	closer := state.fence.Closer()
+	if state.htmlCode != "" {
+		if closer != "" {
+			closer += "\n"
+		}
+		closer += "</" + state.htmlCode + ">"
+	}
 	if closer == "" {
 		return body
 	}
@@ -693,10 +715,10 @@ func fenceClosedWithin(budget int, units func(string) int, build func(budget int
 	var closed string
 	for attempt := 0; attempt < maxFenceRebuilds; attempt++ {
 		body := build(budget - reserve)
-		if scanPRBodyFence(body).Closer() == "" {
+		closed = closePRBodyFence(body)
+		if closed == body {
 			return body
 		}
-		closed = closePRBodyFence(body)
 		overshoot := units(closed) - budget
 		if overshoot <= 0 {
 			return closed
@@ -733,9 +755,9 @@ func logClosingRejection(sctx *pipeline.StepContext, body, missing string) {
 	if closingGrammarFor(resolvedProviderForBody(sctx)).codeAware {
 		issuesOpen := false
 		if anchor >= 0 {
-			issuesOpen = scanPRBodyFence(body[:anchor]).Open()
+			issuesOpen = scanPRBodyCode(body[:anchor]).fence.Open()
 		}
-		fenceState = fmt.Sprintf("ended inside an open fence: %t; Issues section started inside an open fence: %t (this provider ignores references inside fences)", scanPRBodyFence(body).Open(), issuesOpen)
+		fenceState = fmt.Sprintf("ended inside an open fence: %t; Issues section started inside an open fence: %t (this provider ignores references inside fences)", scanPRBodyCode(body).fence.Open(), issuesOpen)
 	} else {
 		fenceState = "this provider applies its closing pattern to the raw text, so fences do not matter; the reference was not found in the body"
 	}

@@ -268,8 +268,8 @@ func TestPRStep_IntentClosingDeclarationAfterHTMLCodeWithFence(t *testing.T) {
 				if !strings.Contains(body, "Closes #12") || !strings.Contains(body, "## Issues\n\nCloses #95") {
 					t.Fatalf("published body lost the literal example or requested closure:\n%s", body)
 				}
-				if tag == "code" && !strings.HasSuffix(body, marker+"\n\n## Issues\n\nCloses #95") {
-					t.Fatalf("inline HTML example's Markdown fence was not closed before Issues:\n%s", body)
+				if tag == "code" && !strings.HasSuffix(body, marker+"\n</code>\n\n## Issues\n\nCloses #95") {
+					t.Fatalf("inline HTML example's Markdown fence and HTML element were not closed before Issues:\n%s", body)
 				}
 			})
 		}
@@ -283,6 +283,24 @@ func TestVerifyClosingIssuesRejectsMarkdownFenceInsideInlineHTMLCode(t *testing.
 		body := "Document this example:\n<code>\n" + marker + "\nCloses #12\n </code>\n\n## Issues\n\nCloses #95"
 		if err := verifyClosingIssuesInBody(body, sctx); err == nil {
 			t.Fatalf("verified a requested declaration inside an unclosed %s fence", marker)
+		}
+	}
+}
+
+// CommonMark renders the original </code> as literal fenced content. Closing
+// only the fence leaves the HTML element open under HTML5 tree construction,
+// so the requested declaration is still code and must not pass verification.
+func TestVerifyClosingIssuesRejectsHTMLCodeAfterFenceRepair(t *testing.T) {
+	t.Parallel()
+	sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"95"}}
+	for _, marker := range []string{"```", "~~~"} {
+		body := "Document this example:\n<code>\n" + marker + "\nCloses #12\n </code>\n" + marker + "\n\n## Issues\n\nCloses #95"
+		if err := verifyClosingIssuesInBody(body, sctx); err == nil {
+			t.Fatalf("verified a requested declaration inside the HTML code element after %s repair", marker)
+		}
+		body = strings.Replace(body, "\n\n## Issues", "\n</code>\n\n## Issues", 1)
+		if err := verifyClosingIssuesInBody(body, sctx); err != nil {
+			t.Fatalf("rejected declaration after both contexts were closed: %v", err)
 		}
 	}
 }
@@ -303,6 +321,9 @@ func TestPRTemplate_IntentClosingDeclarationAfterHTMLCodeWithFence(t *testing.T)
 				body := readPRBodyFile(t, envEntry(env, "FAKE_CLI_PR_BODY_FILE"))
 				if !strings.Contains(body, "Closes #12") || !strings.Contains(body, "## Issues\n\nCloses #95") {
 					t.Fatalf("template body lost example or requested closure:\n%s", body)
+				}
+				if tag == "code" && !strings.Contains(body, marker+"\n</code>\n\n## Issues\n\nCloses #95") {
+					t.Fatalf("template left the HTML code element open before Issues:\n%s", body)
 				}
 			})
 		}
@@ -332,7 +353,7 @@ func TestAppendIssuesSectionHTMLFenceContext(t *testing.T) {
 				body := tc.prefix + marker + "\nCloses #12" + tc.suffix
 				want := body
 				if tc.repair {
-					want += "\n" + marker
+					want += "\n" + marker + "\n</code>"
 				}
 				want += "\n\n## Issues\n\nCloses #95"
 				got := appendIssuesSection(body, "## Issues\n\nCloses #95")

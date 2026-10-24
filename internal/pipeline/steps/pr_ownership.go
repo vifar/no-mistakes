@@ -79,7 +79,7 @@ func parsePROwnedBody(body string) (prOwnedBody, error) {
 // Track fences with HTML-block context so a quoted marker cannot acquire
 // ownership and literal fence markers in HTML cannot invalidate the appendix.
 func markdownFenceOpen(text string) bool {
-	return scanPRBodyFence(text).Open()
+	return scanPRBodyCode(text).fence.Open()
 }
 
 func wrapPRAppendix(appendix string) string {
