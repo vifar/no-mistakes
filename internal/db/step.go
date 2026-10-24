@@ -643,11 +643,36 @@ func (s *StepResult) StrictApprovalRefusal(reason string) string {
 				}
 			}
 		}
+		if err == nil && s.StepName == types.StepLint && onlyLintEnvironmentFindings(findings) {
+			return StrictLintEnvironmentRefusal
+		}
 		if err != nil || types.HasActionableFindings(findings) || s.StepName == types.StepTest && (findings.Verdict == types.TestVerdictNoSurface || findings.Verdict == types.TestVerdictNoGo || findings.Verdict == types.TestVerdictInconclusive) {
 			return "strict shipping cannot approve unresolved actionable findings" + s.acceptedGapHint()
 		}
 	}
 	return ""
+}
+
+// StrictLintEnvironmentRefusal answers a strict approval of a Lint gate whose
+// only actionable findings are unavailable tools. Approval would ship a change
+// no formatter or linter checked, and no code fix can install a tool, so the
+// way forward is to make the tool available and answer fix: the Lint step
+// then re-checks the environment without an agent pass and either clears the
+// finding or parks again (see steps.lintEnvironmentRecheck).
+const StrictLintEnvironmentRefusal = "strict shipping cannot approve an unavailable lint tool; make it available in the run worktree (for example install the repository's dependencies), then respond with `axi respond --action fix` to re-check the environment"
+
+func onlyLintEnvironmentFindings(findings types.Findings) bool {
+	actionable := false
+	for _, item := range findings.Items {
+		if item.ActionOrDefault() == types.ActionNoOp {
+			continue
+		}
+		if item.Category != types.FindingCategoryLintEnvironment {
+			return false
+		}
+		actionable = true
+	}
+	return actionable
 }
 
 // GateIdentity returns the durable identity of the last park. Status tells the

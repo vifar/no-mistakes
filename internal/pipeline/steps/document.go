@@ -214,18 +214,19 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		sctx.Log("updating documentation...")
 	}
 
+	// This agent may run documentation checks and the combined lint duty.
+	// Prepare before its pass starts so setup artifacts cannot become
+	// proposals, and before the prompt so the lint tools it names resolve
+	// from installed dependencies.
+	if err := ensurePrepared(sctx, s.Name()); err != nil {
+		return nil, fmt.Errorf("prepare document dependencies: %w", err)
+	}
 	prompt := s.buildPrompt(sctx, baseSHA, targetBranch, ignorePatterns, combinedLint)
 	schema := findingsSchema
 	purpose := "document"
 	if combinedLint {
 		schema = housekeepingFindingsSchema
 		purpose = "housekeeping"
-	}
-
-	// This agent may run documentation checks and the combined lint duty.
-	// Prepare before its pass starts so setup artifacts cannot become proposals.
-	if err := ensurePrepared(sctx, s.Name()); err != nil {
-		return nil, fmt.Errorf("prepare document dependencies: %w", err)
 	}
 	passID, err := sctx.DB.BeginDocumentPass(sctx.Run.ID, headBefore)
 	if err != nil {
@@ -493,7 +494,7 @@ Rules:
 		documentScopeDiscipline,
 		repositoryDocumentPolicySection(sctx),
 		trustedDocumentPolicySection(sctx),
-		lintDutySection(combinedLint),
+		lintDutySection(sctx, baseSHA, combinedLint),
 		editRule,
 		historySection,
 	)
@@ -538,11 +539,11 @@ func repositoryDocumentPolicySection(sctx *pipeline.StepContext) string {
 		sanitizePromptMultilineText(instructions)
 }
 
-func lintDutySection(combinedLint bool) string {
+func lintDutySection(sctx *pipeline.StepContext, baseSHA string, combinedLint bool) string {
 	if !combinedLint {
 		return ""
 	}
-	return housekeepingLintSection
+	return housekeepingLintSection + lintToolsPromptSection(lintToolsForStep(sctx, baseSHA))
 }
 
 // splitHousekeepingFindings routes combined-pass findings to their owning
