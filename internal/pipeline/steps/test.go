@@ -366,8 +366,8 @@ Rules:
 		})
 	}
 
-	// The step that made an edit owns it: Test never hands the next step a
-	// worktree holding edits its own agents left uncommitted.
+	// Settle newly dirty evidence paths before passing work to the next step.
+	// Once the shared correction is spent, inherited edits need a repair too.
 	var restart *pipeline.StepOutcome
 	reported := false
 	if dirtyBeforeErr == nil {

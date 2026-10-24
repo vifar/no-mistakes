@@ -13,33 +13,21 @@ import (
 )
 
 // FindingIDTestLeftoverEdits is the auto-fixable Test finding for uncommitted
-// edits the Test agents left in the run worktree after the run's one
-// automatic leftover correction was already spent. The repair turn commits
-// them (validation then re-runs on the new head) or reverts them.
+// edits remaining in the run worktree after the run's one automatic leftover
+// correction was already spent, including inherited edits. The repair turn
+// commits them (validation then re-runs on the new head) or reverts them.
 const FindingIDTestLeftoverEdits = "test-leftover-edits"
 
-// settleTestLeftoverEdits makes the Test step own the uncommitted edits its
-// agents left in the run worktree before the worktree reaches the next step.
+// settleTestLeftoverEdits settles uncommitted worktree edits before Test
+// completes, so repeated evidence edits cannot exhaust Document's boundary
+// correction and then fail its clean-entry check.
 //
-// The evidence turn may write or improve a focused test, but nothing commits
-// what it writes. Left alone, the edits reach Document, which refuses a dirty
-// worktree. Document's boundary commit absorbs the first set, but its budget
-// is one per run: on the re-validation that follows, the Test agent wrote the
-// same file again and Document killed the run (vifar/controller#8241).
-//
-// The step that made the edits settles them itself:
-//
-//   - While the run's leftover budget allows, a passing Test commits them as
-//     an attributed "no-mistakes(test): keep test validation edits" commit and
-//     sends the run back to Review, so they are reviewed and re-validated
-//     before anything is published.
-//   - Once the budget is spent, Test does not complete. It reports the edits
-//     as an auto-fixable finding, so a repair turn commits them through the
-//     normal Test fix path (validation re-runs on that head) or reverts them,
-//     and it refuses Approve, which would carry them on unreviewed.
-//
-// A gate that already blocks with budget left is unchanged: its fix round
-// commits the edits, and an approval still meets Document's boundary commit.
+// With budget available, dirtyBefore prevents Test from claiming work solely
+// because it predates the evidence turn. A newly dirty path permits a shared
+// correction of all worktree edits when no gate already blocks. With budget
+// spent, dirtyBefore must not filter the repair finding: Document can return
+// edits already present at Test entry, and filtering them would loop between
+// the two steps instead of reaching the repair gate.
 func settleTestLeftoverEdits(sctx *pipeline.StepContext, findings *Findings, needsApproval bool, dirtyBefore []string) (*pipeline.StepOutcome, bool, error) {
 	if sctx == nil || sctx.DB == nil || sctx.Run == nil {
 		return nil, false, nil
