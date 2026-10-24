@@ -186,6 +186,24 @@ func (d *DB) bindRunPRContextOnce(writeCtx context.Context, runID string, candid
 			return PRContextBindResult{Generation: previous.Generation}, nil
 		}
 	}
+	if !initial && forward && previous.PRURL != "" && previous.ForgeHeadSHA != candidate.ForgeHeadSHA {
+		unchanged := candidate
+		unchanged.ForgeHeadSHA = previous.ForgeHeadSHA
+		if unchanged == previous.PRContextCandidate {
+			pending, err = pendingTargetRewind(tx, runID)
+			if err != nil {
+				return PRContextBindResult{}, err
+			}
+			if pending != nil {
+				if !sameOptionalSHA(pending.ForgeHeadSHA, &previous.ForgeHeadSHA) {
+					return PRContextBindResult{}, fmt.Errorf("pending rewind PR head differs from comparison receipt")
+				}
+				if _, err = tx.ExecContext(writeCtx, `UPDATE run_target_rewinds SET forge_head_sha=? WHERE id=?`, candidate.ForgeHeadSHA, pending.ID); err != nil {
+					return PRContextBindResult{}, err
+				}
+			}
+		}
+	}
 	identityOnlyAttach := !initial && previous.PRURL == "" && candidate.PRURL != "" &&
 		candidate.ForgeHeadSHA == candidate.LocalHeadSHA &&
 		previous.SourceRepo == candidate.SourceRepo && previous.SourceBranch == candidate.SourceBranch &&

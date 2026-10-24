@@ -56,6 +56,65 @@ func TestRunPRContextInitialAndIdempotentBind(t *testing.T) {
 	}
 }
 
+func TestRunPRContextHeadAdvancePreservesPendingRewindSource(t *testing.T) {
+	for _, corruptPin := range []bool{false, true} {
+		t.Run(map[bool]string{false: "accounted advance", true: "inconsistent pin"}[corruptPin], func(t *testing.T) {
+			d, id, target, request := targetRewindDBFixture(t)
+			before, err := d.GetRunPRContext(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attached := before.PRContextCandidate
+			attached.PRURL = "https://example.com/acme/repo/pull/42"
+			attached.ForgeHeadSHA = attached.LocalHeadSHA
+			bound, err := d.BindRunPRContext(id, attached, types.StepRebase)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attached.TargetSHA = target.TargetSHA
+			request.ExpectedGeneration, request.HasPR = bound.Generation, true
+			request.SourceSHA = &attached.LocalHeadSHA
+			if _, err := d.RewindRunPRContext(id, attached, request); err != nil {
+				t.Fatal(err)
+			}
+			before, err = d.GetRunPRContext(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			originalPin := attached.ForgeHeadSHA
+			if corruptPin {
+				originalPin = strings.Repeat("d", 40)
+				if _, err := d.sql.Exec(`UPDATE run_target_rewinds SET forge_head_sha=? WHERE run_id=?`, originalPin, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			attached.ForgeHeadSHA = strings.Repeat("f", 40)
+			_, err = d.AdvanceRunPRContext(id, attached)
+			if (err != nil) != corruptPin {
+				t.Fatalf("head advance error=%v; corrupt pin=%t", err, corruptPin)
+			}
+			receipt, readErr := d.GetRunPRContext(id)
+			pending, pendingErr := d.GetPendingTargetRewind(id)
+			if readErr != nil || pendingErr != nil || pending == nil || pending.SourceSHA == nil || *pending.SourceSHA != attached.LocalHeadSHA {
+				t.Fatalf("original source was changed: receipt=%+v pending=%+v errors=%v %v", receipt, pending, readErr, pendingErr)
+			}
+			if corruptPin {
+				if *receipt != *before || pending.ForgeHeadSHA == nil || *pending.ForgeHeadSHA != originalPin {
+					t.Fatalf("refused advance partially committed: receipt=%+v pending=%+v", receipt, pending)
+				}
+				return
+			}
+			if receipt.PRContextCandidate != attached || receipt.Generation != before.Generation+1 || pending.ForgeHeadSHA == nil || *pending.ForgeHeadSHA != attached.ForgeHeadSHA {
+				t.Fatalf("receipt and pending PR pin disagree: receipt=%+v pending=%+v", receipt, pending)
+			}
+			if _, err := d.CompleteRebasePRContext(id, attached, receipt.Generation); err != nil {
+				t.Fatalf("accounted head stranded pending integration: %v", err)
+			}
+			assertRewindCharge(t, d, id, 1, false)
+		})
+	}
+}
+
 func TestRunPRContextQualificationSurvivesReadinessLossButNotRebinding(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.sqlite")
 	d, err := Open(path)
