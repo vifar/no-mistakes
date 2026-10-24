@@ -36,10 +36,14 @@ import (
 // EventFunc is called when a pipeline event occurs, for streaming to subscribers.
 type EventFunc func(ipc.Event)
 
-// DocumentCapWayForward is the operator instruction when this run cannot
-// make another documentation commit. A new run's document history starts
-// empty, so it receives a fresh count of the configured cap.
-const DocumentCapWayForward = "Abort this run and start a new one. A new run starts with a fresh document commit count."
+// DocumentCapWayForward is the operator instruction when this run has spent
+// its documentation commit budget. A fix response that selects the remaining
+// findings may land one more Document commit for them (issue #188).
+const DocumentCapWayForward = "To resolve a remaining documentation finding, respond with --action fix and select it: each fix response may land one more Document commit."
+
+// documentCapLegacyWayForward is the way forward earlier versions recorded in
+// a cap notice. A gate parked before an upgrade still carries it.
+const documentCapLegacyWayForward = "Abort this run and start a new one. A new run starts with a fresh document commit count."
 
 const (
 	defaultGateReconcileInterval = config.DefaultGateReconcileInterval
@@ -1633,7 +1637,7 @@ func (e *Executor) autoFixLimit(stepName types.StepName) int {
 }
 
 func documentCapReached(findings string) bool {
-	return strings.Contains(findings, DocumentCapWayForward)
+	return strings.Contains(findings, DocumentCapWayForward) || strings.Contains(findings, documentCapLegacyWayForward)
 }
 
 // StrictDocumentCapRefusal appends the way forward to a strict refusal of a

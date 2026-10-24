@@ -12,9 +12,9 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// The Document commit cap is a BOUND on how many commits the step may make in
-// one run. It is not a verdict on the documentation, and it must never be the
-// reason a run cannot finish.
+// The Document commit cap bounds automatic commits in one run; an explicit
+// fix response can authorize one more via documentCapFixGrace. It is not a
+// verdict on the documentation, and must never prevent a run from finishing.
 //
 // Issue #123: the cap was checked BEFORE the agent ran, so the step emitted an
 // `ask-user` finding on every round without ever asking whether the
@@ -32,13 +32,45 @@ import (
 //
 // The fix has two halves:
 //
-//  1. The cap still runs the READ-ONLY gap check. It asks what gaps remain
-//     and applies nothing, so it spends no budget. With no gap remaining the
-//     step completes and the run continues.
+//  1. At the cap, rounds without explicit repair grace run the READ-ONLY gap
+//     check. It asks what gaps remain and applies nothing, so it spends no
+//     budget. With no gap remaining the step completes and the run continues.
 //
 //  2. The cap notice itself is INFORMATIONAL (no-op), never an actionable
 //     finding. A finding no agent and no human response can resolve must not
 //     be able to block an approval forever.
+
+// documentCapFixGrace reports whether this round may land one Document
+// commit past the spent cap.
+//
+// Issue #188: with the cap spent and a REAL gap remaining, every disposition
+// of a strict gate was refused. `approve` and `skip` are refused by strict
+// shipping, and `fix` re-ran the read-only gap check, which cannot land the
+// fix and so re-reported the same gap. The only way out was to abort the run.
+//
+// A fix response is the one disposition that can resolve a gap, so it is the
+// one that earns a commit. The grace is bounded:
+//
+//   - Only an explicit fix response earns it. The automatic fix loop does
+//     not, so the cap still bounds everything the pipeline does on its own.
+//     `axi --yes` sends at most one fix per step.
+//   - Each response earns at most ONE commit. A proposal over that is
+//     discarded like any other over-budget proposal.
+//   - The response must select an actionable finding; an informational
+//     notice is nothing to fix.
+//
+// The grace commit is an ordinary repair pass, so it is recorded in the
+// run's Document history and counts against the budget like any other.
+func documentCapFixGrace(sctx *pipeline.StepContext) bool {
+	if !sctx.Fixing || sctx.AutoFixRound || sctx.SkipFixExecution || sctx.FinalizingAnswers {
+		return false
+	}
+	selected, err := types.ParseFindingsJSON(sctx.PreviousFindings)
+	if err != nil {
+		return false
+	}
+	return types.HasActionableFindings(selected)
+}
 
 // documentCapCheckSection is the read-only gap check's prompt section. The
 // agent must not edit anything: the cap forbids another commit, and a check

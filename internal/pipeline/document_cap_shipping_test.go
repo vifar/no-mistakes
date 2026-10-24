@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -18,7 +19,7 @@ import (
 // internal/pipeline/steps own the Document step's own behavior; these own
 // what the executor and the strict admission do with its outcome.
 const documentCapNoticeFindings = `{"findings":[` +
-	`{"id":"document-1","severity":"info","description":"Document commit limit reached. Abort this run and start a new one. A new run starts with a fresh document commit count.","action":"no-op"}],` +
+	`{"id":"document-1","severity":"info","description":"Document commit limit reached. ` + DocumentCapWayForward + `","action":"no-op"}],` +
 	`"summary":"Document commit limit reached; no remaining documentation gap"}`
 
 // The cap notice alone must not park a gate and must not block an approval.
@@ -82,7 +83,7 @@ func TestStrictShippingDocumentCapRealGapStillParksAndTheCapNoticeIsNotTheBlocke
 	bindCompletionFixture(t, database, run, workDir)
 
 	const findings = `{"findings":[` +
-		`{"id":"document-1","severity":"info","description":"Document commit limit reached. Abort this run and start a new one. A new run starts with a fresh document commit count.","action":"no-op"},` +
+		`{"id":"document-1","severity":"info","description":"Document commit limit reached. ` + DocumentCapWayForward + `","action":"no-op"},` +
 		`{"id":"document-2","severity":"warning","file":"README.md","description":"the rollout guide is still stale","action":"ask-user"}],` +
 		`"summary":"Document commit limit reached; stopping further commits"}`
 	document := &adaptiveCallStep{name: types.StepDocument, fn: func(*StepContext) (*StepOutcome, error) {
@@ -112,7 +113,7 @@ func TestStrictShippingDocumentCapRealGapStillParksAndTheCapNoticeIsNotTheBlocke
 		t.Fatalf("the real gap did not block the strict approval with a way forward: %v", err)
 	}
 	if err := exec.Respond(types.StepDocument, types.ActionSkip, nil, gateSnapshot(exec)); err == nil || !strings.Contains(err.Error(), "forbids skipped steps") || !strings.Contains(err.Error(), DocumentCapWayForward) {
-		t.Fatalf("strict skip did not name the new run: %v", err)
+		t.Fatalf("strict skip did not name the way forward: %v", err)
 	}
 	if err := exec.Respond(types.StepDocument, types.ActionAbort, nil, nil); err != nil {
 		t.Fatal(err)
@@ -134,5 +135,72 @@ func TestDocumentCapNoticeIsNotCountedAsActionable(t *testing.T) {
 	row := &db.StepResult{StepName: types.StepDocument, FindingsJSON: &notice}
 	if refusal := row.StrictApprovalRefusal(""); refusal != "" {
 		t.Fatalf("strict shipping refuses the informational cap notice: %s", refusal)
+	}
+}
+
+// Issue #188: the refusals above must not be the end of the road. A fix
+// response to the parked gate reaches the Document step as an explicit
+// (non-automatic) fix round with the selected gap, which is what earns the
+// step one more commit at the spent cap; once that round clears the gap,
+// the strict run finishes without an abort.
+func TestStrictShippingDocumentCapFixResponseIsTheWayForward(t *testing.T) {
+	for _, gap := range []string{
+		`{"id":"doc-lane-telemetry-labels","severity":"info","file":"laneTelemetry.ts","description":"two comments omit two label values","action":"auto-fix"}`,
+		`{"id":"document-2","severity":"warning","file":"README.md","description":"the rollout guide is still stale","action":"ask-user"}`,
+	} {
+		database, p, baseRun, repo := setupTest(t)
+		workDir := completionFixture(t, database, baseRun)
+		run, err := database.InsertRunWithShipping(repo.ID, "feature", baseRun.HeadSHA, baseRun.HeadSHA, nil, "", "", "", "main", false, nil, &types.ShippingOptions{Mode: types.ShippingFull})
+		if err != nil {
+			t.Fatal(err)
+		}
+		bindCompletionFixture(t, database, run, workDir)
+
+		parked := `{"findings":[` +
+			`{"id":"document-1","severity":"info","description":"Document commit limit reached. ` + DocumentCapWayForward + `","action":"no-op"},` +
+			gap + `],"summary":"Document commit limit reached; stopping further commits"}`
+		calls := 0
+		var fixRound *StepContext
+		document := &adaptiveCallStep{name: types.StepDocument, fn: func(sctx *StepContext) (*StepOutcome, error) {
+			calls++
+			if calls == 1 {
+				return &StepOutcome{NeedsApproval: true, Findings: parked}, nil
+			}
+			snapshot := *sctx
+			fixRound = &snapshot
+			return &StepOutcome{NeedsApproval: false, Findings: `{"findings":[],"summary":"fixed the remaining gap"}`}, nil
+		}}
+		exec := NewExecutor(database, p, &config.Config{}, nil, []Step{document}, nil)
+		done, _ := startExecutor(t, exec, run, repo, workDir)
+
+		waitForStepStatus(t, database, run.ID, types.StepDocument, types.StepStatusAwaitingApproval)
+		if err := exec.Respond(types.StepDocument, types.ActionApprove, nil, gateSnapshot(exec)); err == nil || !strings.Contains(err.Error(), "--action fix") {
+			t.Fatalf("the strict refusal does not name the fix response: %v", err)
+		}
+		var finding types.Finding
+		if err := json.Unmarshal([]byte(gap), &finding); err != nil {
+			t.Fatal(err)
+		}
+		if err := exec.Respond(types.StepDocument, types.ActionFix, []string{"document-1", finding.ID}, gateSnapshot(exec)); err != nil {
+			t.Fatalf("the fix response was refused: %v", err)
+		}
+		waitExecutorDone(t, done)
+
+		if fixRound == nil {
+			t.Fatal("the fix response never reached the Document step")
+		}
+		if !fixRound.Fixing || fixRound.AutoFixRound {
+			t.Fatalf("the fix response did not arrive as an explicit fix round: fixing=%v auto=%v", fixRound.Fixing, fixRound.AutoFixRound)
+		}
+		if !strings.Contains(fixRound.PreviousFindings, finding.Description) {
+			t.Fatalf("the fix round lost the selected gap: %s", fixRound.PreviousFindings)
+		}
+		got, err := database.GetRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != types.RunCompleted {
+			t.Fatalf("the strict run did not finish after the fix: %+v", got)
+		}
 	}
 }
