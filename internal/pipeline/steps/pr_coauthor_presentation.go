@@ -32,7 +32,8 @@ const prAIAttributionNotice = "<no-mistakes: AI attribution line neutralized>"
 //
 // A recorded payload keeps its line breaks as the two-character escape, so its
 // entries are one line to a line-based scanner. Such a line is filtered through
-// its own string values, and the payload keeps the bytes it was recorded with.
+// its own string values. Only changed strings are re-encoded; unrelated payload
+// bytes stay as recorded.
 func prDisplayText(text string, configuredTrailers ...string) string {
 	return prDisplayTextMode(text, false, configuredTrailers...)
 }
