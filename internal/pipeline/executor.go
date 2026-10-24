@@ -46,12 +46,12 @@ const (
 	defaultGateReconcileTimeout  = config.DefaultGateReconcileTimeout
 )
 
-// A non-fixing CI monitoring round whose state write exhausted the SQLite
-// retry budget is resumed in place after ContentionResumeCooldown, up to
-// ContentionResumes times, before
-// the run settles the named infrastructure outcome. These are variables only
-// so test binaries (TestMain) and the e2e build can change them before any
-// executor exists; production code never assigns them.
+// ContentionResumes bounds execution replay after an exhausted SQLite write
+// budget to non-fixing CI monitoring with no fix or answer trigger in progress.
+// It also bounds separate repeats of idempotent findings writes without
+// replaying execution. ContentionResumeCooldown separates these attempts.
+// These are variables only so test binaries (TestMain) and the e2e build can
+// change them before any executor exists; production code never assigns them.
 var (
 	ContentionResumes        = 2
 	ContentionResumeCooldown = 30 * time.Second

@@ -35,8 +35,8 @@ const (
 )
 
 // Budget is the retry budget Do applies. It is a variable only so test
-// binaries can shorten it in TestMain before any test runs; production code
-// never assigns it.
+// binaries can shorten it in TestMain or e2e initialization before any writes;
+// production code never assigns it.
 var Budget = DefaultBudget
 
 // ContentionError is an infrastructure failure, never a verdict on source code.
