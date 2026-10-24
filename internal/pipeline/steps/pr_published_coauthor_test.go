@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -58,6 +59,54 @@ func TestInlineCoAuthorPublicationPaths(t *testing.T) {
 	}
 }
 
+func TestCapturedTextCoAuthorInFencedTestingPublication(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "capture.txt")
+	const raw = "Recorded risk Co-Authored-By: Codex <bot@example.invalid>\nRecorded helper Co-Authored-By: Ada <ada@example.com>\n"
+	if err := os.WriteFile(path, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	artifact := types.TestArtifact{Kind: "command-output", Label: "Captured command", Path: path}
+	findings := findingsJSON(t, types.Findings{Artifacts: []types.TestArtifact{artifact}})
+	steps := []*db.StepResult{{ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &findings}}
+	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+		t.Run(string(provider), func(t *testing.T) {
+			opts := testingSummaryOptions{flavor: prBodyFlavorFor(provider), repoRoot: root, evidenceRoot: root}
+			if text, ok := embeddedArtifactText(artifact, opts, &testingArtifactRenderState{remainingEmbeddedBytes: maxEmbeddedArtifactsTotalBytes}); !ok || !strings.Contains(text, "Recorded risk") {
+				t.Fatal("captured text evidence omitted")
+			}
+			testingMD := buildTestingSummary(steps, nil, opts)
+			ctx := &pipeline.StepContext{Config: &config.Config{}}
+			ctx.Config.PR.Appendix = config.PRAppendixFull
+			for name, body := range map[string]string{
+				"testing":  testingMD,
+				"assemble": assemblePRBody(ctx, "## What Changed\n\nKeep captured evidence.", "Low risk", testingMD, "", 0, provider),
+				"build":    buildPRBodyWithin("## What Changed\n\nKeep captured evidence.", "Low risk", testingMD, "", ctx, provider, maxPullRequestBodyBytes),
+			} {
+				t.Run(name, func(t *testing.T) {
+					view := html.UnescapeString(body)
+					if strings.Contains(view, "Co-Authored-By:") || strings.Contains(view, "Codex") || strings.Contains(view, "bot@example.invalid") {
+						t.Fatalf("fenced captured text published an AI claim: %q", body)
+					}
+					for _, want := range []string{"```text", "Recorded risk " + prAIAttributionNotice, "Recorded helper co-author (quoted): Ada <ada@example.com>"} {
+						if !strings.Contains(view, want) {
+							t.Errorf("fenced captured text lost %q: %q", want, body)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestInlineCodeSpansExcludeFenceDelimiters(t *testing.T) {
+	for _, line := range []string{"```text `literal`", "   ````text `literal`", "~~~text `literal`", "   ~~~~text `literal`"} {
+		if spans := inlineCodeSpans(line); len(spans) != 0 {
+			t.Errorf("fence delimiter %q produced inline spans: %v", line, spans)
+		}
+	}
+}
+
 func TestRenderInlineCoAuthorKeys(t *testing.T) {
 	for _, tt := range []struct {
 		name string
@@ -79,7 +128,9 @@ func TestRenderInlineCoAuthorKeys(t *testing.T) {
 		{"escaped backtick", "Low: handle \\`; Co-Authored-By: Codex <bot@example.invalid>", "Low: handle \\`; " + prAIAttributionNotice},
 		{"unmatched backtick", "Low: handle `; Co-Authored-By: Codex <bot@example.invalid>", "Low: handle `; " + prAIAttributionNotice},
 		{"double backtick span", "Recorded ``literal ` Co-Authored-By: Codex <bot@example.invalid>``", "Recorded ``literal ` Co-Authored-By: Codex <bot@example.invalid>``"},
-		{"multiline span", "Recorded ``literal\nCo-Authored-By: Codex <bot@example.invalid>\n``", "Recorded ``literal\nCo-Authored-By: Codex <bot@example.invalid>\n``"},
+		{"cross-line backticks", "Recorded ``literal\nCo-Authored-By: Codex <bot@example.invalid>\n``", "Recorded ``literal\n" + prAIAttributionNotice + "\n``"},
+		{"backtick fence", "```text\nRecorded risk Co-Authored-By: Codex <bot@example.invalid>\n```", "```text\nRecorded risk " + prAIAttributionNotice + "\n```"},
+		{"tilde fence", "   ~~~~text\nRecorded risk Co-Authored-By: Ada <ada@example.com>\n   ~~~~", "   ~~~~text\nRecorded risk co-author (quoted): Ada <ada@example.com>\n   ~~~~"},
 		{"escaped closing backtick", "Recorded `literal \\` Co-Authored-By: Codex <bot@example.invalid>", "Recorded `literal \\` " + prAIAttributionNotice},
 		{"unequal delimiter lengths", "Recorded ``literal ` Co-Authored-By: Codex <bot@example.invalid>", "Recorded ``literal ` " + prAIAttributionNotice},
 		{"field prose", "The Co-Authored-By: field identifies contributors.", "The Co-Authored-By: field identifies contributors."},

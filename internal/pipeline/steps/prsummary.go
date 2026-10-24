@@ -1742,17 +1742,15 @@ var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)
 // inline code span, stay as they are: neither is a claim, and the code span is
 // evidence the body preserves byte for byte.
 func renderInlineCoAuthorKeys(s string) string {
-	spans := inlineCodeSpans(s)
-	lineOffset := 0
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
-		lineLength := len(line)
+		spans := inlineCodeSpans(line)
 		matches := publishedCoAuthorKey.FindAllStringSubmatchIndex(line, -1)
 		for k := len(matches) - 1; k >= 0; k-- {
 			start, end, sep := matches[k][0], matches[k][1], line[matches[k][2]:matches[k][3]]
 			inCode := false
 			for _, span := range spans {
-				if lineOffset+start >= span[0] && lineOffset+start < span[1] {
+				if start >= span[0] && start < span[1] {
 					inCode = true
 					break
 				}
@@ -1780,12 +1778,15 @@ func renderInlineCoAuthorKeys(s string) string {
 			}
 		}
 		lines[i] = line
-		lineOffset += lineLength + 1
 	}
 	return strings.Join(lines, "\n")
 }
 
 func inlineCodeSpans(text string) [][2]int {
+	trimmed := strings.TrimLeft(text, " ")
+	if len(text)-len(trimmed) <= 3 && (strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")) {
+		return nil
+	}
 	var spans [][2]int
 	for i := 0; i < len(text); {
 		if text[i] == '\\' && i+1 < len(text) {

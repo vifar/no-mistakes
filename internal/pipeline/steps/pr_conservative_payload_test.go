@@ -19,6 +19,8 @@ func TestPRRecordedInlineClaimsPreserveUnrelatedBytes(t *testing.T) {
 		want string
 	}{
 		{"AI", `"Recorded risk Co-Authored-By: Codex \u003cbot@example.invalid\u003e"`, `"Recorded risk <no-mistakes: AI attribution line neutralized>"`},
+		{"fenced AI", "\"```text\\nRecorded risk Co-Authored-By: Codex \\u003cbot@example.invalid\\u003e\\n```\"", "\"```text\\nRecorded risk <no-mistakes: AI attribution line neutralized>\\n```\""},
+		{"fenced human", `"~~~text\nRecorded helper Co-Authored-By: Ada \u003cada@example.com\u003e\n~~~"`, `"~~~text\nRecorded helper co-author (quoted): Ada <ada@example.com>\n~~~"`},
 		{"human", `"Recorded risk Co-Authored-By: Ada \u003cada@example.com\u003e."`, `"Recorded risk co-author (quoted): Ada <ada@example.com>."`},
 		{"field", `"The field \"Co-Authored-By:\" identifies Ada \u003cada@example.com\u003e"`, `"The field \"Co-Authored-By:\" identifies Ada \u003cada@example.com\u003e"`},
 		{"code", "\"Recorded `Co-Authored-By: Codex \\u003cbot@example.invalid\\u003e`\"", "\"Recorded `Co-Authored-By: Codex \\u003cbot@example.invalid\\u003e`\""},
