@@ -102,7 +102,7 @@ func TestCapturedTextCoAuthorInFencedTestingPublication(t *testing.T) {
 }
 
 func TestInlineCodeSpansExcludeFenceDelimiters(t *testing.T) {
-	for _, line := range []string{"```text `literal`", "   ````text `literal`", "~~~text `literal`", "   ~~~~text `literal`"} {
+	for _, line := range []string{"```text", "   ````text", "```", "   ````", "~~~text `literal`", "   ~~~~text `literal`"} {
 		if spans := inlineCodeSpans(line); len(spans) != 0 {
 			t.Errorf("fence delimiter %q produced inline spans: %v", line, spans)
 		}
@@ -306,6 +306,8 @@ func TestPRInlineClaimsAtSharedDisplayBoundary(t *testing.T) {
 		{"Recorded Co-Authored-By: Ada:Dev <ada@example.com>.", "Recorded co-author (quoted): Ada:Dev <ada@example.com>.", "Recorded co-author (quoted): Ada:Dev <ada@example.com>."},
 		{`The field "Co-Authored-By:" identifies acp:cursor <ai@example.com>`, `The field "Co-Authored-By:" identifies acp:cursor <ai@example.com>`, `The field "Co-Authored-By:" identifies acp:cursor <ai@example.com>`},
 		{"Recorded `Co-Authored-By: acp:cursor <ai@example.com>`", "Recorded `Co-Authored-By: acp:cursor <ai@example.com>`", "Recorded `Co-Authored-By: acp:cursor <ai@example.com>`"},
+		{"```literal``` documents `Co-Authored-By:` Ada <ada@example.com>", "```literal``` documents `Co-Authored-By:` Ada <ada@example.com>", "```literal``` documents `Co-Authored-By:` Ada <ada@example.com>"},
+		{"   ````literal```` documents `Co-Authored-By:` Ada <ada@example.com>", "   ````literal```` documents `Co-Authored-By:` Ada <ada@example.com>", "   ````literal```` documents `Co-Authored-By:` Ada <ada@example.com>"},
 		{"Recorded Co-Authored-By: Ada; contact <ada@example.com>", "Recorded Co-Authored-By: Ada; contact <ada@example.com>", "Recorded Co-Authored-By: Ada; contact <ada@example.com>"},
 	} {
 		for _, notice := range []bool{false, true} {
@@ -375,5 +377,49 @@ func TestPRInlineClaimsOwnedUpdateAndRestamp(t *testing.T) {
 				check(updated, hasPRAppendixMarkers(prior))
 			}
 		})
+	}
+}
+
+func TestPRConfiguredInlineClaimsAtSharedDisplayBoundary(t *testing.T) {
+	const configured = "Co-Authored-By: private:writer <opaque@example.com>"
+	for _, prefix := range []string{"Recorded ", "Mention co-author (quoted): field\nRecorded "} {
+		for _, notice := range []bool{false, true} {
+			want := prefix
+			if notice {
+				want += prAIAttributionNotice
+			}
+			raw := prefix + configured
+			if got := prDisplayTextMode(raw, notice, configured); got != want {
+				t.Errorf("plain notice=%t: got %q, want %q", notice, got, want)
+			}
+			encoded, err := marshalJSONString(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected, err := marshalJSONString(want)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, wrappers := range [][2]string{
+				{`{ "summary": `, `, "escape": "A\u0042\/C", "number": 1.200e+3 }`},
+				{"", ","},
+			} {
+				input := wrappers[0] + string(encoded) + wrappers[1]
+				output := wrappers[0] + string(expected) + wrappers[1]
+				if got := prDisplayTextMode(input, notice, configured); got != output {
+					t.Errorf("recorded notice=%t: got %q, want %q", notice, got, output)
+				}
+			}
+		}
+	}
+	for _, raw := range []string{
+		"Recorded `Co-Authored-By: private:writer <opaque@example.com>`",
+		`The field "Co-Authored-By:" identifies private:writer <opaque@example.com>`,
+	} {
+		for _, notice := range []bool{false, true} {
+			if got := prDisplayTextMode(raw, notice, configured); got != raw {
+				t.Errorf("configured mention changed: got %q, want %q", got, raw)
+			}
+		}
 	}
 }

@@ -1735,7 +1735,7 @@ var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)
 // in a co-author claim. A key that only names the field, and a key quoted in an
 // inline code span, stay as they are: neither is a claim, and the code span is
 // evidence the body preserves byte for byte.
-func renderInlineCoAuthorKeys(s string, notice bool) string {
+func renderInlineCoAuthorKeys(s string, notice bool, configuredTrailers ...string) string {
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
 		spans := inlineCodeSpans(line)
@@ -1771,7 +1771,7 @@ func renderInlineCoAuthorKeys(s string, notice bool) string {
 			if err != nil || address.Name == "" || !strings.HasSuffix(identity, ">") {
 				continue
 			}
-			if _, _, _, ai := publishedAttributionEntry([]string{claim}, 0, nil); ai {
+			if _, _, _, ai := publishedAttributionEntry([]string{claim}, 0, configuredTrailers); ai {
 				replacement := ""
 				if notice {
 					replacement = prAIAttributionNotice
@@ -1789,7 +1789,13 @@ func renderInlineCoAuthorKeys(s string, notice bool) string {
 func inlineCodeSpans(text string) [][2]int {
 	trimmed := strings.TrimLeft(text, " ")
 	if len(text)-len(trimmed) <= 3 && (strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~")) {
-		return nil
+		width := 3
+		for width < len(trimmed) && trimmed[width] == trimmed[0] {
+			width++
+		}
+		if trimmed[0] == '~' || !strings.Contains(trimmed[width:], "`") {
+			return nil
+		}
 	}
 	var spans [][2]int
 	for i := 0; i < len(text); {
