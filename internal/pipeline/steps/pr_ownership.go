@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/mdfence"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safepath"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -77,11 +76,10 @@ func parsePROwnedBody(body string) (prOwnedBody, error) {
 	return parts, nil
 }
 
-// Only track fenced blocks to keep a quoted marker from acquiring ownership.
-// This deliberately does not interpret headings or attempt general Markdown
-// rewriting. Four-space-indented lines cannot open a CommonMark fence.
+// Track fences with HTML-block context so a quoted marker cannot acquire
+// ownership and literal fence markers in HTML cannot invalidate the appendix.
 func markdownFenceOpen(text string) bool {
-	return mdfence.Scan(text).Open()
+	return scanPRBodyCode(text).fence.Open()
 }
 
 func wrapPRAppendix(appendix string) string {

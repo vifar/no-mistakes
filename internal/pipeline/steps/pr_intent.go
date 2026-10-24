@@ -1,14 +1,16 @@
 package steps
 
 import (
+	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
 // publicPRIntent returns the intent text published on the PR body, or "" when
-// publication is suppressed. It is the single publication gate: every PR-body
-// render path (ordinary drafting, fallback content, and template appendix)
-// goes through it, so caller-side omission and the repository's trusted
-// policy compose here and nowhere else.
+// publication is suppressed. Every Intent-section render path (ordinary
+// drafting, fallback content, and template appendix) goes through it.
+// publicPRIntentSource owns the shared publication gate for this rendering
+// and intent-derived closing references, composing caller-side omission with
+// the repository's trusted policy.
 //
 // The control is tighten-only in both directions:
 //
@@ -28,18 +30,19 @@ import (
 // Review, test, document, lint, and CI-fix prompts keep the full intent
 // under either signal.
 func publicPRIntent(sctx *pipeline.StepContext, configuredTrailers ...string) string {
-	if sctx != nil && sctx.Config != nil && !sctx.Config.PR.PublishesIntent() {
-		return ""
-	}
-	if runOmitsIntent(sctx) {
-		return ""
-	}
 	if sctx == nil {
 		return ""
 	}
 	display := *sctx
-	display.UserIntent = prDisplayText(sctx.UserIntent, configuredTrailers...)
+	display.UserIntent = withoutPromotedClosingLines(publicPRIntentSource(sctx, configuredTrailers...), sctx)
 	return cleanedUserIntent(&display)
+}
+
+func publicPRIntentSource(sctx *pipeline.StepContext, configuredTrailers ...string) string {
+	if sctx == nil || (sctx.Config != nil && !sctx.Config.PR.PublishesIntent()) || runOmitsIntent(sctx) {
+		return ""
+	}
+	return intent.RedactSecrets(intent.StripAdversarial(prDisplayText(sctx.UserIntent, configuredTrailers...)))
 }
 
 // runOmitsIntent reports whether this run was started with the caller-side,

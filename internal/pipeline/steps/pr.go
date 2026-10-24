@@ -1675,7 +1675,7 @@ func truncateFenceAware(text string, maxBytes int, marker string, pick func(text
 	for available > 0 {
 		available = utf8BoundaryBefore(text, available)
 		cut, lineBased := pick(text, available)
-		head := mdfence.Close(strings.TrimRight(text[:cut], "\n"))
+		head := closePRBodyFence(strings.TrimRight(text[:cut], "\n"))
 		if len(head)+len(marker) <= maxBytes {
 			return head + marker
 		}

@@ -15,13 +15,17 @@ import (
 )
 
 // The pipeline adds closing references to a PR body from exactly one place:
-// explicit `axi run --closes` values, persisted on the run and claimed once by
-// the PR step (sctx.ClosingIssueRefs). They render in one stable `## Issues`
-// section. An author-preserving (pr.template) body keeps its author text
-// verbatim, so only the references the author text does not already close
-// are added to its generated appendix. Closure is never inferred from intent,
-// commits, or branch names: pipeline-generated text is published with its
-// closing references neutralized by the provider's closingGrammar.
+// the references claimed once by the PR step (sctx.ClosingIssueRefs). They are
+// the explicit `axi run --closes` values persisted on the run, plus the
+// standalone closing-keyword lines of the run intent ("Closes #12" alone on its
+// line), which are just as explicit a closing declaration. They render in one
+// stable `## Issues` section, as plain text. An author-preserving (pr.template)
+// body keeps its author text verbatim, so only the references the author text
+// does not already close are added to its generated appendix. Closure is never
+// inferred from intent prose, commits, or branch names: pipeline-generated text
+// is published with its closing references neutralized by the provider's
+// closingGrammar, and an intent closing line promoted to the Issues section is
+// not repeated in the published intent.
 
 const issuesSectionHeading = "## Issues"
 
@@ -124,19 +128,9 @@ func closingGrammarFor(provider scm.Provider) closingGrammar {
 func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 	seen := map[string]struct{}{}
 	var lines []string
-	var fence mdfence.Fence
-	for _, raw := range strings.Split(mdfence.NormalizeLineEndings(body), "\n") {
-		if grammar.codeAware {
-			inFence := fence.Open()
-			fence.Consume(raw)
-			if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
-				continue
-			}
-		}
-		line := strings.TrimSpace(raw)
-		if !grammar.keywordLine.MatchString(line) {
-			continue
-		}
+	rawLines := strings.Split(mdfence.NormalizeLineEndings(body), "\n")
+	for _, i := range closingKeywordLineIndexes(body, grammar, true) {
+		line := strings.TrimSpace(rawLines[i])
 		key := strings.ToLower(line)
 		if _, exists := seen[key]; exists {
 			continue
@@ -145,6 +139,59 @@ func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 		lines = append(lines, line)
 	}
 	return lines
+}
+
+// Rendered bodies use Markdown block context. Intent additionally treats an
+// entire HTML code element as an example, even when its contents would open a
+// Markdown fence: a declaration following that example must still be promoted.
+func closingKeywordLineIndexes(body string, grammar closingGrammar, rendered bool) []int {
+	var indexes []int
+	var fence mdfence.Fence
+	var bodyFence prBodyFenceScanner
+	var htmlCode string
+	for i, raw := range strings.Split(mdfence.NormalizeLineEndings(body), "\n") {
+		if grammar.codeAware {
+			if rendered {
+				if bodyFence.Consume(raw) {
+					continue
+				}
+			} else {
+				inHTML := htmlCode != ""
+				if !inHTML {
+					inFence := fence.Open()
+					fence.Consume(raw)
+					if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+						continue
+					}
+				}
+				outsideInlineCode(raw, func(text string) string {
+					return outsideHTMLCode(text, &htmlCode, func(text string) string { return text })
+				})
+				if inHTML || htmlCode != "" {
+					continue
+				}
+			}
+			if strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+				continue
+			}
+		}
+		if grammar.keywordLine.MatchString(strings.TrimSpace(raw)) {
+			indexes = append(indexes, i)
+		}
+	}
+	return indexes
+}
+
+func intentClosingLineIndexes(intent string, grammar closingGrammar) []int {
+	lines := strings.Split(mdfence.NormalizeLineEndings(intent), "\n")
+	var indexes []int
+	for _, i := range closingKeywordLineIndexes(intent, grammar, false) {
+		if grammar.codeAware && (strings.HasPrefix(lines[i], " ") || strings.HasPrefix(lines[i], "\t")) {
+			continue
+		}
+		indexes = append(indexes, i)
+	}
+	return indexes
 }
 
 // neutralizeGitHubClosingReferences puts every closing-keyword reference in
@@ -161,10 +208,12 @@ func neutralizeGitHubClosingReferences(s string) string {
 	var fence mdfence.Fence
 	var htmlCode string
 	for i, raw := range lines {
-		inFence := fence.Open()
-		fence.Consume(raw)
-		if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
-			continue
+		if htmlCode == "" {
+			inFence := fence.Open()
+			fence.Consume(raw)
+			if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+				continue
+			}
 		}
 		lines[i] = outsideInlineCode(raw, func(text string) string {
 			return outsideHTMLCode(text, &htmlCode, func(text string) string {
@@ -333,8 +382,8 @@ func issuesSection(sctx *pipeline.StepContext, authorText string) string {
 
 // appendIssuesSection appends section to body as its final block. The section
 // must be live Markdown outside any code, so a body that ends inside an open
-// fence has the fence closed first. On providers that ignore references inside
-// code, leaving the fence open would make closing-reference verification fail.
+// fence has the fence and any surrounding HTML code element closed first.
+// Providers that ignore references inside code require both contexts closed.
 func appendIssuesSection(body, section string) string {
 	if section == "" {
 		return body
@@ -342,7 +391,98 @@ func appendIssuesSection(body, section string) string {
 	if strings.TrimSpace(body) == "" {
 		return section
 	}
-	return mdfence.Close(body) + "\n\n" + section
+	return closePRBodyFence(body) + "\n\n" + section
+}
+
+var htmlPreBlockStartPattern = regexp.MustCompile(`(?i)^ {0,3}<pre(?:[\t >]|$)`)
+var htmlCodeBlockStartPattern = regexp.MustCompile(`(?i)^ {0,3}</?code(?:[\t ][^>]*)?>[\t ]*$`)
+var markdownHeadingPattern = regexp.MustCompile(`^ {0,3}#{1,6}(?:[\t ]|$)`)
+
+// scanPRBodyCode distinguishes HTML blocks from inline elements. CommonMark
+// <pre> blocks may interrupt paragraphs and end at </pre>. A standalone <code>
+// tag starts a type-7 block only outside a paragraph, and that block ends at a
+// blank line, not its closing tag. Inline elements cannot suppress fences.
+func scanPRBodyCode(body string) prBodyFenceScanner {
+	var scanner prBodyFenceScanner
+	for _, raw := range strings.Split(mdfence.NormalizeLineEndings(body), "\n") {
+		scanner.Consume(raw)
+	}
+	return scanner
+}
+
+type prBodyFenceScanner struct {
+	fence     mdfence.Fence
+	pre       bool
+	codeBlock bool
+	paragraph bool
+	htmlCode  string
+}
+
+// Consume reports whether raw belongs to fenced or HTML code. HTML tags inside
+// a Markdown fence are literal text and cannot close a surrounding element.
+func (s *prBodyFenceScanner) Consume(raw string) bool {
+	inFence := s.fence.Open()
+	inHTML := s.htmlCode != ""
+	blocked := s.consumeBlock(raw)
+	if !inFence && !s.fence.Open() {
+		outsideInlineCode(raw, func(text string) string {
+			return outsideHTMLCode(text, &s.htmlCode, func(text string) string { return text })
+		})
+	}
+	return blocked || inHTML || s.htmlCode != ""
+}
+
+func (s *prBodyFenceScanner) consumeBlock(raw string) bool {
+	if s.pre {
+		s.pre = !strings.Contains(strings.ToLower(raw), "</pre>")
+		return true
+	}
+	if s.codeBlock {
+		s.codeBlock = strings.Trim(raw, " \t") != ""
+		return true
+	}
+	inFence := s.fence.Open()
+	s.fence.Consume(raw)
+	if inFence || s.fence.Open() {
+		s.paragraph = false
+		return true
+	}
+	if strings.Trim(raw, " \t") == "" {
+		s.paragraph = false
+		return false
+	}
+	if strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+		return false
+	}
+	if htmlPreBlockStartPattern.MatchString(raw) {
+		s.pre = !strings.Contains(strings.ToLower(raw), "</pre>")
+		s.paragraph = false
+		return true
+	}
+	if !s.paragraph && htmlCodeBlockStartPattern.MatchString(raw) {
+		s.codeBlock = true
+		return true
+	}
+	s.paragraph = !markdownHeadingPattern.MatchString(raw)
+	return false
+}
+
+func closePRBodyFence(body string) string {
+	state := scanPRBodyCode(body)
+	closer := state.fence.Closer()
+	if state.htmlCode != "" {
+		if closer != "" {
+			closer += "\n"
+		}
+		closer += "</" + state.htmlCode + ">"
+	}
+	if closer == "" {
+		return body
+	}
+	if !strings.HasSuffix(body, "\n") && !strings.HasSuffix(body, "\r") {
+		body += "\n"
+	}
+	return body + closer
 }
 
 // claimClosingIssueRefs samples the run's --closes references for this PR
@@ -368,7 +508,7 @@ func claimClosingIssueRefs(sctx *pipeline.StepContext, host scm.Host, provider s
 		return fmt.Errorf("resolve closing issue references: %w", err)
 	}
 	if len(refs) == 0 {
-		sctx.ClosingIssueRefs = nil
+		sctx.ClosingIssueRefs = intentClosingRefs(sctx, host, provider)
 		return nil
 	}
 	// A nested project path is a GitLab subgroup reference. Publishing one for
@@ -393,8 +533,78 @@ func claimClosingIssueRefs(sctx *pipeline.StepContext, host scm.Host, provider s
 	}
 	// Assigned only once every gate has passed, so a refusal never leaves the
 	// step holding references it will not publish.
+	refs, err = closingissues.Normalize(append(refs, intentClosingRefs(sctx, host, provider)...))
+	if err != nil {
+		return fmt.Errorf("resolve closing issue references: %w", err)
+	}
 	sctx.ClosingIssueRefs = refs
 	return nil
+}
+
+// intentClosingRefs returns the references closed by the standalone
+// closing-keyword lines of the run intent, localized to the PR's repository.
+// Unlike --closes, unsupported targets are ignored rather than failing the
+// claim. Supported targets on the same line still join the claimed references
+// and must pass body verification. A line with any unclaimed target stays in
+// the published intent, neutralized like any other text.
+func intentClosingRefs(sctx *pipeline.StepContext, host scm.Host, provider scm.Provider) []string {
+	if host == nil || !host.Capabilities().ClosingReferences {
+		return nil
+	}
+	if _, ok := host.(scm.PRContentReader); !ok {
+		return nil
+	}
+	grammar := closingGrammarFor(provider)
+	repo := prRepository(sctx, provider)
+	var refs []string
+	intent := publicPRIntentSource(sctx)
+	lines := strings.Split(mdfence.NormalizeLineEndings(intent), "\n")
+	for _, i := range intentClosingLineIndexes(intent, grammar) {
+		line := lines[i]
+		for _, target := range grammar.reference.FindAllString(line, -1) {
+			ref := closingissues.Localize(strings.TrimPrefix(target, "#"), repo)
+			if provider != scm.ProviderGitLab && strings.Count(ref, "/") > 1 {
+				continue
+			}
+			normalized, err := closingissues.Normalize([]string{ref})
+			if err != nil {
+				continue
+			}
+			refs = append(refs, normalized...)
+		}
+	}
+	refs, _ = closingissues.Normalize(refs)
+	return refs
+}
+
+// withoutPromotedClosingLines drops from intent the standalone closing-keyword
+// lines whose every target is already published in the Issues section, so the
+// published intent never repeats them (neutralized, as a code span) beside the
+// live line.
+func withoutPromotedClosingLines(intent string, sctx *pipeline.StepContext) string {
+	if sctx == nil || len(sctx.ClosingIssueRefs) == 0 || intent == "" {
+		return intent
+	}
+	provider := resolvedProviderForBody(sctx)
+	grammar := closingGrammarFor(provider)
+	repo := prRepository(sctx, provider)
+	claimed := map[string]struct{}{}
+	for _, ref := range sctx.ClosingIssueRefs {
+		claimed[strings.ToLower(ref)] = struct{}{}
+	}
+	lines := strings.Split(mdfence.NormalizeLineEndings(intent), "\n")
+	for _, i := range intentClosingLineIndexes(intent, grammar) {
+		covered := true
+		for target := range closingTargets([]string{lines[i]}, repo, grammar) {
+			if _, ok := claimed[target]; !ok {
+				covered = false
+			}
+		}
+		if covered {
+			lines[i] = ""
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 // refuseSkipWithClosingIssues fails a PR step that would be skipped while the
@@ -506,10 +716,10 @@ func fenceClosedWithin(budget int, units func(string) int, build func(budget int
 	var closed string
 	for attempt := 0; attempt < maxFenceRebuilds; attempt++ {
 		body := build(budget - reserve)
-		if mdfence.Scan(body).Closer() == "" {
+		closed = closePRBodyFence(body)
+		if closed == body {
 			return body
 		}
-		closed = mdfence.Close(body)
 		overshoot := units(closed) - budget
 		if overshoot <= 0 {
 			return closed
@@ -546,9 +756,9 @@ func logClosingRejection(sctx *pipeline.StepContext, body, missing string) {
 	if closingGrammarFor(resolvedProviderForBody(sctx)).codeAware {
 		issuesOpen := false
 		if anchor >= 0 {
-			issuesOpen = mdfence.Scan(body[:anchor]).Open()
+			issuesOpen = scanPRBodyCode(body[:anchor]).fence.Open()
 		}
-		fenceState = fmt.Sprintf("ended inside an open fence: %t; Issues section started inside an open fence: %t (this provider ignores references inside fences)", mdfence.Scan(body).Open(), issuesOpen)
+		fenceState = fmt.Sprintf("ended inside an open fence: %t; Issues section started inside an open fence: %t (this provider ignores references inside fences)", scanPRBodyCode(body).fence.Open(), issuesOpen)
 	} else {
 		fenceState = "this provider applies its closing pattern to the raw text, so fences do not matter; the reference was not found in the body"
 	}
