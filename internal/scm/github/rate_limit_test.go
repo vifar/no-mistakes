@@ -179,3 +179,34 @@ func TestRateLimitThatOutlastsTheBudgetFails(t *testing.T) {
 		t.Fatalf("waited %v past the budget", total)
 	}
 }
+
+func TestWriteAndNestedReadsShareRateLimitBudget(t *testing.T) {
+	for _, operation := range []string{"create", "rerun"} {
+		t.Run(operation, func(t *testing.T) {
+			now := time.Unix(1_800_000_000, 0)
+			reset := func(at time.Time) ghScriptStep {
+				return ghScriptStep{stdout: fmt.Sprintf(`{"resources":{"core":{"remaining":0,"reset":%d},"graphql":{"remaining":0,"reset":%d}}}`, at.Unix(), at.Unix())}
+			}
+			script := &rateLimitScript{steps: []ghScriptStep{
+				{stderr: ghRESTRateLimit, code: 1},
+				reset(now.Add(20 * time.Minute)),
+				{stderr: ghGraphQLRateLimit, code: 1},
+				reset(now.Add(70 * time.Minute)),
+			}}
+			host, waits := rateLimitHost(t, script, now)
+			host.repo = "test/repo"
+			var err error
+			if operation == "create" {
+				_, err = host.CreatePR(context.Background(), "feature", "main", scm.PRContent{Title: "test"})
+			} else {
+				err = host.RerunCheck(context.Background(), nil, scm.Check{RunAttempt: 1, Link: "https://github.com/test/repo/actions/runs/9"})
+			}
+			if !errors.Is(err, netretry.ErrRateLimitBudgetSpent) {
+				t.Fatalf("err=%v, want nested lookup to refuse a reset beyond the shared budget", err)
+			}
+			if got := totalWait(*waits); got < 20*time.Minute || got > 21*time.Minute || len(script.args) != 4 {
+				t.Fatalf("waited=%v calls=%d, want only the first reset wait and no outer replay", got, len(script.args))
+			}
+		})
+	}
+}

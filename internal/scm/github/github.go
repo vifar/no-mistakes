@@ -447,6 +447,7 @@ func (h *Host) matchesHead(headRefName string, owner *struct {
 }
 
 func (h *Host) CreatePR(ctx context.Context, branch, base string, content scm.PRContent) (*scm.PR, error) {
+	ctx = netretry.WithRateLimitBudget(ctx)
 	args := append([]string{"pr", "create",
 		"--head", h.headRef(branch),
 		"--base", base,
@@ -1424,6 +1425,7 @@ func (h *Host) getWorkflowRunChecks(ctx context.Context, headSHA string) ([]scm.
 // dashboard, or a run path this backend cannot read - names no re-runnable work,
 // and the error says so rather than falling back to a wider rerun.
 func (h *Host) RerunCheck(ctx context.Context, _ *scm.PR, check scm.Check) error {
+	ctx = netretry.WithRateLimitBudget(ctx)
 	rerunArgs, ok := h.rerunTargetArgs(check)
 	if !ok {
 		return fmt.Errorf("check %q has no GitHub Actions job to re-run", check.Name)

@@ -256,3 +256,47 @@ func TestCustomRetryableNeverWaitsForRateLimits(t *testing.T) {
 		t.Fatalf("waited=%v err=%v, want a typed-retry caller to keep its own policy", waited, err)
 	}
 }
+
+func TestSecondaryRateLimitLongRetryAfterIsAMinimum(t *testing.T) {
+	for _, after := range []time.Duration{20 * time.Minute, 70 * time.Minute} {
+		t.Run(after.String(), func(t *testing.T) {
+			clock := &rateLimitClock{now: time.Unix(1_800_000_000, 0)}
+			var logs []string
+			calls := 0
+			_, err := Do(context.Background(), clock.options(&logs), func() (string, error) {
+				calls++
+				if calls == 1 {
+					return "", resetError{error: errors.New(ghSecondaryLimit), after: after}
+				}
+				return "ok", nil
+			})
+			if after > 65*time.Minute {
+				if !errors.Is(err, ErrRateLimitBudgetSpent) || calls != 1 || clock.total() != 0 {
+					t.Fatalf("err=%v calls=%d waited=%v, want refusal without an early retry", err, calls, clock.total())
+				}
+			} else if err != nil || calls != 2 || clock.total() < after {
+				t.Fatalf("err=%v calls=%d waited=%v, want retry after %v", err, calls, clock.total(), after)
+			}
+		})
+	}
+}
+
+func TestNestedRateLimitBudgetExhaustionIsTerminal(t *testing.T) {
+	clock := &rateLimitClock{now: time.Unix(1_800_000_000, 0)}
+	var logs []string
+	opts := clock.options(&logs)
+	ctx := WithRateLimitBudget(context.Background())
+	outerCalls := 0
+	_, err := Do(ctx, opts, func() (string, error) {
+		outerCalls++
+		return Do(ctx, opts, func() (string, error) {
+			return "", errors.New(ghSecondaryLimit)
+		})
+	})
+	if !errors.Is(err, ErrRateLimitBudgetSpent) || outerCalls != 1 || clock.total() > 65*time.Minute {
+		t.Fatalf("err=%v outer calls=%d waited=%v", err, outerCalls, clock.total())
+	}
+	if Retryable(err) || RateLimitClass(err) != "" {
+		t.Fatalf("exhausted error remains retryable: %v", err)
+	}
+}

@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -89,6 +90,14 @@ type RateLimited interface {
 }
 
 type waitNotifierKey struct{}
+type rateLimitBudgetKey struct{}
+
+func WithRateLimitBudget(ctx context.Context) context.Context {
+	if ctx.Value(rateLimitBudgetKey{}) != nil {
+		return ctx
+	}
+	return context.WithValue(ctx, rateLimitBudgetKey{}, new(atomic.Int64))
+}
 
 // WithWaitNotifier returns a context whose rate-limit waits are reported to
 // notify, one line per wait and heartbeat. The pipeline installs the step's
@@ -157,7 +166,8 @@ func Do[T any](ctx context.Context, opts Options, call func() (T, error)) (T, er
 	attempts := opts.attempts()
 	var last T
 	var err error
-	var rateLimitWaited time.Duration
+	ctx = WithRateLimitBudget(ctx)
+	rateLimitWaited := ctx.Value(rateLimitBudgetKey{}).(*atomic.Int64)
 	rateLimitWaits := 0
 	for attempt := 1; attempt <= attempts; {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -171,6 +181,9 @@ func Do[T any](ctx context.Context, opts Options, call func() (T, error)) (T, er
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return last, errors.Join(err, ctxErr)
 		}
+		if errors.Is(err, ErrRateLimitBudgetSpent) {
+			return last, err
+		}
 		if opts.Retryable == nil && RateLimitClass(err) != "" {
 			if opts.ProbeRateLimit != nil {
 				err = opts.ProbeRateLimit(ctx, err)
@@ -181,8 +194,9 @@ func Do[T any](ctx context.Context, opts Options, call func() (T, error)) (T, er
 			if class := RateLimitClass(err); class != "" {
 				delay, until := opts.rateLimitDelay(err, rateLimitWaits)
 				budget := opts.rateLimitBudget()
-				if budget < 0 || rateLimitWaited+delay > budget {
-					return last, fmt.Errorf("%w (%s waited): %w", ErrRateLimitBudgetSpent, rateLimitWaited.Round(time.Second), err)
+				waited := time.Duration(rateLimitWaited.Load())
+				if budget < 0 || delay > budget-waited {
+					return last, fmt.Errorf("%w (%s waited): %w", ErrRateLimitBudgetSpent, waited.Round(time.Second), err)
 				}
 				if deadline, ok := ctx.Deadline(); ok && opts.now().Add(delay).After(deadline) {
 					// The caller's own bound ends before the limit clears:
@@ -192,7 +206,7 @@ func Do[T any](ctx context.Context, opts Options, call func() (T, error)) (T, er
 				if waitErr := opts.waitForRateLimit(ctx, class, delay, until, err); waitErr != nil {
 					return zero, waitErr
 				}
-				rateLimitWaited += delay
+				rateLimitWaited.Add(int64(delay))
 				rateLimitWaits++
 				continue
 			}
@@ -276,6 +290,9 @@ func (o Options) rateLimitDelay(err error, waits int) (time.Duration, time.Time)
 	}
 	if delay > DefaultRateLimitMaxBackoff {
 		delay = DefaultRateLimitMaxBackoff
+	}
+	if limited != nil {
+		delay = max(delay, limited.RateLimitRetryAfter())
 	}
 	delay += time.Duration(float64(delay) * DefaultJitter * rand.Float64())
 	return delay, now.Add(delay)
@@ -409,7 +426,7 @@ func Retryable(err error) bool {
 // Describe returns the transient failure class of err, or "" when err is not a
 // transient network failure. The class is what a retry log line reports.
 func Describe(err error) string {
-	if err == nil {
+	if err == nil || errors.Is(err, ErrRateLimitBudgetSpent) {
 		return ""
 	}
 	var classified interface{ RetryClass() Class }
