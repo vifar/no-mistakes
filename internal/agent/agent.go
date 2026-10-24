@@ -77,6 +77,20 @@ type RunOpts struct {
 	// fallback-provider attempts, after it completes. It is instrumentation
 	// only and must not change invocation behavior.
 	OnAttempt func(Attempt)
+	// RunAttempt, when set, runs one candidate of a fallback chain under the
+	// caller's own per-attempt bounds and reports why a failed attempt may
+	// hand the turn to the next candidate.
+	//
+	// The fallback wrapper consults it instead of calling the candidate
+	// directly. A caller installs it when it owns the invocation budget (the
+	// pipeline does, per step and per review turn) because otherwise every
+	// candidate shares one bounded context: a silent stall then spends the
+	// budget the next candidate would have needed, and a cancellation leaves
+	// nobody to fall back to.
+	//
+	// An agent that is not a fallback chain never calls it; the caller bounds
+	// that invocation itself.
+	RunAttempt func(a Agent, opts RunOpts) (*Result, error, FallbackReason)
 }
 
 // IsStructuredOutputRejected reports whether an invocation completed but its

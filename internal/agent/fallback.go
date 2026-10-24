@@ -8,6 +8,31 @@ import (
 	"time"
 )
 
+// FallbackReason is why one attempt in a fallback chain may hand its turn to
+// the next agent. It is the classification the fallback wrapper announces in
+// its agent-fallback line and, for the pipeline, the vocabulary an attempt
+// seam reports back with.
+//
+// The zero value means the attempt's failure is the agent's verdict on the
+// work, and must not be re-run under a different agent.
+type FallbackReason string
+
+const (
+	// FallbackNone is not fallback-eligible: the failure is a verdict.
+	FallbackNone FallbackReason = ""
+	// FallbackUnavailable means the agent never got as far as holding the
+	// prompt (see isAgentUnavailableError).
+	FallbackUnavailable FallbackReason = "unavailable"
+	// FallbackRefused means the provider blocked the turn's content. See
+	// IsRefused.
+	FallbackRefused FallbackReason = "refused"
+	// FallbackStalled means the attempt stopped advancing its turn without
+	// producing anything, so there is nothing to preserve and another agent
+	// may start over. Only the pipeline's attempt seam can establish this: it
+	// owns the progress measurement and checks the worktree for side effects.
+	FallbackStalled FallbackReason = "stalled"
+)
+
 type fallbackAgent struct {
 	agents []Agent
 }
@@ -96,7 +121,23 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 			currentOpts.SessionFallback = false
 		}
 		startedAt := time.Now()
-		result, err := current.Run(ctx, currentOpts)
+		var (
+			result *Result
+			err    error
+			reason FallbackReason
+		)
+		if opts.RunAttempt != nil {
+			// The caller owns this invocation's bounds, so it runs the
+			// attempt and tells us both the attempt's own context and whether
+			// a failure may hand the turn on. That is the only way a stall can
+			// fall back: the stalled attempt consumed a context this wrapper
+			// does not own, and a fresh one has to be derived from the
+			// invocation's parent.
+			result, err, reason = opts.RunAttempt(current, currentOpts)
+		} else {
+			result, err = current.Run(ctx, currentOpts)
+			reason = FallbackReasonFor(err)
+		}
 		if !ReportsAgentAttempts(current) {
 			emitAgentAttempt(currentOpts, current.Name(), result, err, startedAt, time.Now())
 		}
@@ -107,23 +148,85 @@ func (a *fallbackAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) 
 			return result, nil
 		}
 		lastErr = err
-		// A fallback is another attempt inside this invocation's existing
-		// bounded context, not a fresh timeout policy. Once that context has
-		// expired or been cancelled, the next candidate cannot start
+		// The caller may give each candidate its own bound through RunAttempt,
+		// but all candidates still share this parent context. Once the parent
+		// has expired or been cancelled the next candidate cannot start
 		// meaningfully. Preserve the current adapter's report for the caller's
 		// timeout diagnostic, but do not announce or instrument an attempt that
 		// will inherit an already-dead context.
 		if context.Cause(ctx) != nil {
 			return nil, err
 		}
-		if i == len(candidates)-1 || !isAgentUnavailableError(err) {
+		if i == len(candidates)-1 || reason == FallbackNone {
 			return nil, err
 		}
 		next := candidates[i+1]
-		emitAgentFallback(opts, current.Name(), next.Name(), err)
+		emitAgentFallback(opts, current.Name(), next.Name(), reason, err)
 	}
 	return nil, lastErr
 }
+
+// ReplayUnsafe reports whether a failure's own record says its turn may not be
+// run again: it provably ran a tool, or nothing available proves it did not.
+// The pipeline's attempt seam reads it before classifying a stall or a budget
+// cut too, because an adapter that lost its stream can hold a tool event it
+// never delivered.
+func ReplayUnsafe(err error) bool {
+	return replayRanTools(err) || opencodeReplayUnsafe(err)
+}
+
+// FallbackReasonFor classifies a failed attempt by the reason class the
+// fallback wrapper announces, for callers that run candidates themselves
+// through RunOpts.RunAttempt.
+//
+// It answers only what the failure itself says. Whether the attempt left
+// something behind - an edit, a commit - is the caller's to check: the pipeline
+// attempt seam withdraws both FallbackRefused and FallbackStalled when the step
+// worktree moved.
+func FallbackReasonFor(err error) FallbackReason {
+	if err == nil || IsStructuredOutputRejected(err) {
+		return FallbackNone
+	}
+	// The adapter's own replay evidence outranks every class. A turn that
+	// provably ran tools already has side effects on disk, in a commit, or in a
+	// posted comment, and a second agent's fresh turn would do them twice. A
+	// turn whose tool activity cannot be verified is the same answer in the
+	// other direction - silence is not a proof - so both stay a verdict.
+	//
+	// It is read before the refusal class because a provider can refuse a turn
+	// after a tool has run, and before the unavailable class because the
+	// killed-process report a timeout appends ("codex exited: signal: killed")
+	// would otherwise read as an agent that never started.
+	if ReplayUnsafe(err) {
+		return FallbackNone
+	}
+	if IsRefused(err) {
+		return FallbackRefused
+	}
+	if isAgentUnavailableError(err) {
+		return FallbackUnavailable
+	}
+	return FallbackNone
+}
+
+// DrivesAttempts reports whether a honours RunOpts.RunAttempt on every route,
+// so a caller may install per-attempt bounds and leave the whole-invocation
+// bound off. Fallback chains answer true; reviewAgents also answers true when
+// any route reaches a chain and runs its single-agent routes through the seam
+// itself. A caller that gets false must bound the invocation itself, because
+// nothing would call RunAttempt.
+func DrivesAttempts(a Agent) bool {
+	driver, ok := a.(attemptDriver)
+	return ok && driver.drivesAttempts()
+}
+
+type attemptDriver interface {
+	drivesAttempts() bool
+}
+
+// drivesAttempts runs every candidate through RunOpts.RunAttempt when the
+// caller installs one.
+func (a *fallbackAgent) drivesAttempts() bool { return true }
 
 func (a *fallbackAgent) Close() error {
 	var errs []string
@@ -218,7 +321,7 @@ func (e *agentSetupError) Unwrap() error { return e.err }
 
 func (e *agentSetupError) Is(target error) bool { return target == errAgentSetupFailure }
 
-func fallbackReason(err error) string {
+func fallbackDetail(err error) string {
 	if err == nil {
 		return "unknown error"
 	}

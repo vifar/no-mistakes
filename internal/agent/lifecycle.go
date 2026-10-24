@@ -41,7 +41,28 @@ const (
 	// Adapters that forward assistant prose alone contribute it through
 	// OnChunk, which is the same forward motion.
 	LifecyclePhaseProgress = "progress"
+	// LifecyclePhaseTool marks a tool call or tool result inside a running
+	// turn. It says something progress cannot: a tool may have left a side
+	// effect behind, so a turn that reported one must never be replayed under
+	// another agent. Adapters emit it IN ADDITION to progress for a tool
+	// event, and for nothing else - reasoning and prose are progress only, and
+	// reporting those here would withhold safe fallbacks.
+	LifecyclePhaseTool = "tool"
 )
+
+// isToolContentType reports whether a Messages-compatible content block is a
+// tool call or a tool result.
+//
+// The allowlist is explicit because the other non-text blocks are reasoning:
+// "thinking", "redacted_thinking" and "reasoning" are not side effects, and
+// counting them as tools would withhold a refusal fallback that is safe.
+func isToolContentType(blockType string) bool {
+	switch blockType {
+	case "tool_use", "tool_result", "server_tool_use", "mcp_tool_use", "mcp_tool_result", "function_call", "function_result":
+		return true
+	}
+	return false
+}
 
 // nativeAgentActivityInterval throttles LifecyclePhaseActivity so a chatty
 // subprocess cannot flood the observer. It is a liveness signal, not a log: the
@@ -109,11 +130,11 @@ func emitAgentRetry(opts RunOpts, name string, label string, attempt, max int) {
 	})
 }
 
-func emitAgentFallback(opts RunOpts, current, next string, err error) {
+func emitAgentFallback(opts RunOpts, current, next string, reason FallbackReason, err error) {
 	emitAgentControl(opts, LifecycleEvent{
 		Agent:   current,
 		Phase:   LifecyclePhaseFallback,
-		Message: fmt.Sprintf("agent %s failed (%s); falling back to %s", current, fallbackReason(err), next),
+		Message: fmt.Sprintf("agent %s failed (%s: %s); falling back to %s", current, reason, fallbackDetail(err), next),
 	})
 }
 
@@ -147,6 +168,23 @@ func agentProgressEmitter(opts RunOpts, name string) func() {
 		emitLifecycle(opts, LifecycleEvent{
 			Agent: name,
 			Phase: LifecyclePhaseProgress,
+		})
+	}
+}
+
+// agentToolEmitter returns the callback a structured-stream parser uses to
+// report a tool call or tool result, or nil when nobody is observing the
+// invocation. It is emitted alongside progress for the same event: the progress
+// phase keeps a long tool stretch from looking wedged, and this one carries the
+// side-effect fact the fallback classes must not replay.
+func agentToolEmitter(opts RunOpts, name string) func() {
+	if opts.OnLifecycle == nil {
+		return nil
+	}
+	return func() {
+		emitLifecycle(opts, LifecycleEvent{
+			Agent: name,
+			Phase: LifecyclePhaseTool,
 		})
 	}
 }

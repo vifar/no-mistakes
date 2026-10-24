@@ -108,6 +108,10 @@ func parseOpencodeSSE(r io.Reader, state *opencodeStreamState) error {
 				}
 				if isOpencodeToolPart(p.Type) {
 					state.toolInvoked = true
+					// A tool call is forward motion even though it writes no
+					// assistant text: report it so a tool-only stretch is not
+					// mistaken for a stalled turn.
+					state.observeToolProgress()
 				}
 				if p.Type == "step-finish" {
 					state.pendingStepSeparator = true

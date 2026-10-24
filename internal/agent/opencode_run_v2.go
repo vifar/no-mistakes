@@ -55,6 +55,7 @@ func (a *opencodeAgent) runOnceV2(ctx context.Context, opts RunOpts, baseURL str
 	state := &opencodeStreamState{
 		sessionID:  sessionID,
 		onChunk:    opts.OnChunk,
+		onTool:     agentToolEmitter(opts, a.Name()),
 		textParts:  make(map[string]*opencodeTextPart),
 		usageByMsg: make(map[string]TokenUsage),
 	}
@@ -100,7 +101,14 @@ func (a *opencodeAgent) runOnceV2(ctx context.Context, opts RunOpts, baseURL str
 			// stream is the evidence that the turn may have left side
 			// effects, which is what the replay gate reads.
 			evidence := state.v2ToolEvidence()
-			return resultFromUsage(state.usage), opencodeTurnFailure(evidence, streamErr)
+			reported := streamErr
+			if execErr.refused() {
+				// A provider content-policy block is not a verdict on the
+				// work: the same prompt usually goes through on another
+				// provider, so the fallback wrapper may hand the turn on.
+				reported = MarkRefused(reported)
+			}
+			return resultFromUsage(state.usage), opencodeTurnFailure(evidence, reported)
 		}
 		return resultFromUsage(state.usage), opencodeTurnFailure(state.v2ToolEvidence(), fmt.Errorf("opencode events: %w", streamErr))
 	}
@@ -137,16 +145,30 @@ func (a *opencodeAgent) runOnceV2(ctx context.Context, opts RunOpts, baseURL str
 	return result, nil
 }
 
+// observeToolProgress reports a tool part as forward motion, when anyone is
+// observing the invocation.
+func (s *opencodeStreamState) observeToolProgress() {
+	if s != nil && s.onTool != nil {
+		s.onTool()
+	}
+}
+
 // v2ToolEvidence answers the replay gate's question for a 2.x turn.
 //
 // The 2.x stream names tool activity explicitly (session.tool.called and
-// friends), so a tool that ran is a fact. The absence of one is NOT a proof
-// that none ran: the stream is the only record of the turn's tool parts, so
-// an unobserved turn stays UNKNOWN and fails closed, exactly like the 1.x
-// path does.
+// friends), so a tool that ran is a fact. The absence of one is a proof only
+// once the turn's terminal frame has crossed the stream: the stream is the only
+// record of the turn's tool parts, so a turn that ended on
+// session.execution.succeeded, .failed or .interrupted delivered every part it
+// ran, exactly as session.idle does on 1.x. Before that frame - a dropped
+// connection, an unparsable tail - the record is incomplete and the evidence
+// stays UNKNOWN, which fails closed.
 func (s *opencodeStreamState) v2ToolEvidence() opencodeToolEvidence {
 	if s.toolInvoked {
 		return opencodeToolsRan
+	}
+	if s.terminalFrame {
+		return opencodeToolsNone
 	}
 	return opencodeToolsUnknown
 }

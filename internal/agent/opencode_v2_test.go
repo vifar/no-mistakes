@@ -691,3 +691,100 @@ func TestOpencodeAgent_V1EffortWithoutModelRemainsSupported(t *testing.T) {
 		t.Fatalf("sendMessage = %+v, %v; prompts = %d", resp, err, prompts.Load())
 	}
 }
+
+// TestOpencodeAgent_V2ContentFilterIsARefusal is the measured shape from issue
+// #201: the server ends the turn with provider.content-filter, which is a
+// provider content policy, not a verdict on the work. The fallback wrapper must
+// be able to hand the turn to the next agent.
+func TestOpencodeAgent_V2ContentFilterIsARefusal(t *testing.T) {
+	fake := newOpencodeV2Fake(t, opencodeV2FakeOptions{
+		answer: "",
+		execError: &opencodeV2Error{
+			Type:    "provider.content-filter",
+			Message: "Provider blocked the response",
+		},
+	})
+	a := opencodeV2AgentFor(fake)
+
+	_, err := a.Run(context.Background(), RunOpts{
+		Prompt: "review this code",
+		CWD:    t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("Run error = nil, want the execution failure")
+	}
+	if !IsRefused(err) {
+		t.Fatalf("error = %v, want a provider refusal", err)
+	}
+	if reason := FallbackReasonFor(err); reason != FallbackRefused {
+		t.Fatalf("FallbackReasonFor = %q, want %q", reason, FallbackRefused)
+	}
+	if !strings.Contains(err.Error(), "provider.content-filter") {
+		t.Fatalf("error = %v, want the server's own wording preserved", err)
+	}
+}
+
+// The same refusal after a tool call is a turn with side effects to undo, so it
+// must not be replayed under another agent.
+func TestOpencodeAgent_V2ContentFilterAfterToolsIsNotARefusal(t *testing.T) {
+	fake := newOpencodeV2Fake(t, opencodeV2FakeOptions{
+		toolRan: true,
+		execError: &opencodeV2Error{
+			Type:    "provider.content-filter",
+			Message: "Provider blocked the response",
+		},
+	})
+	a := opencodeV2AgentFor(fake)
+
+	_, err := a.Run(context.Background(), RunOpts{
+		Prompt: "review this code",
+		CWD:    t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("Run error = nil, want the execution failure")
+	}
+	if reason := FallbackReasonFor(err); reason != FallbackNone {
+		t.Fatalf("FallbackReasonFor = %q, want no fallback after a turn that ran tools", reason)
+	}
+}
+
+// The 2.x stream is the only record of a turn's tool parts, so its terminal
+// frame makes the absence of a tool part a proof rather than an absence - the
+// same rule 1.x gets from session.idle. A stream that ends without one stays
+// unknown and fails closed.
+func TestOpencodeAgent_V2TerminalFrameProvesNoTools(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stream string
+		want   opencodeToolEvidence
+	}{
+		{
+			name: "succeeded",
+			stream: "data: {\"type\":\"session.text.delta\",\"data\":{\"sessionID\":\"v2s1\",\"assistantMessageID\":\"m1\",\"ordinal\":0,\"delta\":\"done\"}}\n\n" +
+				"data: {\"type\":\"session.execution.succeeded\",\"data\":{\"sessionID\":\"v2s1\"}}\n\n",
+			want: opencodeToolsNone,
+		},
+		{
+			name:   "failed on content policy",
+			stream: "data: {\"type\":\"session.execution.failed\",\"data\":{\"sessionID\":\"v2s1\",\"error\":{\"type\":\"provider.content-filter\",\"message\":\"Provider blocked the response\"}}}\n\n",
+			want:   opencodeToolsNone,
+		},
+		{
+			name:   "dropped before any terminal frame",
+			stream: "data: {\"type\":\"session.text.delta\",\"data\":{\"sessionID\":\"v2s1\",\"assistantMessageID\":\"m1\",\"ordinal\":0,\"delta\":\"partial\"}}\n\n",
+			want:   opencodeToolsUnknown,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &opencodeStreamState{
+				sessionID:  "v2s1",
+				textParts:  make(map[string]*opencodeTextPart),
+				usageByMsg: make(map[string]TokenUsage),
+			}
+			_ = parseOpencodeV2SSE(strings.NewReader(tc.stream), state)
+			if got := state.v2ToolEvidence(); got != tc.want {
+				t.Fatalf("evidence = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

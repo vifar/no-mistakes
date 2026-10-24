@@ -21,7 +21,7 @@ data: {"content":"hello world"}
 
 	err := parseRovodevSSE(strings.NewReader(input), func(text string) {
 		chunks = append(chunks, text)
-	}, &usage, &latestText)
+	}, nil, &usage, &latestText)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -44,7 +44,7 @@ data: {"input_tokens":100,"output_tokens":50,"cache_read_tokens":30,"cache_write
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -79,7 +79,7 @@ data: {"content":"after tool"}
 
 	err := parseRovodevSSE(strings.NewReader(input), func(text string) {
 		chunks = append(chunks, text)
-	}, &usage, &latestText)
+	}, nil, &usage, &latestText)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -109,7 +109,7 @@ func TestParseRovodevSSE_EventKindFallback(t *testing.T) {
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -129,7 +129,7 @@ data: {"input_tokens":100,"output_tokens":30}
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -152,7 +152,7 @@ data: {"index":0,"part":{"content":"hello","part_kind":"text"},"event_kind":"par
 
 	err := parseRovodevSSE(strings.NewReader(input), func(text string) {
 		chunks = append(chunks, text)
-	}, &usage, &latestText)
+	}, nil, &usage, &latestText)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -182,7 +182,7 @@ data: {"index":0,"delta":{"content_delta":",\"summary\":\"done\"}","part_delta_k
 
 	err := parseRovodevSSE(strings.NewReader(input), func(text string) {
 		chunks = append(chunks, text)
-	}, &usage, &latestText)
+	}, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -222,7 +222,7 @@ data: {"index":0,"part":{"content":"{\"success\":true}","part_kind":"text"},"eve
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -241,7 +241,7 @@ data: {"index":0,"delta":{"content_delta":"orphan","part_delta_kind":"text"},"ev
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -261,7 +261,7 @@ data: {"index":0,"delta":{"content_delta":" world\n","part_delta_kind":"text"},"
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -293,7 +293,7 @@ func TestParseRovodevSSE_GnhfFixture(t *testing.T) {
 
 	var usage TokenUsage
 	var latestText string
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestParseRovodevSSE_EmptyData(t *testing.T) {
 	var usage TokenUsage
 	var latestText string
 
-	err := parseRovodevSSE(strings.NewReader(input), nil, &usage, &latestText)
+	err := parseRovodevSSE(strings.NewReader(input), nil, nil, &usage, &latestText)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -70,10 +70,15 @@ func parseOpencodeV2SSE(r interface{ Read([]byte) (int, error) }, state *opencod
 
 		switch event.Type {
 		case "session.execution.succeeded":
+			state.terminalFrame = true
 			sawDone = true
 			return false
 
 		case "session.execution.failed", "session.execution.interrupted":
+			// The turn is over: nothing after this frame can describe it, so
+			// the stream is a complete record and its tool parts are the whole
+			// truth about what ran.
+			state.terminalFrame = true
 			if data.Error != nil {
 				streamErr = &opencodeV2ExecutionError{event: event.Type, err: data.Error}
 			} else {
@@ -93,8 +98,11 @@ func parseOpencodeV2SSE(r interface{ Read([]byte) (int, error) }, state *opencod
 
 		case "session.tool.called", "session.tool.input.started", "session.tool.progress":
 			// A tool part means the turn may have left side effects behind,
-			// which is the durable evidence the replay gate reads.
+			// which is the durable evidence the replay gate reads. It is also
+			// forward motion: a tool streams no assistant text, so this is the
+			// only liveness signal a tool-only stretch produces.
 			state.toolInvoked = true
+			state.observeToolProgress()
 
 		case "session.step.ended", "session.step.failed":
 			if data.Tokens != nil {
@@ -138,6 +146,13 @@ func (e *opencodeV2ExecutionError) Error() string {
 }
 
 func (e *opencodeV2ExecutionError) Unwrap() error { return nil }
+
+// refused reports whether the server ended the turn on a provider content
+// policy. opencode names the cause in the event's error type
+// (provider.content-filter) and repeats it in the message, so both are read.
+func (e *opencodeV2ExecutionError) refused() bool {
+	return e != nil && e.err != nil && (refusesTurn(e.err.Type) || refusesTurn(e.err.Message))
+}
 
 // beginV2Text starts a text block for a 2.x assistant message.
 func (s *opencodeStreamState) beginV2Text(messageID string, ordinal int) {

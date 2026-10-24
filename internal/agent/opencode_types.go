@@ -229,8 +229,13 @@ type opencodeTextPart struct {
 
 // opencodeStreamState holds mutable state during SSE event processing.
 type opencodeStreamState struct {
-	sessionID       string
-	onChunk         func(string)
+	sessionID string
+	onChunk   func(string)
+	// onTool reports a tool part as a turn advance AND as side-effect
+	// evidence. It is the only liveness signal a tool-only stretch can produce
+	// (a tool call streams no assistant text), and it is what stops a
+	// tool-running turn from being replayed under another agent.
+	onTool          func()
 	textParts       map[string]*opencodeTextPart
 	textPartOrder   []string
 	usageByMsg      map[string]TokenUsage
@@ -253,4 +258,12 @@ type opencodeStreamState struct {
 	// decides whether the turn can be retried in a fresh session. A
 	// step-finish alone never sets it: every turn emits one.
 	toolInvoked bool
+
+	// terminalFrame records that the turn's own terminal event crossed the
+	// stream (session.execution.succeeded, failed or interrupted). The 2.x
+	// stream is the only record of a turn's tool parts, so once it has reached
+	// a terminal frame the absence of a tool part is a PROOF that none ran -
+	// the same rule the 1.x stream gets from session.idle. Without the frame
+	// the record is incomplete and tool evidence stays unknown.
+	terminalFrame bool
 }

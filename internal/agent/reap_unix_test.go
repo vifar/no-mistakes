@@ -42,7 +42,7 @@ func TestNativeAgentCommand_SlowClaudeCallbackPreservesCompletedTurn(t *testing.
 	err = parseClaudeEvents(ctx, started.stdout, func(string) {
 		// Simulate a synchronous log/database callback on a loaded host.
 		time.Sleep(300 * time.Millisecond)
-	}, &usage, &result)
+	}, nil, nil, &usage, &result)
 	if err != nil {
 		t.Fatalf("parse completed turn: %v (wait: %v)", err, started.waitAfterParseError(err))
 	}

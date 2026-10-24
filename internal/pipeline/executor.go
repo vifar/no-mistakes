@@ -1132,18 +1132,19 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, "")
 	}
 	reconcileCtx := &StepContext{
-		Ctx:          ctx,
-		Run:          run,
-		Repo:         repo,
-		WorkDir:      workDir,
-		GateDir:      e.paths.RepoDir(repo.ID),
-		Config:       e.config,
-		ForgeContext: e.forge,
-		DB:           e.db,
-		StepResultID: gate.stepResult.ID,
-		Agent:        limitAgent(e.agent, e.slot),
-		Sessions:     e.sessions,
-		Shared:       e.shared,
+		Ctx:           ctx,
+		Run:           run,
+		Repo:          repo,
+		WorkDir:       workDir,
+		GateDir:       e.paths.RepoDir(repo.ID),
+		Config:        e.config,
+		ForgeContext:  e.forge,
+		DB:            e.db,
+		StepResultID:  gate.stepResult.ID,
+		Agent:         limitAgent(e.agent, e.slot),
+		AgentAttempts: agent.DrivesAttempts(e.agent),
+		Sessions:      e.sessions,
+		Shared:        e.shared,
 		// The same value executeStep supplies. A reconciler or resumer that
 		// reads the review conversation needs its stable directory as well as
 		// the active evidence directory, or it would decline on every tick
@@ -1772,7 +1773,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, nil); dbErr != nil {
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}
-		case agent.LifecyclePhaseActivity, agent.LifecyclePhaseProgress:
+		case agent.LifecyclePhaseActivity, agent.LifecyclePhaseProgress, agent.LifecyclePhaseTool:
 			// Liveness and forward motion, not narrative: record that the agent is
 			// still working so `axi status` can distinguish a live fix round from a
 			// wedged one, but never write either to the step log. A long turn
@@ -1789,9 +1790,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			// activity observer, never this column, so throttling the write cannot
 			// delay detection.
 			//
-			// The progress phase is handled explicitly so it cannot fall through to
-			// the default branch below, which writes every unknown phase's
-			// synthesized text into the log.
+			// The progress and tool phases are handled explicitly so they cannot
+			// fall through to the default branch below, which writes every unknown
+			// phase's synthesized text into the log. The tool phase is emitted per
+			// tool event - an opencode session.tool.progress stream produces
+			// thousands - and its replay evidence is read from the in-memory
+			// observer, so it needs the same throttle and no log line of its own.
 			touchStepActivityThrottled(text)
 			return
 		default:
@@ -1887,6 +1891,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		WorkDir:               workDir,
 		GateDir:               e.paths.RepoDir(repo.ID),
 		Agent:                 limitAgent(stepAgent, e.slot),
+		AgentAttempts:         agent.DrivesAttempts(e.agent),
 		Config:                e.config,
 		ForgeContext:          e.forge,
 		PRTarget:              e.prTarget,

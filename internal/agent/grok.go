@@ -117,7 +117,7 @@ func (a *grokAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 		stderrBuf, _ = io.ReadAll(started.stderr)
 	}()
 
-	result, parseErr := parseGrokEvents(ctx, started.stdout, opts.OnChunk)
+	result, parseErr := parseGrokEvents(ctx, started.stdout, opts.OnChunk, agentProgressEmitter(opts, a.Name()), agentToolEmitter(opts, a.Name()))
 	if parseErr != nil {
 		parseErr = started.waitAfterParseError(parseErr)
 		stderrWG.Wait()
@@ -254,7 +254,7 @@ type grokUsage struct {
 	ReasoningTokens          *int `json:"reasoning_tokens,omitempty"`
 }
 
-func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*Result, error) {
+func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string), onProgress, onTool func()) (*Result, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), grokScannerMaxTokenSize)
 	result := &Result{}
@@ -291,6 +291,17 @@ func parseGrokEvents(ctx context.Context, r io.Reader, onChunk func(string)) (*R
 			for _, content := range message.Content {
 				if content.Type == "text" && content.Text != "" && onChunk != nil {
 					onChunk(content.Text)
+				}
+				if !isToolContentType(content.Type) {
+					// Text is streamed above; everything else that is not a
+					// tool block is reasoning, which is not a side effect.
+					continue
+				}
+				if onProgress != nil {
+					onProgress()
+				}
+				if onTool != nil {
+					onTool()
 				}
 			}
 		case "result":

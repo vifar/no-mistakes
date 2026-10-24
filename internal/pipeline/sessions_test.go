@@ -28,6 +28,7 @@ type fakeSessionAgent struct {
 	nextID       int
 	failResumes  map[string]error // session id -> error returned when resumed
 	failNext     error            // error returned on the next call regardless
+	blockNext    bool             // wait for the invocation context before returning
 	supportsFlag bool
 }
 
@@ -46,10 +47,18 @@ func (f *fakeSessionAgent) SupportsSessionResume() bool { return f.supportsFlag 
 
 func (f *fakeSessionAgent) Close() error { return nil }
 
-func (f *fakeSessionAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+func (f *fakeSessionAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, sessionCall{prompt: opts.Prompt, session: opts.Session, fallback: opts.SessionFallback})
+	block := f.blockNext
+	f.blockNext = false
+	f.mu.Unlock()
+	if block {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, sessionCall{prompt: opts.Prompt, session: opts.Session, fallback: opts.SessionFallback})
 
 	if f.failNext != nil {
 		err := f.failNext

@@ -129,7 +129,7 @@ func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error)
 		}
 		return res
 	}
-	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, agentProgressEmitter(opts, "codex"), &usage, &lastMessage, &codexErr, &threadID, metrics); err != nil {
+	if err := parseCodexEvents(ctx, started.stdout, opts.OnChunk, agentProgressEmitter(opts, "codex"), agentToolEmitter(opts, "codex"), &usage, &lastMessage, &codexErr, &threadID, metrics); err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("codex parse events: %w", err)
@@ -339,7 +339,7 @@ type codexUsage struct {
 // evidence (round-trips, tool calls + categories, subprocess wait time). It is
 // clocked by time.Now as events arrive, so a tool item's started->completed gap
 // is its real subprocess wall time.
-func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), onProgress func(), usage *TokenUsage, lastMessage *string, codexErr *string, threadID *string, metrics *codexMetricsAccumulator) error {
+func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), onProgress, onTool func(), usage *TokenUsage, lastMessage *string, codexErr *string, threadID *string, metrics *codexMetricsAccumulator) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 256*1024*1024)
 
@@ -373,11 +373,13 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), on
 
 		case "item.started":
 			metrics.onItem(event.Type, event.Item, time.Now())
-			reportCodexProgress(onProgress)
+			reportCodexProgress(onProgress, event.Item)
+			reportCodexTool(onTool, event.Item)
 
 		case "item.completed":
 			metrics.onItem(event.Type, event.Item, time.Now())
-			reportCodexProgress(onProgress)
+			reportCodexProgress(onProgress, event.Item)
+			reportCodexTool(onTool, event.Item)
 			if event.Item != nil && event.Item.Type == "agent_message" {
 				*lastMessage = event.Item.Text
 				if onChunk != nil {
@@ -405,11 +407,30 @@ func parseCodexEvents(ctx context.Context, r io.Reader, onChunk func(string), on
 // reportCodexProgress forwards one turn advance when an observer is installed.
 // Codex reports tool and reasoning work as item events and only emits assistant
 // text at item completion, so without this its long tool stretches carry no
-// progress signal at all.
-func reportCodexProgress(onProgress func()) {
+// progress signal at all. Diagnostic error items (such as model-metadata
+// warnings) are byte-level activity, not forward motion in the assistant turn.
+func reportCodexProgress(onProgress func(), item *codexItem) {
+	if item != nil && item.Type == "error" {
+		return
+	}
 	if onProgress != nil {
 		onProgress()
 	}
+}
+
+// reportCodexTool reports an item that may have acted on the world. Codex
+// reports reasoning and assistant prose as items too, so only the item types
+// that run something count: reporting the others would withhold a fallback that
+// is safe.
+func reportCodexTool(onTool func(), item *codexItem) {
+	if onTool == nil || item == nil {
+		return
+	}
+	if isTool, _, _ := codexToolItemKind(item.Type); !isTool {
+		// Reasoning, assistant messages, plans and errors act on nothing.
+		return
+	}
+	onTool()
 }
 
 func codexOutputSchema(schema json.RawMessage) ([]byte, error) {

@@ -125,6 +125,19 @@ func (a *reviewAgents) NeutralizesGateInstructions() bool {
 	return true
 }
 
+// drivesAttempts reports true when any route this router can take ends in a
+// fallback chain. The router itself installs the seam for a route that does
+// not (a single configured review or fixer agent), so enabling it can never
+// leave an invocation unbounded.
+func (a *reviewAgents) drivesAttempts() bool {
+	for _, current := range a.all() {
+		if DrivesAttempts(current) {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *reviewAgents) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 	selected := a.primary
 	switch opts.Purpose {
@@ -138,7 +151,19 @@ func (a *reviewAgents) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 		selected = a.fixer.pick(opts.Round, a.primary)
 	}
 	started := time.Now()
-	result, err := selected.Run(ctx, opts)
+	var (
+		result *Result
+		err    error
+	)
+	if opts.RunAttempt != nil && !DrivesAttempts(selected) {
+		// The caller owns the invocation's bounds but this route is a single
+		// agent, so the router runs it through the seam itself: one bounded
+		// attempt with no candidate behind it. Passing the options through
+		// untouched would leave this invocation with no bound at all.
+		result, err, _ = opts.RunAttempt(selected, opts)
+	} else {
+		result, err = selected.Run(ctx, opts)
+	}
 	if !ReportsAgentAttempts(selected) {
 		emitAgentAttempt(opts, selected.Name(), result, err, started, time.Now())
 	}

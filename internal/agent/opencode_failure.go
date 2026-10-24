@@ -31,7 +31,7 @@ func newOpencodeMessageFailure(e *opencodeMessageError, toolActivity bool) error
 	if e == nil {
 		return nil
 	}
-	return &opencodeMessageFailure{
+	failure := &opencodeMessageFailure{
 		name:         e.Name,
 		message:      e.message(),
 		statusCode:   e.statusCode(),
@@ -41,6 +41,13 @@ func newOpencodeMessageFailure(e *opencodeMessageError, toolActivity bool) error
 		terminal:     isTerminalRetryError(strings.ToLower(strings.Join(e.providerText(), "\n"))),
 		toolActivity: toolActivity,
 	}
+	// A provider content-policy block is not a verdict on the work, so the
+	// fallback wrapper may hand the turn to the next agent. It is read from
+	// the typed error the server sent, not from the rendered sentence.
+	if refusesTurn(strings.Join(e.providerText(), "\n")) {
+		return MarkRefused(failure)
+	}
+	return failure
 }
 
 func (e *opencodeMessageFailure) StructuredOutputRejected() bool { return e.structured }
@@ -122,6 +129,18 @@ func classifyOpencodeTransient(err error) (string, bool) {
 		return "", false
 	}
 	return classifyTransient(err)
+}
+
+// replayRanTools reports whether the failure carries typed evidence that its
+// turn already invoked a tool.
+//
+// opencodeMessageFailure records that evidence as a field, set from the
+// server's own parts. It is not the same shape as the replay marker the stream
+// paths carry, so a gate that only knew the marker would read this failure as
+// "nothing ran" and replay a side effect.
+func replayRanTools(err error) bool {
+	var failure *opencodeMessageFailure
+	return errors.As(err, &failure) && failure.toolActivity
 }
 
 // isOpencodeToolPart reports whether a message-part type is a tool

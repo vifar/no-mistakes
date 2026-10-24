@@ -37,10 +37,11 @@ const (
 // branches, repositories, or roles.
 //
 // Correctness always wins over reuse: adapters without session support run
-// cold, a failed resume drops the identity and re-runs the same turn in a
-// fresh same-role session, and any persistence failure degrades to cold
-// invocations. A nil *RunSessions runs everything cold, preserving the
-// pre-session behavior for steps outside the review loop and for tests.
+// cold, and a failed resume drops the identity and re-runs the same turn in a
+// fresh same-role session unless cancellation or an invocation bound ended it.
+// Any persistence failure degrades to cold invocations. A nil *RunSessions
+// runs everything cold, preserving the pre-session behavior for steps outside
+// the review loop and for tests.
 type RunSessions struct {
 	db      *db.DB
 	runID   string
@@ -94,7 +95,10 @@ func (rs *RunSessions) Run(ctx context.Context, a agent.Agent, role SessionRole,
 		rs.remember(role, result.SessionID, sessionProvider(a, result))
 		return result, nil
 	}
-	if storedID == "" || ctx.Err() != nil {
+	// An attempt the invocation's own bound ended is not a failed resume: the
+	// turn was cut, not the identity. Retrying cold would repeat work it may
+	// already have done and spend the invocation twice.
+	if storedID == "" || ctx.Err() != nil || agent.AttemptEnded(err) {
 		return nil, err
 	}
 

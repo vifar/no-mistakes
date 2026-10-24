@@ -136,7 +136,7 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 
 	var usage TokenUsage
 	var result *claudeResult
-	if err := parseClaudeEvents(ctx, started.stdout, opts.OnChunk, &usage, &result); err != nil {
+	if err := parseClaudeEvents(ctx, started.stdout, opts.OnChunk, agentProgressEmitter(opts, a.Name()), agentToolEmitter(opts, a.Name()), &usage, &result); err != nil {
 		err = started.waitAfterParseError(err)
 		stderrWG.Wait()
 		retErr := fmt.Errorf("claude parse events: %w", err)
@@ -410,7 +410,7 @@ const claudeStructuredOutputTool = "StructuredOutput"
 
 // parseClaudeEvents reads JSONL from the reader and dispatches events.
 // It accumulates token usage and captures the final result event.
-func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), usage *TokenUsage, result **claudeResult) error {
+func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), onProgress, onTool func(), usage *TokenUsage, result **claudeResult) error {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), claudeScannerMaxTokenSize)
 	var textBuf string
@@ -463,6 +463,18 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 						onChunk(c.Text)
 					}
 				}
+				if c.Type == "text" || !isToolContentType(c.Type) {
+					continue
+				}
+				// A tool call is a turn advance and side-effect evidence at
+				// once. Reasoning blocks ("thinking") stay out: see
+				// isToolContentType.
+				if onProgress != nil {
+					onProgress()
+				}
+				if onTool != nil {
+					onTool()
+				}
 				if c.Type == "tool_use" && c.Name == claudeStructuredOutputTool && c.ID != "" && len(c.Input) > 0 {
 					pendingSubmissions[c.ID] = c.Input
 				}
@@ -476,6 +488,14 @@ func parseClaudeEvents(ctx context.Context, r io.Reader, onChunk func(string), u
 			for _, c := range msg.Content {
 				if c.Type != "tool_result" {
 					continue
+				}
+				// A tool result is a turn advance and the proof that the tool
+				// ran.
+				if onProgress != nil {
+					onProgress()
+				}
+				if onTool != nil {
+					onTool()
 				}
 				input, ok := pendingSubmissions[c.ToolUseID]
 				if !ok {

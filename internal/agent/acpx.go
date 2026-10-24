@@ -96,7 +96,7 @@ func (a *acpxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) 
 	}()
 
 	var usage TokenUsage
-	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, agentProgressEmitter(opts, a.Name()), &usage)
+	text, stdoutErr, err := parseAcpxJSONEvents(ctx, started.stdout, opts.OnChunk, agentProgressEmitter(opts, a.Name()), agentToolEmitter(opts, a.Name()), &usage)
 	// Estimate before any return, not just the success one: acpx can report an
 	// input-only usage event and then fail, and a reported usage with no output
 	// count would otherwise record the text it did stream as a reported zero.
@@ -260,7 +260,7 @@ type acpxUsageFields struct {
 // parseAcpxJSONEvents streams acpx's JSON events and returns the assistant
 // text accumulated so far, on its error paths too, so a turn that fails partway
 // can still account for the output acpx already produced.
-func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string), onProgress func(), usage *TokenUsage) (string, string, error) {
+func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string), onProgress, onTool func(), usage *TokenUsage) (string, string, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), acpxScannerMaxTokenSize)
 	var output strings.Builder
@@ -320,6 +320,11 @@ func parseAcpxJSONEvents(ctx context.Context, r io.Reader, onChunk func(string),
 			// reference/global-config.md that reasoning-only traffic does not
 			// count. Reasoning still satisfies byte-level liveness.
 			reportAcpxProgress(onProgress)
+			if onTool != nil && update.SessionUpdate != "agent_plan" {
+				// A tool call may have left a side effect outside the
+				// worktree; the agent's plan has not.
+				onTool()
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {

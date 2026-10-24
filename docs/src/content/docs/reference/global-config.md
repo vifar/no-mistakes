@@ -175,8 +175,13 @@ agent: [codex, grok]
 The list is filtered to entries available to the daemon at run startup, and the first available entry becomes the primary agent.
 After resolving `auto`, entries that resolve to the same ACP target are deduplicated in list order, so `cursor` and `acp:cursor` (or `devin` and `acp:devin`) provide one fallback and preserve whichever spelling appears first.
 If no entry is available, the gate fails before its first pipeline step.
-If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback. OpenCode and Rovo Dev server-startup and session-creation failures also count as unavailable agents. For OpenCode, a failed API-generation probe or event-stream connection before submitting the prompt counts the same way.
-Fallback candidates share the invocation's existing bounded context and use only its remaining time; once that context expires or is cancelled, no further candidate is announced or started.
+A failed invocation falls back to the next available candidate in three cases, and the operator-visible `agent <name> failed (<reason>: ...); falling back to <next>` line names which one applied:
+
+- `unavailable` - the agent process cannot start or exits with an error. OpenCode and Rovo Dev server-startup and session-creation failures also count, and so does an OpenCode failed API-generation probe or event-stream connection before the prompt was submitted.
+- `refused` - the provider blocked the turn's content on a content policy, for example OpenCode's `provider.content-filter` or a native CLI's content-policy wording. The refusal says nothing about the agent's fitness for the work, and the same prompt usually goes through on another provider.
+- `stalled` - the attempt ended with no assistant output and no tool activity at all: either the progress bound fired ([`agent_stall_timeout`](#agent_stall_timeout)) or the invocation's own budget expired before the turn ever advanced. The next candidate starts a fresh bounded invocation with its own budget: a stalled attempt that consumed its own `agent_timeout`, `review_agent_timeout` or `test_agent_timeout` does not spend the budget the next candidate needs.
+
+`refused` and `stalled` hand the turn on only when two independent records say nothing was left behind: the attempt reported no tool activity (a turn that provably ran tools, or whose tool activity cannot be verified, is never replayed under another agent), and the step worktree is exactly as the invocation found it - no uncommitted or untracked change and no moved HEAD. A stall or refusal after tool activity, partial edits or a commit fails the step exactly as before, so a second agent never starts over on work it cannot see. Each configured agent runs at most once per invocation, and replacement candidates share a wall-clock allowance of twice the invocation's silent budget, measured from the invocation's start: no replacement is started once that much has been spent, and each replacement's limits are clamped to what is left. The first attempt keeps its configured limits, including a still-working cap longer than that allowance; this also preserves the caps on a route with a single configured agent.
 Structured findings and schema/output validation problems do not trigger fallback. An OpenCode failure from a turn that ran tools, or whose tool activity cannot be established, does not trigger agent fallback.
 
 ### acpx_path
@@ -640,9 +645,9 @@ A silent invocation is cancelled when this budget expires.
 An invocation that is still producing output at expiry, or whose agent subprocess is still running a child process it started after its last output, such as a test suite a tool call launched, continues only when [`agent_working_timeout`](#agent_working_timeout) is set.
 It may then continue until it goes quiet with no live child process for 10 minutes (the shipped [`step_quiet_warning`](#step_quiet_warning) default, fixed regardless of that setting; this budget itself when it is shorter) or until that cap, whichever comes first.
 With the cap unset, the turn stops at this budget.
-There is no hidden multiple of this budget.
-When the invocation is cancelled, it returns a timeout diagnostic instead of remaining active indefinitely.
-Most agent-driven mutation steps fail the run, CI auto-fix parks for a user decision, and PR drafting follows its existing agent-error fallback and continues with deterministic content.
+These limits apply per candidate; the [`agent`](#agent) reference owns fallback eligibility and the total fallback wall-clock bound.
+When an attempt is cancelled, it returns a timeout diagnostic instead of remaining active indefinitely.
+If no fallback succeeds, most agent-driven mutation steps fail the run, CI auto-fix parks for a user decision, and PR drafting follows its existing agent-error fallback and continues with deterministic content.
 The [CI step reference](/no-mistakes/reference/pipeline-steps/#ci) owns the approval behavior.
 A late successful return after cancellation is rejected, so post-agent commits and PR content cannot use work from a timed-out turn.
 
@@ -693,8 +698,10 @@ This is measured behaviour, not a hypothetical: `omp` review turns hit their the
 An invocation is stalled when no assistant text, tool call, or tool result has been observed for this long.
 Reasoning-only traffic, subprocess byte liveness, and retry or fallback bookkeeping do not count - only forward motion does.
 In addition, on platforms that expose process state and CPU time, a launched native agent that remains runnable with zero accumulated CPU time and makes no progress is treated as a confirmed wedge after a short grace window and cancelled early; this catches a process that never began executing instead of waiting for the full configured bound. Malformed or unavailable process samples do not trigger that classification.
-When the bound expires - including for that confirmed zero-CPU wedge - the agent is cancelled and the run fails with `agent made no progress; agent produced no assistant output or tool activity for <measured>` instead of continuing to consume the remaining budget.
-That diagnostic is deliberately distinct from the timeout one, because the two demand different responses: a wall-clock expiry means the turn was working and needs a larger budget, while a stall means it was not converging and needs investigating.
+When the bound expires - including for that confirmed zero-CPU wedge - the agent is cancelled and the invocation fails with `agent made no progress; agent produced no assistant output or tool activity for <measured>` instead of continuing to consume the remaining budget.
+When another agent is configured behind it and the attempt produced nothing at all (no assistant output, no tool activity) in a worktree it left untouched, that failure hands the turn to the next candidate with a fresh bounded budget instead of ending the step; see the [`agent`](#agent) fallback classes, which also cover an invocation budget that expires before the turn ever advances.
+A stall after any progress, or one that left edits or a commit behind, still fails the step.
+That diagnostic is deliberately distinct from the timeout one: a stall means the turn stopped advancing, while a timeout names the invocation budget that expired. Use the measured activity evidence to decide whether a larger budget would help.
 
 | Field | Value |
 | --- | --- |
@@ -733,7 +740,7 @@ The optional fixer gets the full configured budget, and its fresh, session-free 
 Every later fixer and rereviewer does the same; no invocation inherits time spent by an earlier turn.
 A silent invocation is cancelled when this budget expires.
 A still-working invocation continues only when [`review_agent_working_timeout`](#review_agent_working_timeout) is set, under the same idle rule as [`agent_working_timeout`](#agent_working_timeout).
-When the invocation is cancelled, the review agent fails the run with a diagnostic naming the bound that cut it instead of remaining active indefinitely.
+If no fallback succeeds under the [`agent`](#agent) rules, cancellation fails the run with a diagnostic naming the bound that cut the attempt instead of remaining active indefinitely.
 That diagnostic carries the same measured evidence and adapter report described under [`agent_timeout`](#agent_timeout).
 
 |         |                        |
@@ -767,7 +774,7 @@ Stall budget for one Test-step agent invocation.
 The budget covers the post-test evidence-gathering turn, and a Test-repair turn gets its own budget of the same length.
 A silent invocation is cancelled when this budget expires.
 A still-working invocation continues only when [`test_agent_working_timeout`](#test_agent_working_timeout) is set, so a targeted run that already needs most of this budget is not failed solely because the provider was slow.
-When the invocation is cancelled, the test agent parks for a decision with an ask-user finding rather than failing the run as a code defect.
+If no fallback succeeds under the [`agent`](#agent) rules, cancellation parks Test for a decision with an ask-user finding rather than failing the run as a code defect.
 That finding carries the same measured evidence and adapter report described under [`agent_timeout`](#agent_timeout).
 A late structured result from the expired turn is still not used as a successful Test pass.
 The park keeps the configured `commands.test` result from the same execution, so approving over a failing command is still recorded as a configured-command override.
@@ -874,7 +881,7 @@ When enabled and every fixer that can serve the run supports native session resu
 Review turns - the initial full review and every full rereview - always run as fresh invocations regardless of this setting. They are also session-free, unless the run has a [review conversation](/no-mistakes/reference/repo-config/#reviewconversation) AND this setting is on, in which case one reviewer session spans exactly one review pass - the asking turn and the finalize turn that receives its answers - and never a code change; with `session_reuse: false` that finalize turn runs cold, which costs a re-read rather than the answers, because the finalize prompt is the complete review prompt plus the answers. Either way a rereview certifies fixes that implement the previous review turn's findings, so it must never resume the session that prescribed them; cross-round review context travels only in the explicit sanitized round history.
 The fixer session is never lent to review turns, other pipeline steps stay session-isolated in their own cold invocations, and different runs never reuse identities.
 These isolation guarantees cover the harness's own context channels: no-mistakes closes Omp's persistent memory for every Omp invocation (see [Omp](/no-mistakes/guides/agents/#omp)), because a recall would otherwise inject earlier prompts into a session-free review turn.
-When resume is unavailable or fails, the fix turn falls back to a cold run or a fresh fixer session and the fallback is recorded in the local `agent_invocations` performance record. Pi emits per-invocation usage after a resume, unlike Codex's cumulative session counters.
+When resume is unavailable or fails, the fix turn falls back to a cold run or a fresh fixer session and the fallback is recorded in the local `agent_invocations` performance record. Cancellation or a turn ended by its invocation bound does not trigger a cold session retry; provider fallback follows the separate [`agent`](#agent) rules. Pi emits per-invocation usage after a resume, unlike Codex's cumulative session counters.
 Session identities are persisted only as minimum local resume metadata, never as prompts or transcripts; Pi's own session directory retains its native transcript. Keep Pi's session directory private, and keep any `--session-dir` or `PI_CODING_AGENT_SESSION_DIR` setting stable while a run is active so a daemon restart can find the fixer session.
 The [daemon crash-recovery reference](/no-mistakes/concepts/daemon/#crash-recovery) owns which parked gates can resume or reconcile after a restart.
 Set `false` to force every agent invocation cold.
