@@ -312,8 +312,9 @@ func lintMissingToolClaim(f Finding) (tool, dir string, ok bool) {
 }
 
 // lintCheckRunner runs a resolved tool's read-only check from dir. It returns
-// the combined output and exit code; err is set only when the tool could not
-// be started at all.
+// the combined output and exit code. A normal non-zero exit is returned without
+// an error; startup, cancellation, timeout, and output-collection failures return
+// an error with exit code -1.
 type lintCheckRunner func(ctx context.Context, dir, binary string, args []string) (string, int, error)
 
 const lintCheckTimeout = 5 * time.Minute
