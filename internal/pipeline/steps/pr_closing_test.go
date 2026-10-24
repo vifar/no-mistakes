@@ -203,14 +203,22 @@ func TestClosingReferencesResumeAfterHTMLCode(t *testing.T) {
 					if got := publicPRIntent(sctx); !strings.Contains(got, "Closes #12") || strings.Contains(got, "Closes #95") {
 						t.Fatalf("intent lost example or retained promoted line: %q", got)
 					}
-					if got := strings.Join(extractClosingKeywordLines(body, githubClosingGrammar), "|"); got != "Closes #95" {
-						t.Fatalf("live closing lines = %q, want Closes #95", got)
+					// Inline <code> cannot prevent a Markdown fence from
+					// opening. Promotion may relocate #95, but the original
+					// unclosed body cannot certify it as an author's closure.
+					fenced := tag == "code" && content != "Closes #12"
+					wantLines, wantSection := "Closes #95", ""
+					if fenced {
+						wantLines, wantSection = "", "## Issues\n\nCloses #95"
 					}
-					if got := issuesSection(sctx, body); got != "" {
-						t.Fatalf("author's live declaration was duplicated: %q", got)
+					if got := strings.Join(extractClosingKeywordLines(body, githubClosingGrammar), "|"); got != wantLines {
+						t.Fatalf("live closing lines = %q, want %q", got, wantLines)
 					}
-					if err := verifyClosingIssuesInBody(body, sctx); err != nil {
-						t.Fatalf("live declaration failed verification: %v", err)
+					if got := issuesSection(sctx, body); got != wantSection {
+						t.Fatalf("Issues section = %q, want %q", got, wantSection)
+					}
+					if err := verifyClosingIssuesInBody(body, sctx); (err != nil) != fenced {
+						t.Fatalf("verification error = %v, want rejection = %v", err, fenced)
 					}
 					sctx.ClosingIssueRefs = []string{"12"}
 					if err := verifyClosingIssuesInBody(body, sctx); err == nil {
@@ -231,10 +239,10 @@ func TestClosingReferencesResumeAfterHTMLCode(t *testing.T) {
 	}
 }
 
-// A fence marker inside an HTML code example is literal content. The public
-// intent-closing contract still requires the declaration after the example to
-// be published and verified. This exercises full PR composition, where a
-// fence repair must not put the Issues section inside a newly opened fence.
+// CommonMark HTML blocks make fences literal, but <code> cannot interrupt a
+// paragraph (https://spec.commonmark.org/0.31.2/#html-blocks). An inline <code>
+// example therefore needs its Markdown fence closed before the Issues section.
+// Checking the published boundary rejects a literal closing line hidden in code.
 func TestPRStep_IntentClosingDeclarationAfterHTMLCodeWithFence(t *testing.T) {
 	t.Parallel()
 	for _, tag := range []string{"pre", "code"} {
@@ -259,6 +267,81 @@ func TestPRStep_IntentClosingDeclarationAfterHTMLCodeWithFence(t *testing.T) {
 				body := readPRBodyFile(t, envEntry(env, "FAKE_CLI_PR_BODY_FILE"))
 				if !strings.Contains(body, "Closes #12") || !strings.Contains(body, "## Issues\n\nCloses #95") {
 					t.Fatalf("published body lost the literal example or requested closure:\n%s", body)
+				}
+				if tag == "code" && !strings.HasSuffix(body, marker+"\n\n## Issues\n\nCloses #95") {
+					t.Fatalf("inline HTML example's Markdown fence was not closed before Issues:\n%s", body)
+				}
+			})
+		}
+	}
+}
+
+func TestVerifyClosingIssuesRejectsMarkdownFenceInsideInlineHTMLCode(t *testing.T) {
+	t.Parallel()
+	sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"95"}}
+	for _, marker := range []string{"```", "~~~"} {
+		body := "Document this example:\n<code>\n" + marker + "\nCloses #12\n </code>\n\n## Issues\n\nCloses #95"
+		if err := verifyClosingIssuesInBody(body, sctx); err == nil {
+			t.Fatalf("verified a requested declaration inside an unclosed %s fence", marker)
+		}
+	}
+}
+
+func TestPRTemplate_IntentClosingDeclarationAfterHTMLCodeWithFence(t *testing.T) {
+	t.Parallel()
+	for _, tag := range []string{"pre", "code"} {
+		for _, marker := range []string{"```", "~~~"} {
+			t.Run(tag+"/"+marker, func(t *testing.T) {
+				t.Parallel()
+				sctx, _, _ := templateTestContext(t)
+				env, _ := fakeGH(t, "")
+				sctx.Env = env
+				sctx.UserIntent = "Document this example:\n<" + tag + ">\n" + marker + "\nCloses #12\n </" + tag + ">\n\nCloses #95"
+				if _, err := (&PRStep{}).Execute(sctx); err != nil {
+					t.Fatalf("HTML example prevented template publication: %v", err)
+				}
+				body := readPRBodyFile(t, envEntry(env, "FAKE_CLI_PR_BODY_FILE"))
+				if !strings.Contains(body, "Closes #12") || !strings.Contains(body, "## Issues\n\nCloses #95") {
+					t.Fatalf("template body lost example or requested closure:\n%s", body)
+				}
+			})
+		}
+	}
+}
+
+// These boundaries follow CommonMark's type-1 (<pre>) and type-7 (<code>)
+// HTML block rules, rather than treating every HTML element as a block.
+func TestAppendIssuesSectionHTMLFenceContext(t *testing.T) {
+	t.Parallel()
+	for _, marker := range []string{"```", "~~~"} {
+		for _, tc := range []struct {
+			name   string
+			prefix string
+			suffix string
+			repair bool
+		}{
+			{"inline code", "Paragraph\n<code>\n", "\n </code>", true},
+			{"block code", "Paragraph\n\n<code>\n", "\n </code>", false},
+			{"block code after whitespace blank", "Paragraph\n \t\n<code>\n", "\n </code>", false},
+			{"block code after heading", "## Example\n<code>\n", "\n </code>", false},
+			{"block code ends at blank", "Paragraph\n\n<code>\n\n", "\n </code>", true},
+			{"pre interrupts paragraph", "Paragraph\n<pre>\n", "\n </pre>", false},
+			{"pre survives blank", "Paragraph\n<pre>\n\n", "\n </pre>", false},
+		} {
+			t.Run(tc.name+"/"+marker, func(t *testing.T) {
+				body := tc.prefix + marker + "\nCloses #12" + tc.suffix
+				want := body
+				if tc.repair {
+					want += "\n" + marker
+				}
+				want += "\n\n## Issues\n\nCloses #95"
+				got := appendIssuesSection(body, "## Issues\n\nCloses #95")
+				if got != want {
+					t.Fatalf("published Markdown = %q, want %q", got, want)
+				}
+				sctx := &pipeline.StepContext{ClosingIssueRefs: []string{"95"}}
+				if err := verifyClosingIssuesInBody(got, sctx); err != nil {
+					t.Fatalf("repaired declaration failed verification: %v", err)
 				}
 			})
 		}

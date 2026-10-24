@@ -129,7 +129,7 @@ func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 	seen := map[string]struct{}{}
 	var lines []string
 	rawLines := strings.Split(mdfence.NormalizeLineEndings(body), "\n")
-	for _, i := range closingKeywordLineIndexes(body, grammar) {
+	for _, i := range closingKeywordLineIndexes(body, grammar, true) {
 		line := strings.TrimSpace(rawLines[i])
 		key := strings.ToLower(line)
 		if _, exists := seen[key]; exists {
@@ -141,14 +141,23 @@ func extractClosingKeywordLines(body string, grammar closingGrammar) []string {
 	return lines
 }
 
-func closingKeywordLineIndexes(body string, grammar closingGrammar) []int {
+// Rendered bodies use Markdown block context. Intent additionally treats an
+// entire HTML code element as an example, even when its contents would open a
+// Markdown fence: a declaration following that example must still be promoted.
+func closingKeywordLineIndexes(body string, grammar closingGrammar, rendered bool) []int {
 	var indexes []int
 	var fence mdfence.Fence
+	var bodyFence prBodyFenceScanner
 	var htmlCode string
 	for i, raw := range strings.Split(mdfence.NormalizeLineEndings(body), "\n") {
 		if grammar.codeAware {
+			if rendered && bodyFence.Consume(raw) {
+				// A block boundary ends any preceding inline HTML context.
+				htmlCode = ""
+				continue
+			}
 			inHTML := htmlCode != ""
-			if !inHTML {
+			if !rendered && !inHTML {
 				inFence := fence.Open()
 				fence.Consume(raw)
 				if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
@@ -159,6 +168,9 @@ func closingKeywordLineIndexes(body string, grammar closingGrammar) []int {
 				return outsideHTMLCode(text, &htmlCode, func(text string) string { return text })
 			})
 			if inHTML || htmlCode != "" {
+				continue
+			}
+			if strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
 				continue
 			}
 		}
@@ -172,7 +184,7 @@ func closingKeywordLineIndexes(body string, grammar closingGrammar) []int {
 func intentClosingLineIndexes(intent string, grammar closingGrammar) []int {
 	lines := strings.Split(mdfence.NormalizeLineEndings(intent), "\n")
 	var indexes []int
-	for _, i := range closingKeywordLineIndexes(intent, grammar) {
+	for _, i := range closingKeywordLineIndexes(intent, grammar, false) {
 		if grammar.codeAware && (strings.HasPrefix(lines[i], " ") || strings.HasPrefix(lines[i], "\t")) {
 			continue
 		}
@@ -381,25 +393,63 @@ func appendIssuesSection(body, section string) string {
 	return closePRBodyFence(body) + "\n\n" + section
 }
 
-// scanPRBodyFence uses the closing-reference scanner's HTML context: fence
-// markers inside <pre>/<code> are literal content, and HTML inside a Markdown
-// fence cannot change that context.
+var htmlPreBlockStartPattern = regexp.MustCompile(`(?i)^ {0,3}<pre(?:[\t >]|$)`)
+var htmlCodeBlockStartPattern = regexp.MustCompile(`(?i)^ {0,3}</?code(?:[\t ][^>]*)?>[\t ]*$`)
+var markdownHeadingPattern = regexp.MustCompile(`^ {0,3}#{1,6}(?:[\t ]|$)`)
+
+// scanPRBodyFence distinguishes HTML blocks from inline elements. CommonMark
+// <pre> blocks may interrupt paragraphs and end at </pre>. A standalone <code>
+// tag starts a type-7 block only outside a paragraph, and that block ends at a
+// blank line, not its closing tag. Inline elements cannot suppress fences.
 func scanPRBodyFence(body string) mdfence.Fence {
-	var fence mdfence.Fence
-	var htmlCode string
+	var scanner prBodyFenceScanner
 	for _, raw := range strings.Split(mdfence.NormalizeLineEndings(body), "\n") {
-		if htmlCode == "" {
-			inFence := fence.Open()
-			fence.Consume(raw)
-			if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
-				continue
-			}
-		}
-		outsideInlineCode(raw, func(text string) string {
-			return outsideHTMLCode(text, &htmlCode, func(text string) string { return text })
-		})
+		scanner.Consume(raw)
 	}
-	return fence
+	return scanner.fence
+}
+
+type prBodyFenceScanner struct {
+	fence     mdfence.Fence
+	pre       bool
+	codeBlock bool
+	paragraph bool
+}
+
+// Consume reports whether raw belongs to a fenced or HTML code block.
+func (s *prBodyFenceScanner) Consume(raw string) bool {
+	if s.pre {
+		s.pre = !strings.Contains(strings.ToLower(raw), "</pre>")
+		return true
+	}
+	if s.codeBlock {
+		s.codeBlock = strings.Trim(raw, " \t") != ""
+		return true
+	}
+	inFence := s.fence.Open()
+	s.fence.Consume(raw)
+	if inFence || s.fence.Open() {
+		s.paragraph = false
+		return true
+	}
+	if strings.Trim(raw, " \t") == "" {
+		s.paragraph = false
+		return false
+	}
+	if strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+		return false
+	}
+	if htmlPreBlockStartPattern.MatchString(raw) {
+		s.pre = !strings.Contains(strings.ToLower(raw), "</pre>")
+		s.paragraph = false
+		return true
+	}
+	if !s.paragraph && htmlCodeBlockStartPattern.MatchString(raw) {
+		s.codeBlock = true
+		return true
+	}
+	s.paragraph = !markdownHeadingPattern.MatchString(raw)
+	return false
 }
 
 func closePRBodyFence(body string) string {
