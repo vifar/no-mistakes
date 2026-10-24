@@ -17,6 +17,43 @@ func exhaustedStateWrite(operation string) error {
 	return &sqlitewrite.ContentionError{Operation: operation, Attempts: 1, Cause: context.DeadlineExceeded}
 }
 
+func TestDocumentStateWriteContentionDoesNotReplayStep(t *testing.T) {
+	t.Parallel()
+	database, p, run, repo := setupTest(t)
+	workdir := completionFixture(t, database, run)
+	step := &contentionStep{shutdownBlockingStep: newShutdownBlockingStep(types.StepDocument)}
+	executions := 0
+	step.execute = func(*StepContext) (*StepOutcome, error) {
+		executions++
+		if executions == 1 {
+			return nil, exhaustedStateWrite("CompleteDocumentPass")
+		}
+		return &StepOutcome{ExitCode: 0}, nil
+	}
+	executor := NewExecutor(database, p, nil, nil, []Step{step}, nil)
+	executor.SetForgeContext(&forgecontext.Context{})
+	executor.contentionResumeCooldown = time.Millisecond
+	err := executor.Execute(context.Background(), run, repo, workdir)
+	if !sqlitewrite.IsContention(err) {
+		t.Fatalf("lost typed infrastructure error: %T %v", err, err)
+	}
+	if executions != 1 {
+		t.Fatalf("Document executed %d times, want exactly once", executions)
+	}
+	stored, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != types.RunFailed || stored.Error == nil || !sqlitewrite.RecordedContention(*stored.Error) {
+		t.Fatalf("lost named infrastructure outcome: %+v", stored)
+	}
+	for _, state := range step.reported() {
+		if state == "failure" {
+			t.Fatalf("storage contention published a code failure verdict: %v", step.reported())
+		}
+	}
+}
+
 // A finished step whose bookkeeping write lost the connection race must not
 // fail the run: the executor resumes the step and the run completes.
 func TestStepStateWriteContentionResumesStepInsteadOfFailingRun(t *testing.T) {
