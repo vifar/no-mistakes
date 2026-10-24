@@ -125,6 +125,9 @@ func TestMain(m *testing.M) {
 	}
 	globalConfig := filepath.Join(globalConfigDir, "gitconfig")
 	os.Setenv("GIT_CONFIG_GLOBAL", globalConfig)
+	// Daemon fixtures assert the settled outcome of an exhausted state write;
+	// pipeline unit tests cover the in-place resumes before it.
+	pipeline.ContentionResumes = 0
 	code := m.Run()
 	os.RemoveAll(globalConfigDir)
 	os.Exit(code)

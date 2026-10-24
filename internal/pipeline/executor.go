@@ -46,6 +46,17 @@ const (
 	defaultGateReconcileTimeout  = config.DefaultGateReconcileTimeout
 )
 
+// ContentionResumes bounds execution replay after an exhausted SQLite write
+// budget to non-fixing CI monitoring with no fix or answer trigger in progress.
+// It also bounds separate repeats of idempotent findings writes without
+// replaying execution. ContentionResumeCooldown separates these attempts.
+// These are variables only so test binaries (TestMain) and the e2e build can
+// change them before any executor exists; production code never assigns them.
+var (
+	ContentionResumes        = 2
+	ContentionResumeCooldown = 30 * time.Second
+)
+
 type approvalResponse struct {
 	gate           types.GateIdentity
 	action         types.ApprovalAction
@@ -126,7 +137,11 @@ type Executor struct {
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
-	onPRMerged            func(context.Context, string)
+	// contentionResumes and contentionResumeCooldown bound in-place resumes
+	// after SQLITE_WRITE_CONTENTION. Tests shorten them.
+	contentionResumes        int
+	contentionResumeCooldown time.Duration
+	onPRMerged               func(context.Context, string)
 	// See SetOnWorkloadDone for the workload boundary contract.
 	onWorkloadDone func()
 	// workloadDone records that the hook already ran, so a run that settles
@@ -280,6 +295,9 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		approvalCh:            make(chan approvalResponse, 1),
 		gateReconcileInterval: defaultGateReconcileInterval,
 		gateReconcileTimeout:  defaultGateReconcileTimeout,
+
+		contentionResumes:        ContentionResumes,
+		contentionResumeCooldown: ContentionResumeCooldown,
 	}
 	if cfg != nil {
 		// Global config is the production path for these timings; SetGate*
@@ -1987,6 +2005,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 	}
 
+	contentionResumesLeft := e.contentionResumes
+
 	// Execute with possible fix loop
 rounds:
 	for {
@@ -2117,6 +2137,13 @@ rounds:
 			return false, "", ErrCIMonitorInterruptedAtShutdown
 		}
 		if sqlitewrite.IsContention(err) {
+			// Only non-fixing CI monitoring resumes by re-observing PR state;
+			// repair and answer rounds settle the infrastructure outcome.
+			if stepName == types.StepCI && !sctx.Fixing && nextTrigger == "initial" && contentionResumesLeft > 0 && e.awaitContentionResume(ctx, logFile, stepName, err) {
+				contentionResumesLeft--
+				roundNum--
+				continue rounds
+			}
 			return false, "", fmt.Errorf("step %s infrastructure failure: %w", stepName, err)
 		}
 		if err != nil {
@@ -2169,14 +2196,14 @@ rounds:
 		}
 
 		if effectiveFindings != "" {
-			if dbErr := e.db.SetStepFindings(sr.ID, effectiveFindings); dbErr != nil {
+			if dbErr := e.resumeContendedWrite(ctx, logFile, stepName, func() error { return e.db.SetStepFindings(sr.ID, effectiveFindings) }); dbErr != nil {
 				if run.Shipping != nil {
 					return false, "", fmt.Errorf("persist strict shipping findings: %w", dbErr)
 				}
 				slog.Warn("failed to set step findings in db", "step", stepName, "error", dbErr)
 			}
 		} else {
-			if dbErr := e.db.ClearStepFindings(sr.ID); dbErr != nil {
+			if dbErr := e.resumeContendedWrite(ctx, logFile, stepName, func() error { return e.db.ClearStepFindings(sr.ID) }); dbErr != nil {
 				if run.Shipping != nil {
 					return false, "", fmt.Errorf("persist strict shipping findings: %w", dbErr)
 				}

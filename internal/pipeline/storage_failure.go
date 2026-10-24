@@ -1,16 +1,20 @@
 package pipeline
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/sqlitewrite"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // The independent marker covers the case where SQLite is still unavailable
@@ -139,4 +143,34 @@ func removeStorageFailure(path string, syncDir func(string) error) error {
 		return fmt.Errorf("sync cleared SQLite infrastructure outcome: %w", err)
 	}
 	return nil
+}
+
+// awaitContentionResume waits out a cool-down after a step's state write
+// exhausted its SQLite budget. It reports false when the run's context ends
+// first, so shutdown and cancellation keep their own outcomes.
+func (e *Executor) awaitContentionResume(ctx context.Context, logFile io.Writer, stepName types.StepName, cause error) bool {
+	slog.Warn("SQLITE_WRITE_CONTENTION: resuming step after cool-down", "step", stepName, "cooldown", e.contentionResumeCooldown, "error", cause)
+	fmt.Fprintf(logFile, "\n%s: state write did not land; resuming step %s in %s\n", sqlitewrite.ErrorName, stepName, e.contentionResumeCooldown)
+	timer := time.NewTimer(e.contentionResumeCooldown)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// resumeContendedWrite repeats an idempotent state write whose SQLite budget
+// was exhausted, after a cool-down, up to the executor's resume bound. Other
+// errors, and the final contention error, are returned unchanged.
+func (e *Executor) resumeContendedWrite(ctx context.Context, logFile io.Writer, stepName types.StepName, write func() error) error {
+	err := write()
+	for left := e.contentionResumes; left > 0 && sqlitewrite.IsContention(err); left-- {
+		if !e.awaitContentionResume(ctx, logFile, stepName, err) {
+			return err
+		}
+		err = write()
+	}
+	return err
 }
