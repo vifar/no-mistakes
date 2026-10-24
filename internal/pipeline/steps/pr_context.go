@@ -302,7 +302,7 @@ func runAccountsForPRHead(sctx *pipeline.StepContext, forgeHead, localHead strin
 	}
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
-		return false, fmt.Errorf("read run publication for PR head: %w", err)
+		return false, fmt.Errorf("read run publication before retarget: %w", err)
 	}
 	if run != nil && run.LastPushedSHA != nil && *run.LastPushedSHA == forgeHead {
 		return true, nil
@@ -311,45 +311,16 @@ func runAccountsForPRHead(sctx *pipeline.StepContext, forgeHead, localHead strin
 	return err == nil, nil
 }
 
-func reconcileAccountedPRHead(sctx *pipeline.StepContext, previous *db.PRContext, selection pipeline.PRTargetSelection, localHead string) (*db.PRContext, error) {
-	if previous == nil || previous.PRURL == "" || selection.State != scm.PRStateOpen ||
-		previous.ForgeHeadSHA == selection.ForgeHeadSHA || previous.PRURL != selection.PRURL ||
-		!scm.SameSourceRepository(resolvedProvider(sctx), previous.SourceRepo, selection.SourceRepo) ||
-		previous.SourceBranch != selection.SourceBranch || previous.TargetBranch != selection.TargetBranch {
-		return previous, nil
-	}
-	accounted, err := runAccountsForPRHead(sctx, selection.ForgeHeadSHA, previous.LocalHeadSHA)
-	if err != nil {
-		return nil, err
-	}
-	if !accounted && previous.LocalHeadSHA != localHead && localHead == sctx.Run.HeadSHA {
-		accounted, err = runAccountsForPRHead(sctx, selection.ForgeHeadSHA, localHead)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if !accounted {
-		return nil, fmt.Errorf("pull request head %s differs from local head %s", selection.ForgeHeadSHA, localHead)
-	}
-	candidate := previous.PRContextCandidate
-	candidate.ForgeHeadSHA = selection.ForgeHeadSHA
-	if _, err := sctx.DB.AdvanceRunPRContext(sctx.Run.ID, candidate); err != nil {
-		return nil, err
-	}
-	previous, err = sctx.DB.GetRunPRContext(sctx.Run.ID)
-	if err == nil {
-		sctx.PRTarget = &selection
-		sctx.PRContext = previous
-	}
-	return previous, err
-}
-
 func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName, selection pipeline.PRTargetSelection, freshRetarget bool) (decision pipeline.PRContextDecision, err error) {
 	if sctx == nil || sctx.DB == nil || sctx.Run == nil || sctx.Repo == nil {
 		return pipeline.PRContextDecision{}, fmt.Errorf("PR context requires a run, repository, and database")
 	}
 
 	previous, err := sctx.DB.GetRunPRContext(sctx.Run.ID)
+	if err != nil {
+		return pipeline.PRContextDecision{}, err
+	}
+	pending, err := sctx.DB.GetPendingTargetRewind(sctx.Run.ID)
 	if err != nil {
 		return pipeline.PRContextDecision{}, err
 	}
@@ -377,14 +348,6 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 	if previous != nil && previous.SourceBranch == candidate.SourceBranch &&
 		scm.SameSourceRepository(resolvedProvider(sctx), previous.SourceRepo, candidate.SourceRepo) {
 		candidate.SourceRepo = previous.SourceRepo
-	}
-	previous, err = reconcileAccountedPRHead(sctx, previous, selection, localHead)
-	if err != nil {
-		return pipeline.PRContextDecision{}, err
-	}
-	pending, err := sctx.DB.GetPendingTargetRewind(sctx.Run.ID)
-	if err != nil {
-		return pipeline.PRContextDecision{}, err
 	}
 
 	if pending != nil && !samePendingRewindIdentity(sctx, pending, previous, candidate, selection) {
@@ -524,8 +487,8 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 	//
 	// The LOCAL commit lineage says nothing about the forge's head. Another
 	// publisher moving the attached PR is not this run's advance, so the
-	// forge identity and head must match after the accounted-head
-	// reconciliation above; a published-head transition has its own proof below.
+	// forge identity and head must be unchanged here; a published-head
+	// transition has its own proof below.
 	if previous != nil && sctx.PRContextAfterStep && !forward &&
 		previous.LocalHeadSHA != candidate.LocalHeadSHA &&
 		previous.TargetSHA == candidate.TargetSHA && sameRewindIdentity(previous, candidate) {
@@ -703,7 +666,7 @@ func verifyPRMutationComparison(sctx *pipeline.StepContext, host scm.Host, pr *s
 	}
 	if facts.State != scm.PRStateOpen || !samePRIdentity(pr.URL, &facts.PR) ||
 		!scm.SameSourceRepository(resolvedProvider(sctx), facts.SourceRepository, receipt.SourceRepo) ||
-		facts.SourceBranch != receipt.SourceBranch || (!allowProposed || receipt.PRURL == "") && facts.HeadSHA != forgeHead ||
+		facts.SourceBranch != receipt.SourceBranch || facts.HeadSHA != forgeHead ||
 		facts.BaseBranch != receipt.TargetBranch {
 		return fmt.Errorf("live pull request differs from its comparison receipt before update")
 	}
@@ -714,13 +677,6 @@ func verifyPRMutationComparison(sctx *pipeline.StepContext, host scm.Host, pr *s
 	}
 	if current.LocalHeadSHA != proposedHead {
 		return fmt.Errorf("local head differs from proposed PR update head")
-	}
-	receipt, err = reconcileAccountedPRHead(sctx, receipt, pipeline.PRTargetSelection{
-		PRURL: receipt.PRURL, State: facts.State, SourceRepo: facts.SourceRepository,
-		SourceBranch: facts.SourceBranch, ForgeHeadSHA: facts.HeadSHA, TargetBranch: facts.BaseBranch,
-	}, current.LocalHeadSHA)
-	if err != nil {
-		return err
 	}
 	if proposedHead != receipt.LocalHeadSHA {
 		if _, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", receipt.LocalHeadSHA, proposedHead); err != nil {

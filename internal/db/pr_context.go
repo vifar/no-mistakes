@@ -76,9 +76,8 @@ func (d *DB) BindRunPRContext(runID string, candidate PRContextCandidate, resetF
 	return d.bindRunPRContext(runID, candidate, resetFrom, false, nil)
 }
 
-// AdvanceRunPRContext records a pipeline-owned commit or a forge-head
-// observation already accounted for by the caller. Earlier completed steps
-// keep their own evidence and review anchor.
+// AdvanceRunPRContext records a commit made by the current forward pipeline
+// step. Earlier completed steps keep their own evidence and review anchor.
 func (d *DB) AdvanceRunPRContext(runID string, candidate PRContextCandidate) (PRContextBindResult, error) {
 	return d.bindRunPRContext(runID, candidate, types.StepReview, true, nil)
 }
@@ -185,24 +184,6 @@ func (d *DB) bindRunPRContextOnce(writeCtx context.Context, runID string, candid
 				return PRContextBindResult{}, err
 			}
 			return PRContextBindResult{Generation: previous.Generation}, nil
-		}
-	}
-	if !initial && forward && previous.PRURL != "" && previous.ForgeHeadSHA != candidate.ForgeHeadSHA {
-		unchanged := candidate
-		unchanged.ForgeHeadSHA = previous.ForgeHeadSHA
-		if unchanged == previous.PRContextCandidate {
-			pending, err = pendingTargetRewind(tx, runID)
-			if err != nil {
-				return PRContextBindResult{}, err
-			}
-			if pending != nil {
-				if !sameOptionalSHA(pending.ForgeHeadSHA, &previous.ForgeHeadSHA) {
-					return PRContextBindResult{}, fmt.Errorf("pending rewind PR head differs from comparison receipt")
-				}
-				if _, err = tx.ExecContext(writeCtx, `UPDATE run_target_rewinds SET forge_head_sha=? WHERE id=?`, candidate.ForgeHeadSHA, pending.ID); err != nil {
-					return PRContextBindResult{}, err
-				}
-			}
 		}
 	}
 	identityOnlyAttach := !initial && previous.PRURL == "" && candidate.PRURL != "" &&
