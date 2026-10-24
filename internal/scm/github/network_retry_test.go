@@ -61,6 +61,7 @@ func fastRetryHost(factory CmdFactory) *Host {
 	host := New(factory, nil, "", "")
 	host.retryBase = time.Millisecond
 	host.retryMax = time.Millisecond
+	host.rateLimitWait = func(context.Context, time.Duration) error { return nil }
 	return host
 }
 

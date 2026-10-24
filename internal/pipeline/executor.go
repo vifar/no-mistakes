@@ -23,6 +23,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/gateguidance"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/netretry"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/reviewqa"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
@@ -185,9 +186,30 @@ func (e *Executor) checkPRContext(ctx context.Context, run *db.Run, repo *db.Rep
 	if anchor, ok := stepName.CustomGateAnchor(); ok && e.skips[anchor] && e.prContext == nil {
 		return -1, nil
 	}
+	stepResults, err := e.db.GetStepsByRun(run.ID)
+	if err != nil {
+		return -1, err
+	}
+	stepResultID := ""
+	for _, result := range stepResults {
+		if result.StepName == stepName {
+			stepResultID = result.ID
+			break
+		}
+	}
+	ctx = netretry.WithWaitNotifier(ctx, func(message string) {
+		slog.Info("PR context", "run_id", run.ID, "message", message)
+		e.emitLogChunk(run, repo, stepName, message+"\n")
+		if stepResultID != "" {
+			if dbErr := e.db.TouchStepActivity(stepResultID, stepActivityFromLog(message)); dbErr != nil {
+				slog.Warn("failed to touch step activity in db", "step", stepName, "error", dbErr)
+			}
+		}
+	})
 	decision, err := e.prContextGuard(&StepContext{
 		Ctx: ctx, Run: run, Repo: repo, WorkDir: workDir,
-		Config: e.config, ForgeContext: e.forge, DB: e.db,
+		StepResultID: stepResultID,
+		Config:       e.config, ForgeContext: e.forge, DB: e.db,
 		PRTarget: e.prTarget, PRContext: e.prContext,
 		PRContextAfterStep:       afterStep,
 		PRContextRebaseCompleted: len(rebaseCompleted) > 0 && rebaseCompleted[0],
@@ -1907,7 +1929,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		return nil
 	}
 	sctx := &StepContext{
-		Ctx:                   ctx,
+		// A GitHub rate-limit wait parks the step inside the forge call;
+		// reporting it through the step log makes it the step's visible last
+		// activity ("waiting for GitHub rate limit until ...") in axi status.
+		Ctx:                   netretry.WithWaitNotifier(ctx, writeLog),
 		Run:                   run,
 		Repo:                  repo,
 		WorkDir:               workDir,

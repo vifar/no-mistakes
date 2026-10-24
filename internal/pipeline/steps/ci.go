@@ -678,6 +678,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	lastScopeLog := ""
 	noCIHintLogged := false
 	consecutiveCheckErrs := 0
+	// observation is what this poll read from the forge (PR state,
+	// mergeability, base and the checks' own states); a poll that saw exactly
+	// what the previous one saw backs the next wait off (unchangedPollInterval).
+	observation, lastObservation := "", ""
+	unchangedPolls := 0
 	consecutiveBotCommentErrs := 0
 	receiptTimeout := sctx.Config.CIReadinessReceiptTimeout
 	if receiptTimeout <= 0 {
@@ -700,6 +705,15 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	waitForPoll := func() error {
 		interval := s.pollIntervalOverride
 		interval = ciPollInterval(sctx, now().Sub(started), interval)
+		if observation != "" && observation == lastObservation {
+			unchangedPolls++
+		} else {
+			unchangedPolls = 0
+		}
+		lastObservation = observation
+		if s.pollIntervalOverride == 0 {
+			interval = unchangedPollInterval(interval, unchangedPolls)
+		}
 		if !unlimited {
 			remaining := timeout - now().Sub(timeoutAnchor)
 			if remaining > 0 && remaining < interval {
@@ -734,11 +748,15 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		observation = ""
+		// One poll reads the PR's state, base and mergeability from a single
+		// forge view instead of one call each (scm.WithPRViewSnapshot).
+		pollCtx := scm.WithPRViewSnapshot(ctx)
 		if !unlimited && now().Sub(timeoutAnchor) >= timeout {
 			return timeoutOutcome()
 		}
 		if sctx.Run.Shipping != nil {
-			if err := verifyStrictPRBaseBranch(ctx, sctx, host, pr); err != nil {
+			if err := verifyStrictPRBaseBranch(pollCtx, sctx, host, pr); err != nil {
 				clearCIMonitorReady(sctx)
 				return nil, err
 			}
@@ -755,7 +773,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		// pin their target and verify it above.
 		if sctx.Run.Shipping == nil {
 			if reader, ok := host.(scm.PRBaseBranchReader); ok {
-				live, readErr := reader.GetPRBaseBranch(ctx, pr)
+				live, readErr := reader.GetPRBaseBranch(pollCtx, pr)
 				if readErr != nil && pluginPollFailsStep(readErr) {
 					clearCIMonitorReady(sctx)
 					return nil, readErr
@@ -828,7 +846,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 
 		// Check PR state (merged/closed -> exit)
 		prStateKnown := true
-		state, err := host.GetPRState(ctx, pr)
+		state, err := host.GetPRState(pollCtx, pr)
 		if err != nil && pluginPollFailsStep(err) {
 			clearCIMonitorReady(sctx)
 			return nil, err
@@ -842,6 +860,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			if err := observeCIState(sctx, "open"); err != nil {
 				return nil, err
 			}
+		}
+		if err == nil {
+			observation += "state=" + string(state) + " base=" + baseBranch
 		}
 		if sctx.Run.Shipping != nil {
 			if err := shipping.CheckImmutable(ctx, sctx.Run, sctx.Repo, sctx.WorkDir); err != nil {
@@ -872,7 +893,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		mergeBehind := false
 		mergeabilityKnown := true
 		if host.Capabilities().MergeableState {
-			mergeState, mergeErr := host.GetMergeableState(ctx, pr)
+			mergeState, mergeErr := host.GetMergeableState(pollCtx, pr)
 			if mergeErr != nil && pluginPollFailsStep(mergeErr) {
 				clearCIMonitorReady(sctx)
 				return nil, mergeErr
@@ -882,6 +903,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				mergeabilityBlockedReason = ""
 				mergeabilityKnown = false
 			} else {
+				observation += " mergeable=" + string(mergeState)
 				mergeConflict = mergeState.Conflict()
 				// Unless ci.rebase_behind opts in, BEHIND reads as MERGEABLE:
 				// the green PR reports checks-passed and waits for a human.
@@ -899,7 +921,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 
 		// Check CI status - wait for in-scope executions before escalating
 		pr.HeadSHA = sctx.Run.HeadSHA
-		checks, err := host.GetChecks(ctx, pr)
+		checks, err := host.GetChecks(pollCtx, pr)
 		if err == nil {
 			err = scm.ValidateCheckHeads(checks, pr.HeadSHA)
 		}
@@ -939,6 +961,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		} else {
 			consecutiveCheckErrs = 0
+			observation += " checks=" + checksObservation(checks)
 			// Scope repair work before classifying failures. Informational and
 			// external checks are logged separately; ScopedChecks.Settled and
 			// reviewBotPresenceMarkers preserve the review-bot comment policy.

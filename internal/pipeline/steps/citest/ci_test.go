@@ -25,10 +25,12 @@ func TestCIStep_PendingChecksUseAdaptivePollIntervals(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
 
+	// Each poll sees something new, so this pins the elapsed-time ladder
+	// alone; an unchanged poll's backoff is TestCIStep_UnchangedPendingCIBacksOffItsPolling.
 	checksSequence := []string{
 		`[{"name":"build","state":"PENDING","bucket":"pending"}]`,
-		`[{"name":"build","state":"PENDING","bucket":"pending"}]`,
-		`[{"name":"build","state":"PENDING","bucket":"pending"}]`,
+		`[{"name":"build","state":"PENDING","bucket":"pending"},{"name":"lint","state":"PENDING","bucket":"pending"}]`,
+		`[{"name":"build","state":"PENDING","bucket":"pending"},{"name":"lint","state":"PENDING","bucket":"pending"},{"name":"test","state":"PENDING","bucket":"pending"}]`,
 		`[{"name":"build","state":"SUCCESS","bucket":"pass"}]`,
 	}
 	env := stepstest.FakeCIGHSequence(t, "OPEN", checksSequence)

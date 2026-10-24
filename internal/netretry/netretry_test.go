@@ -27,6 +27,12 @@ func TestClassifyTransientNetworkFailures(t *testing.T) {
 		`fatal: unable to access 'https://github.com/x/y.git/': Failed to connect to github.com port 443 after 75001 ms: Timeout was reached`: ClassTimeout,
 		`fatal: the remote end hung up unexpectedly`:                                                                                          ClassConnection,
 		`HTTP 429: You have exceeded a secondary rate limit; Retry-After: 30`:                                                                 ClassRateLimit,
+		`API rate limit exceeded for user ID 12345.`:                                                                                          ClassPrimaryRateLimit,
+		`GraphQL: API rate limit already exceeded for user ID 12345.`:                                                                         ClassPrimaryRateLimit,
+		`gh: API rate limit exceeded for user ID 12345. (HTTP 403)`:                                                                           ClassPrimaryRateLimit,
+		`You have exceeded a secondary rate limit. Please wait a few minutes before you try again.`:                                           ClassRateLimit,
+		`HTTP 429: Too Many Requests; Retry-After: 30`:                                                                                        ClassRateLimit,
+		`You have triggered an abuse detection mechanism. Please wait a few minutes before you try again.`:                                    ClassRateLimit,
 	}
 	for message, want := range cases {
 		if got := ClassifyText(message); got != want {
@@ -53,9 +59,8 @@ func TestClassifyNeverRetriesRealFailures(t *testing.T) {
 		`error: RPC failed; HTTP 413 curl 22 The requested URL returned error: 413`,
 		`remote: error: GH013: Repository rule violations found for refs/heads/main. : [remote rejected] main -> main (push declined due to repository rule violations)`,
 		`! [remote rejected] main -> main (pre-receive hook declined)`,
-		`API rate limit exceeded for user ID 12345.`,
-		`You have exceeded a secondary rate limit. Please wait a few minutes before you try again.`,
-		`HTTP 429: Too Many Requests; Retry-After: 30`,
+		`HTTP 401: API rate limit exceeded`,
+		`HTTP 404: secondary rate limit`,
 		`gnutls_handshake() failed: Error in protocol version`,
 		`gh: command not found`,
 		``,
@@ -82,11 +87,11 @@ func TestDoEnforcesTransportRetryEligibility(t *testing.T) {
 		{"curl timeout with permission failure", "HTTP 403: forbidden; RPC failed; curl 28 Operation too slow", ""},
 		{"other curl code", "error: RPC failed; curl 280 unknown failure", ""},
 		{"secondary limit with header", "HTTP 403: You have exceeded a secondary rate limit.\nRetry-After: 60", ClassRateLimit},
-		{"secondary limit without header", "HTTP 403: You have exceeded a secondary rate limit.", ""},
-		{"secondary limit without status or header", "You have exceeded a secondary rate limit.", ""},
-		{"secondary limit with prose wait", "HTTP 403: secondary rate limit; retry after a few minutes", ""},
-		{"unqualified rate limit with header", "HTTP 429: Too Many Requests; Retry-After: 30", ""},
-		{"primary limit with header", "HTTP 403: API rate limit exceeded; Retry-After: 60", ""},
+		{"secondary limit without header", "HTTP 403: You have exceeded a secondary rate limit.", ClassRateLimit},
+		{"secondary limit without status or header", "You have exceeded a secondary rate limit.", ClassRateLimit},
+		{"secondary limit with prose wait", "HTTP 403: secondary rate limit; retry after a few minutes", ClassRateLimit},
+		{"unqualified rate limit with header", "HTTP 429: Too Many Requests; Retry-After: 30", ClassRateLimit},
+		{"primary limit with header", "HTTP 403: API rate limit exceeded; Retry-After: 60", ClassPrimaryRateLimit},
 		{"gnutls protocol mismatch", "gnutls_handshake() failed: Error in protocol version", ""},
 		{"gnutls timeout", "gnutls_handshake() failed: Connection timed out", ClassTimeout},
 		{"gnutls reset", "gnutls_handshake() failed: Connection reset by peer", ClassConnection},
@@ -99,6 +104,7 @@ func TestDoEnforcesTransportRetryEligibility(t *testing.T) {
 				Base: time.Millisecond,
 				Max:  time.Millisecond,
 				Log:  func(line string) { logs = append(logs, line) },
+				Wait: func(context.Context, time.Duration) error { return nil },
 			}, func() (string, error) {
 				calls++
 				if calls == 1 {

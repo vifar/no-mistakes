@@ -89,12 +89,10 @@ func TestAPIReadHeaderEvidence(t *testing.T) {
 				}
 				switch scenario {
 				case "exhausted":
-					if err == nil || reads != 3 || probes != 3 || netretry.Describe(err) != string(netretry.ClassRateLimit) {
-						t.Fatalf("reads=%d probes=%d err=%v, want bounded secondary-limit failure", reads, probes, err)
-					}
-				case "no header", "primary limit", "malformed headers", "probe timeout", "header in body", "probe unauthorized", "probe server failure":
-					if err == nil || reads != 1 || probes != 1 || netretry.Retryable(err) || !strings.Contains(err.Error(), strings.TrimSpace(failure)) {
-						t.Fatalf("reads=%d probes=%d err=%v, want original failure without retry", reads, probes, err)
+					// A secondary limit is waited out, not spent from the three
+					// attempts, and the wait backs off until its budget is gone.
+					if err == nil || reads < 4 || reads > 8 || reads != probes || !errors.Is(err, netretry.ErrRateLimitBudgetSpent) || netretry.Retryable(err) {
+						t.Fatalf("reads=%d probes=%d err=%v, want a secondary-limit wait bounded by its budget", reads, probes, err)
 					}
 				default:
 					if err != nil || string(out) != body || detail != "" || reads != 2 || probes != 1 {
@@ -131,8 +129,8 @@ func TestAPIHeaderProbeIsLimitedToGET(t *testing.T) {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			for _, combined := range []bool{false, true} {
 				factory, calls := sequencedGHFactory(t, []ghScriptStep{
-					{stderr: "gh: HTTP 429 Too Many Requests", code: 1},
-					{stdout: "HTTP/2.0 429 Too Many Requests\n\n{}", stderr: "gh: HTTP 429 Too Many Requests", code: 1},
+					{stderr: "gh: HTTP 403 Forbidden", code: 1},
+					{stdout: "HTTP/2.0 403 Forbidden\n\n{}", stderr: "gh: HTTP 403 Forbidden", code: 1},
 				})
 				host := fastRetryHost(factory)
 				var err error

@@ -4,20 +4,101 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/netretry"
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
 
+// ghRateLimitError types a rate limit with the evidence GitHub gave for it: a
+// response's Retry-After header, or the reset time `gh api rate_limit`
+// reported. netretry waits on it without spending an attempt.
 type ghRateLimitError struct {
 	error
+	class      netretry.Class
+	reset      time.Time
+	retryAfter time.Duration
 }
 
-func (e *ghRateLimitError) Unwrap() error              { return e.error }
-func (e *ghRateLimitError) RetryClass() netretry.Class { return netretry.ClassRateLimit }
+func (e *ghRateLimitError) Unwrap() error { return e.error }
+func (e *ghRateLimitError) RetryClass() netretry.Class {
+	if e.class == "" {
+		return netretry.ClassRateLimit
+	}
+	return e.class
+}
+func (e *ghRateLimitError) RateLimitResetAt() time.Time        { return e.reset }
+func (e *ghRateLimitError) RateLimitRetryAfter() time.Duration { return e.retryAfter }
+
+// probeRateLimit reads `gh api rate_limit`, which GitHub does not count
+// against any limit, when a call failed with the primary-limit message. The
+// message alone is ambiguous: GitHub returned "API rate limit already
+// exceeded" both when the hourly GraphQL budget really was at zero and while
+// it still had thousands of points left (its secondary, per-minute or
+// concurrency limit). A resource at zero waits for its reset; one with room is
+// the secondary limit and backs off. A probe that cannot answer leaves the
+// failure as it was, which backs off without a known reset.
+func (h *Host) probeRateLimit(ctx context.Context, err error) error {
+	if netretry.RateLimitClass(err) != netretry.ClassPrimaryRateLimit {
+		return err
+	}
+	var typed *ghRateLimitError
+	if errors.As(err, &typed) {
+		return err
+	}
+	resource := "core"
+	if strings.Contains(strings.ToLower(err.Error()), "graphql") {
+		resource = "graphql"
+	}
+	args := []string{"api"}
+	if h.host != "" {
+		args = append(args, "--hostname", h.host)
+	}
+	args = append(args, "-X", "GET", "rate_limit")
+	out, _, probeErr := h.ghReadAttempt(ctx, "", args)
+	if probeErr != nil {
+		return err
+	}
+	var limits struct {
+		Resources map[string]*struct {
+			Remaining *int   `json:"remaining"`
+			Reset     *int64 `json:"reset"`
+		} `json:"resources"`
+	}
+	if json.Unmarshal(out, &limits) != nil {
+		return err
+	}
+	limit := limits.Resources[resource]
+	if limit == nil || limit.Remaining == nil {
+		return err
+	}
+	if *limit.Remaining > 0 {
+		return &ghRateLimitError{error: err, class: netretry.ClassRateLimit}
+	}
+	if limit.Reset == nil || *limit.Reset <= 0 {
+		return err
+	}
+	return &ghRateLimitError{error: err, class: netretry.ClassPrimaryRateLimit, reset: time.Unix(*limit.Reset, 0)}
+}
+
+func retryAfterHeader(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if at, err := http.ParseTime(value); err == nil {
+		if until := time.Until(at); until > 0 {
+			return until
+		}
+	}
+	return 0
+}
 
 var ghRateLimitStatus = regexp.MustCompile(`\bHTTP (?:403|429)\b`)
 
@@ -95,7 +176,7 @@ func (h *Host) ghReadAttempt(ctx context.Context, stdin string, args []string) (
 		}
 		if response.StatusCode >= 200 && response.StatusCode < 300 ||
 			(response.StatusCode == 403 || response.StatusCode == 429) && response.Header.Get("Retry-After") != "" {
-			return out, detail, &ghRateLimitError{error: err}
+			return out, detail, &ghRateLimitError{error: err, retryAfter: retryAfterHeader(response.Header.Get("Retry-After"))}
 		}
 		if response.StatusCode >= 200 {
 			break
