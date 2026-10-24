@@ -510,9 +510,9 @@ func TestDocumentJourneyTrustedLimits(t *testing.T) {
 			gateJourneyDaemon(t, h, "stop")
 			gateJourneyDaemon(t, h, "start")
 			parked = documentJourneyNextGate(t, h, parked.ID, types.StepDocument, "")
-			previous := documentJourneyFix(t, h, parked)
-			parked = documentJourneyNextGate(t, h, parked.ID, types.StepDocument, previous)
-			if len(documentJourneyPasses(t, h, parked.ID)) != 0 {
+			// Recovery preserves the zero-budget park. An explicit fix would
+			// authorize a grace commit, so it cannot test automatic admission.
+			if parked.HeadSHA != submitted || len(documentJourneyPasses(t, h, parked.ID)) != 0 {
 				t.Fatal("recovery lost trusted budget")
 			}
 			documentJourneyStatus(t, h, parked.ID)

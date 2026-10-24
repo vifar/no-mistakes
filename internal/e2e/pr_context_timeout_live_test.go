@@ -100,7 +100,7 @@ exec %s "$@"
 				time.Sleep(200 * time.Millisecond)
 			}
 			retained, err := database.GetRetainedPRTarget(run.ID, receipt)
-			if err != nil || retained != target || !strings.Contains(j.ciLog(run.ID), "transient keyring timeout; retry 2/3 in 1s") {
+			if err != nil || retained != target || !strings.Contains(j.ciLog(run.ID), "retrying PR-context read: attempt 2 of 3") || !strings.Contains(j.ciLog(run.ID), "class=transient keyring timeout") {
 				t.Fatalf("timeout did not recover within the same read: retained=%s want=%s error=%v\n%s", retained, target, err, j.ciLog(run.ID))
 			}
 			current, err := database.GetRunPRContext(run.ID)
