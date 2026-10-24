@@ -147,12 +147,14 @@ func closingKeywordLineIndexes(body string, grammar closingGrammar) []int {
 	var htmlCode string
 	for i, raw := range strings.Split(mdfence.NormalizeLineEndings(body), "\n") {
 		if grammar.codeAware {
-			inFence := fence.Open()
-			fence.Consume(raw)
-			if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
-				continue
-			}
 			inHTML := htmlCode != ""
+			if !inHTML {
+				inFence := fence.Open()
+				fence.Consume(raw)
+				if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+					continue
+				}
+			}
 			outsideInlineCode(raw, func(text string) string {
 				return outsideHTMLCode(text, &htmlCode, func(text string) string { return text })
 			})
@@ -193,10 +195,12 @@ func neutralizeGitHubClosingReferences(s string) string {
 	var fence mdfence.Fence
 	var htmlCode string
 	for i, raw := range lines {
-		inFence := fence.Open()
-		fence.Consume(raw)
-		if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
-			continue
+		if htmlCode == "" {
+			inFence := fence.Open()
+			fence.Consume(raw)
+			if inFence || fence.Open() || strings.HasPrefix(raw, "\t") || strings.HasPrefix(raw, "    ") {
+				continue
+			}
 		}
 		lines[i] = outsideInlineCode(raw, func(text string) string {
 			return outsideHTMLCode(text, &htmlCode, func(text string) string {

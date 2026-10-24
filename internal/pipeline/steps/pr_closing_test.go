@@ -186,6 +186,51 @@ func TestIntentClosingReferencesPreserveCodeExamples(t *testing.T) {
 	}
 }
 
+func TestClosingReferencesResumeAfterHTMLCode(t *testing.T) {
+	t.Parallel()
+	host := closesBoundaryHost{caps: scm.Capabilities{ClosingReferences: true}}
+	for _, tag := range []string{"pre", "code"} {
+		for _, indent := range []string{"", " ", "    ", "\t"} {
+			for _, content := range []string{"Closes #12", "```\nCloses #12", "~~~\nCloses #12"} {
+				t.Run(fmt.Sprintf("%s/indent=%q/content=%q", tag, indent, content), func(t *testing.T) {
+					example := "<" + tag + ">\n" + content + "\n" + indent + "</" + tag + ">"
+					body := "Document this example:\n" + example + "\n\nCloses #95"
+					sctx := &pipeline.StepContext{UserIntent: body}
+					if got := intentClosingRefs(sctx, host, scm.ProviderGitHub); strings.Join(got, ",") != "95" {
+						t.Fatalf("promoted refs = %v, want only 95", got)
+					}
+					sctx.ClosingIssueRefs = []string{"95"}
+					if got := publicPRIntent(sctx); !strings.Contains(got, "Closes #12") || strings.Contains(got, "Closes #95") {
+						t.Fatalf("intent lost example or retained promoted line: %q", got)
+					}
+					if got := strings.Join(extractClosingKeywordLines(body, githubClosingGrammar), "|"); got != "Closes #95" {
+						t.Fatalf("live closing lines = %q, want Closes #95", got)
+					}
+					if got := issuesSection(sctx, body); got != "" {
+						t.Fatalf("author's live declaration was duplicated: %q", got)
+					}
+					if err := verifyClosingIssuesInBody(body, sctx); err != nil {
+						t.Fatalf("live declaration failed verification: %v", err)
+					}
+					sctx.ClosingIssueRefs = []string{"12"}
+					if err := verifyClosingIssuesInBody(body, sctx); err == nil {
+						t.Fatal("HTML example satisfied closing-reference verification")
+					}
+					want := "Document this example:\n" + example + "\n\nCloses `#95`"
+					if got := neutralizeGitHubClosingReferences(body); got != want {
+						t.Fatalf("neutralized body = %q, want %q", got, want)
+					}
+					inlineBody := "<" + tag + ">\nCloses #12\n" + indent + "</" + tag + "> `Closes #13` and Closes #95"
+					inlineWant := "<" + tag + ">\nCloses #12\n" + indent + "</" + tag + "> `Closes #13` and Closes `#95`"
+					if got := neutralizeGitHubClosingReferences(inlineBody); got != inlineWant {
+						t.Fatalf("closing-tag suffix = %q, want %q", got, inlineWant)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestIntentClosingReferencesRedactSecrets(t *testing.T) {
 	t.Parallel()
 	const secret = "sk-abcdefghijklmnopqrstuvwx"
