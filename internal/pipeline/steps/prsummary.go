@@ -1742,12 +1742,22 @@ var publishedCoAuthorKey = regexp.MustCompile(`(?i)Co-Authored-By([ \t]*:[ \t]*)
 // inline code span, stay as they are: neither is a claim, and the code span is
 // evidence the body preserves byte for byte.
 func renderInlineCoAuthorKeys(s string) string {
+	spans := inlineCodeSpans(s)
+	lineOffset := 0
 	lines := strings.Split(s, "\n")
 	for i, line := range lines {
+		lineLength := len(line)
 		matches := publishedCoAuthorKey.FindAllStringSubmatchIndex(line, -1)
 		for k := len(matches) - 1; k >= 0; k-- {
 			start, end, sep := matches[k][0], matches[k][1], line[matches[k][2]:matches[k][3]]
-			if strings.Count(line[:start], "`")%2 == 1 {
+			inCode := false
+			for _, span := range spans {
+				if lineOffset+start >= span[0] && lineOffset+start < span[1] {
+					inCode = true
+					break
+				}
+			}
+			if inCode {
 				continue
 			}
 			prefix, value := html.UnescapeString(line[:start]), html.UnescapeString(line[end:])
@@ -1770,8 +1780,44 @@ func renderInlineCoAuthorKeys(s string) string {
 			}
 		}
 		lines[i] = line
+		lineOffset += lineLength + 1
 	}
 	return strings.Join(lines, "\n")
+}
+
+func inlineCodeSpans(text string) [][2]int {
+	var spans [][2]int
+	for i := 0; i < len(text); {
+		if text[i] == '\\' && i+1 < len(text) {
+			i += 2
+			continue
+		}
+		if text[i] != '`' {
+			i++
+			continue
+		}
+		start := i
+		for i < len(text) && text[i] == '`' {
+			i++
+		}
+		width := i - start
+		for j := i; j < len(text); {
+			if text[j] != '`' {
+				j++
+				continue
+			}
+			closeStart := j
+			for j < len(text) && text[j] == '`' {
+				j++
+			}
+			if j-closeStart == width {
+				spans = append(spans, [2]int{start, j})
+				i = j
+				break
+			}
+		}
+	}
+	return spans
 }
 
 // neutralizeAttestationMarkers breaks every attestation comment prefix in

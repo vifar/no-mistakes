@@ -212,8 +212,12 @@ func filterRecordedPayload(line string, notice, fragment bool, configuredTrailer
 		}
 		literal := string(out[start:end])
 		var value string
-		if err := json.Unmarshal([]byte(literal), &value); err == nil && !(fragment && bareQuotedMention(out, start, end, value, configuredTrailers)) {
-			if filtered := prDisplayTextMode(value, notice, configuredTrailers...); filtered != value {
+		if err := json.Unmarshal([]byte(literal), &value); err == nil {
+			filtered := value
+			if !(fragment && bareQuotedMention(out, start, end, value, configuredTrailers)) {
+				filtered = prDisplayTextMode(value, notice, configuredTrailers...)
+			}
+			if filtered = renderInlineCoAuthorKeys(filtered); filtered != value {
 				if encoded, err := marshalJSONString(filtered); err == nil {
 					rebuilt := make([]byte, 0, len(out))
 					rebuilt = append(rebuilt, out[:start]...)

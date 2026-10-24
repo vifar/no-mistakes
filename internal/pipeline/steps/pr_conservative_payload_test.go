@@ -12,6 +12,33 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestPRRecordedInlineClaimsPreserveUnrelatedBytes(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"AI", `"Recorded risk Co-Authored-By: Codex \u003cbot@example.invalid\u003e"`, `"Recorded risk <no-mistakes: AI attribution line neutralized>"`},
+		{"human", `"Recorded risk Co-Authored-By: Ada \u003cada@example.com\u003e."`, `"Recorded risk co-author (quoted): Ada <ada@example.com>."`},
+		{"field", `"The field \"Co-Authored-By:\" identifies Ada \u003cada@example.com\u003e"`, `"The field \"Co-Authored-By:\" identifies Ada \u003cada@example.com\u003e"`},
+		{"code", "\"Recorded `Co-Authored-By: Codex \\u003cbot@example.invalid\\u003e`\"", "\"Recorded `Co-Authored-By: Codex \\u003cbot@example.invalid\\u003e`\""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, fragment := range []bool{false, true} {
+				prefix, suffix := "{\r\n \"summary\": ", ",\r\n \"escape\": \"A\\u0042\\/C\", \"number\": 1.200e+3"
+				if !fragment {
+					suffix += "\r\n}"
+				}
+				for _, notice := range []bool{false, true} {
+					if got := filterRecordedPayload(prefix+tt.raw+suffix, notice, fragment); got != prefix+tt.want+suffix {
+						t.Errorf("notice=%t fragment=%t: recorded output = %q, want %q", notice, fragment, got, prefix+tt.want+suffix)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestPRConservativePayloadBoundary(t *testing.T) {
 	const disclosure = "Disclosure: fixtures were generated with the repository recorder."
 	const mention = "The recorded field is `Co-Authored-By: Ada Lovelace <ada@example.com>`"
