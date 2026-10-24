@@ -494,6 +494,10 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 			_, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", previous.LocalHeadSHA, localHead)
 			forward = err == nil
 		}
+		if step == types.StepPush && previous.LocalHeadSHA == localHead &&
+			candidate.ForgeHeadSHA == localHead {
+			forward = true
+		}
 		// A completed Rebase REWRITES the head: the same logical changes
 		// land on a new base, so the new head is not a descendant of the one
 		// it replaces. The ancestry proof above therefore cannot apply to a
