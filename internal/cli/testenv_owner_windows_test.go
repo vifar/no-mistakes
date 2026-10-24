@@ -4,6 +4,6 @@ package cli
 
 import "io/fs"
 
-// ownedByCurrentUser is always true on Windows, where TestMain's temp base
-// is the per-user os.TempDir.
-func ownedByCurrentUser(fs.FileInfo) bool { return true }
+// The stale-dir sweep is a no-op on Windows because ownership cannot be
+// established cheaply; GOMODCACHE/GOCACHE pinning still keeps a leaked HOME small.
+func ownedByCurrentUser(fs.FileInfo) bool { return false }

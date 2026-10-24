@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +58,9 @@ func makeLeftoverTestDir(t *testing.T, dir string, modTime time.Time) {
 }
 
 func TestSweepStaleTestDirsRemovesOnlyStaleLeftovers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stale-dir sweep is a no-op on Windows because ownership cannot be established cheaply; GOMODCACHE/GOCACHE pinning still keeps a leaked HOME small")
+	}
 	base := t.TempDir()
 	now := time.Now()
 	stale := now.Add(-staleTestDirAge - time.Hour)
