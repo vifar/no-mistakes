@@ -302,7 +302,7 @@ func runAccountsForPRHead(sctx *pipeline.StepContext, forgeHead, localHead strin
 	}
 	run, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
-		return false, fmt.Errorf("read run publication before retarget: %w", err)
+		return false, fmt.Errorf("read run publication for PR head: %w", err)
 	}
 	if run != nil && run.LastPushedSHA != nil && *run.LastPushedSHA == forgeHead {
 		return true, nil
@@ -448,6 +448,20 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 		resetFrom = types.StepRebase
 	}
 	forward := false
+	if previous != nil && selection.State == scm.PRStateOpen && previous.PRURL != "" && previous.ForgeHeadSHA != candidate.ForgeHeadSHA &&
+		candidate.LocalHeadSHA == sctx.Run.HeadSHA {
+		unchanged := candidate
+		unchanged.ForgeHeadSHA = previous.ForgeHeadSHA
+		if unchanged == previous.PRContextCandidate {
+			forward, err = runAccountsForPRHead(sctx, candidate.ForgeHeadSHA, localHead)
+			if err != nil {
+				return pipeline.PRContextDecision{}, err
+			}
+			if !forward {
+				return pipeline.PRContextDecision{}, fmt.Errorf("pull request head %s differs from local head %s at %s", candidate.ForgeHeadSHA, localHead, step)
+			}
+		}
+	}
 	if previous != nil && sctx.PRContextAfterStep &&
 		previous.TargetBranch == candidate.TargetBranch && previous.TargetSHA == candidate.TargetSHA &&
 		previous.SourceRepo == candidate.SourceRepo && previous.SourceBranch == candidate.SourceBranch &&
@@ -456,10 +470,6 @@ func guardPRContextWithSelection(sctx *pipeline.StepContext, step types.StepName
 			previous.ForgeHeadSHA == candidate.ForgeHeadSHA && previous.LocalHeadSHA != localHead {
 			_, err := git.Run(sctx.Ctx, sctx.WorkDir, "merge-base", "--is-ancestor", previous.LocalHeadSHA, localHead)
 			forward = err == nil
-		}
-		if step == types.StepPush && previous.LocalHeadSHA == localHead &&
-			candidate.ForgeHeadSHA == localHead {
-			forward = true
 		}
 		// A completed Rebase REWRITES the head: the same logical changes
 		// land on a new base, so the new head is not a descendant of the one
