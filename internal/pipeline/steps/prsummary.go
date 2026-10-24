@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"net/mail"
 	"net/url"
 	"os"
 	"path"
@@ -1749,10 +1750,24 @@ func renderInlineCoAuthorKeys(s string) string {
 			if strings.Count(line[:start], "`")%2 == 1 {
 				continue
 			}
-			if !reviewAttributionAddressComplete("Co-Authored-By:" + html.UnescapeString(line[end:])) {
+			prefix, value := html.UnescapeString(line[:start]), html.UnescapeString(line[end:])
+			if strings.HasSuffix(prefix, `"`) && strings.HasPrefix(value, `"`) ||
+				strings.HasSuffix(prefix, "'") && strings.HasPrefix(value, "'") ||
+				strings.HasSuffix(prefix, "“") && strings.HasPrefix(value, "”") ||
+				strings.HasSuffix(prefix, "‘") && strings.HasPrefix(value, "’") {
 				continue
 			}
-			line = line[:start] + "co-author (quoted)" + sep + line[end:]
+			identity := strings.TrimRight(value, " \t\r.,;:!?\"')]}”’")
+			claim := "Co-Authored-By: " + identity
+			address, err := mail.ParseAddress(strings.TrimSpace(identity))
+			if err != nil || address.Name == "" || !strings.HasSuffix(identity, ">") {
+				continue
+			}
+			if _, _, _, ai := publishedAttributionEntry([]string{claim}, 0, nil); ai {
+				line = line[:start] + prAIAttributionNotice + value[len(identity):]
+			} else {
+				line = line[:start] + "co-author (quoted)" + sep + line[end:]
+			}
 		}
 		lines[i] = line
 	}

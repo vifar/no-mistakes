@@ -9,6 +9,38 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
+func TestRenderInlineCoAuthorKeys(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		text string
+		want string
+	}{
+		{"AI claim", "Recorded risk Co-Authored-By: Codex <bot@example.invalid>", "Recorded risk " + prAIAttributionNotice},
+		{"AI sentence", "Recorded risk Co-Authored-By: Codex <bot@example.invalid>.", "Recorded risk " + prAIAttributionNotice + "."},
+		{"escaped AI claim", "Recorded risk Co-Authored-By: Codex &lt;bot@example.invalid&gt;.", "Recorded risk " + prAIAttributionNotice + "."},
+		{"human sentence", "Recorded risk Co-Authored-By: Ada <ada@example.com>.", "Recorded risk co-author (quoted): Ada <ada@example.com>."},
+		{"escaped human sentence", "Recorded risk Co-Authored-By: Ada &lt;ada@example.com&gt;.", "Recorded risk co-author (quoted): Ada &lt;ada@example.com&gt;."},
+		{"closing punctuation", "Recorded risk (Co-Authored-By: Ada <ada@example.com>);", "Recorded risk (co-author (quoted): Ada <ada@example.com>);"},
+		{"quoted field", `The field "Co-Authored-By:" identifies Ada <ada@example.com>`, `The field "Co-Authored-By:" identifies Ada <ada@example.com>`},
+		{"single quoted field", "The field 'Co-Authored-By:' identifies Ada <ada@example.com>", "The field 'Co-Authored-By:' identifies Ada <ada@example.com>"},
+		{"curly quoted field", "The field “Co-Authored-By:” identifies Ada <ada@example.com>", "The field “Co-Authored-By:” identifies Ada <ada@example.com>"},
+		{"escaped quoted field", "The field &quot;Co-Authored-By:&quot; identifies Ada &lt;ada@example.com&gt;", "The field &quot;Co-Authored-By:&quot; identifies Ada &lt;ada@example.com&gt;"},
+		{"code span", "Recorded `Co-Authored-By: Codex <bot@example.invalid>`", "Recorded `Co-Authored-By: Codex <bot@example.invalid>`"},
+		{"field prose", "The Co-Authored-By: field identifies contributors.", "The Co-Authored-By: field identifies contributors."},
+		{"multiple addresses", "Recorded Co-Authored-By: Ada <ada@example.com> and Bob <bob@example.com>", "Recorded Co-Authored-By: Ada <ada@example.com> and Bob <bob@example.com>"},
+		{"missing name", "Recorded Co-Authored-By: <ada@example.com>", "Recorded Co-Authored-By: <ada@example.com>"},
+		{"incomplete address", "Recorded Co-Authored-By: Ada <ada>", "Recorded Co-Authored-By: Ada <ada>"},
+		{"non-name prose", "Recorded Co-Authored-By: Ada; contact <ada@example.com>", "Recorded Co-Authored-By: Ada; contact <ada@example.com>"},
+		{"field then claim", `The field "Co-Authored-By:" records Co-Authored-By: Ada <ada@example.com>.`, `The field "Co-Authored-By:" records co-author (quoted): Ada <ada@example.com>.`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := renderInlineCoAuthorKeys(tt.text); got != tt.want {
+				t.Fatalf("inline claim rendering = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // A co-author the body QUOTES is rendered as a labelled field.
 //
 // A consumer that scans the pull request body for attribution - the merge
